@@ -297,6 +297,12 @@ class RendererContract:
         assert isinstance(parsed.format_valid, bool)
 
 
+def _assert_expired(error: FinetuneError) -> None:
+    """``error`` reports an expired checkpoint: not a usage mistake, and with a way out."""
+    assert not isinstance(error, UsageError), error
+    assert error.hint, error
+
+
 class BackendContract:
     """What every :class:`~pup_finetune.providers.base.TrainingBackend` guarantees."""
 
@@ -450,7 +456,7 @@ class BackendContract:
         assert model.model_id == model_id
         assert model.uri
 
-    def test_promotion_after_the_session_closed_fails_cleanly(
+    def test_a_sampler_checkpoint_from_a_closed_session_works_or_fails_cleanly(
         self,
         backend: TrainingBackend,
         profile: ModelProfile,
@@ -458,16 +464,27 @@ class BackendContract:
         batch: list[TokenizedExample],
         model_id: str,
     ) -> None:
+        # Sampler checkpoints outlive their session on some providers only (see CheckpointRef).
+        # Where they do, promoting and sampling work as usual; where they expire, each fails
+        # as an expiry, not a usage mistake, and the error says how to recover.
         with backend.open_session(profile, lora) as session:
             self._train_one_step(session, batch)
-            ckpt = session.save_sampler_checkpoint("expired", epoch=0, step=1)
+            ckpt = session.save_sampler_checkpoint("after-close", epoch=0, step=1)
         with backend.open_session(profile, lora) as later:
-            for use in (lambda: later.promote(ckpt, model_id), lambda: later.sampler(ckpt)):
-                with pytest.raises(FinetuneError) as excinfo:
-                    use()
-                # Expiry, not a usage mistake; and the error says how to recover.
-                assert not isinstance(excinfo.value, UsageError)
-                assert excinfo.value.hint
+            try:
+                model = later.promote(ckpt, model_id)
+            except FinetuneError as exc:
+                _assert_expired(exc)
+            else:
+                assert isinstance(model, ModelRef)
+                assert model.model_id == model_id
+                assert model.uri
+            try:
+                sampler = later.sampler(ckpt)
+            except FinetuneError as exc:
+                _assert_expired(exc)
+            else:
+                sampler.close()
 
     def test_the_base_sampler_works(self, session: TrainingSession, prompt: Conversation) -> None:
         messages, tools = prompt

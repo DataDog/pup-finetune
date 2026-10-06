@@ -266,11 +266,15 @@ def test_sampler_checkpoints_expire_with_their_session(backend: FakeBackend) -> 
     with pytest.raises(FinetuneError, match="closed"):
         session.forward([_example()])
     with backend.open_session(FAKE_PROFILE, LORA, resume_from=training_ckpt) as resumed:
-        with pytest.raises(FinetuneError, match="has ended") as excinfo:
-            resumed.promote(sampler_ckpt, "run-1")
-        assert excinfo.value.hint
-        with pytest.raises(FinetuneError, match="has ended"):
-            resumed.sampler(sampler_ckpt)
+        for use in (
+            lambda: resumed.promote(sampler_ckpt, "run-1"),
+            lambda: resumed.sampler(sampler_ckpt),
+        ):
+            with pytest.raises(FinetuneError, match="has ended") as excinfo:
+                use()
+            # Expiry, not a usage mistake; and the error says how to recover.
+            assert not isinstance(excinfo.value, UsageError)
+            assert excinfo.value.hint
         with pytest.raises(FinetuneError, match="load weights from"):
             resumed.load_weights(sampler_ckpt)
         # The recovery path: reload the best training weights, save and promote anew.

@@ -38,6 +38,19 @@ class TestFakeBackend(BackendContract):
         return FakeRenderer(FAKE_PROFILE)
 
 
+class _DurableFakeBackend(FakeBackend):
+    """A fake whose sampler checkpoints outlive their session, as on some providers."""
+
+    def is_live(self, session_id: str) -> bool:
+        return True
+
+
+class TestDurableFakeBackend(TestFakeBackend):
+    @pytest.fixture
+    def backend(self) -> FakeBackend:
+        return _DurableFakeBackend()
+
+
 class TestFakeProvider(ProviderContract):
     @pytest.fixture
     def provider(self) -> FakeProvider:
