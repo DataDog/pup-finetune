@@ -18,6 +18,7 @@ uv run pytest                        # tests (no network, no paid calls)
 uv run ruff check --fix              # lint
 uv run ruff format                   # format (check only: uv run ruff format --check)
 uv run mypy src                      # type-check (strict)
+uv run python scripts/check_headers.py  # license header on every tracked .py and shell script
 uv run pre-commit install            # run the hooks above on every commit
 uv run pup-finetune --help           # run the CLI from the checkout
 ```

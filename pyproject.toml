@@ -102,7 +102,7 @@ plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --strict-markers"
+addopts = "-q --strict-markers --import-mode=importlib"
 markers = [
   "live: hits real external services (skipped unless PUP_FINETUNE_LIVE=1)",
   "tokenizer: downloads real tokenizers (skipped unless PUP_FINETUNE_TOKENIZER_TESTS=1)",

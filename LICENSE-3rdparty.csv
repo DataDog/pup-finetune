@@ -1,0 +1,6 @@
+Component,Origin,License,Copyright
+httpx,https://pypi.org/project/httpx/,BSD-3-Clause,Encode OSS Ltd
+keyring,https://pypi.org/project/keyring/,MIT,Kang Zhang and Jason R. Coombs
+pydantic,https://pypi.org/project/pydantic/,MIT,Pydantic Services Inc. and individual contributors
+rich,https://pypi.org/project/rich/,MIT,Will McGugan
+typer,https://pypi.org/project/typer/,MIT,Sebastián Ramírez
