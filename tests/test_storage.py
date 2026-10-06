@@ -27,6 +27,7 @@ from pup_finetune.storage import (
     ensure_private_dir,
     read_json,
     read_jsonl,
+    read_jsonl_numbered,
     settings_hash,
 )
 
@@ -105,6 +106,12 @@ def test_read_jsonl_skips_blank_lines(tmp_path: Path) -> None:
     target = tmp_path / "rows.jsonl"
     target.write_text('{"a": 1}\n\n{"a": 2}\n')
     assert list(read_jsonl(target)) == [{"a": 1}, {"a": 2}]
+
+
+def test_read_jsonl_numbered_counts_blank_lines(tmp_path: Path) -> None:
+    target = tmp_path / "rows.jsonl"
+    target.write_text('{"a": 1}\n\n{"a": 2}\n')
+    assert list(read_jsonl_numbered(target)) == [(1, {"a": 1}), (3, {"a": 2})]
 
 
 def test_read_jsonl_error_names_the_line(tmp_path: Path) -> None:
