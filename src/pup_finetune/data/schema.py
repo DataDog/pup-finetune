@@ -85,6 +85,17 @@ class RowError(ValueError):
 
 _MODEL_CONFIG = ConfigDict(extra="forbid", frozen=True)
 
+
+def _require_int(value: object, message: str) -> object:
+    """Reject anything but a real ``int`` (or ``None``), before pydantic's lax coercion.
+
+    Without this, ``true``, ``1.0`` and ``"1"`` would pass as integers.
+    """
+    if value is not None and type(value) is not int:
+        raise RowError(RowErrorCode.INVALID_ROW, message)
+    return value
+
+
 NonEmptyStr = Annotated[str, Field(min_length=1)]
 
 
@@ -148,10 +159,7 @@ class Message(BaseModel):
     @field_validator("weight", mode="before")
     @classmethod
     def _weight_is_an_integer(cls, value: object) -> object:
-        # Without this, ``true`` and ``1.0`` would pass as 1.
-        if value is not None and type(value) is not int:
-            raise RowError(RowErrorCode.INVALID_ROW, "weight must be the integer 0 or 1")
-        return value
+        return _require_int(value, "weight must be the integer 0 or 1")
 
     @field_validator("tool_calls")
     @classmethod
@@ -207,6 +215,11 @@ class SourceRef(BaseModel):
     evaluations: dict[str, Any] = Field(default_factory=dict)
     tags: list[str] = Field(default_factory=list)
 
+    @field_validator("start_ns", mode="before")
+    @classmethod
+    def _start_ns_is_an_integer(cls, value: object) -> object:
+        return _require_int(value, "start_ns must be an integer number of nanoseconds")
+
 
 class TrainingRow(BaseModel):
     """One conversation to train on. Construct rows from untrusted data with :func:`validate_row`."""
@@ -218,6 +231,11 @@ class TrainingRow(BaseModel):
     tools: list[Tool] = Field(default_factory=list)
     source: SourceRef = Field(default_factory=SourceRef)
     schema_version: Literal[1] = SCHEMA_VERSION
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _schema_version_is_an_integer(cls, value: object) -> object:
+        return _require_int(value, f"schema_version must be the integer {SCHEMA_VERSION}")
 
     @model_validator(mode="after")
     def _conversation_is_well_formed(self) -> Self:

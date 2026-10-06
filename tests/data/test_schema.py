@@ -227,6 +227,12 @@ def _assistant(**fields: Any) -> dict[str, Any]:
         pytest.param(row(USER, _assistant(weight=True)), id="weight-bool"),
         pytest.param(row(USER, _assistant(weight=1.0)), id="weight-float"),
         pytest.param(row(USER, ANSWER, source={"trace_id": 7}), id="bad-source"),
+        pytest.param(row(USER, ANSWER, schema_version=True), id="schema-version-bool"),
+        pytest.param(row(USER, ANSWER, schema_version=1.0), id="schema-version-float"),
+        pytest.param(row(USER, ANSWER, schema_version="1"), id="schema-version-str"),
+        pytest.param(row(USER, ANSWER, source={"start_ns": True}), id="start-ns-bool"),
+        pytest.param(row(USER, ANSWER, source={"start_ns": 1.0}), id="start-ns-float"),
+        pytest.param(row(USER, ANSWER, source={"start_ns": "123"}), id="start-ns-str"),
         pytest.param(row(USER, ANSWER, tools=[{"function": {}}]), id="tool-without-name"),
     ],
 )
@@ -303,6 +309,13 @@ def test_defaults_for_an_imported_row() -> None:
     assert validated.source.evaluations == {}
     assert validated.source.tags == []
     assert validated.messages[1].weight is None
+
+
+def test_explicit_integer_schema_version_and_start_ns_are_kept() -> None:
+    validated = validate_row(row(USER, ANSWER, schema_version=1, source={"start_ns": 0}))
+    assert validated.schema_version == 1
+    assert validated.source.start_ns == 0
+    assert validate_row(row(USER, ANSWER, source={"start_ns": None})).source.start_ns is None
 
 
 def test_rows_are_frozen() -> None:
