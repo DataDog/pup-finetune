@@ -77,9 +77,16 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   spans and the exclusion checks arrive later.
 - `curation/` - *later*. Keep/drop labels and judge-based triage.
 - `training/` - *later*. The shared, provider-neutral SFT loop, run state and detached worker.
-- `rendering/` - *later*. The `Renderer` protocol that turns chat rows into model tokens.
+- `rendering/` - chat rows to model tokens and completions back to messages. `tokens.py` has
+  `TokenizedExample`, the provider-neutral, next-token-shifted token and weight arrays;
+  `base.py` has the `Renderer` protocol (built on Hugging Face chat templates) and
+  `RendererError`. Concrete renderers arrive later.
 - `evaluation/` - *later*. Replay cases, deterministic metrics, LLM judge and reporting.
-- `providers/` - *later*. Provider protocols, the lazy registry and one package per provider.
+- `providers/` - the provider seam. `base.py` has the neutral types (`ModelProfile`,
+  `TrainSpec`, `CheckpointRef`, `StepMetrics`, ...) and the `Provider`, `TrainingBackend`,
+  `TrainingSession` and `Sampler` protocols; `__init__.py` is the lazy registry
+  (`register_provider`, `get_provider`, `known_providers`), which imports a provider only on
+  first use. One package per provider arrives later. See `docs/architecture.md`.
 - `_vendor/` - *later*. Minimal vendored third-party code, with its own license and attribution.
 
 Tests live under `tests/` and mirror `src/`. Shared fakes live in `tests/fakes/` (import them
@@ -110,4 +117,4 @@ Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds can
 
 ## Adding a provider
 
-See `CONTRIBUTING.md` (the "Adding a provider" section arrives in a later PR).
+See "How a new provider plugs in" in `docs/architecture.md`.
