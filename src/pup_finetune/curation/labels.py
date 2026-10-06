@@ -49,7 +49,8 @@ class LabelReport:
     applied: int
     """Labels appended to ``labels.jsonl``."""
     unchanged: int
-    """Labels skipped because the row already had the same decision, reason and source."""
+    """Labels not appended: a later label of the same id in this batch replaced it, or the
+    row already had the same decision, reason and source."""
     kept: int
     """Rows in this batch whose decision is now keep."""
     dropped: int
@@ -62,10 +63,11 @@ def apply_labels(dataset: DatasetDir, labels: Iterable[Label]) -> LabelReport:
 
     Holds the dataset's directory lock. Every label must name an accepted row, or
     :class:`UsageError` lists the unknown ids and nothing is written. Within ``labels`` and
-    across earlier ones, the last label of an id wins. A label repeating the decision in
-    force (same ``keep``, ``reason`` and ``by``) is not appended again, so applying the same
-    file twice changes nothing. The new labels are written in one atomic replace of
-    ``labels.jsonl``; ``rows.jsonl`` is never touched.
+    across earlier ones, the last label of an id wins: only the last label of each id in
+    ``labels`` is considered, and it is not appended when it repeats the decision in force
+    (same ``keep``, ``reason`` and ``by``). So applying the same file twice changes nothing,
+    even when the file changes its mind about a row. The new labels are written in one
+    atomic replace of ``labels.jsonl``; ``rows.jsonl`` is never touched.
     """
     batch = list(labels)
     dataset.settings()  # A UsageError when this is not a dataset directory.
@@ -73,13 +75,13 @@ def apply_labels(dataset: DatasetDir, labels: Iterable[Label]) -> LabelReport:
         row_ids = {row.id for row in dataset.rows()}
         _check_known(batch, row_ids)
         current = dataset.labels()
-        appended: list[Label] = []
-        for label in batch:
-            if not _same_decision(current.get(label.id), label):
-                appended.append(label)
-                current[label.id] = label
+        # Reduce the batch to its last label per id first: appending a file's intermediate
+        # labels (drop, then keep) would grow labels.jsonl on every replay of that file.
+        decided = latest_labels(batch)
+        appended = [
+            label for label in decided.values() if not _same_decision(current.get(label.id), label)
+        ]
         summary = dataset.append_labels(appended)
-    decided = {label.id: current[label.id] for label in batch}
     kept = sum(1 for label in decided.values() if label.keep)
     return LabelReport(
         applied=len(appended),
