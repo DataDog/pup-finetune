@@ -178,6 +178,7 @@ def test_npx_runs_without_any_secret_in_its_environment(
         "DD_APP_KEY": "synthetic-app-key",
         "DD_APPLICATION_KEY": "synthetic-application-key",
         "FIREWORKS_API_KEY": "synthetic-fireworks-key",
+        "BASETEN_API_KEY": "synthetic-baseten-key",
     }
     for name, value in secrets.items():
         monkeypatch.setenv(name, value)

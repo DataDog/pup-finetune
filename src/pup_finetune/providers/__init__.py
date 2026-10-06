@@ -144,7 +144,9 @@ def _is_first_party(missing: str, module_name: str) -> bool:
 # provider implementation.
 register_provider("fake", "pup_finetune.providers.fake:FakeProvider", dev_only=True)
 register_provider("fireworks", "pup_finetune.providers.fireworks.provider:FireworksProvider")
+register_provider("baseten", "pup_finetune.providers.baseten.provider:BasetenProvider")
 
 # Providers with an API key register its CredentialSpec in their (lightweight) package, so
 # `auth`, `doctor` and every command that imports this registry know about the key.
+from pup_finetune.providers import baseten as _baseten  # noqa: E402, F401
 from pup_finetune.providers import fireworks as _fireworks  # noqa: E402, F401

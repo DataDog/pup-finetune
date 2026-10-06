@@ -97,7 +97,7 @@ def test_the_cli_registers_the_key_without_heavy_imports() -> None:
         from pup_finetune import credentials
         import pup_finetune.cli.auth
 
-        heavy = {"transformers", "fireworks", "tinker", "httpx"}
+        heavy = {"transformers", "fireworks", "tinker", "httpx", "baseten"}
         print(json.dumps({
             "providers": [spec.provider for spec in credentials.all_specs()],
             "heavy": sorted({name.partition(".")[0] for name in sys.modules} & heavy),
@@ -107,7 +107,7 @@ def test_the_cli_registers_the_key_without_heavy_imports() -> None:
     completed = subprocess.run(  # noqa: S603 - this interpreter, a fixed script
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
     )
-    assert json.loads(completed.stdout) == {"providers": ["fireworks"], "heavy": []}
+    assert json.loads(completed.stdout) == {"providers": ["baseten", "fireworks"], "heavy": []}
 
 
 # --- the validator -----------------------------------------------------------------------

@@ -297,6 +297,7 @@ def test_importing_the_cli_imports_no_provider_module() -> None:
     # never a provider implementation.
     assert set(report["provider_modules"]) <= {
         "pup_finetune.providers.base",
+        "pup_finetune.providers.baseten",
         "pup_finetune.providers.fireworks",
     }
     assert report["targets"]

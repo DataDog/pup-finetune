@@ -46,6 +46,7 @@ from urllib.parse import urlsplit
 import httpx
 from pydantic import SecretStr
 
+from pup_finetune.credentials import login_hint
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.http_common import (
     CLIENT_SOURCE,
@@ -55,6 +56,7 @@ from pup_finetune.http_common import (
     exception_reason,
 )
 from pup_finetune.providers.base import ProviderAuthError, ProviderCapacityError, TransientError
+from pup_finetune.providers.baseten import CREDENTIALS
 from pup_finetune.redaction import redact
 from pup_finetune.rendering.tokens import TokenizedExample
 
@@ -99,9 +101,7 @@ _CREATE_TIMEOUT: Final = 300.0
 _ID: Final = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _TRANSIENT_STATUS: Final = frozenset({408, 500, 502, 503, 504})
 _AUTH_STATUS: Final = frozenset({401, 403})
-_LOGIN_HINT: Final = (
-    "run `pup finetune auth login baseten` in your own terminal, or set BASETEN_API_KEY"
-)
+_LOGIN_HINT: Final = login_hint(CREDENTIALS)
 _AUTH_HINT: Final = f"{_LOGIN_HINT} to a valid key"
 _CREATED_HINT: Final = "it may have created something that bills; check the Baseten UI"
 _TRAINERS: Final = "/trainers"

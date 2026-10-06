@@ -663,3 +663,16 @@ class BasetenTransport(httpx.MockTransport):
 
 def baseten_transport(routes: Mapping[str, Answer | list[Answer]]) -> BasetenTransport:
     return BasetenTransport(routes)
+
+
+def capabilities(*base_models: str, **fields: Any) -> dict[str, Any]:
+    """A ``GET /v1/loops/capabilities`` body offering ``base_models``, each with ``fields``."""
+    entry = {
+        "max_seq_len": 131_072,
+        "max_enabled_seq_len": 131_072,
+        "max_context_length": 131_072,
+        "supports_vision_language": False,
+        "enabled": True,
+        "enablement_details": None,
+    }
+    return {"supported_models": [{"model_name": name, **entry, **fields} for name in base_models]}

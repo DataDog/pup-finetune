@@ -170,6 +170,15 @@ Training runs in the key's own account (Fireworks refuses a key that sees severa
 `FIREWORKS_ACCOUNT_ID` only overrides the account lookup, i.e. the account id pup-finetune
 records.
 
+Training on Baseten Loops is paid too: `--provider baseten --model qwen3p5-9b` (or
+`glm-5p3-flash`) needs the `baseten` extra and a Baseten API key (`BASETEN_API_KEY`, the OS
+keychain after `pup finetune auth login baseten`, or the default remote's key in
+`~/.trussrc`, read only). Its preview asks Baseten, read only, whether the workspace can train
+the model; `--confirm` starts a billed dedicated trainer, deactivated when the session ends.
+Baseten has no promotion, so `result.json` records the best sampler checkpoint as
+`deployable_checkpoint`; deploying it on Baseten arrives later. `--provider-option
+max_seq_len=<n>` (at least 1024) cuts the profile's context as on Fireworks.
+
 Add `--detach` to train in a background worker (output in `/tmp/run/worker.log`) and follow it
 with `status /tmp/run --watch`. `--provider-option step_delay_s=0.5 --batch-size 1` makes the
 fake slow enough to `cancel /tmp/run --confirm` (or press Ctrl-C in the foreground), and
@@ -486,8 +495,15 @@ Source lives under `src/pup_finetune/`.
   samplers on their own deployments with the profile's context (render, sample greedily,
   parse with the tools; a completion cut at `max_tokens` is not `format_valid`; only sampling
   is retried, a bounded number of times; `generate` is safe from several threads); leaving a
-  session always deactivates its run and samplers. The Baseten provider arrives later. See
-  `docs/architecture.md`.
+  session always deactivates its run and samplers. `baseten/__init__.py` only registers the
+  `BASETEN_API_KEY` `CredentialSpec`, as Fireworks' does (falling back, read only, to the key
+  of the default remote in `~/.trussrc`; the validator lists models). `baseten/provider.py`
+  has `BasetenProvider`: the `qwen3p5-9b` and `glm-5p3-flash` profiles (tokenizer pins from
+  their families), a read-only `preflight` (the SDK loads, and Loops' capabilities offer and
+  enable the model with a limit of at least the `max_seq_len` option, else the profile's
+  context), `check`, the family's HF renderer and the `max_seq_len` option (at least 1024; it
+  cuts the training profile, so it also sizes the samplers and an evaluation's trainer);
+  deployment arrives later. See `docs/architecture.md`.
 
 Tests live under `tests/` and mirror `src/`. Shared fakes live in `tests/fakes/` (import them
 as `tests.fakes...`); `tests/fakes/pup.py` has `FakePup`, a fake pup runner that answers by
@@ -521,13 +537,14 @@ failures), `FakeClock`, and `fake_deployer`, the provider's `deployer` factory o
 deterministic losses and logprobs, `bt://loops:` checkpoints with the name limit, expiry,
 closed clients and deactivated runs, samplers that answer a fixed completion, injectable
 failures), and `BasetenTransport`, Baseten's HTTP routes by `"METHOD /path"`
-(`FakeLoops.transport()` also serves its runs, samplers and their deployments).
+(`FakeLoops.transport()` also serves its runs, samplers and their deployments);
+`capabilities()` builds a Loops capabilities answer.
 `tests/fakes/keyring.py` has in-memory, failing and locked keyring backends; every test starts
 on the failing one, so none touches the real keychain.
 `tests/providers/contract/` has the `RendererContract`, `BackendContract` and
 `ProviderContract` suites every provider subclasses (`tests/providers/test_fake_contract.py`
 runs them against the fake provider; `tests/providers/fireworks/` against Fireworks on its fakes;
-`tests/providers/baseten/` the backend suite against Baseten on its fake).
+`tests/providers/baseten/` against Baseten on its fake).
 Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds canonical rows and
 `llmobs/` raw Export API pages.
 
