@@ -932,6 +932,9 @@ class FakeProvider:
         self._own(profile)
         return FakeRenderer(profile, prefix_stable=self.options.prefix_stable)
 
+    def training_profile(self, profile: ModelProfile) -> ModelProfile:
+        return profile  # no fake option narrows a profile
+
     def backend(self) -> FakeBackend:
         return self._backend
 

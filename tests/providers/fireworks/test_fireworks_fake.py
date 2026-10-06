@@ -273,6 +273,9 @@ def _operations(fw: FakeFireworksTrainingClient) -> dict[str, Callable[[], Any]]
         "save_weights_for_sampler": lambda: run.save_weights_for_sampler("e2-ab12").result(),
         "load_state": lambda: run.load_state(training).result(),
         "sample": lambda: sampler.sample([1], max_tokens=4).result(),
+        "close_sampler": sampler.close,
+        "close_service": service.close,
+        "close": fw.close,
     }
 
 
@@ -288,6 +291,32 @@ def test_every_operation_can_fail(operation: str) -> None:
 
 def test_every_operation_is_covered() -> None:
     assert set(_operations(FakeFireworksTrainingClient())) == OPERATIONS
+
+
+def test_a_failed_service_close_leaves_the_session_running(
+    fw: FakeFireworksTrainingClient,
+) -> None:
+    service = fw.service()
+    fw.fail("close_service", "server")
+    with pytest.raises(TransientError):
+        service.close()
+    assert fw.sessions[service.session_id].alive
+    service.close()
+    assert not fw.sessions[service.session_id].alive
+
+
+def test_a_stalled_call_never_resolves(fw: FakeFireworksTrainingClient) -> None:
+    waited: list[float | None] = []
+    run = fw.service().create_lora_training_client(BASE_MODEL, 8)
+    fw.stall("forward", on_wait=waited.append)
+    pending = run.forward(EXAMPLES)
+    with pytest.raises(TimeoutError):
+        pending.result(timeout=5.0)
+    assert waited == [5.0]
+    assert fw.stalled[0].timeouts == [5.0]
+    run.forward(EXAMPLES).result()  # the stall was used up
+    with pytest.raises(ValueError, match="cannot stall"):
+        fw.stall("sample")
 
 
 def test_an_unknown_operation_cannot_be_failed(fw: FakeFireworksTrainingClient) -> None:

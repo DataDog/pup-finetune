@@ -96,7 +96,10 @@ an assistant message. `transformers` comes from the optional `hf` extra and load
 
 **Providers** (`Provider`) own everything outside the loop: the model profiles they support
 (`models`, `resolve_model`), a live `preflight`, readiness `check`s for `doctor`, their
-credentials, validation of provider-specific `provider_options`, and `deploy` / `undeploy`.
+credentials, validation of provider-specific `provider_options`, `training_profile` (the
+profile as those options train it, e.g. with a shorter context: rows are rendered against
+it and the run records it, so a preview shows its effect and a resume renders the same rows),
+and `deploy` / `undeploy`.
 
 ## Training matches inference
 
@@ -183,6 +186,45 @@ package's `__init__.py` does little more than register the provider's `Credentia
 client or a tokenizer. The implementation lives in the package's `provider` module, which
 `get_provider` imports on first use.
 
+## Training on Fireworks
+
+[`providers/fireworks/backend.py`](../src/pup_finetune/providers/fireworks/backend.py) is the
+`TrainingBackend` for Fireworks serverless training, and the worked example of a real one. It
+talks to the narrow interface in `providers/fireworks/client.py`, never to the SDK:
+
+- **Sessions.** `open_session` opens one serverless training session and creates the LoRA
+  run on it (rank, alpha and seed from the run), or continues a training checkpoint with
+  `create_training_client_from_state_with_optimizer`. Leaving the context always ends the
+  session: results still in flight are waited for briefly after a normal exit and abandoned
+  after an error or Ctrl-C, then the samplers, the session and the client are closed. A
+  failure to close never hides the error that ended the body, and a failure to close the
+  session (which may leave it billing) is the one raised after a normal exit, any other as a
+  note. With no capacity, nothing is left running. The `max_seq_len` provider option cuts the
+  profile's context (`training_profile`), so longer rows are left out when the rows are
+  rendered; the session also refuses a longer sequence length, as a backstop.
+- **Losses.** `forward_backward` reports Fireworks' `loss:sum` over `response_tokens`.
+  Fireworks' forward pass returns no loss, only per-token logprobs, so the validation loss is
+  `-sum(logprob * weight)` over every target token, after checking that the logprobs match
+  the examples sent, token for token.
+- **Checkpoints.** Training checkpoints (`save_state`) hold weights and optimizer state and
+  can be resumed in a later session; sampler checkpoints (`save_weights_for_sampler`) can be
+  sampled from and promoted only while their session lives, which ends shortly after the
+  process exits. Fireworks enforces its 17-character name limit only at promotion, so names
+  are checked before saving.
+- **Promotion.** Fireworks renames checkpoints (`run-<hex>-<name>-<8 hex>`), so `promote`
+  lists the session's checkpoints and takes the newest promotable sampler row carrying the
+  checkpoint's name, then promotes it to `accounts/<account>/models/<model id>`: the
+  `ModelRef`'s `model_id` is the bare id, its `uri` that full name. The shared
+  `finalize` hook ([`training/promotion.py`](../src/pup_finetune/training/promotion.py)) runs
+  it before the session ends; after a resume, it first re-creates the best epoch's sampler
+  checkpoint from its training checkpoint (`load_state`, then `save_weights_for_sampler`).
+- **Sampling.** A sampler renders the prompt with the profile's renderer, samples greedily up
+  to the renderer's stop tokens and parses the completion into an OpenAI message; a
+  completion cut off at `max_tokens` is not `format_valid`. Sampling alone is retried on a
+  transient failure, a bounded number of times with a warning before each retry; training
+  calls never are, since the loop owns that policy. `latency_s` times the successful attempt
+  only.
+
 ## How a new provider plugs in
 
 Using Baseten as the example:
@@ -201,6 +243,7 @@ Using Baseten as the example:
    only then), `ProviderAuthError` for a rejected key and
    `TransientError` for a retryable server error or dropped connection, with redacted
    messages (`providers/fireworks/client.py` does this in `fireworks_error`).
+   `providers/fireworks/backend.py` is a complete backend to follow.
 3. **Renderer.** Reuse `HFChatTemplateRenderer` through the model's family in
    `rendering/families.py`: the same model renders the same way on every provider. A new
    family is a new table entry (plus a response parser when its output format is new) and

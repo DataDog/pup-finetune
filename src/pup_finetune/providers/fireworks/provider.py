@@ -4,18 +4,21 @@
 #
 # This product includes software developed at Datadog (https://www.datadoghq.com/).
 # Copyright 2026-present Datadog, Inc.
-"""The ``fireworks`` provider: model profiles, preflight, rendering and options.
+"""The ``fireworks`` provider: model profiles, preflight, rendering, options and training.
 
 :class:`FireworksProvider` serves the profiles in :mod:`.models`, checks with the Fireworks
-API that a model can be fine-tuned right now (:meth:`FireworksProvider.preflight`), and
-renders each profile with its model family's Hugging Face chat template. Training and
-deployment on Fireworks land in a later release; until then :meth:`~FireworksProvider.backend`,
-:meth:`~FireworksProvider.deploy` and :meth:`~FireworksProvider.undeploy` refuse with a
-:class:`UsageError`.
+API that a model can be fine-tuned right now (:meth:`FireworksProvider.preflight`), renders
+each profile with its model family's Hugging Face chat template, and trains through
+:class:`~.backend.FireworksBackend` (:meth:`~FireworksProvider.backend`). Deployment on
+Fireworks lands in a later release; until then :meth:`~FireworksProvider.deploy` and
+:meth:`~FireworksProvider.undeploy` refuse with a :class:`UsageError`.
 
-Building the provider is cheap: the HTTP client is imported on the first API call, and
-``transformers`` only when a renderer first needs its tokenizer. The API key is resolved
-(``FIREWORKS_API_KEY``, then the OS keychain) on the first API call, never earlier.
+Building the provider is cheap: the HTTP client is imported on the first API call,
+``transformers`` only when a renderer first needs its tokenizer, and the training backend
+(and through it the Fireworks Training SDK) only when :meth:`~FireworksProvider.backend` is
+called and a session opens. The API key is resolved (``FIREWORKS_API_KEY``, then the OS
+keychain) on the first API call or session, never earlier, and is handed to the clients
+directly, never through the environment.
 
 Provider options (``TrainSpec.provider_options``, from ``--provider-option key=value``) are
 listed on :class:`FireworksOptions`; string values are decoded as JSON.
@@ -23,9 +26,10 @@ listed on :class:`FireworksOptions`; string values are decoded as JSON.
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Final, NoReturn
 from urllib.parse import urlsplit
 
@@ -46,10 +50,21 @@ from pup_finetune.runtime import Runtime
 if TYPE_CHECKING:
     import httpx
 
-    from pup_finetune.providers.base import Provider, TrainingBackend
+    from pup_finetune.providers.base import Provider
     from pup_finetune.providers.fireworks.api import FireworksApi, ModelInfo
+    from pup_finetune.providers.fireworks.backend import FireworksBackend
+    from pup_finetune.providers.fireworks.client import FireworksTraining
 
-__all__ = ["MAX_SEQ_LEN", "FireworksOptions", "FireworksProvider", "preflight_problems"]
+__all__ = [
+    "MAX_SEQ_LEN",
+    "FireworksOptions",
+    "FireworksProvider",
+    "TrainingClientFactory",
+    "preflight_problems",
+]
+
+TrainingClientFactory = Callable[[SecretStr], "FireworksTraining"]
+"""Builds the account's training client from the resolved API key."""
 
 MAX_SEQ_LEN: Final = max(profile.max_seq_len for profile in PROFILES)
 """The largest training context of any profile: the bound on the ``max_seq_len`` option."""
@@ -64,8 +79,11 @@ _LATER_RELEASE: Final = (
 class FireworksOptions(BaseModel):
     """The Fireworks provider's options, all optional.
 
-    ``max_seq_len`` caps the training context below the profile's, in tokens; preflight
-    checks it against both the profile and what Fireworks reports for the model.
+    ``max_seq_len`` caps the training context below the profile's, in tokens: a run trains
+    with the profile's context cut to it (:meth:`FireworksProvider.training_profile`), so a
+    row with a longer example is left out when the rows are rendered, and preflight checks it
+    against what Fireworks reports for the model. A training session also refuses to open
+    for a longer sequence length, as a backstop.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
@@ -115,9 +133,13 @@ class FireworksProvider:
     """The ``fireworks`` provider. See the module docstring.
 
     ``env`` is where the API key is looked up first (default: the process environment);
-    ``transport`` replaces the network for the Fireworks API and ``tokenizer`` the Hugging
-    Face tokenizer, for tests. :meth:`validate_options` also makes the validated options this
-    provider's configuration, which :meth:`preflight` checks against.
+    ``transport`` replaces the network for the Fireworks REST API and ``tokenizer`` the Hugging
+    Face tokenizer. ``training_client`` builds the training client from the API key when a
+    session opens (default: a
+    :class:`~pup_finetune.providers.fireworks.client.FireworksTrainingClient` on the SDK), so
+    tests can train against an in-memory Fireworks. :meth:`validate_options` also makes the
+    validated options this provider's configuration, which :meth:`preflight` and
+    :meth:`backend` use.
     """
 
     def __init__(
@@ -127,12 +149,14 @@ class FireworksProvider:
         env: Mapping[str, str] | None = None,
         transport: httpx.BaseTransport | None = None,
         tokenizer: ChatTokenizer | None = None,
+        training_client: TrainingClientFactory | None = None,
     ) -> None:
         self.runtime = runtime
         self.options = FireworksOptions()
         self._env = env
         self._transport = transport
         self._tokenizer = tokenizer
+        self._training_client = training_client
         self._api_key: SecretStr | None = None
 
     @property
@@ -197,8 +221,34 @@ class FireworksProvider:
             )
         return family.renderer(tokenizer=self._tokenizer)
 
-    def backend(self) -> TrainingBackend:
-        _later("training on Fireworks")
+    def training_profile(self, profile: ModelProfile) -> ModelProfile:
+        """``profile`` with its context cut to the ``max_seq_len`` option, if one is set.
+
+        Raises :class:`UsageError` when the option is over the profile's context.
+        """
+        self._own(profile)
+        cap = self.options.max_seq_len
+        if cap is None or cap == profile.max_seq_len:
+            return profile
+        if cap > profile.max_seq_len:
+            raise UsageError(
+                f"the max_seq_len provider option of {cap} is over the "
+                f"{profile.max_seq_len}-token context of {profile.alias}",
+                hint=f"pass --provider-option max_seq_len=N with N at most {profile.max_seq_len}",
+            )
+        return dataclasses.replace(profile, max_seq_len=cap)
+
+    def backend(self) -> FireworksBackend:
+        """The training backend. Builds nothing remote: the client is made per session.
+
+        The ``max_seq_len`` option caps the sequence length a session opens with (a backstop:
+        :meth:`training_profile` already left longer rows out).
+        """
+        from pup_finetune.providers.fireworks.backend import FireworksBackend
+
+        return FireworksBackend(
+            self._new_training_client, renderer=self.renderer, max_seq_len=self.options.max_seq_len
+        )
 
     def validate_options(self, options: Mapping[str, Any]) -> dict[str, Any]:
         parsed = FireworksOptions.parse(options)
@@ -222,12 +272,22 @@ class FireworksProvider:
     def _environ(self) -> Mapping[str, str]:
         return self._env if self._env is not None else os.environ
 
+    def _key(self) -> SecretStr:
+        if self._api_key is None:
+            self._api_key = credentials.resolve(PROVIDER_NAME, env=self._environ()).value
+        return self._api_key
+
     def _api(self) -> FireworksApi:
         from pup_finetune.providers.fireworks.api import FireworksApi
 
-        if self._api_key is None:
-            self._api_key = credentials.resolve(PROVIDER_NAME, env=self._environ()).value
-        return FireworksApi(self._api_key, transport=self._transport)
+        return FireworksApi(self._key(), transport=self._transport)
+
+    def _new_training_client(self) -> FireworksTraining:
+        if self._training_client is not None:
+            return self._training_client(self._key())
+        from pup_finetune.providers.fireworks.client import FireworksTrainingClient
+
+        return FireworksTrainingClient(self._key(), env=self._environ(), transport=self._transport)
 
     def _key_check(self) -> Check:
         name = "fireworks api key"

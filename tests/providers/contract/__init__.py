@@ -647,6 +647,11 @@ class ProviderContract:
             assert renderer.identity()["tokenizer"] == profile.tokenizer_model
             assert renderer.identity()["tokenizer_revision"] == profile.tokenizer_revision
 
+    def test_training_profile_keeps_a_profile_without_options(self, provider: Provider) -> None:
+        provider.validate_options({})
+        for profile in provider.models():
+            assert provider.training_profile(profile) == profile
+
     def test_backend_is_a_training_backend(self, provider: Provider) -> None:
         assert provider.backend().max_checkpoint_name_len > 0
 

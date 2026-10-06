@@ -4,7 +4,7 @@
 #
 # This product includes software developed at Datadog (https://www.datadoghq.com/).
 # Copyright 2026-present Datadog, Inc.
-"""The Fireworks provider: model profiles, preflight and the API key.
+"""The Fireworks provider: model profiles, preflight, training and the API key.
 
 Importing this package is cheap and has one effect: it registers the Fireworks
 :class:`~pup_finetune.credentials.CredentialSpec` (``FIREWORKS_API_KEY``, then the OS
@@ -14,6 +14,8 @@ without importing an HTTP client or a tokenizer. The provider registry imports i
 - :mod:`.models` is the table of supported models.
 - :mod:`.api` is a small read-only client for the Fireworks REST API (no SDK).
 - :mod:`.provider` has :class:`~.provider.FireworksProvider`, which the registry builds.
+- :mod:`.client` wraps the Fireworks Training SDK (the only module that loads it), and
+  :mod:`.backend` trains through it: sessions, checkpoints, promotion and sampling.
 """
 
 from __future__ import annotations
