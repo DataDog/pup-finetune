@@ -8,7 +8,10 @@
 
 :mod:`pup_finetune.rendering.tokens` defines :class:`TokenizedExample`, the provider-neutral
 token arrays a renderer emits; :mod:`pup_finetune.rendering.base` defines the
-:class:`Renderer` protocol each model family implements on its Hugging Face chat template.
+:class:`Renderer` protocol. :mod:`pup_finetune.rendering.hf` implements it once on Hugging
+Face chat templates, :mod:`pup_finetune.rendering.parsers` parses sampled text back into
+messages and :mod:`pup_finetune.rendering.families` pins each model family. Those three are
+not imported here, so importing this package stays light.
 """
 
 from __future__ import annotations

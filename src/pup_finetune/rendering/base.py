@@ -19,13 +19,14 @@ carry ``weight`` ``0``, meaning "do not train on this turn".
 **Prefix stability.** A renderer is prefix-stable when, for every assistant turn ``i``, the
 tokens of :meth:`Renderer.generation_prompt_tokens` for ``messages[:i]`` are a prefix of the
 tokens of the full conversation. Only then does training on one full render (every assistant
-turn trainable at once) match what the model sees at inference. Chat templates are often
-prefix-stable as text but not as tokens, because a tokenizer can merge characters across the
-boundary where generation starts; renderers therefore tokenize segment-wise, splitting the
-render at each generation-prompt end and assistant-turn end and tokenizing the segments
-independently, which is how inference tokenizes them. A renderer that still cannot guarantee
-it declares ``prefix_stable = False``, and the training loop renders each assistant turn
-against its own prefix with :meth:`Renderer.per_turn_examples` instead.
+turn trainable at once) match what the model sees at inference. A chat endpoint tokenizes the
+whole prompt text as one string and the model generates the completion after it, so a
+template that is prefix-stable as text can still fail as tokens: the tokenizer can merge
+characters across the boundary where generation starts. A renderer that cannot guarantee it
+declares ``prefix_stable = False``, and the training loop renders each assistant turn against
+its own prefix with :meth:`Renderer.per_turn_examples` instead. A renderer that declares it may
+still refuse one row by raising :class:`RendererError` with ``not_prefix_stable`` from
+:meth:`Renderer.supervised_example`; the loop then renders that row per turn.
 """
 
 from __future__ import annotations
@@ -49,15 +50,23 @@ class RendererErrorCode(StrEnum):
     """Why rendering failed. The values are stable: they may be recorded with excluded rows."""
 
     NOT_PREFIX_STABLE = "not_prefix_stable"
-    """A generation prompt is not a token prefix of the full render."""
+    """A generation prompt is not a token prefix of the full render.
+
+    Raised only by :meth:`Renderer.supervised_example` to refuse one row, which callers then
+    render per turn; a per-turn render never raises it.
+    """
     TEMPLATE_ERROR = "template_error"
     """The chat template raised while rendering the conversation."""
+    PROMPT_MISMATCH = "prompt_mismatch"
+    """A turn's render does not continue its own generation prompt, as text or as tokens."""
     UNSUPPORTED_MESSAGE = "unsupported_message"
     """The conversation holds something the template cannot express."""
     NO_TRAINABLE_TOKENS = "no_trainable_tokens"
     """Every assistant turn has ``weight`` ``0``, so nothing would be trained on."""
     TOKENIZER_UNAVAILABLE = "tokenizer_unavailable"
-    """The pinned tokenizer or chat template could not be loaded."""
+    """Reserved. A tokenizer or chat template that cannot be loaded fails every row alike, so
+    renderers report it as an :class:`~pup_finetune.errors.ExternalError` (or a
+    :class:`~pup_finetune.errors.UsageError` for a missing extra), not as a per-row error."""
 
 
 class RendererError(FinetuneError):
@@ -109,7 +118,9 @@ class Renderer(Protocol):
     ) -> TokenizedExample:
         """The whole conversation as one example, every assistant turn trainable.
 
-        Assistant turns with ``weight`` ``0`` get zero weights. Raises :class:`RendererError`.
+        Assistant turns with ``weight`` ``0`` get zero weights. Raises :class:`RendererError`;
+        with code ``not_prefix_stable`` when this row cannot be one exact example, so callers
+        fall back to :meth:`per_turn_examples`.
         """
         ...
 

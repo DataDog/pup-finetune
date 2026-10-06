@@ -33,14 +33,13 @@ from pydantic import (
 
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.rendering.base import ChatMessage, Renderer, ToolSpec
+from pup_finetune.rendering.hf import COMMIT_SHA
 from pup_finetune.rendering.tokens import TokenizedExample
 
 if TYPE_CHECKING:
     from concurrent.futures import Future
 
 # --- Models and training configuration ---------------------------------------------------
-
-_COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -66,7 +65,7 @@ class ModelProfile:
     notes: str = ""
 
     def __post_init__(self) -> None:
-        if not _COMMIT_SHA.fullmatch(self.tokenizer_revision):
+        if not COMMIT_SHA.fullmatch(self.tokenizer_revision):
             raise ValueError(
                 "tokenizer_revision must be a full 40-character lowercase commit SHA, got "
                 f"{self.tokenizer_revision!r}"

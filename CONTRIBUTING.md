@@ -8,7 +8,7 @@ all welcome. For a security issue, follow [SECURITY.md](SECURITY.md) instead of 
 You need Python 3.12 or newer and [uv](https://docs.astral.sh/uv/).
 
 ```sh
-uv sync                      # create .venv and install the project and dev tools
+uv sync --all-extras         # create .venv and install the project, its extras and dev tools
 uv run pre-commit install    # run the checks below on every commit
 ```
 
@@ -50,7 +50,9 @@ ticks every box:
       imports the provider's SDK; every other module talks to that client.
 - [ ] **Protocols.** Implement `Provider`, `TrainingBackend` (with its `TrainingSession`) and
       `Sampler` from `providers/base.py`. For the `Renderer`, reuse the shared Hugging Face
-      chat-template renderer of the model family; only a new model family needs a new one.
+      chat-template renderer (`rendering/hf.py`) of the model family from
+      `rendering/families.py`; only a new model family needs a new table entry (plus a
+      response parser when its output format is new).
 - [ ] **Registration.** Register the provider lazily in `providers/__init__.py` with
       `register_provider("<name>", "pup_finetune.providers.<name>:<Name>Provider")`, so
       listing providers imports nothing.

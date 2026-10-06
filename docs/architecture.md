@@ -75,8 +75,15 @@ side of a session:
   checkpoint's weights, and sampling from the base model or a checkpoint.
 
 **Renderers** (`Renderer`) own tokenization and response parsing. They are provider-neutral:
-each model family has one renderer built on its Hugging Face chat template and tokenizer,
-pinned to a revision, and every provider serving that family uses it.
+one implementation, `HFChatTemplateRenderer` in
+[`rendering/hf.py`](../src/pup_finetune/rendering/hf.py), renders with the model's own
+Hugging Face chat template and tokenizer, pinned to a revision, and every provider serving
+that model uses it. Each model family is an entry in
+[`rendering/families.py`](../src/pup_finetune/rendering/families.py): the tokenizer, its
+40-character revision, the response parser (from
+[`rendering/parsers.py`](../src/pup_finetune/rendering/parsers.py)), the stop tokens, any
+template arguments, and for models that stop by emitting the next role tag, which tag follows
+an assistant message. `transformers` comes from the optional `hf` extra and loads lazily.
 
 - `supervised_example` renders a whole conversation with every assistant turn trainable
   (honoring `weight: 0`); `per_turn_examples` renders each trainable turn against its own
@@ -93,19 +100,39 @@ credentials, validation of provider-specific `provider_options`, and `deploy` / 
 
 ## Training matches inference
 
-The loop trains on one render per row with every assistant turn trainable. That costs
-O(turns) tokens rather than O(turns²), but it is only correct when the renderer is
-**prefix-stable**: for every assistant turn *i*, the generation prompt for `messages[:i]` must
-be a token prefix of the full render, so the model is trained on exactly the tokens it will
-see at inference.
+A chat endpoint renders the conversation with the chat template, tokenizes the whole prompt
+text as **one** string, and the model generates the completion after it. Training must see the
+same tokens, so by default `HFChatTemplateRenderer` renders **one example per trainable
+assistant turn**: the generation prompt for `messages[:i]`, tokenized whole, followed by the
+turn's completion tokens. The loss covers the completion through its stop token and nothing
+after it (for role-tag families, the appended next role tag is the stop target, after any
+whitespace the template renders past the reply is dropped). A turn whose render does not
+continue its own prompt is rejected with `prompt_mismatch`.
 
-Chat templates are often prefix-stable as text and still not as tokens, because a tokenizer can
-merge characters across the point where generation starts. Renderers therefore tokenize
-**segment-wise**: they split the rendered conversation at each generation-prompt end and each
-assistant-turn end, and tokenize each segment on its own, which is how the inference server
-tokenizes the prompt and the completion. A renderer that still cannot guarantee prefix
-stability declares `prefix_stable = False` (or raises `RendererError` with code
-`not_prefix_stable`), and the loop falls back to `per_turn_examples`.
+Chat templates are often prefix-stable as text and still not as tokens: a tokenizer can merge
+characters across the point where generation starts. Qwen3.8's prompt ends `<think>\n` and an
+empty reasoning block continues `\n`, which the whole conversation encodes as one `\n\n`
+token. In that case the completion is the rest of the rendered turn encoded on its own after
+the prompt's tokens, as the model would generate it.
+
+One example per row with every assistant turn trainable costs O(turns) tokens rather than
+O(turns²), but it is only correct when the renderer is **prefix-stable** for that row: for
+every trainable turn *i*, the turn's per-turn example must be an exact token prefix of the
+whole conversation tokenized once. A family may pin `prefix_stable` to try this fast path;
+the renderer then checks it on every row in `supervised_example` (rows with
+`reasoning_content` always render per turn) and raises `RendererError` with code
+`not_prefix_stable` when it does not hold, and the loop renders that row with
+`per_turn_examples`. A renderer that is not prefix-stable declares `prefix_stable = False` and
+the loop renders every row per turn. Qwen3.8 is not token prefix-stable, so `qwen3_8` renders
+per turn. Only `supervised_example` raises `not_prefix_stable`; a per-turn failure carries
+its own code, so the loop never retries it per turn.
+
+A tokenizer that cannot be loaded fails every row alike, so the renderer reports it as an
+`ExternalError` (a `UsageError` when the `hf` extra is missing) rather than rejecting rows.
+
+The Qwen3.8 response parser knows its generation prompt opens `<think>`: sampled text that
+never reaches `</think>` (cut off at the token limit) is all reasoning and `format_valid` is
+false.
 
 ## Token arrays
 
@@ -163,9 +190,10 @@ Using Baseten as the example:
    `AdamConfig` onto its optimizer parameters, size the trainer from the `seed` and
    `max_seq_len` passed to `open_session`, set `max_checkpoint_name_len` to the provider's
    limit, and declare `supports_resume` and `supports_promotion`.
-3. **Renderer.** Reuse the Hugging Face chat-template renderer for the model family: the same
-   model renders the same way on every provider. A new family needs a new renderer, plus a
-   prefix-stability test against its real template.
+3. **Renderer.** Reuse `HFChatTemplateRenderer` through the model's family in
+   `rendering/families.py`: the same model renders the same way on every provider. A new
+   family is a new table entry (plus a response parser when its output format is new) and
+   `tokenizer`-marked tests against its real template, including the `RendererContract`.
 4. **Profiles.** Return `ModelProfile`s from `models()`, with the tokenizer pinned to a
    40-character revision, and check in `preflight` that the provider's model matches the
    profile.
