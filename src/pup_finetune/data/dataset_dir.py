@@ -19,6 +19,8 @@ Files, all ``0600`` in a ``0700`` directory, since rows hold trace content:
   with no label is kept, and a label of an id that is no longer accepted is ignored.
 - ``splits.json`` - split assignments (see :mod:`pup_finetune.data.split`).
 - ``summary.json`` - counts and warnings, rewritten after every change.
+- ``push.json`` - written by ``dataset push``: the Agent Observability dataset the kept rows
+  were pushed to and the record id of each (see :mod:`pup_finetune.data.push`).
 - ``raw/`` - for a Datadog pull, the raw Export API pages it read, so an interrupted pull
   resumes without fetching them again (see
   :func:`~pup_finetune.datadog.spans.iter_span_pages`).
