@@ -273,7 +273,8 @@ class SpanQuery:
     :func:`resolve_time`; another one starting with ``now`` raises :class:`UsageError`), or
     epoch milliseconds.
     ``query`` is a search query string; ``tags`` must all match. ``max_spans`` caps how many
-    spans :func:`iter_spans` yields (``None``: all of them).
+    export items :func:`iter_spans` reads, readable or not (``None``: all of them), so it
+    yields at most that many spans and an export of unreadable items still stops.
     """
 
     ml_app: str | None = None
@@ -380,8 +381,8 @@ class ExportStats:
     exhausted: bool = False
     """Whether the export read to the end of the results.
 
-    Stopping at ``max_spans`` counts only when that span was the last item of a page with no
-    next cursor; otherwise a matching span may be left, so this stays ``False``.
+    Stopping at ``max_spans`` counts only when that item was the last of a page with no next
+    cursor; otherwise a matching span may be left, so this stays ``False``.
     """
 
 
@@ -466,7 +467,8 @@ def iter_span_pages(
 
     The next page is fetched (or re-read from the cache) only when the next list is asked
     for, so a caller that stops between pages fetches nothing more. A page whose spans all
-    failed to parse is an empty list; the page that reaches ``max_spans`` is cut there.
+    failed to parse is an empty list; the page whose items reach ``max_spans`` (counting the
+    ones that failed to parse) is cut there.
     """
     stats = ExportStats()
     pages = _pages(pup, query, cache_dir, stats, sleep, timeout_backoff)
@@ -491,11 +493,12 @@ def _span_pages(
             if span is None:
                 stats.invalid_spans += 1
                 stats.unreadable.append(_unreadable(item, number, index))
-                continue
-            stats.spans += 1
-            spans.append(span)
-            if max_spans is not None and stats.spans >= max_spans:
-                # The cap fell on the very last span: nothing is left to read.
+            else:
+                stats.spans += 1
+                spans.append(span)
+            # Every item counts, so an export of unreadable items stops too.
+            if max_spans is not None and stats.spans + stats.invalid_spans >= max_spans:
+                # The cap fell on the very last item: nothing is left to read.
                 stats.exhausted = index == len(items) - 1 and _next_cursor(page) is None
                 yield spans
                 return

@@ -11,7 +11,7 @@ dataset directory (:func:`pull`):
 
 1. Export the spans matching the query a page at a time
    (:func:`~pup_finetune.datadog.spans.iter_span_pages`), reading at most
-   ``max_candidates`` spans.
+   ``max_candidates`` export items, readable or not.
 2. Exclude the spans that fail a span-level check (:mod:`pup_finetune.data.checks`).
 3. Convert the rest into rows per trace (:func:`~pup_finetune.data.trajectories.rows_from_spans`),
    and exclude a row repeating the conversation of an earlier one as
@@ -97,7 +97,7 @@ class PullOptions:
     target_count: int = DEFAULT_TARGET_COUNT
     """Stop reading once this many rows are accepted."""
     max_candidates: int = DEFAULT_MAX_CANDIDATES
-    """Read at most this many spans."""
+    """Read at most this many export items, readable or not (an unreadable one counts too)."""
     window: tuple[TimeBound, TimeBound] | None = None
     """The ``from`` and ``to`` the export sends, a relative time resolved to epoch ms;
     ``None`` until :meth:`resolved` or :meth:`with_window` sets it."""

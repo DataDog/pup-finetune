@@ -126,7 +126,12 @@ TargetCountOption = Annotated[
     int,
     typer.Option(min=1, help="Stop reading once this many rows are accepted."),
 ]
-MaxCandidatesOption = Annotated[int, typer.Option(min=1, help="Read at most this many spans.")]
+MaxCandidatesOption = Annotated[
+    int,
+    typer.Option(
+        min=1, help="Read at most this many exported spans, counting ones that cannot be read."
+    ),
+]
 ReasoningOption = Annotated[
     ReasoningMode,
     typer.Option(
@@ -146,7 +151,8 @@ _PULL_FLAGS = (
     "--tag. Each span becomes a conversation (input then output messages); per trace, a "
     "conversation another one contains is dropped, so sub-agents stay their own rows. "
     "Errored LLM calls are excluded as span_error unless --include-errors is passed. Reading "
-    "stops once --target-count rows are accepted or --max-candidates spans are read."
+    "stops once --target-count rows are accepted or --max-candidates spans are read, "
+    "unreadable ones included."
 )
 
 

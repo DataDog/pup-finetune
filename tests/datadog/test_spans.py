@@ -280,7 +280,7 @@ def test_max_spans_stops_mid_page() -> None:
     assert not stats.exhausted
 
 
-def test_max_spans_does_not_count_invalid_spans() -> None:
+def test_max_spans_counts_invalid_spans() -> None:
     items: list[Any] = [
         "not an object",
         span_item("good-1"),
@@ -288,9 +288,26 @@ def test_max_spans_does_not_count_invalid_spans() -> None:
         span_item("good-2"),
         span_item("good-3"),
     ]
-    _, spans, stats = export([page(items)], SpanQuery(max_spans=2))
-    assert ids(spans) == ["good-1", "good-2"]
-    assert (stats.spans, stats.invalid_spans) == (2, 2)
+    _, spans, stats = export([page(items)], SpanQuery(max_spans=3))
+    assert ids(spans) == ["good-1"]
+    assert (stats.spans, stats.invalid_spans) == (1, 2)
+    assert [u.index for u in stats.unreadable] == [0, 2]
+    assert not stats.exhausted
+
+
+def test_max_spans_stops_an_export_of_unreadable_items() -> None:
+    pages = [page(["bad-1", "bad-2"], "cursor-2"), page(["bad-3"], "cursor-3"), page(["bad-4"])]
+    api, spans, stats = export(pages, SpanQuery(max_spans=1))
+    assert spans == []
+    assert (stats.spans, stats.invalid_spans) == (0, 1)
+    assert api.cursors == [None]
+    assert not stats.exhausted
+
+
+def test_max_spans_on_the_last_item_is_exhausted_even_when_unreadable() -> None:
+    _, spans, stats = export([page([span_item("good-1"), "bad-1"])], SpanQuery(max_spans=2))
+    assert ids(spans) == ["good-1"]
+    assert stats.exhausted
 
 
 def test_max_spans_zero_fetches_nothing() -> None:

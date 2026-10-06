@@ -168,6 +168,30 @@ def test_reading_stops_at_max_candidates() -> None:
     assert collection.stopped == "max_candidates"
 
 
+def test_unreadable_items_count_toward_max_candidates() -> None:
+    pages = [
+        page(["not an object", "nor this"], after="cursor-2"),
+        page(["still not"], after="cursor-3"),
+        page([item("synthetic-span-1", [SYSTEM, Q1, A1])]),
+    ]
+    collection, api = collected(pages, max_candidates=1)
+    assert api.cursors == [None]
+    assert collection.spans == 0
+    assert collection.export.invalid_spans == 1
+    assert [e.code for e in collection.exclusions] == [ExclusionCode.UNREADABLE_SPAN]
+    assert collection.stopped == "max_candidates"
+
+
+def test_max_candidates_cuts_a_mixed_page_counting_unreadable_items() -> None:
+    first = item("synthetic-span-1", [SYSTEM, Q1, A1], trace_id="trace-1")
+    second = item("synthetic-span-2", [SYSTEM, Q2, A2], trace_id="trace-2")
+    collection, api = collected([page([first, "not an object", second])], max_candidates=2)
+    assert api.cursors == [None]
+    assert [row.id for row in collection.rows] == ["trace-1:synthetic-span-1"]
+    assert collection.export.invalid_spans == 1
+    assert collection.stopped == "max_candidates"
+
+
 def test_limits_must_be_positive() -> None:
     with pytest.raises(UsageError, match="--target-count"):
         PullOptions(SpanQuery(), target_count=0)

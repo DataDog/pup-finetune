@@ -129,7 +129,8 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   cache, with the settings frozen first) run, a relative time range resolved once (a re-run
   reuses the frozen window, `resolve_window`): export a page at a time, check, convert, drop
   repeated conversations, and stop at `--target-count` rows or `--max-candidates` spans before
-  fetching another page. Unreadable items are excluded as `unreadable_span`; a re-run that reads
+  fetching another page. Unreadable items are excluded as `unreadable_span` and count toward
+  `--max-candidates` (`SpanQuery.max_spans` caps export items, readable or not); a re-run that reads
   further retires a stored row its trace now shows to be a prefix of a longer conversation
   (`retirements`, `contained_conversation`), and one with lower limits does not add such a row
   back (`contained`); both compare messages as conversion collapses them
