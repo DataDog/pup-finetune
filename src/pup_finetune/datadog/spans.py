@@ -14,7 +14,8 @@ skipped and counted in :class:`ExportStats` instead of failing the export.
 
 With a ``cache_dir``, every raw page is written there before its spans are yielded, together
 with ``cursor.json`` (the cursor to continue from), so an interrupted export resumes without
-fetching the cached pages again.
+fetching the cached pages again. A cache belongs to the query and to the Datadog site and org
+pup is logged in to (``pup auth status``), so it is never reused for another account.
 """
 
 from __future__ import annotations
@@ -330,7 +331,9 @@ def iter_spans(
     ``page-0001.json``, ``page-0002.json``, ... and ``cursor.json`` records
     ``{next_cursor, pages, done}``, before the page's spans are yielded. A later call with
     the same query and directory re-reads the cached pages and continues from
-    ``next_cursor``; a cache written for a different query raises :class:`StateError`.
+    ``next_cursor``; a cache written for a different query, or for another Datadog site or
+    org than pup's login (read with ``pup auth status`` first), raises :class:`StateError`.
+    ``cursor.json`` records that ``account`` (``{site, org}``, nothing secret).
     Re-read pages yield their spans again, so callers that persist results should dedupe
     by span id. Non-finite numbers in a page are stored as ``null``.
     """
@@ -374,9 +377,11 @@ def _pages(
     query_hash = settings_hash(query.settings())
     # Every cursor followed so far, cached pages included, so a loop back is caught on resume.
     followed: set[str | None] = {None}
+    account: Account = {}
     if cache_dir is not None:
+        account = _account(pup)
         make_private_dir(cache_dir)
-        cursor = _read_cursor(cache_dir, query_hash)
+        cursor = _read_cursor(cache_dir, query_hash, account)
         for number in range(1, cursor.pages + 1):
             stats.pages_cached += 1
             cached = _read_page(cache_dir, number)
@@ -404,7 +409,7 @@ def _pages(
         )
         if cache_dir is not None:
             atomic_write_json(cache_dir / page_file_name(cursor.pages), page, ensure_ascii=True)
-            _write_cursor(cache_dir, cursor, query_hash)
+            _write_cursor(cache_dir, cursor, query_hash, account)
         yield page
         if done:
             return
@@ -480,8 +485,27 @@ def _next_cursor(page: Page) -> str | None:
 
 # --- the cache ------------------------------------------------------------------------------
 
+Account = dict[str, str | None]
+"""The Datadog ``site`` and ``org`` an export reads from."""
 
-def _read_cursor(cache_dir: Path, query_hash: str) -> _Cursor:
+
+def _account(pup: Pup) -> Account:
+    """The site and org pup is logged in to; :class:`ExternalError` when it is not."""
+    status = pup.auth_status()
+    if not status["authenticated"]:
+        raise ExternalError(
+            "pup is not logged in to Datadog", source="pup", hint="run `pup auth login`"
+        )
+    return {"site": status["site"], "org": status["org"]}
+
+
+def _describe_account(account: object) -> str:
+    if not isinstance(account, Mapping):
+        return "an unknown account"
+    return f"site {account.get('site') or '?'}, org {account.get('org') or '?'}"
+
+
+def _read_cursor(cache_dir: Path, query_hash: str, account: Account) -> _Cursor:
     path = cache_dir / CURSOR_FILE_NAME
     try:
         data = read_json(path)
@@ -507,15 +531,22 @@ def _read_cursor(cache_dir: Path, query_hash: str) -> _Cursor:
             f"{cache_dir} holds spans exported for a different query",
             hint="use a new directory, or delete this one to export from the start",
         )
+    if data.get("account") != account:
+        raise StateError(
+            f"{cache_dir} holds spans exported from {_describe_account(data.get('account'))}, "
+            f"but pup is logged in to {_describe_account(account)}",
+            hint="use a new directory, or log pup in to the account the cache came from",
+        )
     return _Cursor(next_cursor=next_cursor, pages=pages, done=done)
 
 
-def _write_cursor(cache_dir: Path, cursor: _Cursor, query_hash: str) -> None:
+def _write_cursor(cache_dir: Path, cursor: _Cursor, query_hash: str, account: Account) -> None:
     data: dict[str, Any] = {
         "next_cursor": cursor.next_cursor,
         "pages": cursor.pages,
         "done": cursor.done,
         "settings_hash": query_hash,
+        "account": account,
     }
     atomic_write_json(cache_dir / CURSOR_FILE_NAME, data, ensure_ascii=True)
 

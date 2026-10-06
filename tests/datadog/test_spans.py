@@ -25,7 +25,7 @@ from pup_finetune.datadog.spans import (
 )
 from pup_finetune.errors import ExternalError, StateError, UsageError
 from pup_finetune.storage import atomic_write_json, read_json, settings_hash
-from tests.fakes.llmobs import FakeExportApi, fixture_pages, page, span_item
+from tests.fakes.llmobs import SYNTHETIC_ACCOUNT, FakeExportApi, fixture_pages, page, span_item
 from tests.fakes.pup import FAKE_BINARY, FakePup
 
 
@@ -307,6 +307,7 @@ def test_an_unexpected_response_reports_the_api_error(tmp_path: Path) -> None:
     cache = tmp_path / "raw"
     response = {"errors": [{"title": "Bad Request", "detail": "invalid filter"}]}
     fake = FakePup().on("api", EXPORT_PATH, json=response)
+    fake.on("auth", "status", json={"authenticated": True, **SYNTHETIC_ACCOUNT})
     with pytest.raises(ExternalError, match="invalid filter"):
         list(iter_spans(fake.client(), SpanQuery(), cache_dir=cache))
     assert not (cache / CURSOR_FILE_NAME).exists()
@@ -336,6 +337,7 @@ def test_cache_writes_every_raw_page_and_the_cursor(tmp_path: Path) -> None:
         "pages": 3,
         "done": True,
         "settings_hash": settings_hash(query.settings()),
+        "account": SYNTHETIC_ACCOUNT,
     }
 
 
@@ -393,6 +395,52 @@ def test_a_cache_for_another_query_is_refused(tmp_path: Path) -> None:
     export(three_pages(), SpanQuery(ml_app="one"), cache_dir=cache)
     with pytest.raises(StateError, match="different query"):
         export(three_pages(), SpanQuery(ml_app="two"), cache_dir=cache)
+
+
+@pytest.mark.parametrize(
+    ("account", "message"),
+    [
+        ({"site": "datadoghq.com", "org": "another-org"}, "org another-org"),
+        ({"site": "datadoghq.eu", "org": "synthetic-org"}, "site datadoghq.eu"),
+    ],
+    ids=["org", "site"],
+)
+def test_a_cache_for_another_datadog_account_is_refused(
+    tmp_path: Path, account: dict[str, str], message: str
+) -> None:
+    cache = tmp_path / "raw"
+    api = FakeExportApi(three_pages())
+    pup = api.install(FakePup()).client()
+    assert ids(list(iter_spans(pup, SpanQuery(), cache_dir=cache))) == ids_of_three_pages()
+    api.requests.clear()
+    api.account = account
+    with pytest.raises(StateError, match=message) as failure:
+        list(iter_spans(pup, SpanQuery(), cache_dir=cache))
+    assert "site datadoghq.com, org synthetic-org" in failure.value.message
+    assert api.requests == []
+
+
+def test_a_cache_needs_pup_to_be_logged_in(tmp_path: Path) -> None:
+    cache = tmp_path / "raw"
+    fake = FakeExportApi(three_pages()).install(FakePup())
+    fake.on("auth", "status", json={"authenticated": False})
+    with pytest.raises(ExternalError, match="not logged in"):
+        list(iter_spans(fake.client(), SpanQuery(), cache_dir=cache))
+    assert not cache.exists()
+
+
+def test_a_cache_without_its_account_is_refused(tmp_path: Path) -> None:
+    cache = tmp_path / "raw"
+    export(three_pages(), cache_dir=cache)
+    cursor = read_json(cache / CURSOR_FILE_NAME)
+    del cursor["account"]
+    atomic_write_json(cache / CURSOR_FILE_NAME, cursor)
+    with pytest.raises(StateError, match="an unknown account"):
+        export(three_pages(), cache_dir=cache)
+
+
+def ids_of_three_pages() -> list[str]:
+    return ["s1", "s2", "s3", "s4", "s5"]
 
 
 def test_a_missing_cached_page_is_reported(tmp_path: Path) -> None:

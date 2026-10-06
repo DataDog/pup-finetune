@@ -58,6 +58,10 @@ def page(items: Sequence[Any], after: str | None = None, *, status: str = "done"
     }
 
 
+SYNTHETIC_ACCOUNT: dict[str, str | None] = {"site": "datadoghq.com", "org": "synthetic-org"}
+"""The Datadog account :class:`FakeExportApi` reports pup as logged in to."""
+
+
 class FakeExportApi:
     """Serves ``pages`` by cursor; see the module docstring."""
 
@@ -71,6 +75,7 @@ class FakeExportApi:
         self.calls: list[PupCall] = []
         self.timeouts: dict[str | None, int] = {}
         self.failures: dict[str | None, int] = {}
+        self.account: dict[str, str | None] = dict(SYNTHETIC_ACCOUNT)
 
     @property
     def cursors(self) -> list[str | None]:
@@ -78,7 +83,11 @@ class FakeExportApi:
         return [body["data"]["attributes"]["page"].get("cursor") for body in self.requests]
 
     def install(self, fake: FakePup) -> FakePup:
-        """Answer the Export API route on ``fake``; returns ``fake``."""
+        """Answer the Export API route, and ``pup auth status`` with :attr:`account`, on ``fake``.
+
+        Returns ``fake``. Change :attr:`account` to log the fake pup in elsewhere.
+        """
+        fake.on("auth", "status", handler=lambda call: {"authenticated": True, **self.account})
         return fake.on("api", EXPORT_PATH, handler=self)
 
     def __call__(self, call: PupCall) -> Any:
