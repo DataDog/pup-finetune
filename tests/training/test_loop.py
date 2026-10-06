@@ -18,6 +18,7 @@ import pytest
 
 from pup_finetune.errors import ExternalError, StateError, UsageError
 from pup_finetune.providers.base import (
+    CheckpointRef,
     LoraConfig,
     StepMetrics,
     TrainingSession,
@@ -39,6 +40,7 @@ from pup_finetune.training import (
     EpochMetrics,
     FinalizeFailed,
     Resume,
+    ResumePoint,
     RowExamples,
     TrainResult,
     build_examples,
@@ -767,6 +769,59 @@ def test_time_based_checkpoints_land_on_the_first_step_after_the_interval() -> N
     assert [p.checkpoint for p in state.resume_points] == [
         ref for ref in session.saved if ref.kind == "training"
     ]
+
+
+class CancelOnCheckpoint(MemoryState):
+    """Asks for cancellation as soon as a checkpoint is recorded."""
+
+    def record_checkpoint(self, ref: CheckpointRef, *, resume_point: ResumePoint | None) -> None:
+        super().record_checkpoint(ref, resume_point=resume_point)
+        self.cancel_after_steps = 0
+
+
+def test_a_cancel_during_a_timed_checkpoint_stops_before_the_next_step() -> None:
+    clock = Clock()
+    state = CancelOnCheckpoint()
+    spec = make_spec(max_epochs=1, batch_size=1, pipeline_depth=1, checkpoint_every_minutes=10)
+    with recording() as session:
+        result = train(
+            session,
+            spec,
+            rows=row_examples(6),
+            state=state,
+            clock=clock,
+            on_event=ticking(clock, 4),
+        )
+    assert result.stopped_reason == "cancelled"
+    # The checkpoint before step 4 was being saved when the cancel came: step 4 never ran.
+    assert state.steps == [(1, 1), (1, 2), (1, 3)]
+    assert session.calls.count("optim_step") == 3
+    assert [(ref.kind, ref.step) for ref in session.saved] == [("training", 3)]
+
+
+def test_a_spend_cap_reached_while_draining_for_a_timed_checkpoint_stops_there() -> None:
+    clock = Clock()
+    # 1 USD a minute: training stops at 14 USD (20 less the 30% reserve).
+    budget = Budget(
+        max_spend_usd=20.0, hourly_rate_usd=60.0, spend_reserve_fraction=0.3, clock=clock
+    )
+    events: list[dict[str, Any]] = []
+
+    def sink(event: dict[str, Any]) -> None:
+        ticking(clock, 4)(event)
+        events.append(event)
+
+    spec = make_spec(max_epochs=1, batch_size=1, pipeline_depth=2, checkpoint_every_minutes=10)
+    with recording() as session:
+        result = train(
+            session, spec, rows=row_examples(8), budget=budget, clock=clock, on_event=sink
+        )
+    assert result.stopped_reason == "budget_exhausted"
+    # At 12 minutes the checkpoint is due; draining step 4 takes the run to 16 minutes.
+    assert "stopped before a timed checkpoint" in result.warnings[-1]
+    assert session.calls.count("optim_step") == 4
+    reasons = [(e["reason"], e["step"]) for e in events if e["type"] == "checkpoint"]
+    assert reasons == [("stop", 4)]
 
 
 def test_a_time_based_checkpoint_waits_for_the_steps_in_flight() -> None:

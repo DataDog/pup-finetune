@@ -535,7 +535,14 @@ class _Loop:
                     break
                 if self._checkpoint_due():
                     pipeline.drain()  # a checkpoint holds exactly the steps before it
+                    why = self._budget.spend_exhausted()
+                    if why is not None:  # the stop saves this checkpoint, from the reserve
+                        stop = self._budget_stop(f"stopped before a timed checkpoint: {why}")
+                        break
                     self._save_training(epoch, "time")
+                    stop = self._stop_reason(step)  # draining and saving took time
+                    if stop is not None:
+                        break
                 tokens = step_tokens(step)
                 refused = pipeline.submit(
                     epoch, self._step + 1, step, tokens, guard=self._budget.spend_exhausted
