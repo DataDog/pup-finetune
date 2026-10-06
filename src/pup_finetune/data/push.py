@@ -1,0 +1,559 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Unless explicitly stated otherwise all files in this repository are licensed under the Apache License Version 2.0.
+#
+# This product includes software developed at Datadog (https://www.datadoghq.com/).
+# Copyright 2026-present Datadog, Inc.
+"""Push a dataset directory's kept rows to an Agent Observability dataset.
+
+:func:`plan_push` works out, from local files only, what a push would send: what ``dataset
+push`` previews. :func:`push_dataset` runs it: it finds or creates the project, creates the
+dataset, and adds one record per kept row (:func:`dataset_record`) in batches through
+:class:`~pup_finetune.datadog.datasets.LLMObsDatasets`. Rows labeled ``keep: false`` are never
+sent.
+
+The receipt, ``push.json`` in the dataset directory, records the project and dataset and the
+record id of every row pushed, and is saved after every batch, so:
+
+- pushing again sends only the rows it does not list: nothing for an unchanged dataset, and
+  only the new rows after more were added;
+- an interrupted push resumes where it stopped. Before each batch is sent its row ids are
+  saved as ``in_flight``; a push that finds them (the batch's response was lost: a timeout,
+  an unreadable answer, the process stopped) first lists the dataset's records, adopts those
+  whose ``metadata.row_id`` is in flight and sends only the rest again, so no row is added
+  twice.
+
+A receipt ties the directory to one dataset: pushing with another ``--name`` or ``--project``
+is an error. The dataset's description carries the receipt's ``push_id``, so a push that
+stopped before it learned the dataset id adopts only the dataset it created, never another
+of the same name. Rows the receipt lists that are no longer kept (labeled drop after the
+push) are reported as stale records; they are not deleted from the remote dataset.
+"""
+
+from __future__ import annotations
+
+import secrets
+import shlex
+import signal
+import threading
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
+from pathlib import Path
+from types import FrameType
+from typing import Any
+
+from pup_finetune.data.dataset_dir import DatasetDir
+from pup_finetune.data.jsonl import to_provider_dict
+from pup_finetune.data.schema import TrainingRow
+from pup_finetune.data.split import SPLITS, SplitName, check_isolation
+from pup_finetune.datadog.datasets import RECORDS_BATCH_SIZE, LLMObsDatasets
+from pup_finetune.datadog.pup import Pup
+from pup_finetune.errors import ExternalError, FinetuneError, StateError, UsageError
+from pup_finetune.storage import DirectoryLock, atomic_write_json, read_json, settings_hash
+
+PUSH_FILE = "push.json"
+SOURCE_TAG = "source:pup-finetune"
+PROJECT_DESCRIPTION = "Fine-tuning datasets pushed by pup-finetune."
+DATASET_DESCRIPTION = "Curated fine-tuning conversations pushed by pup-finetune."
+SHOWN_ROW_IDS = 10
+"""How many in-flight row ids an error names; ``push.json`` lists them all."""
+
+_RESUME_HINT = (
+    f"push again to resume: {PUSH_FILE} lists the batch as in_flight, and the next push "
+    "adopts the records of it the dataset already holds before sending the rest"
+)
+
+Progress = Callable[[str], None]
+
+
+def dataset_record(row: TrainingRow, split: SplitName) -> dict[str, Any]:
+    """The Agent Observability record for ``row``: what the final assistant turn answers.
+
+    ``input`` holds the messages before the final assistant message and the declared tools,
+    in OpenAI chat form; ``expected_output`` is that final message.
+    """
+    provider = to_provider_dict(row)
+    messages: list[dict[str, Any]] = provider["messages"]
+    source = row.source
+    return {
+        "input": {"messages": messages[:-1], "tools": provider.get("tools", [])},
+        "expected_output": messages[-1],
+        "metadata": {
+            "row_id": row.id,
+            "split": split,
+            "trace_id": source.trace_id,
+            "span_id": source.span_id,
+            "ml_app": source.ml_app,
+            "source_model": source.model_name,
+            "schema_version": row.schema_version,
+        },
+        "tags": [f"split:{split}", SOURCE_TAG],
+    }
+
+
+def dataset_description(push_id: str) -> str:
+    """The description of the dataset a receipt with ``push_id`` creates."""
+    return f"{DATASET_DESCRIPTION} Push id: {push_id}."
+
+
+@dataclass(frozen=True, slots=True)
+class PushState:
+    """``push.json``: the dataset a directory was pushed to and the record of each row."""
+
+    project: str
+    project_id: str
+    dataset_name: str
+    settings_hash: str
+    push_id: str
+    """Random; written into the description of the dataset this receipt creates."""
+    dataset_id: str | None = None
+    """``None`` until the dataset is created; a push that stopped before then adopts it."""
+    dataset_version: int | None = None
+    """The dataset version the last ``records-add`` reported; ``None`` when unknown."""
+    record_ids: Mapping[str, str] = field(default_factory=dict)
+    """The record id per row id, for every row pushed."""
+    in_flight: tuple[str, ...] = ()
+    """Row ids of a batch sent whose record ids are not known yet; empty between batches."""
+    pushed_at: str | None = None
+    """When records were last added (ISO 8601, UTC)."""
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "project": self.project,
+            "project_id": self.project_id,
+            "dataset_id": self.dataset_id,
+            "dataset_name": self.dataset_name,
+            "dataset_version": self.dataset_version,
+            "push_id": self.push_id,
+            "record_ids": dict(self.record_ids),
+            "in_flight": list(self.in_flight),
+            "pushed_at": self.pushed_at,
+            "settings_hash": self.settings_hash,
+        }
+
+    @classmethod
+    def from_json(cls, data: Any, *, where: str) -> PushState:
+        if not isinstance(data, dict):
+            raise StateError(f"{where}: expected a JSON object")
+
+        def optional(key: str) -> str | None:
+            value = data.get(key)
+            if value is None or (isinstance(value, str) and value):
+                return value
+            raise StateError(f"{where}: {key} must be a non-empty string")
+
+        def required(key: str) -> str:
+            value = optional(key)
+            if value is None:
+                raise StateError(f"{where}: {key} must be a non-empty string")
+            return value
+
+        record_ids = data.get("record_ids")
+        if not isinstance(record_ids, dict) or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in record_ids.items()
+        ):
+            raise StateError(f"{where}: record_ids must map row ids to record ids")
+        in_flight = data.get("in_flight", [])
+        if not isinstance(in_flight, list) or not all(isinstance(i, str) for i in in_flight):
+            raise StateError(f"{where}: in_flight must be a list of row ids")
+        version = data.get("dataset_version")
+        if version is not None and type(version) is not int:
+            raise StateError(f"{where}: dataset_version must be an integer")
+        return cls(
+            project=required("project"),
+            project_id=required("project_id"),
+            dataset_name=required("dataset_name"),
+            settings_hash=required("settings_hash"),
+            push_id=required("push_id"),
+            dataset_id=optional("dataset_id"),
+            dataset_version=version,
+            record_ids=dict(record_ids),
+            in_flight=tuple(in_flight),
+            pushed_at=optional("pushed_at"),
+        )
+
+
+def push_path(dataset: DatasetDir) -> Path:
+    return dataset.path / PUSH_FILE
+
+
+def read_push_state(dataset: DatasetDir) -> PushState | None:
+    """The directory's ``push.json``, or ``None`` when it was never pushed."""
+    path = push_path(dataset)
+    try:
+        data = read_json(path)
+    except FileNotFoundError:
+        return None
+    return PushState.from_json(data, where=str(path))
+
+
+@dataclass(frozen=True, slots=True)
+class PendingRecord:
+    """A kept row the remote dataset does not hold yet, and its record."""
+
+    row_id: str
+    split: SplitName
+    record: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class PushReceipt:
+    """What :func:`push_dataset` did, and the receipt saved in ``push.json``."""
+
+    state: PushState
+    pushed: int
+    """Records added by this push."""
+    already_pushed: int
+    """Kept rows an earlier push had sent, skipped this time."""
+    records_by_split: dict[SplitName, int]
+    """Kept rows the remote dataset holds, per split."""
+    stale_records: dict[str, str]
+    """Rows pushed earlier that are no longer kept: row id to record id."""
+
+    def to_json(self) -> dict[str, Any]:
+        state = self.state
+        return {
+            "project": state.project,
+            "project_id": state.project_id,
+            "dataset_id": state.dataset_id,
+            "dataset_name": state.dataset_name,
+            "dataset_version": state.dataset_version,
+            "pushed_at": state.pushed_at,
+            "pushed": self.pushed,
+            "already_pushed": self.already_pushed,
+            "records": len(state.record_ids),
+            "records_by_split": self.records_by_split,
+            "stale_records": self.stale_records,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PushPlan:
+    """What a push of a dataset directory would send, worked out from local files only."""
+
+    directory: Path
+    project: str
+    dataset_name: str
+    state: PushState | None
+    """The existing receipt, or ``None`` for a first push."""
+    pending: list[PendingRecord]
+    """The kept rows the receipt does not list, train rows first, then validation and test."""
+    already_pushed: int
+    """Kept rows the receipt already lists."""
+    kept_by_split: dict[SplitName, int]
+    stale_records: dict[str, str]
+    """Rows the receipt lists that are no longer kept: row id to record id."""
+    settings_hash: str
+
+    @property
+    def dataset_id(self) -> str | None:
+        return self.state.dataset_id if self.state is not None else None
+
+    @property
+    def in_flight(self) -> tuple[str, ...]:
+        """Row ids of a batch an interrupted push sent without learning its record ids."""
+        return self.state.in_flight if self.state is not None else ()
+
+    @property
+    def empty(self) -> bool:
+        """Nothing to push and nothing pushed: the directory has no kept rows to send."""
+        return not self.pending and self.dataset_id is None
+
+    @property
+    def needs_remote(self) -> bool:
+        """Whether a push would reach Datadog: rows to send, or an interrupted batch to check."""
+        return bool(self.pending or self.in_flight)
+
+    def pending_by_split(self) -> dict[SplitName, int]:
+        counts: dict[SplitName, int] = dict.fromkeys(SPLITS, 0)
+        for item in self.pending:
+            counts[item.split] += 1
+        return counts
+
+    def require_rows(self) -> None:
+        """Raise :class:`UsageError` when the plan is :attr:`empty`."""
+        if self.empty:
+            raise UsageError(
+                f"{self.directory} has no kept rows to push",
+                hint="add rows with `pup finetune dataset pull` or `dataset import`, or keep "
+                "some with `pup finetune dataset label`",
+            )
+
+    def receipt(self, state: PushState | None = None) -> PushReceipt:
+        """The receipt of this plan, pushed into ``state`` (by default the existing one)."""
+        final = state if state is not None else self.state
+        if final is None:
+            raise ValueError("a plan without a receipt has pushed nothing")
+        return PushReceipt(
+            state=final,
+            pushed=len(self.pending) if state is not None else 0,
+            already_pushed=self.already_pushed,
+            records_by_split=dict(self.kept_by_split),
+            stale_records=self.stale_records,
+        )
+
+
+def plan_push(dataset: DatasetDir, *, project: str, name: str) -> PushPlan:
+    """What pushing ``dataset`` to dataset ``name`` in ``project`` would send.
+
+    Raises :class:`UsageError` when the receipt names another dataset or project, and
+    :class:`StateError` when it was written for a dataset directory with other settings.
+    """
+    _require_name(project, "--project")
+    _require_name(name, "--name")
+    digest = settings_hash(dataset.settings())
+    state = read_push_state(dataset)
+    if state is not None:
+        _check_state(dataset, state, project=project, name=name, digest=digest)
+    by_split = dataset.rows_by_split()
+    check_isolation(by_split)
+    pushed = state.record_ids if state is not None else {}
+    kept = {row.id for split in SPLITS for row in by_split[split]}
+    pending = [
+        PendingRecord(row.id, split, dataset_record(row, split))
+        for split in SPLITS
+        for row in by_split[split]
+        if row.id not in pushed
+    ]
+    return PushPlan(
+        directory=dataset.path,
+        project=project,
+        dataset_name=name,
+        state=state,
+        pending=pending,
+        already_pushed=len(kept) - len(pending),
+        kept_by_split={split: len(by_split[split]) for split in SPLITS},
+        stale_records={
+            row_id: record_id for row_id, record_id in pushed.items() if row_id not in kept
+        },
+        settings_hash=digest,
+    )
+
+
+class PushTerminated(FinetuneError):
+    """The push stopped because the process received SIGTERM; rerun it to resume."""
+
+
+def push_dataset(
+    dataset: DatasetDir,
+    *,
+    project: str,
+    name: str,
+    pup: Pup,
+    batch_size: int = RECORDS_BATCH_SIZE,
+    progress: Progress | None = None,
+) -> PushReceipt:
+    """Push the kept rows of ``dataset`` to dataset ``name`` in ``project``.
+
+    Holds the directory lock throughout, so labels cannot change mid-push and two pushes of
+    one directory cannot race. SIGTERM stops it like Ctrl-C, removing the batch file. See the
+    module docstring for resuming and the receipt.
+    """
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+    dataset.settings()  # A clear UsageError when this is not a dataset directory.
+    report = progress or (lambda _message: None)
+    with _sigterm_raises(), DirectoryLock(dataset.path):
+        plan = plan_push(dataset, project=project, name=name)
+        plan.require_rows()
+        if not plan.needs_remote:
+            return plan.receipt()
+        api = LLMObsDatasets(pup)
+        if plan.state is not None and plan.state.in_flight:
+            _reconcile(dataset, plan.state, api, report)
+            plan = plan_push(dataset, project=project, name=name)
+            if not plan.pending:
+                return plan.receipt()
+        state, dataset_id = _ensure_dataset(dataset, plan, api, report)
+        state = _add_records(dataset, plan, state, dataset_id, api, batch_size, report)
+        return plan.receipt(state)
+
+
+def _ensure_dataset(
+    dataset: DatasetDir, plan: PushPlan, api: LLMObsDatasets, report: Progress
+) -> tuple[PushState, str]:
+    """The receipt and the dataset id, creating the project and dataset when needed."""
+    state = plan.state
+    if state is not None and state.dataset_id is not None:
+        return state, state.dataset_id
+    if state is None:
+        project_id = api.ensure_project(plan.project, description=PROJECT_DESCRIPTION)
+        if api.find_dataset(project_id, plan.dataset_name) is not None:
+            raise UsageError(
+                f"project {plan.project!r} already has a dataset named {plan.dataset_name!r}, "
+                f"and {push_path(dataset)} does not record it",
+                hint="pass a new --name: a dataset directory only adds records to a dataset "
+                "it created",
+            )
+        state = PushState(
+            project=plan.project,
+            project_id=project_id,
+            dataset_name=plan.dataset_name,
+            settings_hash=plan.settings_hash,
+            push_id=secrets.token_hex(8),
+        )
+        # Saved before the create, so a push that stops right after it adopts the dataset.
+        _save(dataset, state)
+        dataset_id = None
+    else:
+        found = api.find_dataset(state.project_id, plan.dataset_name)
+        if found is not None and state.push_id not in found.description:
+            raise UsageError(
+                f"project {plan.project!r} has a dataset named {plan.dataset_name!r} that "
+                f"{push_path(dataset)} did not create",
+                hint=f"move {push_path(dataset)} aside and pass a new --name: a dataset "
+                "directory only adds records to a dataset it created",
+            )
+        dataset_id = found.id if found is not None else None
+    if dataset_id is None:
+        report(f"creating dataset {plan.dataset_name!r} in project {plan.project!r}")
+        dataset_id = api.create_dataset(
+            state.project_id,
+            plan.dataset_name,
+            description=dataset_description(state.push_id),
+            marker=state.push_id,
+        )
+    state = replace(state, dataset_id=dataset_id)
+    _save(dataset, state)
+    return state, dataset_id
+
+
+def _add_records(
+    dataset: DatasetDir,
+    plan: PushPlan,
+    state: PushState,
+    dataset_id: str,
+    api: LLMObsDatasets,
+    batch_size: int,
+    report: Progress,
+) -> PushState:
+    total = len(plan.pending)
+    for start in range(0, total, batch_size):
+        batch = plan.pending[start : start + batch_size]
+        row_ids = tuple(item.row_id for item in batch)
+        # Saved before the call: if its answer is lost, the next push checks for these rows.
+        state = replace(state, in_flight=row_ids)
+        _save(dataset, state)
+        try:
+            added = api.add_records(state.project_id, dataset_id, [item.record for item in batch])
+        except ExternalError as exc:
+            raise ExternalError(
+                f"adding a batch of {len(batch)} records to dataset {dataset_id} failed: "
+                f"{exc.message}",
+                source=exc.source,
+                hint=f"{exc.hint}; {_RESUME_HINT}" if exc.hint else _RESUME_HINT,
+            ) from exc
+        record_ids = dict(state.record_ids)
+        record_ids.update(zip(row_ids, added.record_ids, strict=True))
+        state = replace(
+            state,
+            record_ids=record_ids,
+            in_flight=(),
+            dataset_version=added.dataset_version,
+            pushed_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        )
+        _save(dataset, state)
+        report(f"pushed {start + len(batch)}/{total} records")
+    return state
+
+
+def _reconcile(
+    dataset: DatasetDir, state: PushState, api: LLMObsDatasets, report: Progress
+) -> PushState:
+    """Adopt the records of an interrupted batch (``in_flight``) that reached the dataset."""
+    dataset_id = state.dataset_id
+    if dataset_id is None:
+        raise StateError(f"{push_path(dataset)}: in_flight is set but dataset_id is not")
+    in_flight = set(state.in_flight)
+    report(f"checking dataset {dataset_id} for {len(in_flight)} records of an interrupted batch")
+    try:
+        records = api.list_records(dataset_id)
+    except ExternalError as exc:
+        raise StateError(
+            f"cannot tell which of {len(in_flight)} records sent to dataset {dataset_id} by an "
+            f"interrupted push were added ({exc}); they may already be there: "
+            f"{_some(state.in_flight)}",
+            hint=f"push again once the dataset's records can be listed; {PUSH_FILE} lists the "
+            "rows as in_flight, and pushing them now could add them twice",
+        ) from exc
+    found: dict[str, str] = {}
+    for record in records:
+        row_id = record.metadata.get("row_id")
+        if isinstance(row_id, str) and row_id in in_flight:
+            found.setdefault(row_id, record.id)
+    state = replace(
+        state,
+        record_ids={**state.record_ids, **found},
+        in_flight=(),
+        # Records were added since the version recorded, and the listing does not tell how many.
+        dataset_version=None if found else state.dataset_version,
+    )
+    _save(dataset, state)
+    report(
+        f"{len(found)} of the {len(in_flight)} records were already in the dataset; "
+        f"{len(in_flight) - len(found)} are sent again"
+    )
+    return state
+
+
+def _some(row_ids: Sequence[str]) -> str:
+    shown = ", ".join(row_ids[:SHOWN_ROW_IDS])
+    rest = len(row_ids) - SHOWN_ROW_IDS
+    return f"{shown} and {rest} more" if rest > 0 else shown
+
+
+def _save(dataset: DatasetDir, state: PushState) -> None:
+    atomic_write_json(push_path(dataset), state.to_json())
+
+
+def _check_state(
+    dataset: DatasetDir, state: PushState, *, project: str, name: str, digest: str
+) -> None:
+    path = push_path(dataset)
+    if state.settings_hash != digest:
+        raise StateError(
+            f"{path} was written for a dataset directory with other settings",
+            hint=f"move {path} aside to push this directory as a new dataset",
+        )
+    if state.project != project or state.dataset_name != name:
+        raise UsageError(
+            f"{dataset.path} was pushed to dataset {state.dataset_name!r} in project "
+            f"{state.project!r}, not {name!r} in {project!r}",
+            hint=(
+                f"pass --name {shlex.quote(state.dataset_name)} --project "
+                f"{shlex.quote(state.project)} to add to that dataset; a directory pushes to "
+                f"a new dataset only without a {PUSH_FILE}, so move {path} aside first to "
+                "push to another one"
+            ),
+        )
+
+
+def _require_name(value: str, flag: str) -> None:
+    if not value.strip():
+        raise UsageError(f"{flag} must not be empty")
+
+
+def _on_sigterm(signum: int, frame: FrameType | None) -> None:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)  # A second SIGTERM must not stop the cleanup.
+    raise PushTerminated(
+        "the push stopped: the process received SIGTERM",
+        hint="run the same command again to resume",
+    )
+
+
+@contextmanager
+def _sigterm_raises() -> Iterator[None]:
+    """Turn SIGTERM into :class:`PushTerminated`, so the batch file is removed on the way out.
+
+    Signals can only be set on the main thread; elsewhere this does nothing.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.signal(signal.SIGTERM, _on_sigterm)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL if previous is None else previous)

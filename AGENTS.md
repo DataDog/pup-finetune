@@ -59,12 +59,17 @@ uv run pup-finetune dataset pull /tmp/ds --ml-app my-app --from now-7d
 uv run pup-finetune dataset show /tmp/ds
 uv run pup-finetune dataset sample /tmp/ds --n 20            # rows in brief, to review
 uv run pup-finetune dataset label /tmp/ds --file labels.jsonl  # {id, keep, reason} per line
+uv run pup-finetune dataset push /tmp/ds --name my-dataset --project pup-finetune-dev
+                                     # preview only (exit 2); add --confirm to push the kept rows
 ```
 
 A relative `--from` or `--to` (`now`, or `now-<n><unit>` with unit `s`, `m`, `h`, `d` or `w`)
 is resolved to epoch ms when the command starts. The first pull into a directory freezes that
 window together with the expressions as written, and a re-run with the same expressions reads
 the frozen window, so a resumed pull reads the same spans.
+
+`dataset push` is a remote write: it is refused with `PUP_READ_ONLY` set. Push test data to
+the `pup-finetune-dev` project, never to a shared one.
 
 Add `--detach` to train in a background worker (output in `/tmp/run/worker.log`) and follow it
 with `status /tmp/run --watch`. `--provider-option step_delay_s=0.5 --batch-size 1` makes the
@@ -90,8 +95,8 @@ Opt-in test suites: `PUP_FINETUNE_LIVE=1` runs `live` tests (real external servi
 Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later PRs.
 
 - `cli/` - the Typer app; one module per command group. `dataset.py` has `dataset import`,
-  `preview`, `pull`, `show`, `sample` and `label`; `train.py` has `train`, `resume`, `status`,
-  `cancel` and the hidden `_worker` a detached run executes.
+  `preview`, `pull`, `show`, `sample`, `label` and `push`; `train.py` has `train`, `resume`,
+  `status`, `cancel` and the hidden `_worker` a detached run executes.
 - `runtime.py` - non-secret settings from the environment (`PUP_OUTPUT`, `PUP_READ_ONLY`, ...).
 - `errors.py` - expected failures and their exit codes; the `--confirm` and read-only guards.
 - `output.py` - the one stdout result (through `pup format` under pup), progress on stderr.
@@ -109,7 +114,12 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   `settings()` to freeze), `iter_spans` and `iter_span_pages` (cursor pagination, retries of
   timed-out pages, an optional raw page cache that resumes without refetching, `ExportStats`),
   and tolerant `LLMObs*` models that skip and count spans they cannot read (`UnreadableSpan`).
-  Datasets and experiments arrive later.
+  `datasets.py` has `LLMObsDatasets`: projects (`pup llm-obs projects list/create`), datasets
+  (listed and created through `Pup.api` on `v2/llm-obs/v1/<project>/datasets`, since pup
+  1.10.7 cannot read the response of `pup llm-obs datasets create`), `records-add --confirm`
+  and `records-all`; lists are read page by page, a create whose response is lost is found
+  again by name, and `--file` bodies are `0600` in a private temporary directory, removed
+  afterwards. Experiments arrive later.
 - `data/` - training data. `schema.py` is the canonical row every provider consumes (OpenAI
   chat format plus its source) and the stable `RowErrorCode` reasons a row is rejected for;
   `jsonl.py` reads and writes rows and converts them to the provider form; `exclusions.py`
@@ -117,10 +127,11 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   schema cannot see (conversion problems, dataset-level rules);
   `split.py` assigns deterministic, persisted train/validation/test splits per trace;
   `dataset_dir.py` is the dataset directory (`settings.json`, `rows.jsonl`, `excluded.jsonl`,
-  `splits.json`, `summary.json`, and `raw/`, a pull's page cache) behind `dataset import`,
-  `dataset pull` and `dataset show`; `labels.py` has the keep/drop `Label` and the
-  `labels.jsonl` format (append-only, last label per id wins, a reason required to drop;
-  `DatasetDir.kept_rows` leaves dropped rows out of training and split exports).
+  `splits.json`, `summary.json`, `raw/`, a pull's page cache, and `push.json`, the receipt
+  `dataset push` writes) behind `dataset import`, `dataset pull` and `dataset show`;
+  `labels.py` has the keep/drop `Label` and the `labels.jsonl` format (append-only, last label
+  per id wins, a reason required to drop; `DatasetDir.kept_rows` leaves dropped rows out of
+  training and split exports).
   `convert.py` maps one LLM span to a canonical conversation (`span_conversation`: input then
   output messages, tool calls and results, tools, `SourceRef`; reasoning omitted or
   preserved), with conversion issues as stable codes; `trajectories.py` has
@@ -139,7 +150,15 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   further retires a stored row its trace now shows to be a prefix of a longer conversation
   (`retirements`, `contained_conversation`), and one with lower limits does not add such a row
   back (`contained`); both compare messages as conversion collapses them
-  (`comparable_messages` in `trajectories.py`).
+  (`comparable_messages` in `trajectories.py`). `push.py` is `dataset push`: `dataset_record`
+  (input = the messages before the final assistant message plus tools, expected output = that
+  message, metadata = row id, split and source, tags `split:*` and `source:pup-finetune`),
+  `plan_push` (what would be sent, from local files only) and `push_dataset`, which sends only
+  kept rows in batches of 100 and saves `push.json` (project and dataset ids, version, the
+  record id per row, the batch `in_flight`) around every batch, so a re-push sends only new
+  rows and an interrupted push resumes, first adopting the records of a batch whose response
+  was lost (matched on `metadata.row_id` through `records-all`) so no row is added twice; rows
+  dropped after a push are reported as `stale_records`, not deleted.
 - `curation/` - deciding which accepted rows to train on. `labels.py` has `apply_labels`
   (every id an accepted row, last label per id wins, repeats skipped, appended through
   `DatasetDir.append_labels`); `samples.py` picks a seeded, readable sample of rows for
@@ -191,6 +210,8 @@ Tests live under `tests/` and mirror `src/`. Shared fakes live in `tests/fakes/`
 as `tests.fakes...`); `tests/fakes/pup.py` has `FakePup`, a fake pup runner that answers by
 argument prefix (or computes the answer with a `handler`) and records every call;
 `tests/fakes/llmobs.py` has `FakeExportApi`, the Export API search route served by cursor.
+`tests/fakes/datasets.py` has `FakeDatasetsApi`, in-memory projects, datasets and records
+behind the pup calls `LLMObsDatasets` makes, with failures to inject.
 `tests/fakes/keyring.py` has in-memory, failing and locked keyring backends; every test starts
 on the failing one, so none touches the real keychain.
 `tests/providers/contract/` has the `RendererContract`, `BackendContract` and

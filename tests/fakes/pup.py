@@ -18,8 +18,9 @@ longest registered prefix wins)::
     fake.on("api", "v2/some/route", handler=lambda call: {"echo": call.stdin_json()})
     pup = fake.client()
 
-``handler`` computes the answer from the :class:`PupCall`: its return value is printed as JSON,
-or, when it is a :class:`PupExit`, pup exits with that code and stderr. ``raw=True`` answers
+``handler`` computes the answer from the :class:`PupCall`: its return value is printed as JSON;
+when it is a :class:`PupExit`, pup exits with that code and stderr, and when it is a
+:class:`PupStdout`, pup prints that text as is. ``raw=True`` answers
 calls made without the fixed flags (only ``pup --version``); every other call must carry them.
 Every call is recorded (argv, env, stdin, timeout) for assertions. A call with no registered
 response exits 1, the way pup rejects an unknown command.
@@ -70,6 +71,13 @@ class PupExit:
 
     returncode: int = 1
     stderr: str = "Error: fake pup failure"
+
+
+@dataclass(frozen=True)
+class PupStdout:
+    """What a ``handler`` returns to make pup print ``text`` as is (e.g. output that is not JSON)."""
+
+    text: str
 
 
 Handler = Callable[[PupCall], Any]
@@ -152,6 +160,8 @@ class FakePup:
             if isinstance(answer, PupExit):
                 stderr = answer.stderr.encode()
                 return subprocess.CompletedProcess(argv, answer.returncode, b"", stderr)
+            if isinstance(answer, PupStdout):
+                return subprocess.CompletedProcess(argv, 0, answer.text.encode(), b"")
             stdout = jsonlib.dumps(answer).encode()
             return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr=b"")
         return subprocess.CompletedProcess(

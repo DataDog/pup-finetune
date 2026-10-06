@@ -18,7 +18,7 @@ from typing import Annotated, Any, Literal
 
 import typer
 
-from pup_finetune.cli._common import run_command
+from pup_finetune.cli._common import get_runtime, run_command
 from pup_finetune.curation.labels import Label, apply_labels, parse_labels
 from pup_finetune.curation.samples import (
     DEFAULT_SAMPLE_SEED,
@@ -39,6 +39,7 @@ from pup_finetune.data.pull import (
     pull,
     resolve_window,
 )
+from pup_finetune.data.push import PushPlan, plan_push, push_dataset, push_path, read_push_state
 from pup_finetune.data.split import (
     DEFAULT_SEED,
     DEFAULT_TEST_FRACTION,
@@ -48,9 +49,10 @@ from pup_finetune.data.split import (
     split_counts,
     split_warnings,
 )
+from pup_finetune.datadog.datasets import DEFAULT_PROJECT
 from pup_finetune.datadog.pup import Pup
 from pup_finetune.datadog.spans import Clock, SpanQuery, TimeBound, epoch_ms
-from pup_finetune.errors import UsageError
+from pup_finetune.errors import UsageError, require_confirm, require_writable
 from pup_finetune.output import info
 
 SAMPLE_IDS_PER_SPLIT = 5
@@ -239,8 +241,112 @@ def show(directory: DirArgument) -> dict[str, Any]:
         "sample_row_ids": {
             split: [row.id for row in by_split[split][:SAMPLE_IDS_PER_SPLIT]] for split in SPLITS
         },
+        "push": _push_brief(dataset),
         "next_command": f"pup finetune train --dataset {_quoted(directory)} ...",
     }
+
+
+@dataset_app.command(
+    "push",
+    short_help="Push a dataset's kept rows to an Agent Observability dataset.",
+    help=(
+        "Add one record per kept row of DIR to the Agent Observability dataset --name in "
+        "project --project, creating either when missing; rows labeled drop are never sent. "
+        "Each record's input is the conversation before the final assistant message, with "
+        "its tools; its expected output is that message; its metadata holds the row id, "
+        "split and source; it is tagged split:<split> and source:pup-finetune. Without "
+        "--confirm it only previews what would be sent; when every kept row was pushed "
+        "already it reports the receipt and sends nothing. The receipt, push.json in DIR, "
+        "records the dataset and the record of every row pushed and is saved after every "
+        "batch, so pushing again sends only rows not yet pushed, and an interrupted push "
+        "resumes without adding a row twice. A directory pushes to one dataset: another --name or --project is an "
+        "error. Rows labeled drop after they were pushed are reported as stale_records and "
+        "are not deleted from the dataset. A remote write: refused when PUP_READ_ONLY is set."
+    ),
+)
+@run_command
+def push(
+    directory: DirArgument,
+    name: Annotated[
+        str,
+        typer.Option("--name", help="The dataset to push to (required).", show_default=False),
+    ],
+    project: Annotated[
+        str, typer.Option("--project", help="The project the dataset belongs to.")
+    ] = DEFAULT_PROJECT,
+    confirm: Annotated[
+        bool,
+        typer.Option(
+            "--confirm", help="Push (a remote write); without it, only preview what is sent."
+        ),
+    ] = False,
+) -> dict[str, Any]:
+    require_writable(get_runtime(), "dataset push")
+    dataset = DatasetDir(directory)
+    plan = plan_push(dataset, project=project, name=name)
+    plan.require_rows()
+    if plan.needs_remote:
+        rerun = ["pup", "finetune", "dataset", "push", str(directory), "--name", name]
+        rerun += ["--project", project, "--confirm"]
+        require_confirm(confirm, _push_preview(plan), shlex.join(rerun))
+        receipt = push_dataset(dataset, project=project, name=name, pup=Pup(), progress=info)
+    else:
+        info("nothing to push: every kept row was pushed already")
+        receipt = plan.receipt()
+    result: dict[str, Any] = {"dataset_dir": str(dataset.path.resolve()), **receipt.to_json()}
+    result["receipt_file"] = str(push_path(dataset).resolve())
+    if receipt.stale_records:
+        result["warnings"] = [_stale_warning(len(receipt.stale_records))]
+    result["next_command"] = f"pup finetune train --dataset {_quoted(directory)} ..."
+    return result
+
+
+def _push_preview(plan: PushPlan) -> dict[str, Any]:
+    to_push = len(plan.pending)
+    if plan.dataset_id is None:
+        action = (
+            f"create dataset {plan.dataset_name!r} in project {plan.project!r} (and the "
+            f"project if missing), then add {to_push} records"
+        )
+    elif plan.in_flight:
+        action = (
+            f"check dataset {plan.dataset_id} for the records of an interrupted batch, then "
+            f"add those of the {to_push} records it does not hold"
+        )
+    else:
+        action = f"add {to_push} records to dataset {plan.dataset_id}"
+    preview: dict[str, Any] = {
+        "dataset_dir": str(plan.directory.resolve()),
+        "project": plan.project,
+        "dataset_name": plan.dataset_name,
+        "dataset_id": plan.dataset_id,
+        "action": action,
+        "records_to_push": to_push,
+        "records_to_push_by_split": plan.pending_by_split(),
+        "already_pushed": plan.already_pushed,
+        "kept_by_split": plan.kept_by_split,
+        "stale_records": plan.stale_records,
+        "sample_record": plan.pending[0].record if plan.pending else None,
+    }
+    warnings = []
+    if plan.in_flight:
+        warnings.append(
+            f"an interrupted push sent {len(plan.in_flight)} records without learning whether "
+            "they were added; the push lists the dataset's records first and sends only those "
+            "it does not find"
+        )
+    if plan.stale_records:
+        warnings.append(_stale_warning(len(plan.stale_records)))
+    if warnings:
+        preview["warnings"] = warnings
+    return preview
+
+
+def _stale_warning(count: int) -> str:
+    return (
+        f"{count} records pushed earlier are of rows no longer kept (see stale_records); "
+        "they are not deleted from the remote dataset, so remove them there if needed"
+    )
 
 
 @dataset_app.command(
@@ -492,6 +598,21 @@ def sample(
             "review these rows with the user, then record decisions as JSON lines of "
             '{"id": ..., "keep": true|false, "reason": ...}; a reason is required to drop'
         ),
+    }
+
+
+def _push_brief(dataset: DatasetDir) -> dict[str, Any] | None:
+    """Where the dataset was pushed (from ``push.json``), or ``None`` when it never was."""
+    state = read_push_state(dataset)
+    if state is None:
+        return None
+    return {
+        "project": state.project,
+        "dataset_name": state.dataset_name,
+        "dataset_id": state.dataset_id,
+        "dataset_version": state.dataset_version,
+        "records": len(state.record_ids),
+        "pushed_at": state.pushed_at,
     }
 
 
