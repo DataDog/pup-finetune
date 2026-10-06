@@ -521,6 +521,58 @@ def test_null_tool_result_takes_the_tool_message_content() -> None:
     as_row(conversation)
 
 
+IMAGE = {"type": "image_url", "image_url": {"url": "https://example.com/radar.png"}}
+
+
+@pytest.mark.parametrize(
+    "results",
+    [
+        [{"result": "cloudy", "tool_id": "call_1"}],
+        [{"result": "cloudy", "tool_id": "call_1"}, {"result": "9:00", "tool_id": "call_2"}],
+        [{"tool_id": "call_1"}, {"tool_id": "call_2"}],
+    ],
+    ids=["one-result", "two-results", "two-null-results"],
+)
+def test_non_text_content_beside_structured_results_is_an_issue(
+    results: list[dict[str, Any]],
+) -> None:
+    # The content is not kept apart from the results, but the image the model saw beside
+    # them must not be silently dropped from a text-only row.
+    messages = tool_turn(*results)
+    messages[2]["content"] = ["See the radar.", IMAGE]
+    conversation = span_conversation(make_span(messages, [{"content": "Cloudy."}]))
+    assert codes(conversation) == [ExclusionCode.NON_TEXT_CONTENT]
+    assert "image_url" in conversation.issues[0][1]
+
+
+def test_non_text_content_of_a_null_result_is_one_issue() -> None:
+    span = make_span(
+        [
+            USER,
+            {"role": "assistant", "tool_calls": [CALL]},
+            {"role": "tool", "content": [IMAGE], "tool_results": [{"tool_id": "call_1"}]},
+        ],
+        [{"content": "Cloudy."}],
+    )
+    conversation = span_conversation(span)
+    assert codes(conversation) == [ExclusionCode.NON_TEXT_CONTENT]
+    assert conversation.messages[2]["content"] == [IMAGE]
+
+
+def test_text_content_beside_structured_results_is_not_an_issue() -> None:
+    span = make_span(
+        tool_turn({"result": "cloudy", "tool_id": "call_1"}, content="Here is the result."),
+        [{"content": "Cloudy."}],
+    )
+    conversation = span_conversation(span)
+    assert conversation.issues == []
+    assert conversation.messages[2] == {
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "content": "cloudy",
+    }
+
+
 def test_tool_result_with_unknown_id_is_left_to_the_schema() -> None:
     span = make_span(tool_turn({"result": "?", "tool_id": "call_9"}), [{"content": "Done."}])
     conversation = span_conversation(span)

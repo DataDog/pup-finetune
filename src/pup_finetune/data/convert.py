@@ -142,6 +142,7 @@ class _Builder:
     def _add_message(self, message: LLMObsMessage, role: str, index: int) -> None:
         if message.tool_results:
             results = message.tool_results
+            content_used = False
             for result in results:
                 call_id = self._answer(result.tool_id, result.name, index)
                 if call_id is not None:
@@ -149,11 +150,16 @@ class _Builder:
                     if role == "tool" and len(results) == 1 and result.result is None:
                         # The single result's output lives in the message content instead.
                         output = self._content(message, index)
+                        content_used = True
                     self.messages.append(
                         {"role": "tool", "tool_call_id": call_id, "content": output}
                     )
             if role == "tool":
-                # The results are the message; its own content is not kept apart from them.
+                # The results are the message; its own content is not kept apart from them,
+                # but a part that is not text still excludes the conversation: dropping it
+                # would hide what the model saw.
+                if not content_used:
+                    self._content(message, index)
                 return
         elif role == "tool":
             if not self._calls:
