@@ -608,6 +608,37 @@ def test_logging_filter_redacts_extra_fields_a_formatter_renders() -> None:
     assert "sent header=Bearer *** count=3" in output
 
 
+@pytest.mark.parametrize("via", ["install", "filter"])
+def test_nested_extra_fields_are_redacted(via: str) -> None:
+    credentials.register_secret(SECRET)
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    if via == "install":
+        credentials.install_log_redaction()
+    else:
+        handler.addFilter(credentials.RedactingFilter())
+    handler.setFormatter(logging.Formatter("%(message)s ctx=%(ctx)s"))
+    logger = logging.getLogger(f"pup_finetune.tests.nested_extra_{via}")
+    logger.addHandler(handler)
+    logger.propagate = False
+    ctx = {
+        "headers": {"Authorization": f"Bearer {SECRET}"},
+        "attempts": [("url", f"https://x.test/?key={SECRET}"), 3],
+        SECRET: 1.5,
+    }
+    try:
+        logger.warning("request failed", extra={"ctx": ctx})
+    finally:
+        logger.removeHandler(handler)
+    output = stream.getvalue()
+    assert SECRET not in output
+    assert "'Authorization': 'Bearer ***'" in output
+    assert "('url', 'https://x.test/?key=***'), 3]" in output
+    assert "'***': 1.5" in output
+    # The caller's own object is left untouched.
+    assert ctx["headers"] == {"Authorization": f"Bearer {SECRET}"}
+
+
 def test_install_log_redaction_covers_the_last_resort_handler(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

@@ -73,19 +73,40 @@ def _formatted_message(record: logging.LogRecord) -> str:
             return "<unformattable log message>"
 
 
+def _redacted_extra(value: Any) -> Any:
+    """``value`` with every string inside it redacted, through dicts, lists and tuples.
+
+    Keys are redacted too. Any other value is returned unchanged, so a formatter that renders
+    it with ``%d`` or ``%f`` still can.
+    """
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        return {_redacted_extra(key): _redacted_extra(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redacted_extra(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redacted_extra(item) for item in value)
+    return value
+
+
 def _scrub(record: logging.LogRecord) -> None:
     """Redact ``record``'s message, exception text, stack and extra fields in place. Never raises.
 
     The message is formatted once and its arguments dropped, so no handler or formatter can
     re-render a secret from them. Exception text is rendered here (formatters reuse a set
-    ``exc_text``) so the traceback is redacted too. String-valued attributes beyond the
-    standard ones (the ``extra=`` fields a formatter may render) are redacted as well.
+    ``exc_text``) so the traceback is redacted too. Attributes beyond the standard ones (the
+    ``extra=`` fields a formatter may render or serialize) are redacted as well, including
+    strings nested in dicts, lists and tuples.
     """
     record.msg = redact(_formatted_message(record))
     record.args = None
     for name, value in list(vars(record).items()):
-        if name not in _STANDARD_RECORD_ATTRIBUTES and isinstance(value, str):
-            setattr(record, name, redact(value))
+        if name not in _STANDARD_RECORD_ATTRIBUTES:
+            try:
+                setattr(record, name, _redacted_extra(value))
+            except Exception:
+                setattr(record, name, "<unredactable extra field>")
     if record.exc_info and not record.exc_text:
         try:
             record.exc_text = logging.Formatter().formatException(record.exc_info)
