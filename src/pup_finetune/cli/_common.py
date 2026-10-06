@@ -12,6 +12,7 @@ import functools
 import sys
 import traceback
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, NoReturn
 
 import typer
@@ -23,6 +24,18 @@ from pup_finetune.runtime import Runtime
 PROG_NAME = "pup-finetune"
 
 _CLI_FRAMEWORK_MODULES = frozenset({"click", "typer"})
+
+
+@dataclass(frozen=True, slots=True)
+class CommandResult:
+    """A result to emit followed by a non-zero exit, e.g. a report whose checks failed.
+
+    Commands that succeed return a plain mapping; return this when the result itself is the
+    useful output but the exit code must still signal failure.
+    """
+
+    data: Mapping[str, Any]
+    exit_code: int = 0
 
 
 def get_runtime() -> Runtime:
@@ -56,11 +69,14 @@ def _is_cli_framework_exception(exc: BaseException) -> bool:
     )
 
 
-def run_command[**P](fn: Callable[P, Mapping[str, Any] | None]) -> Callable[P, None]:
+def run_command[**P](
+    fn: Callable[P, Mapping[str, Any] | CommandResult | None],
+) -> Callable[P, None]:
     """Decorate a command so its returned result is emitted and its errors map to exit codes.
 
     The command returns the result mapping (or ``None`` when it already emitted output) and
-    raises :class:`FinetuneError` for expected failures. Apply below ``@app.command()``.
+    raises :class:`FinetuneError` for expected failures. A :class:`CommandResult` is emitted
+    and then exits with its ``exit_code``. Apply below ``@app.command()``.
     """
 
     @functools.wraps(fn)
@@ -74,7 +90,11 @@ def run_command[**P](fn: Callable[P, Mapping[str, Any] | None]) -> Callable[P, N
                 # handling.
                 raise
             raise typer.Exit(handle_exception(exc, runtime)) from exc
-        if result is not None:
+        if isinstance(result, CommandResult):
+            emit(result.data, runtime=runtime)
+            if result.exit_code:
+                raise typer.Exit(result.exit_code)
+        elif result is not None:
             emit(result, runtime=runtime)
 
     return wrapper

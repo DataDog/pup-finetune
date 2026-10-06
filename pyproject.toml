@@ -119,6 +119,8 @@ plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The repo root, so tests can import shared fakes as `tests.fakes`.
+pythonpath = ["."]
 addopts = "-q --strict-markers --import-mode=importlib"
 markers = [
   "live: hits real external services (skipped unless PUP_FINETUNE_LIVE=1)",
