@@ -484,6 +484,37 @@ def test_read_import_file_excludes_undecodable_json(tmp_path: Path) -> None:
     assert (summary["accepted"], summary["excluded"]) == (2, 2)
 
 
+def test_read_import_file_excludes_too_deeply_nested_arguments(tmp_path: Path) -> None:
+    lines = TOOL_USE.read_text().splitlines()
+    depth = 100_000
+    nested = {
+        "id": "row-deep-arguments",
+        "messages": [
+            {"role": "user", "content": "Weather?"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"x": ' + "[" * depth + "]" * depth + "}",
+                        },
+                    }
+                ],
+            },
+        ],
+    }
+    path = tmp_path / "deep.jsonl"
+    path.write_text("\n".join([lines[0], json.dumps(nested), lines[1]]) + "\n")
+    rows, exclusions = read_import_file(path)
+    assert [row.id for row in rows] == [validate_row(json.loads(line)).id for line in lines[:2]]
+    assert [(e.row_id, e.code) for e in exclusions] == [
+        ("row-deep-arguments", RowErrorCode.INVALID_ARGUMENTS_JSON)
+    ]
+
+
 def test_read_import_file_keeps_going_past_malformed_lines(tmp_path: Path) -> None:
     good = TOOL_USE.read_text().splitlines()[0]
     path = tmp_path / "mixed.jsonl"
