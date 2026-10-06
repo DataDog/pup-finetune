@@ -52,6 +52,10 @@ def test_train_spec_defaults() -> None:
     assert spec.pipeline_depth == 4
     assert spec.checkpoint_every_minutes == 15
     assert spec.max_train_tokens is None
+    assert spec.microbatch_token_budget is None
+    assert spec.max_spend_usd is None
+    assert spec.hourly_rate_usd is None
+    assert spec.spend_reserve_fraction == 0.1
     assert spec.provider_options == {}
 
 
@@ -69,10 +73,17 @@ def test_train_spec_accepts_valid_settings() -> None:
             "pipeline_depth": 1,
             "checkpoint_every_minutes": 0.5,
             "max_train_tokens": 1_000_000,
+            "microbatch_token_budget": 8192,
+            "max_spend_usd": 25.0,
+            "hourly_rate_usd": 12.5,
+            "spend_reserve_fraction": 0.0,
             "provider_options": {"region": "us"},
         }
     )
+    assert spec.spend_reserve_fraction == 0.0
     assert spec.lora_rank == 16
+    assert spec.microbatch_token_budget == 8192
+    assert (spec.max_spend_usd, spec.hourly_rate_usd) == (25.0, 12.5)
     assert spec.provider_options == {"region": "us"}
 
 
@@ -98,6 +109,11 @@ def test_train_spec_accepts_an_integer_learning_rate_and_interval() -> None:
         ("learning_rate", 0.0),
         ("learning_rate", math.inf),
         ("checkpoint_every_minutes", 0),
+        ("microbatch_token_budget", 0),
+        ("microbatch_token_budget", 1.5),
+        ("spend_reserve_fraction", 1.0),
+        ("spend_reserve_fraction", -0.01),
+        ("spend_reserve_fraction", math.nan),
         ("batch_size", True),
         ("batch_size", "32"),
         ("batch_size", 1.5),
@@ -108,6 +124,29 @@ def test_train_spec_rejects_invalid_values(field: str, value: object) -> None:
         TrainSpec.parse({field: value})
     assert f"{field}:" in info.value.message
     assert info.value.exit_code == 2
+
+
+@pytest.mark.parametrize(
+    "value", [0.0, -1.0, math.inf, math.nan, "10"], ids=["zero", "negative", "inf", "nan", "str"]
+)
+@pytest.mark.parametrize("field", ["max_spend_usd", "hourly_rate_usd"])
+def test_train_spec_rejects_invalid_spend_values(field: str, value: object) -> None:
+    with pytest.raises(UsageError) as info:
+        TrainSpec.parse({"max_spend_usd": 10.0, "hourly_rate_usd": 2.0, field: value})
+    assert f"{field}:" in info.value.message
+
+
+@pytest.mark.parametrize(
+    "fields", [{"max_spend_usd": 10.0}, {"hourly_rate_usd": 2.0}], ids=["cap", "rate"]
+)
+def test_train_spec_needs_both_spend_fields_or_neither(fields: dict[str, float]) -> None:
+    with pytest.raises(UsageError, match="max_spend_usd and hourly_rate_usd must be set together"):
+        TrainSpec.parse(fields)
+
+
+def test_train_spec_accepts_integer_spend_values() -> None:
+    spec = TrainSpec(max_spend_usd=10, hourly_rate_usd=4)
+    assert (spec.max_spend_usd, spec.hourly_rate_usd) == (10.0, 4.0)
 
 
 def test_train_spec_rejects_unknown_fields() -> None:

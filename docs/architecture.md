@@ -8,8 +8,8 @@ The protocols live in [`src/pup_finetune/providers/base.py`](../src/pup_finetune
 and [`src/pup_finetune/rendering/base.py`](../src/pup_finetune/rendering/base.py). The
 development-only `fake` provider in
 [`src/pup_finetune/providers/fake.py`](../src/pup_finetune/providers/fake.py) implements all of
-them offline and is the reference implementation; the shared training loop arrives in a
-follow-up change.
+them offline and is the reference implementation. The shared training loop is
+[`src/pup_finetune/training/loop.py`](../src/pup_finetune/training/loop.py).
 
 ## Who owns what
 
@@ -27,16 +27,23 @@ follow-up change.
  training loop: epochs, batching, eval, early stopping, checkpoint policy, resume
 ```
 
-**The shared loop** (`training/`, next changes) is written once, against the protocols only.
+**The shared loop** (`training/`) is written once, against the protocols only.
 It owns everything that decides *how* training goes:
 
-- epochs, per-epoch shuffling seeded with `seed + epoch`, and batching (`batch_size` rows per
-  step, up to `pipeline_depth` steps in flight, every pending result always resolved);
-- validation loss after each epoch through `TrainingSession.forward`;
+- epochs, per-epoch shuffling of whole rows seeded with `seed + epoch - 1`, and batching
+  (`batch_size` rows per step, packed into microbatches of at most `microbatch_token_budget`
+  tokens, up to `pipeline_depth` steps in flight, every pending result always resolved);
+- never retrying `forward_backward`, since a retry would accumulate the gradients twice;
+- validation loss after each epoch through `TrainingSession.forward`, retried with a short
+  backoff a bounded number of times when it fails with a `TransientError` (or a timeout or
+  connection error);
 - early stopping by `patience` and `min_delta`, and tracking the best epoch;
 - the checkpoint policy: a resumable checkpoint at each epoch end and every
   `checkpoint_every_minutes` at a step boundary, and a sampler checkpoint for each new best;
-- the `max_train_tokens` budget, which stops cleanly and still promotes the best checkpoint;
+- the `max_train_tokens` budget and the `max_spend_usd` / `hourly_rate_usd` wall-clock spend
+  guard, which stop cleanly and still promote the best checkpoint; the spend guard is asked
+  before every paid call and stops training `spend_reserve_fraction` short of the cap, so the
+  checkpoint saved at the stop fits under it;
 - resume: the data order is deterministic, so resuming at step *k* of an epoch replays exactly
   the rest of that epoch.
 

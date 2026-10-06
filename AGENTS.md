@@ -78,7 +78,16 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   `splits.json`, `summary.json`) behind `dataset import` and `dataset show`. Conversion from
   spans and the exclusion checks arrive later.
 - `curation/` - *later*. Keep/drop labels and judge-based triage.
-- `training/` - *later*. The shared, provider-neutral SFT loop, run state and detached worker.
+- `training/` - the shared, provider-neutral SFT loop. `datums.py` renders rows into
+  `TokenizedExample`s (per turn when a renderer is not prefix-stable) and rejects rows that
+  exceed the context or train on nothing; `batching.py` shuffles rows per epoch and packs
+  optimizer steps into microbatches; `budget.py` caps trained tokens and wall-clock spend;
+  `loop.py` has `run_training` (pipelined steps, validation loss, early stopping, best epoch,
+  checkpoints, cancellation). Resume and the detached worker arrive later.
+- `runs.py` - the run directory (`run.json`, `state.json`, `epochs.json`, `result.json`),
+  `RunState`, which the loop reports into, and `execute_run`, which holds the directory lock
+  while training and always writes `result.json`, also on Ctrl-C or SIGTERM (reported as
+  `TrainingTerminated`, a `FinetuneError`).
 - `rendering/` - chat rows to model tokens and completions back to messages. `tokens.py` has
   `TokenizedExample`, the provider-neutral, next-token-shifted token and weight arrays;
   `base.py` has the `Renderer` protocol (built on Hugging Face chat templates) and

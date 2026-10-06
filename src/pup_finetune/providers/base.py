@@ -28,9 +28,10 @@ from pydantic import (
     NonNegativeInt,
     PositiveInt,
     ValidationError,
+    model_validator,
 )
 
-from pup_finetune.errors import UsageError
+from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.rendering.base import ChatMessage, Renderer, ToolSpec
 from pup_finetune.rendering.tokens import TokenizedExample
 
@@ -124,16 +125,27 @@ class AdamConfig:
             raise ValueError("weight_decay and grad_clip_norm must not be negative")
 
 
+DEFAULT_SPEND_RESERVE_FRACTION = 0.1
+"""The share of ``max_spend_usd`` kept back for the checkpoint saved when training stops."""
+
+
 class TrainSpec(BaseModel):
     """How to train: the provider-neutral settings of one run, frozen into the run directory.
 
     ``patience`` is how many epochs without a validation-loss improvement of more than
     ``min_delta`` end training early. ``lora_rank`` ``None`` uses the profile's default.
     ``checkpoint_every_minutes`` adds a resumable checkpoint at a step boundary between the
-    end-of-epoch ones. ``max_train_tokens`` stops cleanly once that many rendered tokens were
-    trained on. ``provider_options`` are checked by :meth:`Provider.validate_options`;
-    the spec is frozen but that dict is not, so consumers use the normalized copy
-    ``validate_options`` returns and never mutate ``provider_options`` in place.
+    end-of-epoch ones. ``max_train_tokens`` stops cleanly before a step that would train on
+    more rendered tokens than that. ``microbatch_token_budget`` packs each step's examples
+    into microbatches of at most that many tokens (gradients accumulate over them); ``None``
+    sends each step as one microbatch. ``max_spend_usd`` and ``hourly_rate_usd`` (both or
+    neither) stop cleanly once the elapsed time at that rate would cost more than the cap;
+    they measure wall-clock time, not the provider's bill. Training stops once the spend
+    reaches ``max_spend_usd`` less ``spend_reserve_fraction`` of it, keeping that reserve for
+    the calls in flight and the checkpoint saved at the stop. ``provider_options`` are
+    checked by :meth:`Provider.validate_options`; the spec is frozen but that dict is not, so
+    consumers use the normalized copy ``validate_options`` returns and never mutate
+    ``provider_options`` in place.
 
     Build one from user input with :meth:`parse`, which raises :class:`UsageError` naming
     the offending fields; mapping fields to command-line flags is the command's job.
@@ -152,7 +164,19 @@ class TrainSpec(BaseModel):
     pipeline_depth: PositiveInt = 4
     checkpoint_every_minutes: float = Field(default=15.0, gt=0, allow_inf_nan=False)
     max_train_tokens: PositiveInt | None = None
+    microbatch_token_budget: PositiveInt | None = None
+    max_spend_usd: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    hourly_rate_usd: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    spend_reserve_fraction: float = Field(
+        default=DEFAULT_SPEND_RESERVE_FRACTION, ge=0, lt=1, allow_inf_nan=False
+    )
     provider_options: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _spend_cap_needs_a_rate(self) -> Self:
+        if (self.max_spend_usd is None) != (self.hourly_rate_usd is None):
+            raise ValueError("max_spend_usd and hourly_rate_usd must be set together")
+        return self
 
     @classmethod
     def parse(cls, data: Mapping[str, Any]) -> Self:
@@ -175,6 +199,15 @@ class TrainSpec(BaseModel):
     def adam_config(self) -> AdamConfig:
         """The optimizer parameters for every step: a constant learning rate."""
         return AdamConfig(learning_rate=self.learning_rate)
+
+
+class TransientError(ExternalError):
+    """A provider call that failed in a way worth retrying: a timeout, a dropped connection.
+
+    Backends raise it (or a :class:`TimeoutError` or :class:`ConnectionError`) only for calls
+    that change nothing when repeated. The loop retries such failures for ``forward`` alone,
+    never for ``forward_backward``, where a retry would accumulate the gradients twice.
+    """
 
 
 # --- Results the seam returns ------------------------------------------------------------
