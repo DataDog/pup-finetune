@@ -12,14 +12,18 @@ Files, all ``0600`` in a ``0700`` directory, written atomically:
   :class:`~pup_finetune.providers.base.TrainSpec`, dataset directory and content hash,
   rendering identity, the hash of those settings, and when it was created.
 - ``state.json`` - :class:`RunState`, rewritten at every step: the phase, epoch and step,
-  every checkpoint, the resume point of the last training checkpoint, the best epoch, the
-  loop's warnings, what a resume would do, a heartbeat and the training process id.
+  the last step's training loss, every checkpoint, the resume point of the last training
+  checkpoint, the best epoch, the loop's warnings, what a resume would do, a heartbeat and
+  the training process id. With ``heartbeat_s``, :func:`execute_run` also rewrites it on a
+  timer, so the heartbeat stays fresh through slow steps, validation and promotion.
 - ``epochs.json`` - one record per finished epoch, with the training checkpoint saved at its
   end.
 - ``result.json`` - how the run ended; :func:`execute_run` writes it on every exit, also on
   failure, Ctrl-C or SIGTERM (which it reports as :class:`TrainingTerminated`): the best
   epoch and validation loss, why training stopped, the promoted model and the deployable
   checkpoint, the best and last checkpoints, the epochs, the warnings and any error.
+- ``worker.json`` and ``worker.log`` - for a detached run, the worker process that was
+  started and how it ended (written by :mod:`pup_finetune.training.worker`), and its output.
 
 Every number written is finite: a non-finite loss is stored as ``null``.
 
@@ -27,11 +31,13 @@ Every number written is finite: a non-finite loss is stored as ``null``.
 training, so two processes never train in one run directory. Any error during training
 leaves the run ``interrupted`` and resumable from its last training checkpoint. When only
 the promotion at the end failed, the run is ``failed`` with the training result kept, and a
-resume re-runs just the promotion (``resume_mode`` ``finalize_only``).
+resume re-runs just the promotion (``resume_mode`` ``finalize_only``). With ``signals``
+``cancel``, SIGTERM and Ctrl-C stop training gracefully instead (see :func:`execute_run`).
 """
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import os
@@ -74,6 +80,8 @@ RUN_FILE = "run.json"
 STATE_FILE = "state.json"
 EPOCHS_FILE = "epochs.json"
 RESULT_FILE = "result.json"
+WORKER_FILE = "worker.json"
+WORKER_LOG = "worker.log"
 
 Phase = Literal["created", "training", "completed", "failed", "cancelled", "interrupted"]
 PHASES: tuple[Phase, ...] = get_args(Phase)
@@ -84,6 +92,10 @@ RESUMABLE_PHASES: frozenset[Phase] = frozenset({"interrupted", "failed", "cancel
 ResumeMode = Literal["train", "finalize_only"]
 """What a resume does: continue training, or (training having ended) only re-run promotion."""
 RESUME_MODES: tuple[ResumeMode, ...] = get_args(ResumeMode)
+
+SignalMode = Literal["interrupt", "cancel"]
+"""How :func:`execute_run` treats SIGTERM and Ctrl-C: stop at once, leaving the run
+``interrupted``, or ask the loop to stop at the next step boundary (a graceful cancel)."""
 
 _TRANSITIONS: dict[Phase, frozenset[Phase]] = {
     "created": frozenset({"training", "failed", "interrupted"}),
@@ -109,6 +121,17 @@ def utcnow() -> datetime:
 
 def _iso(moment: datetime) -> str:
     return moment.isoformat(timespec="seconds")
+
+
+def check_run_id(run_id: str) -> str:
+    """Return ``run_id`` if it is a valid run id, else raise :class:`UsageError`."""
+    if not _RUN_ID.fullmatch(run_id):
+        raise UsageError(
+            f"invalid run id {run_id!r}",
+            hint="use 1 to 64 lowercase letters, digits and dashes, starting with a letter "
+            "or digit",
+        )
+    return run_id
 
 
 def new_run_id(now: datetime | None = None) -> str:
@@ -168,7 +191,8 @@ def _ckpt_json(ref: CheckpointRef | None) -> dict[str, Any] | None:
     return None if ref is None else dataclasses.asdict(ref)
 
 
-def _error_json(error: BaseException) -> dict[str, Any]:
+def error_json(error: BaseException) -> dict[str, Any]:
+    """``error`` as run files record it: its type, and its message and notes redacted."""
     return {
         "type": type(error).__name__,
         "message": redact(str(error)),
@@ -204,18 +228,12 @@ class RunDir:
         ``run_id`` defaults to :func:`new_run_id`. ``rendering`` is the renderer's
         :meth:`~pup_finetune.rendering.base.Renderer.identity`.
         """
-        run_id = run_id if run_id is not None else new_run_id(now())
-        if not _RUN_ID.fullmatch(run_id):
-            raise UsageError(
-                f"invalid run id {run_id!r}",
-                hint="use 1 to 64 lowercase letters, digits and dashes, starting with a letter "
-                "or digit",
-            )
+        run_id = check_run_id(run_id if run_id is not None else new_run_id(now()))
         run_dir = cls(path)
-        run_dir._require_empty()
+        run_dir.require_empty()
         make_private_dir(run_dir.path)
         with run_dir.lock():
-            run_dir._require_empty()
+            run_dir.require_empty()
             settings = {
                 "provider": provider,
                 "profile": dataclasses.asdict(profile),
@@ -251,6 +269,14 @@ class RunDir:
     @property
     def result_path(self) -> Path:
         return self.path / RESULT_FILE
+
+    @property
+    def worker_path(self) -> Path:
+        return self.path / WORKER_FILE
+
+    @property
+    def worker_log_path(self) -> Path:
+        return self.path / WORKER_LOG
 
     def lock(self) -> DirectoryLock:
         """The directory's lock; hold it while training or changing the run."""
@@ -297,10 +323,16 @@ class RunDir:
         return self._read_object(self.result_path)
 
     def status(self) -> dict[str, Any]:
-        """A summary of the run: what it trains, where it is, and how it ended if it did."""
+        """A summary of the run: what it trains, where it is, and how it ended if it did.
+
+        ``val_losses`` lists each finished epoch's validation loss, in order (``None`` for an
+        epoch without validation). While the run is ``created`` or ``training`` (e.g. resumed),
+        nothing is reported from ``result.json``, which then describes an earlier attempt.
+        """
         manifest = self.manifest()
         state = self.load_state()
-        result = self.read_result()
+        result = None if state.phase in ("created", "training") else self.read_result()
+        epochs = self.read_epochs()
         return {
             "run_id": manifest["run_id"],
             "path": str(self.path),
@@ -311,6 +343,8 @@ class RunDir:
             "step": state.step,
             "epochs_completed": state.epochs,
             "max_epochs": manifest["spec"]["max_epochs"],
+            "last_train_loss": state.last_train_loss,
+            "val_losses": [epoch.get("val_loss") for epoch in epochs],
             "best": state.best,
             "heartbeat_at": state.heartbeat_at,
             "pid": state.pid,
@@ -318,6 +352,8 @@ class RunDir:
             "resume_mode": state.resume_mode,
             "stopped_reason": result.get("stopped_reason") if result else None,
             "promoted_model": result.get("promoted_model") if result else None,
+            "deployable_checkpoint": result.get("deployable_checkpoint") if result else None,
+            "finalize_error": result.get("finalize_error") if result else None,
             "warnings": result.get("warnings", []) if result else list(state.warnings),
         }
 
@@ -329,13 +365,16 @@ class RunDir:
     def write_result(self, result: Mapping[str, Any]) -> None:
         atomic_write_json(self.result_path, finite_json(dict(result)))
 
-    # --- internals ------------------------------------------------------------------
+    # --- checks ---------------------------------------------------------------------
 
-    def _require_empty(self) -> None:
+    def require_empty(self) -> None:
+        """Raise :class:`StateError` unless :attr:`path` is missing or an empty directory."""
         if self.path.exists() and not self.path.is_dir():
             raise StateError(f"{self.path} exists and is not a directory")
         if self.path.is_dir() and any(e.name != LOCK_FILE_NAME for e in self.path.iterdir()):
             raise StateError(f"{self.path} is not empty", hint="use a new run directory")
+
+    # --- internals ------------------------------------------------------------------
 
     def _read_object(self, path: Path, *, hint: str | None = None) -> dict[str, Any]:
         try:
@@ -353,11 +392,13 @@ class RunState:
 
     ``phase`` moves ``created`` -> ``training`` -> ``completed``, ``failed``, ``cancelled`` or
     ``interrupted``, and from the last three back to ``training`` on :meth:`resume`; other
-    moves raise :class:`StateError`. ``step`` counts optimizer steps over the run.
-    ``resume_point`` is the last training checkpoint with where training stood (a
+    moves raise :class:`StateError`. ``step`` counts optimizer steps over the run and
+    ``last_train_loss`` is the last step's training loss. ``resume_point`` is the last
+    training checkpoint with where training stood (a
     :class:`~pup_finetune.training.records.ResumePoint` as JSON); ``resume_mode`` says what a
     resume does. :meth:`request_cancel` (e.g. from a signal handler) makes the loop stop at
-    the next step boundary.
+    the next step boundary. :meth:`save` may be called from another thread
+    (:meth:`keep_alive`); saves are serialized, and each writes the state as it is then.
     """
 
     def __init__(
@@ -368,6 +409,7 @@ class RunState:
         epoch: int = 0,
         step: int = 0,
         epochs: int = 0,
+        last_train_loss: float | None = None,
         checkpoints: Sequence[Mapping[str, Any]] = (),
         resume_point: Mapping[str, Any] | None = None,
         resume_mode: ResumeMode = "train",
@@ -383,6 +425,7 @@ class RunState:
         self.epoch = epoch
         self.step = step
         self.epochs = epochs
+        self.last_train_loss = last_train_loss
         self.checkpoints = [dict(ckpt) for ckpt in checkpoints]
         self.resume_point = None if resume_point is None else dict(resume_point)
         self.resume_mode: ResumeMode = resume_mode
@@ -393,6 +436,7 @@ class RunState:
         self.error = None if error is None else dict(error)
         self._now = now
         self._cancel = threading.Event()
+        self._save_lock = threading.Lock()
 
     @classmethod
     def from_json(
@@ -404,6 +448,7 @@ class RunState:
         mode = data.get("resume_mode", "train")
         if mode not in RESUME_MODES:
             raise StateError(f"{run_dir.state_path}: unknown resume mode {mode!r}")
+        loss = data.get("last_train_loss")
         try:
             return cls(
                 run_dir,
@@ -411,6 +456,7 @@ class RunState:
                 epoch=int(data.get("epoch", 0)),
                 step=int(data.get("step", 0)),
                 epochs=int(data.get("epochs", 0)),
+                last_train_loss=None if loss is None else float(loss),
                 checkpoints=list(data.get("checkpoints") or []),
                 resume_point=data.get("resume_point"),
                 resume_mode=cast(ResumeMode, mode),
@@ -430,6 +476,7 @@ class RunState:
             "epoch": self.epoch,
             "step": self.step,
             "epochs": self.epochs,
+            "last_train_loss": self.last_train_loss,
             "checkpoints": self.checkpoints,
             "resume_point": self.resume_point,
             "resume_mode": self.resume_mode,
@@ -442,8 +489,48 @@ class RunState:
 
     def save(self) -> None:
         """Write ``state.json`` atomically, with a fresh heartbeat; non-finite numbers as null."""
-        self.heartbeat_at = _iso(self._now())
-        atomic_write_json(self.run_dir.state_path, finite_json(self.to_json()))
+        with self._save_lock:
+            self.heartbeat_at = _iso(self._now())
+            atomic_write_json(self.run_dir.state_path, finite_json(self.to_json()))
+
+    @contextmanager
+    def keep_alive(self, interval_s: float) -> Iterator[None]:
+        """Save the state every ``interval_s`` seconds from a background thread, so the
+        heartbeat stays fresh while one step, validation or promotion takes long.
+
+        A failed save is skipped (the next report or beat tries again); the first failure and
+        the recovery are noted on stderr (``worker.log`` for a detached run). The thread stops
+        before the context exits.
+        """
+        if interval_s <= 0:
+            raise ValueError(f"interval_s must be positive, got {interval_s}")
+        stop = threading.Event()
+
+        def note(message: str) -> None:
+            with contextlib.suppress(OSError):
+                os.write(2, f"{redact(message)}\n".encode())
+
+        def beat() -> None:
+            failing = False
+            while not stop.wait(interval_s):
+                try:
+                    self.save()
+                except Exception as exc:
+                    if not failing:
+                        note(f"could not refresh the run's heartbeat: {type(exc).__name__}: {exc}")
+                    failing = True
+                else:
+                    if failing:
+                        note("the run's heartbeat is refreshed again")
+                    failing = False
+
+        thread = threading.Thread(target=beat, name="run-heartbeat", daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            thread.join()
 
     # --- phases ---------------------------------------------------------------------
 
@@ -453,7 +540,7 @@ class RunState:
             raise StateError(f"a run cannot go from {self.phase} to {phase}")
         self.phase = phase
         if error is not None:
-            self.error = _error_json(error)
+            self.error = error_json(error)
         self.save()
 
     def start(self) -> None:
@@ -485,8 +572,10 @@ class RunState:
     def cancel_requested(self) -> bool:
         return self._cancel.is_set()
 
-    def record_step(self, *, epoch: int, step: int) -> None:
+    def record_step(self, *, epoch: int, step: int, loss: float | None = None) -> None:
         self.epoch, self.step = epoch, step
+        if loss is not None:
+            self.last_train_loss = loss
         self.save()
 
     def record_checkpoint(self, ref: CheckpointRef, *, resume_point: ResumePoint | None) -> None:
@@ -575,6 +664,42 @@ def _sigterm_raises() -> Iterator[None]:
         signal.signal(signal.SIGTERM, signal.SIG_DFL if previous is None else previous)
 
 
+_CANCEL_NOTICE = (
+    b"cancel requested: stopping after the current step, then saving a checkpoint and "
+    b"promoting the best epoch"
+)
+
+
+@contextmanager
+def _signals_cancel(state: RunState) -> Iterator[None]:
+    """Make SIGTERM and Ctrl-C ask ``state`` to cancel at the next step boundary.
+
+    A repeated SIGTERM changes nothing; a second Ctrl-C raises ``KeyboardInterrupt``, which
+    stops at once (the run is then ``interrupted``). Main thread only, like every handler.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def on_signal(signum: int, frame: FrameType | None) -> None:
+        if state.cancel_requested():
+            if signum == signal.SIGINT:
+                raise KeyboardInterrupt
+            return
+        state.request_cancel()
+        with contextlib.suppress(OSError):
+            tail = b" (press Ctrl-C again to stop at once)" if signum == signal.SIGINT else b""
+            os.write(2, _CANCEL_NOTICE + tail + b"\n")
+
+    sigs = (signal.SIGINT, signal.SIGTERM)
+    previous = {sig: signal.signal(sig, on_signal) for sig in sigs}
+    try:
+        yield
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, signal.SIG_DFL if handler is None else handler)
+
+
 @contextmanager
 def _interrupts_ignored() -> Iterator[None]:
     """Ignore SIGINT and SIGTERM (on the main thread) so the result is always written."""
@@ -619,8 +744,8 @@ def _result_json(
     common = {
         "run_id": run_id,
         "phase": phase,
-        "error": None if error is None else _error_json(error),
-        "finalize_error": None if finalize_error is None else _error_json(finalize_error),
+        "error": None if error is None else error_json(error),
+        "finalize_error": None if finalize_error is None else error_json(finalize_error),
         "finished_at": _iso(finished_at),
     }
     if outcome is not None:
@@ -763,6 +888,8 @@ def execute_run(
     train: Callable[[RunState], TrainResult],
     *,
     resume: bool = False,
+    signals: SignalMode = "interrupt",
+    heartbeat_s: float | None = None,
     now: Clock = utcnow,
 ) -> dict[str, Any]:
     """Run ``train`` in ``run_dir`` under its lock, and write ``result.json`` however it ends.
@@ -784,10 +911,20 @@ def execute_run(
     :class:`ExternalError`. SIGINT and SIGTERM are ignored while the result
     is written. A failure to record the result is noted on the training error, or raised (as
     ``failed``) when training succeeded. Returns the result.
+
+    With ``signals`` ``cancel`` (what the CLI uses), SIGTERM and the first Ctrl-C instead
+    cancel gracefully: the loop stops at the next step boundary, saves a training checkpoint
+    and promotes the best epoch, and the run ends ``cancelled`` with its result returned; a
+    second Ctrl-C stops at once as above. With ``heartbeat_s``, the state is also saved every
+    ``heartbeat_s`` seconds while ``train`` runs (see :meth:`RunState.keep_alive`).
     """
-    with run_dir.lock():
+    with run_dir.lock(), contextlib.ExitStack() as handling:
         run_id = run_dir.run_id
         state = run_dir.load_state(now=now)
+        if signals == "cancel":
+            # Before entering training, so a cancel sent as soon as the state says training is
+            # not lost: the handler only asks the loop to stop at its first step boundary.
+            handling.enter_context(_signals_cancel(state))
         if resume:
             if state.phase == "training":
                 # We hold the lock, so the process that was training has died (e.g. SIGKILL).
@@ -797,13 +934,16 @@ def execute_run(
             state.start()
         outcome: TrainResult | None = None
         error: BaseException | None = None
-        with _sigterm_raises():
-            try:
+        alive = contextlib.nullcontext() if heartbeat_s is None else state.keep_alive(heartbeat_s)
+        if signals != "cancel":
+            handling.enter_context(_sigterm_raises())
+        try:
+            with alive:
                 outcome = train(state)
-            except BaseException as exc:
-                error = exc
-            with _interrupts_ignored():
-                result, error = _record_end(run_dir, state, run_id, outcome, error, now())
+        except BaseException as exc:
+            error = exc
+        with _interrupts_ignored():
+            result, error = _record_end(run_dir, state, run_id, outcome, error, now())
     if error is not None:
         raised = _for_cli(error)
         if raised is error or raised is error.__cause__:

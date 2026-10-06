@@ -113,8 +113,8 @@ class LoopState(Protocol):
         """Whether to stop at the next step boundary."""
         ...
 
-    def record_step(self, *, epoch: int, step: int) -> None:
-        """Optimizer step ``step`` (over the run) of ``epoch`` has finished."""
+    def record_step(self, *, epoch: int, step: int, loss: float) -> None:
+        """Optimizer step ``step`` (over the run) of ``epoch`` has finished with mean ``loss``."""
         ...
 
     def record_checkpoint(self, ref: CheckpointRef, *, resume_point: ResumePoint | None) -> None:
@@ -597,7 +597,7 @@ class _Loop:
             self._epoch_weight += metric.weight
         self._epoch_steps += 1
         self._epoch_tokens += flight.tokens
-        self._state.record_step(epoch=flight.epoch, step=flight.step)
+        self._state.record_step(epoch=flight.epoch, step=flight.step, loss=loss)
         self._emit(
             {
                 "type": "step",

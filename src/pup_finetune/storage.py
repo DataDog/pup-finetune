@@ -24,7 +24,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, NoReturn, Self, overload
 
-from pup_finetune.errors import StateError
+from pup_finetune.errors import LockBusy, StateError
 
 LOCK_FILE_NAME = ".pup-finetune.lock"
 
@@ -213,7 +213,9 @@ class DirectoryLock:
     """Exclusive, non-blocking lock on a directory, held through ``<dir>/.pup-finetune.lock``.
 
     Use as a context manager. The lock is released when the context exits or the process
-    dies. It is not reentrant: a second lock on the same directory fails, even in-process.
+    dies. It is not reentrant: a second lock on the same directory fails, even in-process,
+    with :class:`~pup_finetune.errors.LockBusy`. The holder writes its pid to the lock file
+    (see :meth:`owner_pid`).
     """
 
     def __init__(self, path: Path) -> None:
@@ -233,15 +235,41 @@ class DirectoryLock:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             os.close(fd)
-            raise StateError(
+            raise LockBusy(
                 f"another pup-finetune process is using {self.path}",
                 hint="wait for it to finish, or use a different directory",
             ) from exc
         except BaseException:
             os.close(fd)
             raise
+        with contextlib.suppress(OSError):  # best effort: only tells who holds it
+            os.ftruncate(fd, 0)
+            os.pwrite(fd, f"{os.getpid()}\n".encode(), 0)
         self._fd = fd
         return self
+
+    def is_held(self) -> bool:
+        """Whether a process (this one included) holds the lock right now.
+
+        Probes by taking the lock for an instant, so call it only when no process is about to
+        take it. Raises :class:`~pup_finetune.errors.StateError` when the lock cannot be tried.
+        """
+        try:
+            with self:
+                return False
+        except LockBusy:
+            return True
+
+    def owner_pid(self) -> int | None:
+        """The pid the lock's last holder wrote to the lock file, or ``None``.
+
+        Only meaningful while :meth:`is_held`: a released lock keeps its last holder's pid.
+        """
+        try:
+            text = self.lock_path.read_text(encoding="ascii").strip()
+        except (OSError, UnicodeDecodeError):
+            return None
+        return int(text) if text.isdigit() else None
 
     def __exit__(
         self,

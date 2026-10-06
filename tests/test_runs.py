@@ -13,7 +13,8 @@ import os
 import re
 import signal
 import stat
-from datetime import UTC, datetime
+import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
@@ -231,6 +232,83 @@ def test_the_heartbeat_advances_on_every_save(tmp_path: Path) -> None:
     assert (first, second) == ("2026-10-06T13:00:00+00:00", "2026-10-06T13:00:01+00:00")
 
 
+def test_the_last_step_loss_is_saved_and_a_non_finite_one_as_null(tmp_path: Path) -> None:
+    run_dir = create(tmp_path / "run")
+    state = run_dir.load_state()
+    state.record_step(epoch=1, step=1, loss=1.25)
+    assert read(run_dir.state_path)["last_train_loss"] == 1.25
+    assert run_dir.load_state().last_train_loss == 1.25
+    state.record_step(epoch=1, step=2, loss=math.nan)
+    assert read(run_dir.state_path)["last_train_loss"] is None
+    assert run_dir.status()["last_train_loss"] is None
+
+
+def _ticking_clock() -> Any:
+    """A clock that moves one second per call, from 13:00:00."""
+    seconds = iter(range(10_000))
+    return lambda: datetime(2026, 10, 6, 13, 0, tzinfo=UTC) + timedelta(seconds=next(seconds))
+
+
+def _wait_for_a_new_heartbeat(run_dir: RunDir) -> None:
+    first = read(run_dir.state_path)["heartbeat_at"]
+    deadline = time.monotonic() + 10
+    while read(run_dir.state_path)["heartbeat_at"] == first:
+        assert time.monotonic() < deadline, "the heartbeat did not advance"
+        time.sleep(0.01)
+
+
+def test_keep_alive_refreshes_the_heartbeat_until_it_exits(tmp_path: Path) -> None:
+    run_dir = create(tmp_path / "run")
+    state = run_dir.load_state(now=_ticking_clock())
+    state.save()
+    with state.keep_alive(0.01):
+        _wait_for_a_new_heartbeat(run_dir)
+    stopped = read(run_dir.state_path)["heartbeat_at"]
+    time.sleep(0.05)
+    assert read(run_dir.state_path)["heartbeat_at"] == stopped
+    with pytest.raises(ValueError, match="positive"), state.keep_alive(0):
+        pass
+
+
+def test_keep_alive_notes_a_failing_heartbeat_once_and_its_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    run_dir = create(tmp_path / "run")
+    state = run_dir.load_state()
+    calls = 0
+    save = RunState.save
+
+    def flaky_save(self: RunState) -> None:
+        nonlocal calls
+        calls += 1
+        if calls <= 3:
+            raise OSError("disk full")
+        save(self)
+
+    monkeypatch.setattr(RunState, "save", flaky_save)
+    with state.keep_alive(0.01):
+        deadline = time.monotonic() + 10
+        while calls < 5:
+            assert time.monotonic() < deadline, "the heartbeat did not retry"
+            time.sleep(0.01)
+    err = capfd.readouterr().err
+    assert err.count("could not refresh the run's heartbeat: OSError: disk full") == 1
+    assert err.count("the run's heartbeat is refreshed again") == 1
+
+
+def test_execute_run_keeps_the_heartbeat_fresh_while_training(tmp_path: Path) -> None:
+    run_dir = create(tmp_path / "run")
+    inner = fake_training()
+
+    def train(state: RunState) -> TrainResult:
+        _wait_for_a_new_heartbeat(run_dir)  # no step was reported: the timer saved it
+        return inner(state)
+
+    result = execute_run(run_dir, train, heartbeat_s=0.01, now=_ticking_clock())
+    assert result["phase"] == "completed"
+    assert run_dir.load_state().phase == "completed"
+
+
 def test_warnings_are_saved_as_they_occur(tmp_path: Path) -> None:
     run_dir = create(tmp_path / "run")
     state = run_dir.load_state()
@@ -380,6 +458,40 @@ def test_sigterm_interrupts_the_run_and_still_writes_the_result(tmp_path: Path) 
     assert read(run_dir.result_path)["phase"] == "interrupted"
     assert run_dir.load_state().phase == "interrupted"
     assert signal.getsignal(signal.SIGTERM) == before
+
+
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
+def test_with_signals_cancel_a_signal_cancels_gracefully(
+    tmp_path: Path, sig: signal.Signals
+) -> None:
+    run_dir = create(tmp_path / "run")
+    inner = fake_training()
+    before = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
+
+    def train(state: RunState) -> TrainResult:
+        os.kill(os.getpid(), sig)
+        assert state.cancel_requested()
+        os.kill(os.getpid(), signal.SIGTERM)  # a repeated SIGTERM changes nothing
+        return inner(state)
+
+    result = execute_run(run_dir, train, signals="cancel")
+    assert (result["phase"], result["stopped_reason"]) == ("cancelled", "cancelled")
+    assert run_dir.load_state().phase == "cancelled"
+    assert {s: signal.getsignal(s) for s in before} == before
+
+
+def test_with_signals_cancel_a_second_ctrl_c_stops_at_once(tmp_path: Path) -> None:
+    run_dir = create(tmp_path / "run")
+
+    def train(state: RunState) -> TrainResult:
+        os.kill(os.getpid(), signal.SIGINT)
+        os.kill(os.getpid(), signal.SIGINT)
+        raise AssertionError("the second Ctrl-C should have interrupted training")
+
+    with pytest.raises(KeyboardInterrupt):
+        execute_run(run_dir, train, signals="cancel")
+    assert read(run_dir.result_path)["phase"] == "interrupted"
+    assert run_dir.load_state().phase == "interrupted"
 
 
 def test_termination_notes_become_the_hint(tmp_path: Path) -> None:

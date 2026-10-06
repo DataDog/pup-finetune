@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from pup_finetune.errors import StateError
+from pup_finetune.errors import LockBusy, StateError
 from pup_finetune.storage import (
     LOCK_FILE_NAME,
     DirectoryLock,
@@ -251,6 +251,17 @@ def test_directory_lock_is_exclusive(tmp_path: Path) -> None:
             pass
     with DirectoryLock(tmp_path):
         pass
+
+
+def test_directory_lock_reports_whether_and_by_whom_it_is_held(tmp_path: Path) -> None:
+    lock = DirectoryLock(tmp_path)
+    assert not lock.is_held()
+    with DirectoryLock(tmp_path):
+        assert lock.is_held()
+        assert lock.owner_pid() == os.getpid()
+        with pytest.raises(LockBusy), DirectoryLock(tmp_path):
+            pass
+    assert not lock.is_held()
 
 
 def test_directory_lock_on_missing_dir_raises_state_error(tmp_path: Path) -> None:
