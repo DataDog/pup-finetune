@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Mapping
 from enum import StrEnum
 from typing import Annotated, Any, Literal, NoReturn, Self
@@ -105,6 +106,27 @@ class _NonStandardJSONError(ValueError):
 
 def _reject_json_constant(constant: str) -> NoReturn:
     raise _NonStandardJSONError(f"{constant} is not a JSON value")
+
+
+def _require_finite(value: dict[str, Any]) -> dict[str, Any]:
+    """Reject a NaN or infinite float anywhere in ``value``: JSON cannot represent one.
+
+    Left in, it would be written out as ``null`` (or fail to serialize at all).
+    """
+    stack: list[tuple[object, str]] = [(value, "")]
+    while stack:
+        item, where = stack.pop()
+        if isinstance(item, float) and not math.isfinite(item):
+            raise RowError(
+                RowErrorCode.INVALID_ROW, f"{where} is {item!r}; JSON has no NaN or Infinity"
+            )
+        if isinstance(item, dict):
+            stack.extend(
+                (inner, f"{where}.{key}" if where else str(key)) for key, inner in item.items()
+            )
+        elif isinstance(item, list | tuple):
+            stack.extend((inner, f"{where}[{index}]") for index, inner in enumerate(item))
+    return value
 
 
 class FunctionCall(BaseModel):
@@ -204,6 +226,11 @@ class ToolFunction(BaseModel):
     description: str = ""
     parameters: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("parameters")
+    @classmethod
+    def _parameters_are_finite(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _require_finite(value)
+
 
 class Tool(BaseModel):
     """A tool the conversation declares."""
@@ -226,6 +253,11 @@ class SourceRef(BaseModel):
     start_ns: int | None = None
     evaluations: dict[str, Any] = Field(default_factory=dict)
     tags: list[str] = Field(default_factory=list)
+
+    @field_validator("evaluations")
+    @classmethod
+    def _evaluations_are_finite(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _require_finite(value)
 
     @field_validator("start_ns", mode="before")
     @classmethod

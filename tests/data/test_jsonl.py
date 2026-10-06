@@ -93,6 +93,22 @@ def test_read_rows_reports_each_invalid_fixture_line(
     assert (error.line, error.code, error.path) == (line, expected["code"], str(path))
 
 
+def test_read_rows_rejects_nan_and_infinity_constants(tmp_path: Path) -> None:
+    # Python's json reads these non-standard constants as floats; the row must still fail.
+    valid = json.loads(TOOL_USE.read_text().splitlines()[0])
+    valid["source"]["evaluations"] = {"score": "SCORE"}
+    template = json.dumps(valid)
+    path = tmp_path / "rows.jsonl"
+    path.write_text(template.replace('"SCORE"', "NaN") + "\n")
+    with pytest.raises(RowError) as excinfo:
+        list(read_rows(path))
+    assert (excinfo.value.code, excinfo.value.line) == (RowErrorCode.INVALID_ROW, 1)
+    assert "evaluations: score is nan" in excinfo.value.detail
+    path.write_text(template.replace('"SCORE"', "-Infinity") + "\n")
+    with pytest.raises(RowError, match=r"evaluations: score is -inf"):
+        list(read_rows(path))
+
+
 def test_read_rows_rejects_lines_that_are_not_objects(tmp_path: Path) -> None:
     path = tmp_path / "rows.jsonl"
     path.write_text("[1, 2]\n")

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import pickle
 import re
 from pathlib import Path
@@ -250,6 +251,20 @@ def _assistant(**fields: Any) -> dict[str, Any]:
 )
 def test_schema_violations_are_invalid_rows(data: dict[str, Any]) -> None:
     assert code_of(data) == RowErrorCode.INVALID_ROW
+
+
+@pytest.mark.parametrize("number", [math.nan, math.inf, -math.inf])
+def test_non_finite_numbers_in_parameters_and_evaluations_are_invalid_rows(number: float) -> None:
+    tool = {"function": {"name": "get_weather", "parameters": {"enum": [1, {"x": number}]}}}
+    with pytest.raises(RowError) as info:
+        validate_row(row(USER, ANSWER, tools=[tool]))
+    assert info.value.code == RowErrorCode.INVALID_ROW
+    assert "parameters: enum[1].x is" in info.value.detail
+    source = {"evaluations": {"score": number}}
+    with pytest.raises(RowError) as info:
+        validate_row(row(USER, ANSWER, source=source))
+    assert info.value.code == RowErrorCode.INVALID_ROW
+    assert "evaluations: score is" in info.value.detail
 
 
 def test_tool_message_needs_a_tool_call_id() -> None:
