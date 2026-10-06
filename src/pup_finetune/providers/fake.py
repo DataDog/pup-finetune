@@ -146,7 +146,7 @@ _TEMPLATE: Final = (
     "<|role|>\\n{content}<|end|>\\n, a tool message "
     "<|tool|> {tool_call_id}\\n{content}<|end|>\\n; an assistant body is "
     "[<|think|>{reasoning}<|/think|>\\n]{content}[\\n<|call|>{call json}]*; "
-    "a word's token id is 9 plus the big-endian 4-byte blake2b digest of its UTF-8 bytes"
+    "a word's token id is 9 plus the big-endian 16-byte blake2b digest of its UTF-8 bytes"
 )
 
 # Every word ever tokenized in this process, by id, so any renderer can decode any other's ids.
@@ -159,7 +159,7 @@ def _token_id(word: str) -> int:
     special = _SPECIAL_IDS.get(word)
     if special is not None:
         return special
-    digest = hashlib.blake2b(word.encode("utf-8"), digest_size=4).digest()
+    digest = hashlib.blake2b(word.encode("utf-8"), digest_size=16).digest()
     token = len(_SPECIAL_TOKENS) + int.from_bytes(digest, "big")
     with _VOCAB_LOCK:
         known = _VOCAB.setdefault(token, word)

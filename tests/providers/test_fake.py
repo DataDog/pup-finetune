@@ -120,6 +120,14 @@ def test_token_ids_depend_only_on_the_text() -> None:
     assert second.decode(first.tokenize("seen by first")) == "seen by first"
 
 
+def test_words_whose_short_digests_collide_get_distinct_ids() -> None:
+    # These two words share a 4-byte blake2b digest.
+    renderer = FakeRenderer()
+    tokens = renderer.tokenize("w52890 w55286")
+    assert tokens[0] != tokens[2]
+    assert renderer.decode(tokens) == "w52890 w55286"
+
+
 def test_completion_tokens_carry_weight_one() -> None:
     renderer = FakeRenderer()
     messages = [*PROMPT, {"role": "assistant", "content": "Rain."}]
