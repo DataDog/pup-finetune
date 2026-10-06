@@ -17,11 +17,12 @@ uv run pre-commit install    # run the checks below on every commit
 Every pull request must pass:
 
 ```sh
-uv run ruff check                      # lint
-uv run ruff format --check             # formatting
-uv run mypy src                        # strict type-check
-uv run pytest                          # tests (no network, no paid calls)
-uv run python scripts/check_headers.py # license headers
+uv run ruff check                       # lint
+uv run ruff format --check              # formatting
+uv run mypy src                         # strict type-check
+uv run pytest                           # tests (no network, no paid calls)
+uv run python scripts/check_headers.py  # license headers
+uv run python scripts/check_3rdparty.py # LICENSE-3rdparty.csv covers every dependency
 ```
 
 ## Pull requests
