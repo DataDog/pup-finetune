@@ -1,0 +1,109 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Unless explicitly stated otherwise all files in this repository are licensed under the Apache License Version 2.0.
+#
+# This product includes software developed at Datadog (https://www.datadoghq.com/).
+# Copyright 2026-present Datadog, Inc.
+
+[build-system]
+requires = ["hatchling>=1.27", "hatch-vcs>=0.5"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pup-finetune"
+dynamic = ["version"]
+description = "Curate a dataset from your Datadog Agent Observability traces, fine-tune an open-weight model, and evaluate it against the base model."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "LICENSE-3rdparty.csv"]
+authors = [{ name = "Datadog, Inc.", email = "package@datadoghq.com" }]
+keywords = [
+  "datadog",
+  "agent-observability",
+  "llm-observability",
+  "fine-tuning",
+  "lora",
+  "sft",
+  "llm",
+  "pup",
+]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Typing :: Typed",
+]
+dependencies = [
+  "httpx>=0.28",
+  "keyring>=25.6",
+  "pydantic>=2.11",
+  "rich>=14",
+  "typer>=0.16",
+]
+
+# Provider extras (e.g. `fireworks`) land with their provider client PRs.
+
+[project.scripts]
+pup-finetune = "pup_finetune.cli:main"
+
+[project.urls]
+Repository = "https://github.com/DataDog/pup-finetune"
+
+[dependency-groups]
+dev = [
+  "mypy>=1.16",
+  "pre-commit>=4.2",
+  "pytest>=8.4",
+  "pytest-cov>=6.2",
+  "ruff>=0.12",
+]
+
+[tool.hatch.version]
+source = "vcs"
+raw-options = { fallback_version = "0.0.0" }
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/pup_finetune/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pup_finetune"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["src/pup_finetune/_version.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "S"]
+
+[tool.ruff.lint.pycodestyle]
+# The formatter wraps code at 100; the license header line is 116 characters and must stay verbatim.
+max-line-length = 120
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src"]
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+  "live: hits real external services (skipped unless PUP_FINETUNE_LIVE=1)",
+  "tokenizer: downloads real tokenizers (skipped unless PUP_FINETUNE_TOKENIZER_TESTS=1)",
+]
