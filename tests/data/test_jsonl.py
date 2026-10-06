@@ -93,19 +93,14 @@ def test_read_rows_reports_each_invalid_fixture_line(
     assert (error.line, error.code, error.path) == (line, expected["code"], str(path))
 
 
-def test_read_rows_rejects_nan_and_infinity_constants(tmp_path: Path) -> None:
-    # Python's json reads these non-standard constants as floats; the row must still fail.
+@pytest.mark.parametrize("number", ["NaN", "-Infinity", "1e999"])
+def test_read_rows_reports_non_finite_numbers_as_invalid_json(tmp_path: Path, number: str) -> None:
+    # Python's json reads these as floats; strict JSON has no such values, so the line is not JSON.
     valid = json.loads(TOOL_USE.read_text().splitlines()[0])
     valid["source"]["evaluations"] = {"score": "SCORE"}
-    template = json.dumps(valid)
     path = tmp_path / "rows.jsonl"
-    path.write_text(template.replace('"SCORE"', "NaN") + "\n")
-    with pytest.raises(RowError) as excinfo:
-        list(read_rows(path))
-    assert (excinfo.value.code, excinfo.value.line) == (RowErrorCode.INVALID_ROW, 1)
-    assert "evaluations: score is nan" in excinfo.value.detail
-    path.write_text(template.replace('"SCORE"', "-Infinity") + "\n")
-    with pytest.raises(RowError, match=r"evaluations: score is -inf"):
+    path.write_text(json.dumps(valid).replace('"SCORE"', number) + "\n")
+    with pytest.raises(StateError, match=rf"rows\.jsonl:1: invalid JSON: {number} "):
         list(read_rows(path))
 
 
