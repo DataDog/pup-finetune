@@ -1,0 +1,123 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Unless explicitly stated otherwise all files in this repository are licensed under the Apache License Version 2.0.
+#
+# This product includes software developed at Datadog (https://www.datadoghq.com/).
+# Copyright 2026-present Datadog, Inc.
+"""Scrub known secret values from text before it reaches stderr, stdout or a log.
+
+Kept free of heavy imports so the output and error paths can always use it. Credential
+resolution registers every secret it hands out; :func:`redact` then replaces those values,
+and anything shaped like ``Bearer <token>``, with ``***``.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+import threading
+from typing import Any, Protocol
+
+MASK = "***"
+
+_BEARER = re.compile(r"(\bBearer\s+)[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
+
+_lock = threading.Lock()
+_secrets: set[str] = set()
+
+
+class _Secret(Protocol):
+    """Anything that wraps a secret, e.g. ``pydantic.SecretStr``."""
+
+    def get_secret_value(self) -> str: ...
+
+
+def register_secret(value: str | _Secret) -> None:
+    """Remember ``value`` so :func:`redact` masks it from now on (for this process)."""
+    text = value if isinstance(value, str) else value.get_secret_value()
+    if text:
+        with _lock:
+            _secrets.add(text)
+
+
+def clear_secrets() -> None:
+    """Forget every registered secret. For tests."""
+    with _lock:
+        _secrets.clear()
+
+
+def redact(text: str) -> str:
+    """``text`` with every registered secret and ``Bearer`` token replaced by ``***``."""
+    with _lock:
+        # Longest first, so a secret that contains another is masked whole.
+        secrets = sorted(_secrets, key=len, reverse=True)
+    for secret in secrets:
+        if secret in text:
+            text = text.replace(secret, MASK)
+    return _BEARER.sub(rf"\g<1>{MASK}", text)
+
+
+def _formatted_message(record: logging.LogRecord) -> str:
+    """``record``'s message, even when a malformed log call cannot be formatted."""
+    try:
+        return record.getMessage()
+    except Exception:
+        try:
+            return f"{record.msg!s} (unformattable args: {record.args!r})"
+        except Exception:
+            return "<unformattable log message>"
+
+
+def _scrub(record: logging.LogRecord) -> None:
+    """Redact ``record``'s message, exception text and stack in place. Never raises.
+
+    The message is formatted once and its arguments dropped, so no handler or formatter can
+    re-render a secret from them. Exception text is rendered here (formatters reuse a set
+    ``exc_text``) so the traceback is redacted too.
+    """
+    record.msg = redact(_formatted_message(record))
+    record.args = None
+    if record.exc_info and not record.exc_text:
+        try:
+            record.exc_text = logging.Formatter().formatException(record.exc_info)
+        except Exception:
+            record.exc_text = "<unformattable exception>"
+    if record.exc_text:
+        record.exc_text = redact(record.exc_text)
+    if record.stack_info:
+        record.stack_info = redact(record.stack_info)
+
+
+class RedactingFilter(logging.Filter):
+    """A logging filter that redacts each record's formatted message and exception text.
+
+    For explicit use on a handler or logger; :func:`install_log_redaction` covers every
+    record in the process without one.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        _scrub(record)
+        return True
+
+
+_REDACTING_FACTORY = "_pup_finetune_redacting"
+
+
+def install_log_redaction() -> None:
+    """Redact every log record of this process when it is created.
+
+    Wraps the global log record factory, so records are scrubbed before any logger filter,
+    handler or formatter sees them, whichever handlers exist now or are added later. Calling
+    this again does not wrap the factory twice.
+    """
+    current = logging.getLogRecordFactory()
+    if getattr(current, _REDACTING_FACTORY, False):
+        return
+
+    def factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = current(*args, **kwargs)
+        _scrub(record)
+        return record
+
+    setattr(factory, _REDACTING_FACTORY, True)
+    logging.setLogRecordFactory(factory)

@@ -8,7 +8,9 @@
 
 from __future__ import annotations
 
+import io
 import json
+import logging
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -18,7 +20,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from pup_finetune import __version__, cli
+from pup_finetune import __version__, cli, redaction
 from pup_finetune.cli._common import CommandResult, get_runtime, run_app, run_command
 from pup_finetune.errors import (
     ConfirmRequired,
@@ -282,6 +284,28 @@ def test_run_app_maps_unexpected_errors(capsys: pytest.CaptureFixture[str]) -> N
 def test_run_app_keeps_usage_errors(capsys: pytest.CaptureFixture[str]) -> None:
     assert run_and_exit_code(make_bare_app(RuntimeError()), ["--count", "x"]) == 2
     assert capsys.readouterr().out == ""
+
+
+def test_run_app_redacts_logs_from_handlers_added_later() -> None:
+    secret = "zq9Xsynthetic0000logVALUEw7Pm"  # noqa: S105 - synthetic test value
+    stream = io.StringIO()
+    app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
+
+    @app.command()
+    def noisy() -> None:
+        redaction.register_secret(secret)
+        logger = logging.getLogger("pup_finetune.tests.run_app")
+        logger.addHandler(logging.StreamHandler(stream))
+        logger.propagate = False
+        logging.getLogger("pup_finetune.tests.run_app.child").warning("key=%s", secret)
+
+    try:
+        assert run_and_exit_code(app, []) == 0
+    finally:
+        logging.getLogger("pup_finetune.tests.run_app").handlers.clear()
+        logging.getLogger("pup_finetune.tests.run_app").propagate = True
+        redaction.clear_secrets()
+    assert stream.getvalue() == "key=***\n"
 
 
 def test_main_runs_the_real_app(
