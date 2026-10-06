@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from pup_finetune.data import dataset_dir, jsonl
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.exclusions import Exclusion, ExclusionCode
 from pup_finetune.data.pull import (
@@ -377,6 +378,39 @@ def test_contained_leaves_out_new_rows_a_kept_stored_row_contains() -> None:
     ]
     # A row already stored is the dataset's to keep or retire.
     assert contained(collection.rows, [*stored, *collection.rows]) == (collection.rows, [])
+
+
+def test_a_pull_interrupted_while_retiring_keeps_the_retired_row_s_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    pull_into(dataset, target_count=1)
+    real = dataset_dir.atomic_write_text
+    retired_row_gone = False
+
+    def write(target: Path, text: str) -> None:
+        # Stop at the write of excluded.jsonl after rows.jsonl lost the retired row.
+        nonlocal retired_row_gone
+        if Path(target) == dataset.rows_path and "synthetic-span-1" not in text:
+            retired_row_gone = True
+        elif Path(target) == dataset.excluded_path and retired_row_gone:
+            raise OSError("synthetic: disk full")
+        real(target, text)
+
+    # rows.jsonl is written through the jsonl module, the other files directly.
+    monkeypatch.setattr(dataset_dir, "atomic_write_text", write)
+    monkeypatch.setattr(jsonl, "atomic_write_text", write)
+    with pytest.raises(OSError, match="disk full"):
+        pull_into(dataset)
+    monkeypatch.undo()
+    assert [row.id for row in dataset.rows()] == ["synthetic-trace-9000:synthetic-span-2"]
+
+    # The re-run cannot see the retired row any more, but its record survived the stop.
+    _, added = pull_into(dataset)
+    assert added.retired == 0
+    assert [(record["row_id"], record["code"]) for record in dataset.excluded()] == [
+        ("synthetic-trace-9000:synthetic-span-1", "contained_conversation")
+    ]
 
 
 # --- the time range -------------------------------------------------------------------------

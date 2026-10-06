@@ -16,6 +16,8 @@ from typing import Any
 
 import pytest
 
+from pup_finetune.data import dataset_dir
+from pup_finetune.data import jsonl as jsonl_module
 from pup_finetune.data.dataset_dir import DatasetDir, DatasetSettings, read_import_file
 from pup_finetune.data.exclusions import Exclusion, ExclusionCode
 from pup_finetune.data.jsonl import read_rows, to_provider_dict
@@ -349,6 +351,90 @@ def test_a_stale_exclusion_of_an_accepted_row_is_not_counted(tmp_path: Path) -> 
     dataset.excluded_path.write_text(json.dumps(stale) + "\n")
     summary = dataset.summary()
     assert (summary["total"], summary["accepted"], summary["excluded"]) == (1, 1, 0)
+
+
+# --- retiring rows --------------------------------------------------------------------------
+
+
+class Interrupted(Exception):
+    """The failure a test injects to stop an add part-way."""
+
+
+def interrupt_writes_of(
+    monkeypatch: pytest.MonkeyPatch, path: Path, *, after: int = 0
+) -> list[Path]:
+    """Make the write of ``path`` that follows ``after`` earlier ones fail; returns every write."""
+    real = dataset_dir.atomic_write_text
+    writes: list[Path] = []
+
+    def write(target: Path, text: str) -> None:
+        earlier = sum(1 for written in writes if written == path)
+        writes.append(Path(target))
+        if Path(target) == path and earlier == after:
+            raise Interrupted(str(target))
+        real(target, text)
+
+    # rows.jsonl is written through the jsonl module, the other files directly.
+    monkeypatch.setattr(dataset_dir, "atomic_write_text", write)
+    monkeypatch.setattr(jsonl_module, "atomic_write_text", write)
+    return writes
+
+
+def retire(row: TrainingRow) -> Exclusion:
+    return Exclusion.for_row(row, ExclusionCode.CONTAINED_CONVERSATION, "a prefix of row 'long'")
+
+
+def test_a_retired_row_is_removed_and_recorded(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    short, long = make_row("short", "one"), make_row("long", "two")
+    dataset.add([short], settings=IMPORT)
+    added = dataset.add([long], settings=IMPORT, retired=[retire(short)])
+    assert [row.id for row in dataset.rows()] == ["long"]
+    assert dataset.excluded() == [retire(short).to_json()]
+    assert (added.added, added.retired) == (1, 1)
+
+
+def test_retirements_are_recorded_before_the_rows_are_rewritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    short, long = make_row("short", "one"), make_row("long", "two")
+    other = Exclusion(RowErrorCode.INVALID_ROW, "bad", "broken")
+    dataset.add([short], settings=IMPORT)
+    # Stop after rows.jsonl is rewritten, before the final excluded.jsonl.
+    writes = interrupt_writes_of(monkeypatch, dataset.excluded_path, after=1)
+    with pytest.raises(Interrupted):
+        dataset.add([long], [other], settings=IMPORT, retired=[retire(short)])
+    assert writes.index(dataset.excluded_path) < writes.index(dataset.rows_path)
+    # The retired row is gone, but its record is not: nothing is lost.
+    assert [row.id for row in dataset.rows()] == ["long"]
+    assert dataset.excluded() == [retire(short).to_json()]
+    assert dataset.summary()["excluded_by_code"] == {"contained_conversation": 1}
+
+    # A retry no longer sees the row to retire (it is gone and already recorded), and keeps
+    # the record while it adds what the interrupted add did not.
+    monkeypatch.undo()
+    added = dataset.add([long], [other], settings=IMPORT)
+    assert (added.added, added.unchanged) == (0, 1)
+    assert dataset.excluded() == [retire(short).to_json(), other.to_json()]
+
+
+def test_an_add_stopped_before_its_rows_leaves_the_retired_row_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    short, long = make_row("short", "one"), make_row("long", "two")
+    dataset.add([short], settings=IMPORT)
+    interrupt_writes_of(monkeypatch, dataset.rows_path)
+    with pytest.raises(Interrupted):
+        dataset.add([long], settings=IMPORT, retired=[retire(short)])
+    # The row is still stored, so its staged record is not counted, and the retry retires it.
+    assert [row.id for row in dataset.rows()] == ["short"]
+    assert dataset.summary()["excluded"] == 0
+    monkeypatch.undo()
+    dataset.add([long], settings=IMPORT, retired=[retire(short)])
+    assert [row.id for row in dataset.rows()] == ["long"]
+    assert dataset.excluded() == [retire(short).to_json()]
 
 
 def test_rows_of_one_trace_share_a_split(tmp_path: Path) -> None:

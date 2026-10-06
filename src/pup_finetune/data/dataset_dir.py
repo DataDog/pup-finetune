@@ -266,7 +266,9 @@ class DatasetDir:
         ``rows`` also holds raises :class:`ValueError`.
 
         A validation error (a conflicting id, changed settings) leaves existing dataset files
-        unchanged. If writing fails part-way, re-running the same add repairs the directory.
+        unchanged. If writing fails part-way, re-running the same add repairs the directory;
+        the exclusions of ``retired`` are written before the rows are, so a retired row is
+        never gone from ``rows.jsonl`` without its record in ``excluded.jsonl``.
         """
         self._prepare()
         with DirectoryLock(self.path):
@@ -295,14 +297,25 @@ class DatasetDir:
                 make_private_dir(self.path)
                 FrozenSettings.check_or_write(self.path, SETTINGS_NAME, settings.to_json())
             # Splits first: an assignment without its row is harmless if we stop part-way.
-            # Rows before exclusions: a stale exclusion of an accepted row is skipped on read.
+            # The retirements next, before the rows they take out: a stale exclusion of an
+            # accepted row is skipped on read, but a retired row gone from rows.jsonl without
+            # its record could not be recovered, as nothing left on disk would show it.
+            # Then the rows, and the exclusions last; a re-run of the same add repairs both.
             splits.save(self.splits_path)
+            if retiring:
+                staged = _reconcile(
+                    self.excluded(), retiring, accepted_ids={row.id for row in existing}
+                )
+                self._write_excluded(staged)
             write_rows(self.rows_path, all_rows)
-            lines = "".join(canonical_json(record) + "\n" for record in records)
-            atomic_write_text(self.excluded_path, lines)
+            self._write_excluded(records)
             summary = self._write_summary()
         retired_rows = len(stored) - len(existing)
         return AddResult(len(new_rows), unchanged, len(excluded), summary, retired_rows)
+
+    def _write_excluded(self, records: Iterable[dict[str, Any]]) -> None:
+        lines = "".join(canonical_json(record) + "\n" for record in records)
+        atomic_write_text(self.excluded_path, lines)
 
     def create_or_check(self, settings: DatasetSettings) -> dict[str, Any]:
         """Create an empty dataset frozen with ``settings``, or check an existing one has them.
