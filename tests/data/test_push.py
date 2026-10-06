@@ -12,6 +12,7 @@ import json
 import os
 import signal
 import stat
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from pup_finetune.data.dataset_dir import DatasetDir, DatasetSettings
 from pup_finetune.data.jsonl import read_rows
 from pup_finetune.data.labels import Label
 from pup_finetune.data.push import (
+    IN_FLIGHT_SETTLE,
     PUSH_FILE,
     SOURCE_TAG,
     PushTerminated,
@@ -47,6 +49,21 @@ FIRST = 10
 PROJECT = "pup-finetune-dev"
 NAME = "synthetic-weather-and-more"
 IMPORT = DatasetSettings("import")
+SENT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+"""When a :class:`FakeClock` starts."""
+
+
+class FakeClock:
+    """A clock that stands still until moved on."""
+
+    def __init__(self) -> None:
+        self.now = SENT
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def advance(self, delta: timedelta) -> None:
+        self.now += delta
 
 
 @pytest.fixture
@@ -71,6 +88,11 @@ def push(
 ) -> Any:
     extra.setdefault("batch_size", 4)
     return push_dataset(dataset, project=project, name=name, pup=fake.client(), **extra)
+
+
+@pytest.fixture
+def clock() -> FakeClock:
+    return FakeClock()
 
 
 def drop(dataset: DatasetDir, *row_ids: str) -> None:
@@ -246,9 +268,11 @@ def test_push_json_is_private_and_holds_the_receipt(dataset: DatasetDir, fake: F
         "push_id",
         "record_ids",
         "in_flight",
+        "in_flight_at",
         "pushed_at",
         "settings_hash",
     }
+    assert data["in_flight"] == [] and data["in_flight_at"] is None
 
 
 def test_records_split_tags_match_the_dataset_splits(
@@ -299,12 +323,12 @@ def test_rows_added_after_a_push_are_appended(
 
 
 def test_an_interrupted_push_resumes_without_repeating_records(
-    dataset: DatasetDir, fake: FakePup, api: FakeDatasetsApi
+    dataset: DatasetDir, fake: FakePup, api: FakeDatasetsApi, clock: FakeClock
 ) -> None:
     api.records_add_failures = {2}
     order = push_order(dataset)
     with pytest.raises(ExternalError, match="502") as caught:
-        push(dataset, fake)
+        push(dataset, fake, clock=clock)
     remote = api.dataset_named(NAME)
     assert f"a batch of 4 records to dataset {remote.id}" in caught.value.message
     assert "in_flight" in (caught.value.hint or "")
@@ -312,11 +336,85 @@ def test_an_interrupted_push_resumes_without_repeating_records(
     assert state is not None
     assert set(state.record_ids) == set(order[:4])  # the first batch
     assert state.in_flight == tuple(order[4:8])
-    receipt = push(dataset, fake)
+    assert state.in_flight_at == SENT
+    clock.advance(IN_FLIGHT_SETTLE)
+    receipt = push(dataset, fake, clock=clock)
     assert (receipt.pushed, receipt.already_pushed) == (FIRST - 4, 4)
     assert remote_row_ids(api) == order
     assert len(set(remote.record_ids)) == FIRST
     assert receipt.state.record_ids == dict(zip(order, remote.record_ids, strict=True))
+    assert receipt.state.in_flight == ()
+    assert receipt.state.in_flight_at is None
+
+
+def test_missing_rows_of_a_batch_are_not_sent_again_until_it_has_settled(
+    dataset: DatasetDir, fake: FakePup, api: FakeDatasetsApi, clock: FakeClock
+) -> None:
+    # The call failed, but the server may still be adding the batch: wait before resending.
+    api.records_add_failures = {2}
+    order = push_order(dataset)
+    with pytest.raises(ExternalError):
+        push(dataset, fake, clock=clock)
+    clock.advance(IN_FLIGHT_SETTLE - timedelta(seconds=1))
+    with pytest.raises(StateError, match="may still be being added") as caught:
+        push(dataset, fake, clock=clock)
+    assert "4 of the 4 records" in caught.value.message
+    assert "at 03:04:05 UTC" in caught.value.message
+    assert all(row_id in caught.value.message for row_id in order[4:8])
+    assert caught.value.hint is not None
+    assert caught.value.hint.startswith("retry after 03:15 UTC")  # 03:14:05, rounded up
+    assert records_add_calls(fake) == 2  # nothing sent again
+    state = read_push_state(dataset)
+    assert state is not None
+    assert (state.in_flight, state.in_flight_at) == (tuple(order[4:8]), SENT)
+    clock.advance(timedelta(seconds=1))
+    receipt = push(dataset, fake, clock=clock)
+    assert remote_row_ids(api) == order
+    assert receipt.state.in_flight == ()
+
+
+def test_rows_of_an_unsettled_batch_found_are_adopted_and_the_rest_wait(
+    dataset: DatasetDir, fake: FakePup, api: FakeDatasetsApi, clock: FakeClock
+) -> None:
+    api.records_add_lost_responses = {2}
+    order = push_order(dataset)
+    with pytest.raises(ExternalError, match="timed out"):
+        push(dataset, fake, clock=clock)
+    # Only half the lost batch is listed yet: the rest is still being written.
+    remote = api.dataset_named(NAME)
+    pending = (remote.records[6:], remote.record_ids[6:])
+    del remote.records[6:], remote.record_ids[6:]
+    clock.advance(timedelta(minutes=1))
+    with pytest.raises(StateError, match="2 of the 4 records") as caught:
+        push(dataset, fake, clock=clock)
+    assert "2 found were recorded" in caught.value.message
+    state = read_push_state(dataset)
+    assert state is not None
+    assert set(state.record_ids) == set(order[:6])
+    assert (state.in_flight, state.in_flight_at) == (tuple(order[6:8]), SENT)
+    assert state.dataset_version is None
+    assert records_add_calls(fake) == 2
+    # The write lands; within the window the push adopts it and sends the remaining batch.
+    remote.records.extend(pending[0])
+    remote.record_ids.extend(pending[1])
+    receipt = push(dataset, fake, clock=clock)
+    assert sorted(remote_row_ids(api)) == sorted(order)
+    assert receipt.state.record_ids == dict(zip(order, remote.record_ids, strict=True))
+    assert records_add_calls(fake) == 3
+
+
+def test_a_receipt_without_in_flight_at_is_taken_as_settled(
+    dataset: DatasetDir, fake: FakePup, api: FakeDatasetsApi, clock: FakeClock
+) -> None:
+    api.records_add_failures = {2}
+    with pytest.raises(ExternalError):
+        push(dataset, fake, clock=clock)
+    path = dataset.path / PUSH_FILE
+    data = json.loads(path.read_text())
+    del data["in_flight_at"]  # written before it was recorded
+    path.write_text(json.dumps(data))
+    receipt = push(dataset, fake, clock=clock)
+    assert remote_row_ids(api) == push_order(dataset)
     assert receipt.state.in_flight == ()
 
 
@@ -433,7 +531,7 @@ def test_a_lost_create_response_is_recovered_in_the_same_push(
     state = read_push_state(dataset)
     assert state is not None and state.record_ids == {}
     assert state.dataset_id == created.id
-    receipt = push(dataset, fake)
+    receipt = push(dataset, fake, clock=lambda: datetime.now(UTC) + IN_FLIGHT_SETTLE)
     assert receipt.state.dataset_id == created.id
     assert len(api.datasets) == 1
     assert len(created.records) == FIRST
@@ -552,6 +650,8 @@ def test_a_receipt_of_other_settings_is_a_state_error(dataset: DatasetDir, fake:
         {"dataset_id": 7},
         {"push_id": None},
         {"in_flight": "row-1"},
+        {"in_flight_at": "yesterday"},
+        {"in_flight_at": "2026-01-02T03:04:05"},
     ],
 )
 def test_a_corrupt_receipt_is_a_state_error(

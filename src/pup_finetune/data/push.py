@@ -21,7 +21,9 @@ record id of every row pushed, and is saved after every batch, so:
   saved as ``in_flight``; a push that finds them (the batch's response was lost: a timeout,
   an unreadable answer, the process stopped) first lists the dataset's records, adopts those
   whose ``metadata.row_id`` is in flight and sends only the rest again, so no row is added
-  twice.
+  twice. A batch whose call timed out may still be being written, so until
+  :data:`IN_FLIGHT_SETTLE` has passed since it was sent (``in_flight_at``) the rows not found
+  are not sent again: the push adopts those found and stops, saying when to push again.
 
 A receipt ties the directory to one dataset: pushing with another ``--name`` or ``--project``
 is an error. The dataset's description carries the receipt's ``push_id``, so a push that
@@ -39,7 +41,7 @@ import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import FrameType
 from typing import Any
@@ -61,12 +63,17 @@ PUSH_FILE = "push.json"
 SOURCE_TAG = "source:pup-finetune"
 PROJECT_DESCRIPTION = "Fine-tuning datasets pushed by pup-finetune."
 DATASET_DESCRIPTION = "Curated fine-tuning conversations pushed by pup-finetune."
+IN_FLIGHT_SETTLE = timedelta(minutes=10)
+"""How long after a batch was sent its missing rows are not sent again: a records-add call
+that timed out may still be adding them."""
 SHOWN_ROW_IDS = 10
 """How many in-flight row ids an error names; ``push.json`` lists them all."""
 
 _RESUME_HINT = (
     f"push again to resume: {PUSH_FILE} lists the batch as in_flight, and the next push "
-    "adopts the records of it the dataset already holds before sending the rest"
+    "adopts the records of it the dataset already holds before sending the rest, which it "
+    f"sends only from {int(IN_FLIGHT_SETTLE.total_seconds() // 60)} minutes after the batch "
+    "was sent, as the batch may still be being added"
 )
 
 _LOOK_UP_HINT = (
@@ -77,6 +84,12 @@ _LOOK_UP_HINT = (
 )
 
 Progress = Callable[[str], None]
+Clock = Callable[[], datetime]
+"""The current time, timezone-aware."""
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 def dataset_record(row: TrainingRow, split: SplitName) -> dict[str, Any]:
@@ -127,6 +140,9 @@ class PushState:
     """The record id per row id, for every row pushed."""
     in_flight: tuple[str, ...] = ()
     """Row ids of a batch sent whose record ids are not known yet; empty between batches."""
+    in_flight_at: datetime | None = None
+    """When the batch in flight was sent (UTC); ``None`` between batches, and in a receipt
+    written before it was recorded, whose batch is taken as settled."""
     pushed_at: str | None = None
     """When records were last added (ISO 8601, UTC)."""
 
@@ -140,6 +156,11 @@ class PushState:
             "push_id": self.push_id,
             "record_ids": dict(self.record_ids),
             "in_flight": list(self.in_flight),
+            "in_flight_at": (
+                None
+                if self.in_flight_at is None
+                else self.in_flight_at.isoformat(timespec="seconds")
+            ),
             "pushed_at": self.pushed_at,
             "settings_hash": self.settings_hash,
         }
@@ -169,6 +190,10 @@ class PushState:
         in_flight = data.get("in_flight", [])
         if not isinstance(in_flight, list) or not all(isinstance(i, str) for i in in_flight):
             raise StateError(f"{where}: in_flight must be a list of row ids")
+        in_flight_at = optional("in_flight_at")
+        sent_at = _parse_time(in_flight_at) if in_flight_at is not None else None
+        if in_flight_at is not None and sent_at is None:
+            raise StateError(f"{where}: in_flight_at must be an ISO 8601 time with an offset")
         version = data.get("dataset_version")
         if version is not None and type(version) is not int:
             raise StateError(f"{where}: dataset_version must be an integer")
@@ -182,6 +207,7 @@ class PushState:
             dataset_version=version,
             record_ids=dict(record_ids),
             in_flight=tuple(in_flight),
+            in_flight_at=sent_at,
             pushed_at=optional("pushed_at"),
         )
 
@@ -355,12 +381,14 @@ def push_dataset(
     pup: Pup,
     batch_size: int = RECORDS_BATCH_SIZE,
     progress: Progress | None = None,
+    clock: Clock = _utc_now,
 ) -> PushReceipt:
     """Push the kept rows of ``dataset`` to dataset ``name`` in ``project``.
 
     Holds the directory lock throughout, so labels cannot change mid-push and two pushes of
     one directory cannot race. SIGTERM stops it like Ctrl-C, removing the batch file. See the
-    module docstring for resuming and the receipt.
+    module docstring for resuming and the receipt. ``clock`` gives the time batches are sent
+    and pushed at.
     """
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
@@ -373,12 +401,12 @@ def push_dataset(
             return plan.receipt()
         api = LLMObsDatasets(pup)
         if plan.state is not None and plan.state.in_flight:
-            _reconcile(dataset, plan.state, api, report)
+            _reconcile(dataset, plan.state, api, report, clock)
             plan = plan_push(dataset, project=project, name=name)
             if not plan.pending:
                 return plan.receipt()
         state, dataset_id = _ensure_dataset(dataset, plan, api, report)
-        state = _add_records(dataset, plan, state, dataset_id, api, batch_size, report)
+        state = _add_records(dataset, plan, state, dataset_id, api, batch_size, report, clock)
         return plan.receipt(state)
 
 
@@ -439,13 +467,14 @@ def _add_records(
     api: LLMObsDatasets,
     batch_size: int,
     report: Progress,
+    clock: Clock,
 ) -> PushState:
     total = len(plan.pending)
     for start in range(0, total, batch_size):
         batch = plan.pending[start : start + batch_size]
         row_ids = tuple(item.row_id for item in batch)
         # Saved before the call: if its answer is lost, the next push checks for these rows.
-        state = replace(state, in_flight=row_ids)
+        state = replace(state, in_flight=row_ids, in_flight_at=_now(clock))
         _save(dataset, state)
         try:
             added = api.add_records(state.project_id, dataset_id, [item.record for item in batch])
@@ -462,8 +491,9 @@ def _add_records(
             state,
             record_ids=record_ids,
             in_flight=(),
+            in_flight_at=None,
             dataset_version=added.dataset_version,
-            pushed_at=datetime.now(UTC).isoformat(timespec="seconds"),
+            pushed_at=_now(clock).isoformat(),
         )
         _save(dataset, state)
         report(f"pushed {start + len(batch)}/{total} records")
@@ -471,9 +501,13 @@ def _add_records(
 
 
 def _reconcile(
-    dataset: DatasetDir, state: PushState, api: LLMObsDatasets, report: Progress
+    dataset: DatasetDir, state: PushState, api: LLMObsDatasets, report: Progress, clock: Clock
 ) -> PushState:
-    """Adopt the records of an interrupted batch (``in_flight``) that reached the dataset."""
+    """Adopt the records of an interrupted batch (``in_flight``) that reached the dataset.
+
+    Raises :class:`StateError` when rows of it are missing within :data:`IN_FLIGHT_SETTLE` of
+    when it was sent, after adopting those found: the rest may still be being added.
+    """
     dataset_id = state.dataset_id
     if dataset_id is None:
         raise StateError(f"{push_path(dataset)}: in_flight is set but dataset_id is not")
@@ -502,19 +536,56 @@ def _reconcile(
         row_id = record.metadata.get("row_id")
         if isinstance(row_id, str) and row_id in in_flight:
             found.setdefault(row_id, record.id)
+    missing = tuple(row_id for row_id in state.in_flight if row_id not in found)
+    sent_at = state.in_flight_at
+    # A receipt without in_flight_at predates it: its batch is taken as settled.
+    settled_at = sent_at + IN_FLIGHT_SETTLE if sent_at is not None else None
+    unsettled = bool(missing) and settled_at is not None and clock() < settled_at
     state = replace(
         state,
         record_ids={**state.record_ids, **found},
-        in_flight=(),
+        # Until the batch has settled its missing rows stay in flight, so none is sent twice.
+        in_flight=missing if unsettled else (),
+        in_flight_at=sent_at if unsettled else None,
         # Records were added since the version recorded, and the listing does not tell how many.
         dataset_version=None if found else state.dataset_version,
     )
     _save(dataset, state)
+    if unsettled and sent_at is not None and settled_at is not None:
+        raise StateError(
+            f"{len(missing)} of the {len(in_flight)} records sent to dataset {dataset_id} at "
+            f"{sent_at:%H:%M:%S} UTC by an interrupted push are not in it yet, and may still be "
+            f"being added ({len(found)} found were recorded): {_some(missing)}",
+            hint=(
+                f"retry after {_minute_after(settled_at):%H:%M} UTC: {PUSH_FILE} keeps the "
+                "missing rows as in_flight, and sending them sooner could add them twice"
+            ),
+        )
     report(
         f"{len(found)} of the {len(in_flight)} records were already in the dataset; "
-        f"{len(in_flight) - len(found)} are sent again"
+        f"{len(missing)} are sent again"
     )
     return state
+
+
+def _now(clock: Clock) -> datetime:
+    """The time in UTC to the second, as ``push.json`` records it."""
+    return clock().astimezone(UTC).replace(microsecond=0)
+
+
+def _parse_time(text: str) -> datetime | None:
+    """``text`` as a UTC time, or ``None`` when it is not ISO 8601 with an offset."""
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return moment.astimezone(UTC) if moment.tzinfo is not None else None
+
+
+def _minute_after(moment: datetime) -> datetime:
+    """``moment`` rounded up to the minute, so a time shown as HH:MM is not before it."""
+    floor = moment.replace(second=0, microsecond=0)
+    return floor if floor == moment else floor + timedelta(minutes=1)
 
 
 def _undecided(state: PushState, why: str, *, hint: str) -> StateError:
