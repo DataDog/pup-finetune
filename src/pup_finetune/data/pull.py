@@ -29,7 +29,8 @@ match, so they are not part of the frozen :meth:`PullOptions.settings`: a pull c
 with higher limits to read further. When it does, a trace an earlier pull read only in part
 may now show that a stored row is a prefix of a longer conversation: :func:`pull` retires
 such a row as ``contained_conversation`` (see :func:`retirements`), so the latest conversion
-of every span it read is what the dataset holds.
+of every span it read is what the dataset holds. A re-run with lower limits, which stops before
+that longer conversation, does not add the shorter row back (see :func:`contained`).
 
 A relative ``--from`` or ``--to`` (``now-7d``) is resolved to epoch milliseconds once, when a
 collection or a dataset's first pull starts (:meth:`PullOptions.resolved`), and the export
@@ -51,9 +52,13 @@ from pup_finetune.data.checks import CheckOptions, check_span
 from pup_finetune.data.convert import ReasoningMode, check_reasoning
 from pup_finetune.data.dataset_dir import AddResult, DatasetDir, DatasetSettings, SourceKind
 from pup_finetune.data.exclusions import Exclusion, ExclusionCode
-from pup_finetune.data.schema import Message, TrainingRow, row_content_hash
+from pup_finetune.data.schema import TrainingRow, row_content_hash
 from pup_finetune.data.split import SplitParams
-from pup_finetune.data.trajectories import ConversionStats, rows_from_spans
+from pup_finetune.data.trajectories import (
+    ConversionStats,
+    comparable_messages,
+    rows_from_spans,
+)
 from pup_finetune.datadog.pup import Pup
 from pup_finetune.datadog.spans import (
     CACHED_PAGES_NOTE,
@@ -306,12 +311,12 @@ def retirements(
     stale = collection.read_ids - collection.produced_ids
     if not stale:
         return []
-    keepers = [*collection.rows, *(row for row in stored_rows if row.id not in stale)]
+    keepers = _Containers([*collection.rows, *(row for row in stored_rows if row.id not in stale)])
     retired: list[Exclusion] = []
     for row in stored_rows:
         if row.id not in stale:
             continue
-        container = _container(row, keepers)
+        container = keepers.find(row)
         if container is not None:
             detail = f"a prefix of row {container.id!r}, read by a later pull"
             retired.append(Exclusion.for_row(row, ExclusionCode.CONTAINED_CONVERSATION, detail))
@@ -332,23 +337,62 @@ def retirements(
     return retired
 
 
-def _container(row: TrainingRow, candidates: Iterable[TrainingRow]) -> TrainingRow | None:
-    """The first of ``candidates`` in ``row``'s trace whose messages start with ``row``'s."""
-    messages = [_comparable(message) for message in row.messages]
-    for other in candidates:
-        if other.id == row.id or other.source.trace_id != row.source.trace_id:
+def contained(
+    rows: Sequence[TrainingRow],
+    stored_rows: Sequence[TrainingRow],
+    retired: Iterable[Exclusion] = (),
+) -> tuple[list[TrainingRow], list[Exclusion]]:
+    """``rows`` minus those a stored row contains, and an exclusion for each one left out.
+
+    The limits are not frozen, so a pull re-run with a lower ``target_count`` than the last
+    one can stop before the page that showed a conversation continues, and produce again the
+    shorter row an earlier pull already replaced by its longer version (:func:`retirements`).
+    Such a row, new to the dataset and contained in a stored row of its trace that is not
+    being ``retired``, is excluded as ``contained_conversation`` instead of being added beside
+    the longer one. Rows already stored are left to the dataset.
+    """
+    retired_ids = {exclusion.row_id for exclusion in retired}
+    stored_ids = {row.id for row in stored_rows}
+    containers = _Containers(row for row in stored_rows if row.id not in retired_ids)
+    kept: list[TrainingRow] = []
+    excluded: list[Exclusion] = []
+    for row in rows:
+        container = None if row.id in stored_ids else containers.find(row)
+        if container is None:
+            kept.append(row)
             continue
-        if [_comparable(m) for m in other.messages[: len(messages)]] == messages:
-            return other
-    return None
+        detail = f"a prefix of row {container.id!r}, read by an earlier pull"
+        excluded.append(Exclusion.for_row(row, ExclusionCode.CONTAINED_CONVERSATION, detail))
+    return kept, excluded
 
 
-def _comparable(message: Message) -> tuple[object, ...]:
-    """What conversation compares a message by: role, content, tool call names and args."""
-    calls = tuple(
-        (call.function.name, call.function.arguments) for call in message.tool_calls or ()
-    )
-    return (message.role, message.content, calls)
+class _Containers:
+    """Rows that may contain another one, by trace, compared as conversion compares them.
+
+    A row contains another when its messages start with the other's, by
+    :func:`~pup_finetune.data.trajectories.comparable_messages`: canonical tool call
+    arguments, and each tool message by the position of the call it answers, so retirement
+    and conversion agree on which conversations are one.
+    """
+
+    def __init__(self, rows: Iterable[TrainingRow]) -> None:
+        self._by_trace: dict[str | None, list[tuple[TrainingRow, list[str]]]] = {}
+        for row in rows:
+            self._by_trace.setdefault(row.source.trace_id, []).append((row, _comparable(row)))
+
+    def find(self, row: TrainingRow) -> TrainingRow | None:
+        """The first row in ``row``'s trace, other than ``row``, whose messages start with its."""
+        parts = _comparable(row)
+        for other, other_parts in self._by_trace.get(row.source.trace_id, ()):
+            # A part depends only on its message and the ones before it, so the parts of
+            # a prefix are a prefix of the parts.
+            if other.id != row.id and other_parts[: len(parts)] == parts:
+                return other
+        return None
+
+
+def _comparable(row: TrainingRow) -> list[str]:
+    return comparable_messages(message.model_dump() for message in row.messages)
 
 
 def resolve_window(options: PullOptions, dataset: DatasetDir, clock: Clock) -> PullOptions:
@@ -390,7 +434,9 @@ def pull(
     pull with other settings fails fast with :class:`~pup_finetune.errors.StateError`, and
     an interrupted first pull leaves a dataset its re-run resumes; an :class:`ExternalError`
     part-way says so in its hint. The cache is locked while the export reads it. Stored rows
-    the new conversion collapsed are retired (:func:`retirements`).
+    the new conversion collapsed are retired (:func:`retirements`), and new rows a stored row
+    contains are excluded instead of added (:func:`contained`); the returned collection is
+    what the export read and converted, before either.
     """
     options = resolve_window(options, dataset, clock)
     settings = options.dataset_settings(split)
@@ -401,8 +447,12 @@ def pull(
             collection = collect(pup, options, cache_dir=raw, sleep=sleep, progress=progress)
         except ExternalError as exc:
             raise _with_resume_note(exc, raw) from exc
-    retired = retirements(collection, dataset.rows(), dataset.excluded())
-    added = dataset.add(collection.rows, collection.exclusions, settings=settings, retired=retired)
+    stored = dataset.rows()
+    retired = retirements(collection, stored, dataset.excluded())
+    rows, exclusions = contained(collection.rows, stored, retired)
+    added = dataset.add(
+        rows, [*collection.exclusions, *exclusions], settings=settings, retired=retired
+    )
     return collection, added
 
 

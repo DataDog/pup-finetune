@@ -555,6 +555,12 @@ def test_a_rerun_retires_a_stored_prefix_of_a_conversation_on_a_later_page(
     again = output_json(pull(target))
     assert (again["accepted"], again["excluded"], again["pull"]["retired"]) == (1, 1, 0)
 
+    # The first, smaller pull again: it stops before page 2, but does not add T:s1 back.
+    lower = output_json(pull(target, "--target-count", "1"))
+    assert (lower["accepted"], lower["excluded"], lower["pull"]["added"]) == (1, 1, 0)
+    rows = [json.loads(line)["id"] for line in (target / "rows.jsonl").read_text().splitlines()]
+    assert rows == ["T:s2"]
+
 
 @pytest.mark.parametrize(
     "changed",

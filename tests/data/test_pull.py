@@ -15,11 +15,12 @@ from typing import Any
 import pytest
 
 from pup_finetune.data.dataset_dir import DatasetDir
-from pup_finetune.data.exclusions import ExclusionCode
+from pup_finetune.data.exclusions import Exclusion, ExclusionCode
 from pup_finetune.data.pull import (
     Collection,
     PullOptions,
     collect,
+    contained,
     pull,
     resolve_window,
     retirements,
@@ -271,6 +272,111 @@ def test_a_stored_exclusion_of_a_collapsed_conversation_is_re_recorded() -> None
     ]
     already = {**stale, "code": "contained_conversation"}
     assert retirements(full, [], [already]) == []
+
+
+PARALLEL_CALLS = {
+    "role": "assistant",
+    "tool_calls": [
+        {"name": "get_weather", "arguments": {"city": "Northvale"}, "tool_id": "call-a"},
+        {"name": "get_weather", "arguments": {"city": "Southvale"}, "tool_id": "call-b"},
+    ],
+}
+
+
+def parallel_results(*answering: str) -> dict[str, Any]:
+    """The same result text for each call in ``answering``, in that order."""
+    return {
+        "role": "tool",
+        "tool_results": [{"result": "cloudy", "tool_id": call_id} for call_id in answering],
+    }
+
+
+def test_retirement_tells_apart_results_paired_with_other_calls() -> None:
+    # The stored row pairs the identical results with the calls in one order; the accepted
+    # conversation pairs them the other way, so it is a different conversation and does not
+    # contain the stored row, even though the message texts are the same.
+    stored_messages = [Q1, PARALLEL_CALLS, parallel_results("call-a", "call-b"), A1]
+    stored, _ = collected([page([item("synthetic-span-1", stored_messages)])])
+    swapped = [Q1, PARALLEL_CALLS, parallel_results("call-b", "call-a"), A1, Q2, A2]
+    other, _ = collected([page([item("synthetic-span-2", swapped)])])
+    other.read_ids.add("synthetic-trace-9000:synthetic-span-1")
+    assert retirements(other, stored.rows, []) == []
+
+    # Paired the same way, the longer conversation does contain it.
+    longer = [*stored_messages, Q2, A2]
+    same, _ = collected([page([item("synthetic-span-2", longer)])])
+    same.read_ids.add("synthetic-trace-9000:synthetic-span-1")
+    assert [e.row_id for e in retirements(same, stored.rows, [])] == [
+        "synthetic-trace-9000:synthetic-span-1"
+    ]
+
+
+def test_retirement_compares_tool_call_arguments_canonically() -> None:
+    def calling(arguments: Any) -> dict[str, Any]:
+        call = {"name": "get_weather", "arguments": arguments, "tool_id": "call-a"}
+        return {"role": "assistant", "tool_calls": [call]}
+
+    result = {"role": "tool", "tool_results": [{"result": "cloudy", "tool_id": "call-a"}]}
+    short = [Q1, calling({"city": "Northvale", "units": "metric"}), result, A1]
+    stored, _ = collected([page([item("synthetic-span-1", short)])])
+    text = '{\n  "units": "metric",\n  "city": "Northvale"\n}'
+    longer, _ = collected(
+        [page([item("synthetic-span-2", [Q1, calling(text), result, A1, Q2, A2])])]
+    )
+    longer.read_ids.add("synthetic-trace-9000:synthetic-span-1")
+    assert [e.row_id for e in retirements(longer, stored.rows, [])] == [
+        "synthetic-trace-9000:synthetic-span-1"
+    ]
+
+
+def two_page_conversation() -> list[dict[str, Any]]:
+    return [
+        page([item("synthetic-span-1", [SYSTEM, Q1, A1])], after="cursor-2"),
+        page([item("synthetic-span-2", [SYSTEM, Q1, A1, Q2, A2])]),
+    ]
+
+
+def pull_into(dataset: DatasetDir, **options: Any) -> Any:
+    api = FakeExportApi(two_page_conversation())
+    pup = api.install(FakePup()).client()
+    return pull(pup, PullOptions(SpanQuery(ml_app="synthetic"), **options), dataset, SplitParams())
+
+
+def test_a_lower_target_count_does_not_add_back_a_retired_prefix(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    pull_into(dataset, target_count=1)
+    pull_into(dataset)
+    retired = [(record["row_id"], record["code"]) for record in dataset.excluded()]
+    assert retired == [("synthetic-trace-9000:synthetic-span-1", "contained_conversation")]
+
+    # The original, smaller pull stops on page 1 again and produces the short row again.
+    collection, added = pull_into(dataset, target_count=1)
+    assert [row.id for row in collection.rows] == ["synthetic-trace-9000:synthetic-span-1"]
+    assert (added.added, added.unchanged, added.retired) == (0, 0, 0)
+    assert [row.id for row in dataset.rows()] == ["synthetic-trace-9000:synthetic-span-2"]
+    records = dataset.excluded()
+    assert [(record["row_id"], record["code"]) for record in records] == retired
+    assert "synthetic-trace-9000:synthetic-span-2" in records[0]["detail"]
+    summary = dataset.summary()
+    assert (summary["accepted"], summary["excluded"]) == (1, 1)
+
+
+def test_contained_leaves_out_new_rows_a_kept_stored_row_contains() -> None:
+    pages = [page([item("synthetic-span-1", [SYSTEM, Q1, A1])])]
+    collection, _ = collected(pages)
+    longer, _ = collected([page([item("synthetic-span-2", [SYSTEM, Q1, A1, Q2, A2])])])
+    stored = longer.rows
+    retiring = [
+        Exclusion.for_row(row, ExclusionCode.CONTAINED_CONVERSATION, "synthetic") for row in stored
+    ]
+    assert contained(collection.rows, stored, retiring) == (collection.rows, [])
+    kept, excluded = contained(collection.rows, stored)
+    assert kept == []
+    assert [(e.code, e.row_id) for e in excluded] == [
+        (ExclusionCode.CONTAINED_CONVERSATION, "synthetic-trace-9000:synthetic-span-1")
+    ]
+    # A row already stored is the dataset's to keep or retire.
+    assert contained(collection.rows, [*stored, *collection.rows]) == (collection.rows, [])
 
 
 # --- the time range -------------------------------------------------------------------------

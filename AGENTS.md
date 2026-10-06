@@ -131,7 +131,9 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   repeated conversations, and stop at `--target-count` rows or `--max-candidates` spans before
   fetching another page. Unreadable items are excluded as `unreadable_span`; a re-run that reads
   further retires a stored row its trace now shows to be a prefix of a longer conversation
-  (`retirements`, `contained_conversation`).
+  (`retirements`, `contained_conversation`), and one with lower limits does not add such a row
+  back (`contained`); both compare messages as conversion collapses them
+  (`comparable_messages` in `trajectories.py`).
 - `curation/` - *later*. Keep/drop labels and judge-based triage.
 - `training/` - the shared, provider-neutral SFT loop. `datums.py` renders rows into
   `TokenizedExample`s (per turn when a renderer is not prefix-stable) and rejects rows that
