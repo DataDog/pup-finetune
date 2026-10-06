@@ -82,7 +82,10 @@ uv run pup-finetune models list --provider fireworks --check  # plus a live pref
 
 `--check` asks Fireworks about each model (one GET each, nothing paid) and needs the API key:
 `FIREWORKS_API_KEY`, or the OS keychain after `pup finetune auth login fireworks`. Training and
-deployment on Fireworks arrive in later PRs.
+deployment on Fireworks arrive in later PRs; the Training SDK they use comes with the
+`fireworks` extra (`uv sync --extra fireworks`, or `--all-extras`). Training runs in the key's
+own account (Fireworks refuses a key that sees several accounts); `FIREWORKS_ACCOUNT_ID` only
+overrides the account lookup, i.e. the account id pup-finetune records.
 
 Add `--detach` to train in a background worker (output in `/tmp/run/worker.log`) and follow it
 with `status /tmp/run --watch`. `--provider-option step_delay_s=0.5 --batch-size 1` makes the
@@ -246,8 +249,16 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   `model_info`, `list_accounts`, injectable transport, redacted errors, 401/403 as
   `FireworksAuthError`, 404 as a missing model); `provider.py` has `FireworksProvider`
   (profiles, preflight against `GET /v1/accounts/fireworks/models/<id>`, the family's HF
-  renderer, the `max_seq_len` option). Its training backend and deployment arrive later.
-  See `docs/architecture.md`.
+  renderer, the `max_seq_len` option). `client.py` is the only module that imports the
+  Fireworks Training SDK (`fireworks`, `tinker`; the `fireworks` extra), and only on first
+  use: it defines the narrow interface the backend uses (`FireworksTraining` -> `service()` ->
+  `TrainingService` -> `TrainingRun` and `TokenSampler`, with plain results such as
+  `ForwardOutput` and typed `CheckpointRow`s), implements it as `FireworksTrainingClient`
+  (training runs in the key's own account; the recorded account id is `FIREWORKS_ACCOUNT_ID`,
+  else the key's first account), converts to
+  `tinker.Datum` and `tinker.AdamParams`, and maps every SDK failure with `fireworks_error`
+  (`ProviderCapacityError`, `ProviderAuthError`, `TransientError`, redacted). Its training
+  backend and deployment arrive later. See `docs/architecture.md`.
 
 Tests live under `tests/` and mirror `src/`. Shared fakes live in `tests/fakes/` (import them
 as `tests.fakes...`); `tests/fakes/pup.py` has `FakePup`, a fake pup runner that answers by
@@ -259,6 +270,10 @@ behind the pup calls `LLMObsDatasets` makes, with failures to inject.
 Qwen3.8-like Python template (optionally merging `\n\n` across the prompt boundary).
 `tests/fakes/fireworks_api.py` has `FakeFireworksApi`, the Fireworks model and account routes
 behind an `httpx.MockTransport`, with statuses and transport errors to inject.
+`tests/fakes/fireworks.py` has `FakeFireworksTrainingClient`, the Fireworks Training API
+behind the `client.py` interface in memory (sessions, server-renamed checkpoints, promotion
+that fails once a session has expired, deterministic losses, canned samples, injectable
+capacity, auth, 5xx and connection failures).
 `tests/fakes/keyring.py` has in-memory, failing and locked keyring backends; every test starts
 on the failing one, so none touches the real keychain.
 `tests/providers/contract/` has the `RendererContract`, `BackendContract` and

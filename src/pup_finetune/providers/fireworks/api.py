@@ -29,22 +29,27 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 from pup_finetune import __version__
 from pup_finetune.credentials import login_hint
 from pup_finetune.errors import ExternalError, UsageError
+from pup_finetune.providers.base import ProviderAuthError
 from pup_finetune.providers.fireworks import CREDENTIALS
 from pup_finetune.redaction import redact, register_secret
 
 __all__ = [
     "API_URL",
     "CLIENT_SOURCE",
+    "CLIENT_SOURCE_HEADER",
     "DEFAULT_TIMEOUT_S",
     "FireworksApi",
     "FireworksAuthError",
     "ModelInfo",
+    "checked_key",
 ]
 
 API_URL: Final = "https://api.fireworks.ai"
 DEFAULT_TIMEOUT_S: Final = 30.0
 CLIENT_SOURCE: Final = f"pup-finetune/{__version__}"
-"""Sent as ``X-Fireworks-Client-Source`` (and ``User-Agent``) on every request."""
+"""Sent as :data:`CLIENT_SOURCE_HEADER` (and ``User-Agent``) on every request."""
+CLIENT_SOURCE_HEADER: Final = "X-Fireworks-Client-Source"
+"""The header Fireworks reads the calling client from."""
 
 SOURCE: Final = "fireworks"
 _DEFAULT_ACCOUNT: Final = "fireworks"
@@ -54,7 +59,7 @@ _MODEL_ID: Final = re.compile(_SEGMENT)
 _DETAIL_LIMIT: Final = 200
 
 
-class FireworksAuthError(ExternalError):
+class FireworksAuthError(ProviderAuthError):
     """Fireworks rejected the API key (HTTP 401) or refused it the request (HTTP 403)."""
 
 
@@ -101,18 +106,7 @@ class FireworksApi:
         transport: httpx.BaseTransport | None = None,
         timeout_s: float = DEFAULT_TIMEOUT_S,
     ) -> None:
-        secret = api_key.get_secret_value()
-        if not secret:
-            raise UsageError("the Fireworks API key is empty", hint=login_hint(CREDENTIALS))
-        if not _is_token(secret):
-            # Refused before it reaches a header: the HTTP layer would echo an illegal header
-            # value in its error, escaped, so redaction could not mask it whole.
-            raise UsageError(
-                "the Fireworks API key is malformed: it must be one word of printable ASCII, "
-                "with no spaces or line breaks",
-                hint=login_hint(CREDENTIALS),
-            )
-        register_secret(secret)
+        secret = checked_key(api_key)
         self._timeout_s = timeout_s
         self._client = httpx.Client(
             base_url=base_url,
@@ -122,7 +116,7 @@ class FireworksApi:
                 "Authorization": f"Bearer {secret}",
                 "Accept": "application/json",
                 "User-Agent": CLIENT_SOURCE,
-                "X-Fireworks-Client-Source": CLIENT_SOURCE,
+                CLIENT_SOURCE_HEADER: CLIENT_SOURCE,
             },
             follow_redirects=False,
         )
@@ -218,6 +212,26 @@ class FireworksApi:
             raise ExternalError(
                 f"{what} failed: the Fireworks API did not return JSON", source=SOURCE
             ) from exc
+
+
+def checked_key(api_key: SecretStr) -> str:
+    """The value of ``api_key``, registered for redaction, once it is safe to send.
+
+    Raises :class:`UsageError` for an empty key, or one that is not one word of printable
+    ASCII. A malformed key is refused before it reaches a header: the HTTP layer would echo an
+    illegal header value in its error, escaped, so redaction could not mask it whole.
+    """
+    secret = api_key.get_secret_value()
+    if not secret:
+        raise UsageError("the Fireworks API key is empty", hint=login_hint(CREDENTIALS))
+    if not _is_token(secret):
+        raise UsageError(
+            "the Fireworks API key is malformed: it must be one word of printable ASCII, "
+            "with no spaces or line breaks",
+            hint=login_hint(CREDENTIALS),
+        )
+    register_secret(secret)
+    return secret
 
 
 def _is_token(secret: str) -> bool:
