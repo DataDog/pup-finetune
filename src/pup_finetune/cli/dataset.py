@@ -14,11 +14,19 @@ from collections import Counter
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import typer
 
 from pup_finetune.cli._common import run_command
+from pup_finetune.curation.labels import Label, apply_labels, parse_labels
+from pup_finetune.curation.samples import (
+    DEFAULT_SAMPLE_SEED,
+    DEFAULT_SAMPLE_SIZE,
+    SampleSplit,
+    row_brief,
+    sample_rows,
+)
 from pup_finetune.data.convert import ReasoningMode
 from pup_finetune.data.dataset_dir import DatasetDir, DatasetSettings, read_import_file
 from pup_finetune.data.exclusions import Exclusion, explain
@@ -31,7 +39,6 @@ from pup_finetune.data.pull import (
     pull,
     resolve_window,
 )
-from pup_finetune.data.schema import TrainingRow
 from pup_finetune.data.split import (
     DEFAULT_SEED,
     DEFAULT_TEST_FRACTION,
@@ -294,7 +301,7 @@ def preview(
         "exclusion_explanations": _explanations(excluded_by_code),
         "splits": counts,
         "warnings": [*_collection_warnings(collection, options), *split_warnings(counts)],
-        "sample_accepted": [_describe_row(row) for row in collection.rows[:SAMPLE_SIZE]],
+        "sample_accepted": [row_brief(row) for row in collection.rows[:SAMPLE_SIZE]],
         "sample_excluded": _sample_exclusions(collection.exclusions),
         "stats": collection.stats(),
         "next_command": _pull_command("<DIR>", options, params),
@@ -375,11 +382,131 @@ def pull_rows(
         },
         "next_command": f"pup finetune dataset show {_quoted(directory)}",
         "hint": (
-            f"review a sample of the accepted rows ({dataset.rows_path.name}) and the "
-            f"exclusions ({dataset.excluded_path.name}) with the user before training, and "
-            "decide which rows to keep"
+            "review a sample of the accepted rows (`pup finetune dataset sample "
+            f"{_quoted(directory)}`) and the exclusions ({dataset.excluded_path.name}) with "
+            "the user before training, and record which rows to keep with `pup finetune "
+            "dataset label`"
         ),
     }
+
+
+@dataset_app.command(
+    "label",
+    short_help="Apply keep/drop labels to a dataset's rows.",
+    help=(
+        "Record keep/drop decisions on accepted rows of DIR from a JSONL file of "
+        '{"id", "keep", "reason"} objects; "by" and "at" may be given per line and default '
+        "to --by and the current time. A reason is required to drop a row. Every id must be "
+        "an accepted row, or nothing is written. Labels are appended to labels.jsonl and the "
+        "last label of an id wins; rows.jsonl is never changed. A dropped row is left out of "
+        f"training and of the split files. {_LOCAL_ONLY}"
+    ),
+)
+@run_command
+def label(
+    directory: DirArgument,
+    file: Annotated[
+        Path,
+        typer.Option(
+            "--file",
+            help="Labels, one JSON object per line.",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            show_default=False,
+        ),
+    ],
+    by: Annotated[
+        Literal["agent", "human"],
+        typer.Option(help="Who made the decisions, for lines that do not say."),
+    ] = "agent",
+) -> dict[str, Any]:
+    dataset = DatasetDir(directory)
+    labels = _read_label_file(file, by=by, at=datetime.now(UTC))
+    report = apply_labels(dataset, labels)
+    summary = report.summary
+    train = f"pup finetune train --dataset {_quoted(directory)} ..."
+    return {
+        "dataset_dir": str(dataset.path.resolve()),
+        "label": {
+            "file": str(file),
+            "labels": len(labels),
+            "applied": report.applied,
+            "unchanged": report.unchanged,
+            "kept": report.kept,
+            "dropped": report.dropped,
+        },
+        "accepted": summary["accepted"],
+        "kept": summary["kept"],
+        "dropped": summary["dropped"],
+        "drop_reasons": summary["drop_reasons"],
+        "splits": summary["splits"],
+        "warnings": summary["warnings"],
+        "next_command": train,
+        "next_commands": [
+            train,
+            f"pup finetune dataset push {_quoted(directory)} --name ...",
+        ],
+    }
+
+
+@dataset_app.command(
+    "sample",
+    short_help="Show a small, readable sample of a dataset's rows.",
+    help=(
+        "Show up to --n rows of DIR in brief, to review them before labeling: each row's id, "
+        "split, label (keep, drop or none), assistant turns, tools used, and its first user "
+        "and final assistant messages cut to 300 characters (a final message without text "
+        "shows its tool calls as name(args)). The full rows stay in rows.jsonl. The same "
+        "--seed picks the same rows. Rows labeled drop are left out unless "
+        f"--include-dropped is passed. {_LOCAL_ONLY}"
+    ),
+)
+@run_command
+def sample(
+    directory: DirArgument,
+    n: Annotated[int, typer.Option("--n", min=1, help="How many rows to show.")] = (
+        DEFAULT_SAMPLE_SIZE
+    ),
+    split: Annotated[SampleSplit, typer.Option(help="The split to sample from.")] = "all",
+    seed: Annotated[int, typer.Option(help="Seed that picks the rows.")] = DEFAULT_SAMPLE_SEED,
+    include_dropped: Annotated[
+        bool,
+        typer.Option("--include-dropped", help="Also sample rows labeled drop."),
+    ] = False,
+) -> dict[str, Any]:
+    dataset = DatasetDir(directory)
+    dataset.settings()  # A UsageError when this is not a dataset directory.
+    rows, eligible = sample_rows(
+        dataset, n=n, split=split, seed=seed, include_dropped=include_dropped
+    )
+    return {
+        "dataset_dir": str(dataset.path.resolve()),
+        "split": split,
+        "seed": seed,
+        "include_dropped": include_dropped,
+        "eligible": eligible,
+        "rows": rows,
+        "rows_file": str(dataset.rows_path.resolve()),
+        "next_command": f"pup finetune dataset label {_quoted(directory)} --file labels.jsonl",
+        "hint": (
+            "review these rows with the user, then record decisions as JSON lines of "
+            '{"id": ..., "keep": true|false, "reason": ...}; a reason is required to drop'
+        ),
+    }
+
+
+def _read_label_file(path: Path, *, by: str, at: datetime) -> list[Label]:
+    """The labels in ``path``; ``by`` and ``at`` fill in lines that leave them out."""
+    labels = parse_labels(
+        path,
+        defaults={"by": by, "at": at},
+        error=UsageError,
+        hint='each line must be {"id": ..., "keep": true|false, "reason": ...}',
+    )
+    if not labels:
+        raise UsageError(f"{path} has no labels")
+    return labels
 
 
 # --- pull helpers ---------------------------------------------------------------------------
@@ -538,16 +665,6 @@ def _collection_warnings(collection: Collection, options: PullOptions) -> list[s
             f"{unreadable} spans could not be read and were skipped (excluded as unreadable_span)"
         )
     return warnings
-
-
-def _describe_row(row: TrainingRow) -> dict[str, Any]:
-    """A row in brief: its id, its assistant turns and the tools it calls."""
-    tools = {call.function.name for message in row.messages for call in message.tool_calls or ()}
-    return {
-        "id": row.id,
-        "turns": sum(1 for message in row.messages if message.role == "assistant"),
-        "tools_used": sorted(tools),
-    }
 
 
 def _sample_exclusions(exclusions: Sequence[Exclusion]) -> list[dict[str, Any]]:

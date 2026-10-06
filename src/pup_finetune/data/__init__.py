@@ -12,7 +12,8 @@ source) and the stable :class:`RowErrorCode` reasons a row is rejected for;
 :mod:`pup_finetune.data.exclusions` records why a row was left out of a dataset;
 :mod:`pup_finetune.data.convert` maps one LLM span to a canonical conversation and
 :mod:`pup_finetune.data.trajectories` turns the spans of whole traces into rows;
-:mod:`pup_finetune.data.split` assigns stable train / validation / test splits; and
+:mod:`pup_finetune.data.split` assigns stable train / validation / test splits;
+:mod:`pup_finetune.data.labels` defines keep/drop labels and their JSONL format; and
 :mod:`pup_finetune.data.dataset_dir` is the on-disk dataset directory.
 """
 
