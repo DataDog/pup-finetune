@@ -379,9 +379,9 @@ Source lives under `src/pup_finetune/`.
   path for families that pin `prefix_stable`. It also has the narrow `ChatTokenizer` seam
   (tests inject `tests/fakes/tokenizer.py`) and the lazily imported `transformers` adapter
   (the `hf` extra). `parsers.py` has the `ResponseParser`s (`Qwen3XmlToolParser`,
-  `JsonToolCallParser`) that turn sampled text back into a message; `families.py` is the
-  model-family table (`qwen3_8` for now), each entry a tokenizer, revision, parser and stop
-  tokens.
+  `Qwen3_5XmlToolParser`, `GlmXmlToolParser`, `JsonToolCallParser`) that turn sampled text
+  back into a message; `families.py` is the model-family table (`qwen3_8`, `qwen3_5`,
+  `glm5_3`), each entry a tokenizer, revision, parser and stop tokens.
 - `evaluation/` - replay evaluation, provider-neutral. `cases.py` turns a dataset's kept
   test-split rows into `ReplayCase`s (`cases_from_dataset`, `build_cases`): one per trained
   (`weight` not `0`) assistant message with a visible action, with the recorded prefix and
@@ -479,7 +479,8 @@ behind the pup calls `LLMObsExperiments` makes (failed and lost creates and even
 delayed or capped indexing); it chains to the `api` handler installed before it, so it serves
 one `FakePup` with `FakeDatasetsApi`.
 `tests/fakes/tokenizer.py` has `FakeChatTokenizer`, a character-level chat tokenizer with a
-Qwen3.8-like Python template (optionally merging `\n\n` across the prompt boundary).
+Qwen3.8-like Python template (optionally merging `\n\n` across the prompt boundary) or a
+GLM-5-like one (`glm5_like`).
 `tests/fakes/chat_api.py` has `FakeChatApi`, an OpenAI-compatible chat completions endpoint
 (scripted responses or errors first, then an answer function) and `matching_judge`.
 `tests/fakes/fireworks_api.py` has `FakeFireworksApi`, the Fireworks model and account routes

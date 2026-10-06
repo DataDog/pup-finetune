@@ -128,8 +128,10 @@ the renderer then checks it on every row in `supervised_example` (rows with
 `not_prefix_stable` when it does not hold, and the loop renders that row with
 `per_turn_examples`. A renderer that is not prefix-stable declares `prefix_stable = False` and
 the loop renders every row per turn. Qwen3.8 is not token prefix-stable, so `qwen3_8` renders
-per turn. Only `supervised_example` raises `not_prefix_stable`; a per-turn failure carries
-its own code, so the loop never retries it per turn.
+per turn, as does `qwen3_5` (Qwen3.5 also drops reasoning before the last user turn); every
+turn boundary of GLM-5.3 is a special token, so `glm5_3` takes the fast path. Only
+`supervised_example` raises `not_prefix_stable`; a per-turn failure carries its own code, so
+the loop never retries it per turn.
 
 A tokenizer that cannot be loaded fails every row alike, so the renderer reports it as an
 `ExternalError` (a `UsageError` when the `hf` extra is missing) rather than rejecting rows.

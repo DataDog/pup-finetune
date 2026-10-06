@@ -8,7 +8,7 @@
 
 A :class:`ResponseParser` reads the text a sampler produced after the generation prompt and
 never raises: text that broke the model's output format comes back with ``format_valid``
-false and a best-effort message. Two tool-call formats are covered:
+false and a best-effort message. Three tool-call formats are covered:
 
 - :class:`Qwen3XmlToolParser`, the Qwen3.8 format::
 
@@ -28,11 +28,19 @@ false and a best-effort message. Two tool-call formats are covered:
   reasoning block: everything before the first ``</think>`` is reasoning, with or without an
   opening tag, and text that never closes the block (cut off at the token limit, or a model
   that never left its reasoning) is format-invalid, all of it reasoning.
+  :class:`Qwen3_5XmlToolParser` reads the same format from Qwen3.5, whose template writes
+  scalar values with Python's ``str``.
+- :class:`GlmXmlToolParser`, the GLM-5 format, also after an open ``<think>``, with no
+  separators (wrapped here) and ending on the next role tag::
+
+      reasoning</think><tool_call>get_weather<arg_key>city</arg_key>
+      <arg_value>Paris</arg_value></tool_call><|observation|>
+
 - :class:`JsonToolCallParser`, one JSON object per block:
   ``<tool_call>{"name": ..., "arguments": {...}}</tool_call>``.
 
-Both strip one trailing end-of-turn token. Model families pick a parser by name from
-:data:`PARSERS`. A parser is also given the tools the prompt declared: the XML format needs
+Each strips one trailing end-of-turn token. Model families pick a parser by name from
+:data:`PARSERS`. A parser is also given the tools the prompt declared: the XML formats need
 their parameter types to read a value back (see :class:`Qwen3XmlToolParser`).
 """
 
@@ -56,6 +64,11 @@ _CALL_CLOSE = "</tool_call>"
 _CALL_BLOCK = re.compile(re.escape(_CALL_OPEN) + r"(.*?)" + re.escape(_CALL_CLOSE), re.DOTALL)
 _FUNCTION = re.compile(r"<function=([^>\n]+)>(.*)</function>", re.DOTALL)
 _PARAMETER = re.compile(r"<parameter=([^>\n]+)>(.*?)</parameter>", re.DOTALL)
+_ARGUMENT = re.compile(r"<arg_key>([^<>]*)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.DOTALL)
+_GLM_NAME = re.compile(r"[^\s<>]+")
+_GLM_USER = "<|user|>"
+_GLM_OBSERVATION = "<|observation|>"
+_PYTHON_LITERALS: Mapping[str, Any] = MappingProxyType({"True": True, "False": False, "None": None})
 
 
 class ResponseParser(Protocol):
@@ -90,25 +103,28 @@ def _tool_call(index: int, name: str, arguments: Mapping[str, Any]) -> dict[str,
 
 def _parse_blocks(
     text: str,
-    turn_end: str,
+    turn_ends: tuple[str, ...],
     parse_call: Callable[[str], tuple[str, dict[str, Any]] | None],
     *,
     prompt_opens_think: bool,
 ) -> ParsedResponse:
-    """The parse both formats share: reasoning, then content and ``<tool_call>`` blocks.
+    """The parse every format shares: reasoning, then content and ``<tool_call>`` blocks.
 
-    ``parse_call`` reads one block's inner text as ``(name, arguments)``, or ``None`` when
-    the block is malformed; a malformed block stays in ``content`` as raw text, as does a
-    stray ``<tool_call>`` or ``</tool_call>`` before, between or after the blocks, and either
-    makes the format invalid. With
-    ``prompt_opens_think`` the text continues a reasoning block the prompt opened, so it must
-    close it: when it does not, the whole text is reasoning and the format is invalid.
+    One of ``turn_ends`` may end the text; anywhere else, one is invalid. ``parse_call``
+    reads one block's inner text as ``(name, arguments)``, or ``None`` when the block is
+    malformed; a malformed block stays in ``content`` as raw text, as does a stray
+    ``<tool_call>`` or ``</tool_call>`` before, between or after the blocks, and either makes
+    the format invalid. With ``prompt_opens_think`` the text continues a reasoning block the
+    prompt opened, so it must close it: when it does not, the whole text is reasoning and the
+    format is invalid.
     """
     valid = True
     body = text.rstrip()
-    if body.endswith(turn_end):
-        body = body.removesuffix(turn_end)
-    if turn_end in body:
+    for turn_end in turn_ends:
+        if body.endswith(turn_end):
+            body = body.removesuffix(turn_end)
+            break
+    if any(turn_end in body for turn_end in turn_ends):
         valid = False
     reasoning: str | None = None
     if prompt_opens_think and _THINK_CLOSE not in body:
@@ -240,11 +256,43 @@ class Qwen3XmlToolParser:
     def parse(self, text: str, tools: Sequence[ToolSpec] = ()) -> ParsedResponse:
         parse_call = functools.partial(_xml_call, properties=_properties(tools))
         return _parse_blocks(
-            text, self.turn_end, parse_call, prompt_opens_think=self.prompt_opens_think
+            text, (self.turn_end,), parse_call, prompt_opens_think=self.prompt_opens_think
         )
 
 
-def _xml_call(inner: str, *, properties: _Properties) -> tuple[str, dict[str, Any]] | None:
+@dataclass(frozen=True, slots=True)
+class Qwen3_5XmlToolParser(Qwen3XmlToolParser):
+    """The Qwen3.5 format: :class:`Qwen3XmlToolParser`'s, with scalars written by ``str``.
+
+    Qwen3.5's template writes booleans and null as ``True``, ``False`` and ``None``; those
+    exact values read as ``true``, ``false`` and ``null``, unless the parameter is a string.
+    """
+
+    name: ClassVar[str] = "qwen3_5_xml"
+    version: ClassVar[str] = "1"
+
+    def parse(self, text: str, tools: Sequence[ToolSpec] = ()) -> ParsedResponse:
+        parse_call = functools.partial(
+            _xml_call, properties=_properties(tools), value=_python_value
+        )
+        return _parse_blocks(
+            text, (self.turn_end,), parse_call, prompt_opens_think=self.prompt_opens_think
+        )
+
+
+def _python_value(text: str, schema: Mapping[str, Any] | None) -> Any:
+    if text not in _PYTHON_LITERALS:
+        return _value(text, schema)
+    decoded = _value(json.dumps(_PYTHON_LITERALS[text]), schema)
+    return text if isinstance(decoded, str) else decoded
+
+
+def _xml_call(
+    inner: str,
+    *,
+    properties: _Properties,
+    value: Callable[[str, Mapping[str, Any] | None], Any] = _value,
+) -> tuple[str, dict[str, Any]] | None:
     function = _FUNCTION.fullmatch(inner.strip())
     if function is None:
         return None
@@ -258,8 +306,53 @@ def _xml_call(inner: str, *, properties: _Properties) -> tuple[str, dict[str, An
             return None
         position = match.end()
         text = match.group(2).removeprefix("\n").removesuffix("\n")
-        arguments[key] = _value(text, schemas.get(key))
+        arguments[key] = value(text, schemas.get(key))
     if params[position:].strip() or not name:
+        return None
+    return name, arguments
+
+
+@dataclass(frozen=True, slots=True)
+class GlmXmlToolParser:
+    """The GLM-5 format: ``<think>`` reasoning and ``<arg_key>``/``<arg_value>`` tool calls.
+
+    The model ends a turn by emitting the next role tag: ``<|observation|>`` after tool calls,
+    ``<|user|>`` otherwise; text that ends on the other tag is format-invalid. The template
+    writes string values raw and other values as JSON, so a value is read with the type the
+    called tool declares, as in :class:`Qwen3XmlToolParser`. A block whose name is not one
+    word, with text outside its arguments or a repeated key, is malformed.
+    ``prompt_opens_think`` is as in :class:`Qwen3XmlToolParser` (GLM-5's generation prompt
+    ends ``<think>``).
+    """
+
+    prompt_opens_think: bool = True
+    name: ClassVar[str] = "glm_xml"
+    version: ClassVar[str] = "1"
+
+    def parse(self, text: str, tools: Sequence[ToolSpec] = ()) -> ParsedResponse:
+        tags = (_GLM_USER, _GLM_OBSERVATION)
+        parse_call = functools.partial(_glm_call, properties=_properties(tools))
+        parsed = _parse_blocks(text, tags, parse_call, prompt_opens_think=self.prompt_opens_think)
+        expected = _GLM_OBSERVATION if parsed.message.get("tool_calls") else _GLM_USER
+        ending = text.rstrip()
+        if ending.endswith(tags) and not ending.endswith(expected):
+            return ParsedResponse(parsed.message, format_valid=False)
+        return parsed
+
+
+def _glm_call(inner: str, *, properties: _Properties) -> tuple[str, dict[str, Any]] | None:
+    head, _, _ = inner.partition("<arg_key>")
+    name, params = head.strip(), inner[len(head) :]
+    schemas = properties.get(name, {})
+    arguments: dict[str, Any] = {}
+    position = 0
+    for match in _ARGUMENT.finditer(params):
+        key = match.group(1).strip()
+        if params[position : match.start()].strip() or not key or key in arguments:
+            return None
+        position = match.end()
+        arguments[key] = _value(match.group(2), schemas.get(key))
+    if params[position:].strip() or not _GLM_NAME.fullmatch(name):
         return None
     return name, arguments
 
@@ -281,7 +374,7 @@ class JsonToolCallParser:
     def parse(self, text: str, tools: Sequence[ToolSpec] = ()) -> ParsedResponse:
         # JSON arguments carry their own types, so the declared tools are not needed.
         return _parse_blocks(
-            text, self.turn_end, _json_call, prompt_opens_think=self.prompt_opens_think
+            text, (self.turn_end,), _json_call, prompt_opens_think=self.prompt_opens_think
         )
 
 
@@ -303,6 +396,8 @@ def _json_call(inner: str) -> tuple[str, dict[str, Any]] | None:
 PARSERS: Mapping[str, Callable[[], ResponseParser]] = MappingProxyType(
     {
         "qwen3_xml": Qwen3XmlToolParser,
+        "qwen3_5_xml": Qwen3_5XmlToolParser,
+        "glm_xml": GlmXmlToolParser,
         "json_tool_call": JsonToolCallParser,
     }
 )
