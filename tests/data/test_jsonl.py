@@ -104,6 +104,18 @@ def test_read_rows_reports_non_finite_numbers_as_invalid_json(tmp_path: Path, nu
         list(read_rows(path))
 
 
+def test_read_rows_reports_an_escaped_lone_surrogate_as_a_row_error(tmp_path: Path) -> None:
+    # Valid JSON, but the decoded text cannot be hashed or written back as UTF-8.
+    valid = json.loads(TOOL_USE.read_text().splitlines()[0])
+    valid["messages"][0]["content"] = "CONTENT"
+    path = tmp_path / "rows.jsonl"
+    path.write_text(json.dumps(valid).replace('"CONTENT"', '"\\ud800"') + "\n")
+    with pytest.raises(RowError) as excinfo:
+        list(read_rows(path))
+    assert (excinfo.value.code, excinfo.value.line) == (RowErrorCode.INVALID_ROW, 1)
+    assert "messages[0].content has a lone surrogate" in excinfo.value.detail
+
+
 def test_read_rows_rejects_lines_that_are_not_objects(tmp_path: Path) -> None:
     path = tmp_path / "rows.jsonl"
     path.write_text("[1, 2]\n")

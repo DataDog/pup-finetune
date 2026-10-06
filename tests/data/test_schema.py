@@ -276,6 +276,89 @@ def test_non_finite_numbers_in_parameters_and_evaluations_are_invalid_rows(numbe
     assert "evaluations: score is" in info.value.detail
 
 
+LONE = "\ud800"  # What JSON's "\ud800" escape decodes to; UTF-8 cannot encode it.
+
+
+SURROGATE = "has a lone surrogate (U+D800); UTF-8 cannot encode it"
+
+
+@pytest.mark.parametrize(
+    ("data", "detail"),
+    [
+        pytest.param(
+            row({"role": "user", "content": LONE}, ANSWER),
+            f"messages[0].content {SURROGATE}",
+            id="content",
+        ),
+        pytest.param(
+            row(USER, {"role": "assistant", "content": "ok", "reasoning_content": LONE}),
+            f"messages[1].reasoning_content {SURROGATE}",
+            id="reasoning",
+        ),
+        pytest.param(
+            row(USER, ANSWER, source={"evaluations": {"judge": {"notes": ["ok", LONE]}}}),
+            f"source.evaluations.judge.notes[1] {SURROGATE}",
+            id="nested-evaluation",
+        ),
+        pytest.param(
+            row(USER, ANSWER, source={"evaluations": {f"bad{LONE}": 1}}),
+            f"the key source.evaluations.bad\\ud800 {SURROGATE}",
+            id="evaluation-key",
+        ),
+        pytest.param(
+            row(USER, ANSWER, tools=[{"function": {"name": "t", "parameters": {"x": LONE}}}]),
+            f"tools[0].function.parameters.x {SURROGATE}",
+            id="tool-parameters",
+        ),
+        pytest.param(
+            row(USER, ANSWER, source={"tags": [LONE]}), f"source.tags[0] {SURROGATE}", id="tag"
+        ),
+        # Pydantic itself rejects a lone surrogate in a length-constrained string.
+        pytest.param(
+            {**row(USER, ANSWER), "id": LONE}, "id: Input should be a valid string", id="id"
+        ),
+    ],
+)
+def test_lone_surrogates_are_invalid_rows(data: dict[str, Any], detail: str) -> None:
+    with pytest.raises(RowError) as info:
+        validate_row(data)
+    assert info.value.code == RowErrorCode.INVALID_ROW
+    assert info.value.detail.startswith(detail)
+    str(info.value).encode("utf-8")  # The message itself stays printable.
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param('{"city": "\\ud800", "note": "fine"}', id="escaped"),
+        pytest.param(f'{{"city": "{LONE}"}}', id="raw"),
+        pytest.param('{"\\ud800": 1}', id="key"),
+    ],
+)
+def test_lone_surrogate_in_arguments_is_invalid_arguments_json(arguments: str) -> None:
+    data = row(USER, {"role": "assistant", "tool_calls": [call("c1", arguments=arguments)]})
+    with pytest.raises(RowError) as info:
+        validate_row(data)
+    assert info.value.code == RowErrorCode.INVALID_ARGUMENTS_JSON
+    assert info.value.detail.startswith("messages[1].tool_calls[0].function.arguments: ")
+    assert SURROGATE in info.value.detail
+    str(info.value).encode("utf-8")
+
+
+def test_lone_surrogate_in_a_row_built_from_models_is_rejected() -> None:
+    validated = validate_row(row(USER, ANSWER))
+    bad = validated.messages[0].model_copy(update={"content": LONE})
+    with pytest.raises(ValidationError, match="lone surrogate"):
+        TrainingRow(id="row-1", messages=[bad, *validated.messages[1:]])
+
+
+def test_surrogate_pairs_are_valid_text() -> None:
+    data = json.loads('{"id": "r", "messages": [{"role": "user", "content": "\\ud83d\\ude00"}]}')
+    validated = validate_row(row(data["messages"][0], ANSWER))
+    assert validated.messages[0].content == "\U0001f600"
+    assert len(row_content_hash(validated)) == 64
+
+
 def test_tool_message_needs_a_tool_call_id() -> None:
     data = row(
         USER,

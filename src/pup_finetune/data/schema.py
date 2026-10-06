@@ -129,6 +129,45 @@ def _require_finite(value: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
+def _find_lone_surrogate(value: object, root: str = "") -> str | None:
+    """Describe the first string or key in ``value`` holding a lone surrogate, or ``None``.
+
+    JSON's ``\\ud800`` escape decodes to one, but UTF-8 cannot encode it, so a row holding
+    one could never be hashed or written. ``root`` names ``value`` in the description.
+    """
+    stack: list[tuple[object, str]] = [(value, root)]
+    while stack:
+        item, where = stack.pop()
+        if isinstance(item, str):
+            if (surrogate := _lone_surrogate(item)) is not None:
+                return f"{where} has a lone surrogate ({surrogate}); UTF-8 cannot encode it"
+        elif isinstance(item, dict):
+            children: list[tuple[object, str]] = []
+            for key, inner in item.items():
+                text = str(key)
+                # Escaped, so the description itself stays encodable.
+                name = text.encode("utf-8", "backslashreplace").decode("utf-8")
+                path = f"{where}.{name}" if where else name
+                if (surrogate := _lone_surrogate(text)) is not None:
+                    return (
+                        f"the key {path} has a lone surrogate ({surrogate}); UTF-8 cannot encode it"
+                    )
+                children.append((inner, path))
+            stack.extend(reversed(children))
+        elif isinstance(item, list | tuple):
+            stack.extend(reversed([(inner, f"{where}[{i}]") for i, inner in enumerate(item)]))
+    return None
+
+
+def _lone_surrogate(text: str) -> str | None:
+    """The first lone surrogate in ``text`` as ``U+XXXX``, or ``None``."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        return f"U+{ord(text[exc.start]):04X}"
+    return None
+
+
 class FunctionCall(BaseModel):
     """The function an assistant calls; ``arguments`` is a JSON object encoded as a string."""
 
@@ -159,6 +198,8 @@ class FunctionCall(BaseModel):
             raise RowError(
                 RowErrorCode.INVALID_ARGUMENTS_JSON, "arguments must encode a JSON object"
             )
+        if (problem := _find_lone_surrogate(parsed, "arguments")) is not None:
+            raise RowError(RowErrorCode.INVALID_ARGUMENTS_JSON, problem)
         return value
 
 
@@ -285,6 +326,13 @@ class TrainingRow(BaseModel):
     @classmethod
     def _schema_version_is_an_integer(cls, value: object) -> object:
         return _require_int(value, f"schema_version must be the integer {SCHEMA_VERSION}")
+
+    @model_validator(mode="after")
+    def _text_is_valid_unicode(self) -> Self:
+        # Checked on the whole row so nested metadata and models built in code are covered.
+        if (problem := _find_lone_surrogate(self.model_dump())) is not None:
+            raise RowError(RowErrorCode.INVALID_ROW, problem)
+        return self
 
     @model_validator(mode="after")
     def _conversation_is_well_formed(self) -> Self:
