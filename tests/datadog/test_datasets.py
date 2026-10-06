@@ -12,7 +12,14 @@ import json
 
 import pytest
 
-from pup_finetune.datadog.datasets import JSON_API, DatasetInfo, DatasetRecord, LLMObsDatasets
+from pup_finetune.datadog.datasets import (
+    JSON_API,
+    RECORDS_ALL_MAX_PAGES,
+    DatasetInfo,
+    DatasetRecord,
+    LLMObsDatasets,
+    RecordsListTruncated,
+)
 from pup_finetune.errors import ExternalError
 from tests.fakes.datasets import FakeDatasetsApi
 from tests.fakes.pup import FakePup, PupCall, PupExit
@@ -286,6 +293,33 @@ def test_list_records_skips_unreadable_items(fake: FakePup, client: LLMObsDatase
     fake.on("llm-obs", "datasets", "records-all", json={"data": []})
     with pytest.raises(ExternalError, match="no records list"):
         client.list_records("d1")
+
+
+def test_list_records_refuses_a_truncated_listing(
+    api: FakeDatasetsApi, client: LLMObsDatasets
+) -> None:
+    project_id = api.add_project("pup-finetune")
+    dataset = api.add_dataset(project_id, "synthetic-ds")
+    rows = [{"input": {}, "metadata": {"row_id": f"r-{i}"}} for i in range(3)]
+    client.add_records(project_id, dataset.id, rows)
+    api.records_all_limit = 2
+    with pytest.raises(RecordsListTruncated, match=r"2 records, marked truncated"):
+        client.list_records(dataset.id)
+    api.records_all_limit = 3  # Every record fits: the listing is whole.
+    assert len(client.list_records(dataset.id)) == 3
+
+
+def test_list_records_refuses_a_listing_that_reached_the_page_cap(
+    fake: FakePup, client: LLMObsDatasets
+) -> None:
+    good = {"id": "rec-1", "attributes": {"metadata": {"row_id": "r-1"}}}
+    capped = {"records": [good], "truncated": False, "pages_fetched": RECORDS_ALL_MAX_PAGES}
+    fake.on("llm-obs", "datasets", "records-all", json=capped)
+    with pytest.raises(RecordsListTruncated, match=f"stopped after {RECORDS_ALL_MAX_PAGES}"):
+        client.list_records("d1")
+    below = {**capped, "pages_fetched": RECORDS_ALL_MAX_PAGES - 1}
+    fake.on("llm-obs", "datasets", "records-all", json=below)
+    assert client.list_records("d1") == [DatasetRecord("rec-1", {"row_id": "r-1"})]
 
 
 def test_add_records_needs_records(client: LLMObsDatasets) -> None:

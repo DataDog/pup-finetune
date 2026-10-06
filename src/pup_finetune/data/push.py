@@ -48,7 +48,11 @@ from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.jsonl import to_provider_dict
 from pup_finetune.data.schema import TrainingRow
 from pup_finetune.data.split import SPLITS, SplitName, check_isolation
-from pup_finetune.datadog.datasets import RECORDS_BATCH_SIZE, LLMObsDatasets
+from pup_finetune.datadog.datasets import (
+    RECORDS_BATCH_SIZE,
+    LLMObsDatasets,
+    RecordsListTruncated,
+)
 from pup_finetune.datadog.pup import Pup
 from pup_finetune.errors import ExternalError, FinetuneError, StateError, UsageError
 from pup_finetune.storage import DirectoryLock, atomic_write_json, read_json, settings_hash
@@ -470,6 +474,20 @@ def _reconcile(
     report(f"checking dataset {dataset_id} for {len(in_flight)} records of an interrupted batch")
     try:
         records = api.list_records(dataset_id)
+    except RecordsListTruncated as exc:
+        # A record missing from a cut-off listing may still be in the dataset: resending its
+        # row would add it twice. Listing again reads no further, so say how to settle it.
+        raise StateError(
+            f"cannot tell which of {len(in_flight)} records sent to dataset {dataset_id} by an "
+            f"interrupted push were added ({exc}); they may already be there: "
+            f"{_some(state.in_flight)}",
+            hint=(
+                f"pushing again lists the same records, so {PUSH_FILE} keeps the rows as "
+                "in_flight; look them up in the dataset by metadata.row_id, add the ids of "
+                f"the records found to record_ids in {PUSH_FILE}, remove every row from "
+                "in_flight, and push again to send only the rows that are missing"
+            ),
+        ) from exc
     except ExternalError as exc:
         raise StateError(
             f"cannot tell which of {len(in_flight)} records sent to dataset {dataset_id} by an "
