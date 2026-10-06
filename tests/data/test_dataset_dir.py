@@ -474,14 +474,16 @@ def test_read_import_file_excludes_undecodable_json(tmp_path: Path) -> None:
     path = tmp_path / "hostile.jsonl"
     huge_int = '{"id": ' + "9" * 5000 + "}"
     deep = "[" * 100_000 + "]" * 100_000
-    path.write_text("\n".join([lines[0], huge_int, deep, lines[1]]) + "\n")
+    nan = '{"id": "row-nan", "messages": [], "source": {"evaluations": {"score": NaN}}}'
+    path.write_text("\n".join([lines[0], huge_int, deep, nan, lines[1]]) + "\n")
     rows, exclusions = read_import_file(path)
     assert [row.id for row in rows] == [validate_row(json.loads(line)).id for line in lines[:2]]
-    assert [e.code for e in exclusions] == [RowErrorCode.INVALID_ROW] * 2
+    assert [e.code for e in exclusions] == [RowErrorCode.INVALID_ROW] * 3
     assert exclusions[0].detail.startswith("hostile.jsonl:2: invalid JSON: ")
     assert exclusions[1].detail.startswith("hostile.jsonl:3: invalid JSON: ")
+    assert exclusions[2].detail == "hostile.jsonl:4: invalid JSON: NaN is not a JSON value"
     summary = DatasetDir(tmp_path / "ds").add(rows, exclusions, settings=IMPORT).summary
-    assert (summary["accepted"], summary["excluded"]) == (2, 2)
+    assert (summary["accepted"], summary["excluded"]) == (2, 3)
 
 
 def test_read_import_file_excludes_too_deeply_nested_arguments(tmp_path: Path) -> None:

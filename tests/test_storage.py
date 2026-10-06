@@ -27,6 +27,7 @@ from pup_finetune.storage import (
     atomic_write_text,
     ensure_private_dir,
     make_private_dir,
+    parse_jsonl_line,
     read_json,
     read_jsonl,
     read_jsonl_numbered,
@@ -184,6 +185,14 @@ def test_read_jsonl_rejects_non_finite_numbers_naming_the_line(tmp_path: Path, n
     assert next(rows) == {"a": 1}
     with pytest.raises(StateError, match=rf"rows\.jsonl:2: invalid JSON: {re.escape(number)} "):
         list(rows)
+
+
+@pytest.mark.parametrize("number", NON_FINITE_NUMBERS)
+def test_parse_jsonl_line_reports_non_finite_numbers(number: str) -> None:
+    data, problem = parse_jsonl_line(f'{{"loss": {number}}}\n'.encode())
+    assert data == {}
+    assert problem is not None
+    assert problem.startswith(f"invalid JSON: {number} ")
 
 
 def test_read_json_missing_raises_file_not_found(tmp_path: Path) -> None:

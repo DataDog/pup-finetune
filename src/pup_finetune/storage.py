@@ -193,7 +193,8 @@ def parse_jsonl_line(line: bytes) -> tuple[dict[str, Any], str | None]:
     """Parse one JSONL line as a JSON object, without raising.
 
     Returns ``(object, None)``, or ``({}, problem)`` when the line is not valid UTF-8, not
-    valid JSON (including numbers too long or nesting too deep to decode), or not an object.
+    valid JSON (including ``NaN``, ``Infinity``, numbers beyond float range, and numbers too
+    long or nesting too deep to decode), or not an object.
     """
     try:
         data = _loads(line.decode("utf-8"))
