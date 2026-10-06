@@ -60,6 +60,10 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
 - `storage.py` - atomic writes, `0600` files and `0700` directories, directory locks, frozen
   settings.
 - `doctor.py` - the check registry behind `doctor`; modules add checks with `register_check`.
+- `credentials.py` - provider API keys (never Datadog's): a `CredentialSpec` registry, resolution
+  from the environment variable, then the OS keychain (`keyring`), as `SecretStr`; `store` refuses
+  when there is no OS keychain rather than writing a file. `auth login/status/logout` use it.
+- `redaction.py` - masks resolved secrets and `Bearer` tokens in error output and logs.
 - `datadog/` - Datadog access via `pup`. `pup.py` is the client every Datadog call goes
   through: `pup --no-agent --output json ...`, a scrubbed environment, timeouts, and failures as
   `ExternalError`. Span export, datasets and experiments arrive later.
@@ -73,7 +77,8 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
 
 Tests live under `tests/` and mirror `src/`. Shared fakes live in `tests/fakes/` (import them
 as `tests.fakes...`); `tests/fakes/pup.py` has `FakePup`, a fake pup runner that answers by
-argument prefix and records every call.
+argument prefix and records every call. `tests/fakes/keyring.py` has in-memory, failing and locked
+keyring backends; every test starts on the failing one, so none touches the real keychain.
 
 ## Conventions
 

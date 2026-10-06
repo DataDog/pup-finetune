@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from pup_finetune.errors import FinetuneError
+from pup_finetune.redaction import redact
 from pup_finetune.runtime import Runtime
 
 
@@ -79,21 +80,23 @@ def run_check(name: str, fn: CheckFn, *, required: bool = True) -> CheckResult:
     """Run one check. A check that raises fails with the error as its detail.
 
     An unexpected exception is summarized in one line; with ``PUP_FINETUNE_DEBUG=1`` its
-    traceback is also printed to stderr.
+    traceback is also printed to stderr. Every detail, passing or failing, is redacted of
+    known secrets.
     """
     try:
         outcome = fn()
     except FinetuneError as exc:
-        return CheckResult(name, False, error_detail(exc), required)
+        return CheckResult(name, False, redact(error_detail(exc)), required)
     except Exception as exc:
         debug = Runtime.from_env().debug
         if debug:
-            traceback.print_exception(exc, file=sys.stderr)
+            sys.stderr.write(redact("".join(traceback.format_exception(exc))))
         lines = str(exc).strip().splitlines()
         reason = f"{type(exc).__name__}: {lines[0]}" if lines else type(exc).__name__
         suffix = "" if debug else " (set PUP_FINETUNE_DEBUG=1 for a traceback)"
-        return CheckResult(name, False, f"check failed unexpectedly ({reason}){suffix}", required)
-    return CheckResult(name, outcome.ok, outcome.detail, required)
+        detail = redact(f"check failed unexpectedly ({reason}){suffix}")
+        return CheckResult(name, False, detail, required)
+    return CheckResult(name, outcome.ok, redact(outcome.detail), required)
 
 
 def run_registered_checks() -> list[CheckResult]:

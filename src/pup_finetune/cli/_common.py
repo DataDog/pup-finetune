@@ -19,6 +19,7 @@ import typer
 
 from pup_finetune.errors import FinetuneError
 from pup_finetune.output import emit, emit_error
+from pup_finetune.redaction import install_log_redaction, redact
 from pup_finetune.runtime import Runtime
 
 PROG_NAME = "pup-finetune"
@@ -49,11 +50,11 @@ def handle_exception(exc: BaseException, runtime: Runtime) -> int:
         emit_error(exc, runtime=runtime)
         return exc.exit_code
     if runtime.debug:
-        traceback.print_exception(exc, file=sys.stderr)
+        sys.stderr.write(redact("".join(traceback.format_exception(exc))))
     detail = str(exc).strip().splitlines()
     message = f"{type(exc).__name__}: {detail[0]}" if detail else type(exc).__name__
     suffix = "" if runtime.debug else " (set PUP_FINETUNE_DEBUG=1 for a traceback)"
-    print(f"Error: unexpected {message}{suffix}", file=sys.stderr)
+    print(redact(f"Error: unexpected {message}{suffix}"), file=sys.stderr)
     sys.stderr.flush()
     return 1
 
@@ -103,8 +104,10 @@ def run_command[**P](
 def run_app(app: typer.Typer, args: Sequence[str] | None = None) -> NoReturn:
     """Run ``app`` and exit, mapping exceptions that escape commands to exit codes.
 
-    Typer/Click usage errors keep their own handling (a message on stderr, exit 2).
+    Typer/Click usage errors keep their own handling (a message on stderr, exit 2). Every
+    log record created from here on is redacted of known secrets, whichever handler emits it.
     """
+    install_log_redaction()
     try:
         app(args=list(args) if args is not None else None, prog_name=PROG_NAME)
     except Exception as exc:
