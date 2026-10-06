@@ -25,6 +25,12 @@ of two (at least 1024), and `deploy` serves that same context.
 A deployment bills per hour until `undeploy`; `--serving-mode dedicated` (the default) also
 needs `--accelerator`, for example `H100:1`.
 
+## Agent skill
+
+`src/pup_finetune/skills/pup-finetune/` is an agent skill for this workflow. Copy that directory
+into your agent's skills directory (for Claude Code, `~/.claude/skills/`), or run
+`npx skills add <checkout path>`.
+
 ## Development
 
 See [AGENTS.md](AGENTS.md) for setup, commands, layout and conventions.

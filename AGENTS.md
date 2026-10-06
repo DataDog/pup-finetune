@@ -91,6 +91,7 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   imports the Loops SDK, lazily; the SDK comes with the `baseten` extra),
   `training.py`, `deploy.py` and `provider.py`.
 - `_vendor/` - *later*. Minimal vendored third-party code, with its own license and attribution.
+- `skills/` - the agent skill (`pup-finetune/SKILL.md`) that operates the CLI; shipped in the wheel.
 
 Tests live under `tests/` and mirror `src/`. Shared fakes live in `tests/fakes/` (import them
 as `tests.fakes...`); `tests/fakes/pup.py` has `FakePup`, a fake pup runner that answers by
@@ -119,6 +120,7 @@ Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds can
 - Tests use fakes, not mocks. Default tests make no network or paid calls.
 - Fixtures are synthetic only: never commit real trace content or customer data.
 - No internal links or internal-only references; this repository will be public.
+- Keep the agent skill aligned with the CLI; `tests/test_skill.py` checks its commands and flags.
 
 ## Adding a provider
 
