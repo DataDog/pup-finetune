@@ -51,6 +51,18 @@ class TestDurableFakeBackend(TestFakeBackend):
         return _DurableFakeBackend()
 
 
+class TestFakeBackendWithoutResume(TestFakeBackend):
+    @pytest.fixture
+    def backend(self) -> FakeBackend:
+        return FakeBackend(supports_resume=False)
+
+
+class TestFakeBackendWithoutPromotion(TestFakeBackend):
+    @pytest.fixture
+    def backend(self) -> FakeBackend:
+        return FakeBackend(supports_promotion=False)
+
+
 class TestFakeProvider(ProviderContract):
     @pytest.fixture
     def provider(self) -> FakeProvider:

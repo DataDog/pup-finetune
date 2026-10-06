@@ -34,6 +34,7 @@ from pup_finetune.providers.fake import (
 from pup_finetune.rendering.base import ChatMessage, RendererError, RendererErrorCode
 from pup_finetune.rendering.tokens import TokenizedExample
 from pup_finetune.runtime import Runtime
+from tests.fakes.training import SESSION
 
 ADAM = AdamConfig(learning_rate=1e-4)
 LORA = LoraConfig(rank=8)
@@ -71,7 +72,7 @@ def backend() -> FakeBackend:
 
 @pytest.fixture
 def session(backend: FakeBackend) -> Iterator[FakeSession]:
-    with backend.open_session(FAKE_PROFILE, LORA) as session:
+    with backend.open_session(FAKE_PROFILE, LORA, **SESSION) as session:
         yield session
 
 
@@ -283,7 +284,7 @@ def test_load_weights_restores_that_epochs_validation_loss(session: FakeSession)
 def test_fail_at_step_crashes_that_step_and_resume_continues(backend: FakeBackend) -> None:
     # The same options stay in force on resume, as the frozen run spec keeps them.
     backend.options = backend.options.model_copy(update={"fail_at_step": 3})
-    with backend.open_session(FAKE_PROFILE, LORA) as session:
+    with backend.open_session(FAKE_PROFILE, LORA, **SESSION) as session:
         _epoch(session)
         ckpt = session.save_training_checkpoint("e0s2", epoch=0, step=2)
         pending = session.forward_backward([_example()])
@@ -291,12 +292,12 @@ def test_fail_at_step_crashes_that_step_and_resume_continues(backend: FakeBacken
             pending.result()
         with pytest.raises(FakeCrash):
             session.optim_step(ADAM)
-    with backend.open_session(FAKE_PROFILE, LORA, resume_from=ckpt) as resumed:
+    with backend.open_session(FAKE_PROFILE, LORA, resume_from=ckpt, **SESSION) as resumed:
         assert resumed.step == 2
         assert _epoch(resumed) == ([2.0, 2.0], 1.8)
         assert resumed.step == 4
     # A fresh run with the same options crashes again.
-    with backend.open_session(FAKE_PROFILE, LORA) as fresh:
+    with backend.open_session(FAKE_PROFILE, LORA, **SESSION) as fresh:
         _epoch(fresh)
         with pytest.raises(FakeCrash, match="step 3"):
             fresh.forward_backward([_example()]).result()
@@ -304,7 +305,7 @@ def test_fail_at_step_crashes_that_step_and_resume_continues(backend: FakeBacken
 
 def test_step_delay_holds_results_back() -> None:
     backend = FakeBackend(FakeOptions(step_delay_s=0.5))
-    with backend.open_session(FAKE_PROFILE, LORA) as session:
+    with backend.open_session(FAKE_PROFILE, LORA, **SESSION) as session:
         started = time.monotonic()
         pending = session.forward_backward([_example()])
         with pytest.raises(TimeoutError):
@@ -315,13 +316,13 @@ def test_step_delay_holds_results_back() -> None:
 
 
 def test_sampler_checkpoints_expire_with_their_session(backend: FakeBackend) -> None:
-    with backend.open_session(FAKE_PROFILE, LORA) as session:
+    with backend.open_session(FAKE_PROFILE, LORA, **SESSION) as session:
         _epoch(session)
         sampler_ckpt = session.save_sampler_checkpoint("best", epoch=0, step=2)
         training_ckpt = session.save_training_checkpoint("e0s2", epoch=0, step=2)
     with pytest.raises(FinetuneError, match="closed"):
         session.forward([_example()])
-    with backend.open_session(FAKE_PROFILE, LORA, resume_from=training_ckpt) as resumed:
+    with backend.open_session(FAKE_PROFILE, LORA, resume_from=training_ckpt, **SESSION) as resumed:
         for use in (
             lambda: resumed.promote(sampler_ckpt, "run-1"),
             lambda: resumed.sampler(sampler_ckpt),
@@ -342,13 +343,13 @@ def test_sampler_checkpoints_expire_with_their_session(backend: FakeBackend) -> 
 
 
 def test_training_checkpoints_resume_in_a_new_process(backend: FakeBackend) -> None:
-    with backend.open_session(FAKE_PROFILE, LORA) as session:
+    with backend.open_session(FAKE_PROFILE, LORA, **SESSION) as session:
         _epoch(session)
         training = session.save_training_checkpoint("e0s2", epoch=0, step=2)
         sampler = session.save_sampler_checkpoint("best", epoch=0, step=2)
         # A new process has a new backend, which knows no live session.
         elsewhere = FakeBackend(backend.options)
-        with elsewhere.open_session(FAKE_PROFILE, LORA, resume_from=training) as resumed:
+        with elsewhere.open_session(FAKE_PROFILE, LORA, resume_from=training, **SESSION) as resumed:
             assert resumed.step == 2
             assert resumed.session_id != session.session_id
             with pytest.raises(FinetuneError, match="has ended"):
@@ -356,7 +357,7 @@ def test_training_checkpoints_resume_in_a_new_process(backend: FakeBackend) -> N
 
 
 def test_saves_promotions_and_samplers_are_recorded(backend: FakeBackend) -> None:
-    with backend.open_session(FAKE_PROFILE, LORA) as session:
+    with backend.open_session(FAKE_PROFILE, LORA, **SESSION) as session:
         _epoch(session)
         ckpt = session.save_sampler_checkpoint("best", epoch=0, step=2)
         session.sampler(None).close()
@@ -375,27 +376,27 @@ def test_checkpoint_names_need_1_to_17_characters(session: FakeSession, name: st
 
 
 def test_names_with_url_characters_stay_resumable(backend: FakeBackend) -> None:
-    with backend.open_session(FAKE_PROFILE, LORA) as session:
+    with backend.open_session(FAKE_PROFILE, LORA, **SESSION) as session:
         ckpt = session.save_training_checkpoint("a/b?c=d", epoch=0, step=0)
-    with backend.open_session(FAKE_PROFILE, LORA, resume_from=ckpt) as resumed:
+    with backend.open_session(FAKE_PROFILE, LORA, resume_from=ckpt, **SESSION) as resumed:
         assert resumed.step == 0
 
 
 def test_resume_needs_a_fake_training_checkpoint(backend: FakeBackend) -> None:
-    with backend.open_session(FAKE_PROFILE, LORA) as session:
+    with backend.open_session(FAKE_PROFILE, LORA, **SESSION) as session:
         sampler = session.save_sampler_checkpoint("s", epoch=0, step=0)
     foreign = dataclasses.replace(sampler, kind="training", uri="other://checkpoints/x")
     for ckpt, match in ((sampler, "training checkpoint"), (foreign, "not a fake")):
         with (
             pytest.raises(UsageError, match=match),
-            backend.open_session(FAKE_PROFILE, LORA, resume_from=ckpt),
+            backend.open_session(FAKE_PROFILE, LORA, resume_from=ckpt, **SESSION),
         ):
             pass
 
 
 def test_only_fake_profiles_train(backend: FakeBackend) -> None:
     other = dataclasses.replace(FAKE_PROFILE, provider="other")
-    with pytest.raises(UsageError), backend.open_session(other, LORA):
+    with pytest.raises(UsageError), backend.open_session(other, LORA, **SESSION):
         pass
 
 
@@ -419,7 +420,7 @@ def test_the_base_model_answers_generically(session: FakeSession) -> None:
 
 def test_a_tuned_checkpoint_answers_the_reference() -> None:
     backend = FakeBackend(teacher={prompt_hash(PROMPT, []): CALL})
-    with backend.open_session(FAKE_PROFILE, LORA) as session:
+    with backend.open_session(FAKE_PROFILE, LORA, **SESSION) as session:
         sampler = session.sampler(_tuned_ckpt(session))
         assert sampler.generate(PROMPT, [], max_tokens=256).message == CALL
         weighted = [{**PROMPT[0], "weight": 0}]
@@ -430,7 +431,7 @@ def test_a_tuned_checkpoint_answers_the_reference() -> None:
 
 def test_the_provider_passes_its_teacher_table_to_the_backend() -> None:
     provider = FakeProvider(Runtime(), teacher={prompt_hash(PROMPT, []): CALL})
-    with provider.backend().open_session(FAKE_PROFILE, LORA) as session:
+    with provider.backend().open_session(FAKE_PROFILE, LORA, **SESSION) as session:
         sampler = session.sampler(_tuned_ckpt(session))
         assert sampler.generate(PROMPT, [], max_tokens=256).message == CALL
 
@@ -504,7 +505,7 @@ def test_options_from_the_command_line_are_decoded() -> None:
     }
     # The validated options configure what the provider builds next.
     assert not provider.renderer(FAKE_PROFILE).prefix_stable
-    with provider.backend().open_session(FAKE_PROFILE, LORA) as session:
+    with provider.backend().open_session(FAKE_PROFILE, LORA, **SESSION) as session:
         assert session.forward_backward([_example()]).result().mean_loss == 2.0
 
 
@@ -546,3 +547,74 @@ def test_deployments_are_recorded() -> None:
         provider.undeploy(endpoint)
     with pytest.raises(UsageError):
         provider.deploy(dataclasses.replace(model, provider="other"), {})
+
+
+# --- Backend: capabilities, promotion failures and session settings -------------------------
+
+
+def test_capabilities_can_be_turned_off() -> None:
+    assert (FakeBackend().supports_resume, FakeBackend().supports_promotion) == (True, True)
+    backend = FakeBackend(supports_resume=False, supports_promotion=False)
+    assert (backend.supports_resume, backend.supports_promotion) == (False, False)
+    with backend.open_session(FAKE_PROFILE, LORA, **SESSION) as session:
+        _epoch(session)
+        training = session.save_training_checkpoint("t", epoch=1, step=2)
+        sampler = session.save_sampler_checkpoint("s", epoch=1, step=2)
+        with pytest.raises(UsageError, match="without promotion"):
+            session.promote(sampler, "run-1")
+    with (
+        pytest.raises(UsageError, match="without resume"),
+        backend.open_session(FAKE_PROFILE, LORA, resume_from=training, **SESSION),
+    ):
+        pass
+    provider = FakeProvider(Runtime(dev_mode=True), supports_resume=False)
+    assert (provider.backend().supports_resume, provider.backend().supports_promotion) == (
+        False,
+        True,
+    )
+
+
+def test_fail_promotions_fails_that_many_promotions(backend: FakeBackend) -> None:
+    backend.fail_promotions = 1
+    with backend.open_session(FAKE_PROFILE, LORA, **SESSION) as session:
+        _epoch(session)
+        ckpt = session.save_sampler_checkpoint("best", epoch=1, step=2)
+        with pytest.raises(FakeCrash, match="fail_promotions"):
+            session.promote(ckpt, "run-1")
+        assert session.promote(ckpt, "run-1").model_id == "run-1"
+    assert backend.fail_promotions == 0
+
+
+@pytest.mark.parametrize("model_id", ["", "Run-1", "1run", "run-", "run_1", "r" * 64])
+def test_promoted_model_ids_must_be_valid(session: FakeSession, model_id: str) -> None:
+    _epoch(session)
+    ckpt = session.save_sampler_checkpoint("best", epoch=1, step=2)
+    with pytest.raises(UsageError, match="invalid model id"):
+        session.promote(ckpt, model_id)
+    assert session.promote(ckpt, "r" * 63).model_id == "r" * 63
+
+
+def test_sessions_record_their_settings(backend: FakeBackend) -> None:
+    with backend.open_session(FAKE_PROFILE, LORA, seed=7, max_seq_len=128) as session:
+        ckpt = session.save_training_checkpoint("t", epoch=0, step=0)
+    with backend.open_session(FAKE_PROFILE, LORA, resume_from=ckpt, seed=7, max_seq_len=128):
+        pass
+    assert backend.session_settings == [
+        {"seed": 7, "max_seq_len": 128, "resume_from": None},
+        {"seed": 7, "max_seq_len": 128, "resume_from": ckpt},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("seed", "max_seq_len", "match"),
+    [(0, 0, "max_seq_len"), (0, FAKE_PROFILE.max_seq_len + 1, "max_seq_len"), (-1, 8, "seed")],
+)
+def test_session_settings_are_checked(
+    backend: FakeBackend, seed: int, max_seq_len: int, match: str
+) -> None:
+    with (
+        pytest.raises(UsageError, match=match),
+        backend.open_session(FAKE_PROFILE, LORA, seed=seed, max_seq_len=max_seq_len),
+    ):
+        pass
+    assert backend.opened == []

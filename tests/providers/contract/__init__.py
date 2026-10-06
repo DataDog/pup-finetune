@@ -297,6 +297,11 @@ class RendererContract:
         assert isinstance(parsed.format_valid, bool)
 
 
+def _session_settings(profile: ModelProfile) -> dict[str, Any]:
+    """The ``seed`` and ``max_seq_len`` the suites open sessions with."""
+    return {"seed": 42, "max_seq_len": profile.max_seq_len}
+
+
 def _assert_expired(error: FinetuneError) -> None:
     """``error`` reports an expired checkpoint: not a usage mistake, and with a way out."""
     assert not isinstance(error, UsageError), error
@@ -342,7 +347,7 @@ class BackendContract:
     def session(
         self, backend: TrainingBackend, profile: ModelProfile, lora: LoraConfig
     ) -> Iterator[TrainingSession]:
-        with backend.open_session(profile, lora) as session:
+        with backend.open_session(profile, lora, **_session_settings(profile)) as session:
             yield session
 
     def _train_one_step(
@@ -365,13 +370,28 @@ class BackendContract:
     def test_checkpoint_name_limit_is_positive(self, backend: TrainingBackend) -> None:
         assert backend.max_checkpoint_name_len > 0
 
+    def test_capabilities_are_declared(self, backend: TrainingBackend) -> None:
+        assert isinstance(backend.supports_resume, bool)
+        assert isinstance(backend.supports_promotion, bool)
+
+    def test_a_session_can_be_sized_below_the_profile_limit(
+        self,
+        backend: TrainingBackend,
+        profile: ModelProfile,
+        lora: LoraConfig,
+        batch: list[TokenizedExample],
+    ) -> None:
+        longest = max(example.num_tokens for example in batch)
+        with backend.open_session(profile, lora, seed=7, max_seq_len=longest) as session:
+            assert math.isfinite(self._train_one_step(session, batch).mean_loss)
+
     def test_open_and_close_a_session(
         self, backend: TrainingBackend, profile: ModelProfile, lora: LoraConfig
     ) -> None:
-        with backend.open_session(profile, lora) as first:
+        with backend.open_session(profile, lora, **_session_settings(profile)) as first:
             first_id = first.session_id
             assert isinstance(first_id, str) and first_id
-        with backend.open_session(profile, lora) as second:
+        with backend.open_session(profile, lora, **_session_settings(profile)) as second:
             assert second.session_id != first_id
 
     def test_a_training_step_resolves_with_metrics(
@@ -432,25 +452,66 @@ class BackendContract:
         lora: LoraConfig,
         batch: list[TokenizedExample],
     ) -> None:
-        with backend.open_session(profile, lora) as session:
+        with backend.open_session(profile, lora, **_session_settings(profile)) as session:
             self._train_one_step(session, batch)
             ckpt = session.save_training_checkpoint("e0s1", epoch=0, step=1)
             first_id = session.session_id
         assert isinstance(ckpt, CheckpointRef)
         assert (ckpt.kind, ckpt.epoch, ckpt.step) == ("training", 0, 1)
         assert ckpt.created_in_session == first_id
-        with backend.open_session(profile, lora, resume_from=ckpt) as resumed:
+        settings = _session_settings(profile)
+        if not backend.supports_resume:
+            # Without resume, asking for it fails up front instead of training from scratch.
+            with (
+                pytest.raises(FinetuneError),
+                backend.open_session(profile, lora, resume_from=ckpt, **settings),
+            ):
+                pass
+            return
+        with backend.open_session(profile, lora, resume_from=ckpt, **settings) as resumed:
             assert resumed.session_id != first_id
             metrics = self._train_one_step(resumed, batch)
             assert math.isfinite(metrics.mean_loss)
 
+    def test_a_training_checkpoint_recreates_a_sampler_checkpoint(
+        self,
+        backend: TrainingBackend,
+        profile: ModelProfile,
+        lora: LoraConfig,
+        batch: list[TokenizedExample],
+        model_id: str,
+    ) -> None:
+        # How a run promotes a best epoch whose sampler checkpoint expired with its session:
+        # load the epoch's training checkpoint in a new session and save its weights again.
+        settings = _session_settings(profile)
+        with backend.open_session(profile, lora, **settings) as session:
+            self._train_one_step(session, batch)
+            training = session.save_training_checkpoint("e1s1", epoch=1, step=1)
+        resume_from = training if backend.supports_resume else None
+        with backend.open_session(profile, lora, resume_from=resume_from, **settings) as later:
+            later.load_weights(training)
+            sampler = later.save_sampler_checkpoint("r1s1", epoch=1, step=1)
+            assert (sampler.kind, sampler.epoch, sampler.step) == ("sampler", 1, 1)
+            assert sampler.created_in_session == later.session_id
+            if backend.supports_promotion:
+                assert later.promote(sampler, model_id).model_id == model_id
+
     def test_a_sampler_checkpoint_is_promotable_while_open(
-        self, session: TrainingSession, batch: list[TokenizedExample], model_id: str
+        self,
+        backend: TrainingBackend,
+        session: TrainingSession,
+        batch: list[TokenizedExample],
+        model_id: str,
     ) -> None:
         self._train_one_step(session, batch)
         ckpt = session.save_sampler_checkpoint("best", epoch=0, step=1)
         assert ckpt.kind == "sampler"
         assert ckpt.created_in_session == session.session_id
+        if not backend.supports_promotion:
+            # Without promotion, the sampler checkpoint itself is what gets deployed.
+            with pytest.raises(FinetuneError):
+                session.promote(ckpt, model_id)
+            return
         model = session.promote(ckpt, model_id)
         assert isinstance(model, ModelRef)
         assert model.model_id == model_id
@@ -467,18 +528,19 @@ class BackendContract:
         # Sampler checkpoints outlive their session on some providers only (see CheckpointRef).
         # Where they do, promoting and sampling work as usual; where they expire, each fails
         # as an expiry, not a usage mistake, and the error says how to recover.
-        with backend.open_session(profile, lora) as session:
+        with backend.open_session(profile, lora, **_session_settings(profile)) as session:
             self._train_one_step(session, batch)
             ckpt = session.save_sampler_checkpoint("after-close", epoch=0, step=1)
-        with backend.open_session(profile, lora) as later:
+        with backend.open_session(profile, lora, **_session_settings(profile)) as later:
             try:
-                model = later.promote(ckpt, model_id)
+                model = later.promote(ckpt, model_id) if backend.supports_promotion else None
             except FinetuneError as exc:
                 _assert_expired(exc)
             else:
-                assert isinstance(model, ModelRef)
-                assert model.model_id == model_id
-                assert model.uri
+                if model is not None:
+                    assert isinstance(model, ModelRef)
+                    assert model.model_id == model_id
+                    assert model.uri
             try:
                 sampler = later.sampler(ckpt)
             except FinetuneError as exc:
