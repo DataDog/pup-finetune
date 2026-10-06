@@ -277,6 +277,65 @@ def test_a_stored_prefix_is_kept_while_its_container_is_over_the_target() -> Non
     assert retirements(cut, stored.rows, []) == []
 
 
+def a_long(span_id: str = "synthetic-span-a2") -> dict[str, Any]:
+    return item(span_id, [SYSTEM, Q1, A1, Q2, A2], trace_id="synthetic-trace-a")
+
+
+def a_prefix() -> dict[str, Any]:
+    return item("synthetic-span-a1", [SYSTEM, Q1, A1], trace_id="synthetic-trace-a")
+
+
+def b_long() -> dict[str, Any]:
+    return item("synthetic-span-b1", [SYSTEM, Q1, A1, Q2, A2], trace_id="synthetic-trace-b")
+
+
+def test_a_stored_prefix_of_a_duplicate_of_an_accepted_row_is_retired(tmp_path: Path) -> None:
+    # Trace A continues on page 2 with the conversation trace B already has.
+    pages = [page([b_long(), a_prefix()], after="cursor-2"), page([a_long()])]
+    dataset = DatasetDir(tmp_path / "ds")
+
+    def pull_pages(**options: Any) -> Any:
+        api = FakeExportApi(pages)
+        pup = api.install(FakePup()).client()
+        query = SpanQuery(ml_app="synthetic")
+        return pull(pup, PullOptions(query, **options), dataset, SplitParams())
+
+    pull_pages(target_count=2)
+    assert [row.id for row in dataset.rows()] == [
+        "synthetic-trace-b:synthetic-span-b1",
+        "synthetic-trace-a:synthetic-span-a1",
+    ]
+    collection, added = pull_pages()
+    assert [(row.id, other) for row, other in collection.duplicates] == [
+        ("synthetic-trace-a:synthetic-span-a2", "synthetic-trace-b:synthetic-span-b1")
+    ]
+    assert added.retired == 1
+    assert [row.id for row in dataset.rows()] == ["synthetic-trace-b:synthetic-span-b1"]
+    records = {record["row_id"]: record for record in dataset.excluded()}
+    assert {row_id: record["code"] for row_id, record in records.items()} == {
+        "synthetic-trace-a:synthetic-span-a1": "contained_conversation",
+        "synthetic-trace-a:synthetic-span-a2": "duplicate_conversation",
+    }
+    detail = records["synthetic-trace-a:synthetic-span-a1"]["detail"]
+    assert "synthetic-trace-a:synthetic-span-a2" in detail
+    assert "synthetic-trace-b:synthetic-span-b1" in detail
+
+
+def test_a_stored_prefix_is_kept_while_the_row_its_duplicate_repeats_is_over_the_target() -> None:
+    stored, _ = collected([page([a_prefix()])])
+    other = item("synthetic-span-z1", [SYSTEM, Q2, A2], trace_id="synthetic-trace-z")
+    pages = [page([other, b_long(), a_prefix(), a_long()])]
+    cut, _ = collected(pages, target_count=1)
+    assert [row.id for row in cut.rows] == ["synthetic-trace-z:synthetic-span-z1"]
+    assert [row.id for row, _ in cut.duplicates] == ["synthetic-trace-a:synthetic-span-a2"]
+    assert retirements(cut, stored.rows, []) == []
+
+    full, _ = collected(pages)
+    assert [e.row_id for e in retirements(full, stored.rows, [])] == [
+        "synthetic-trace-a:synthetic-span-a1"
+    ]
+
+
 def test_a_stored_exclusion_of_a_collapsed_conversation_is_re_recorded() -> None:
     pages = [page([item("synthetic-span-1", [SYSTEM, Q1, A1, Q2, A2])])]
     full, _ = collected(pages)

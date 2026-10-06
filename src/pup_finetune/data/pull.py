@@ -179,6 +179,9 @@ class Collection:
     produced_ids: set[str] = field(default_factory=set)
     """The row ids the checks and the last conversion yielded, rows over the target included.
     A read id missing here was collapsed into another conversation of its trace."""
+    duplicates: list[tuple[TrainingRow, str]] = field(default_factory=list)
+    """Each row excluded as ``duplicate_conversation``, with the id of the row it repeats
+    (which may be over the target)."""
 
     def stats(self) -> dict[str, Any]:
         """The export, check and conversion counts, as JSON."""
@@ -219,8 +222,7 @@ def collect(
     passing: list[LLMObsSpan] = []
     seen: set[str] = set()
     traces: set[str] = set()
-    rows: list[TrainingRow] = []
-    converted: list[Exclusion] = []
+    converted = _Converted()
     stopped: StopReason | None = None
     for number, page in enumerate(pages, start=1):
         added = False
@@ -238,16 +240,20 @@ def collect(
             else:
                 result.exclusions.append(exclusion)
         if added:
-            rows, converted, result.conversion = _convert(passing, options.reasoning)
+            converted = _convert(passing, options.reasoning)
+        accepted = len(converted.rows)
         if progress is not None:
-            progress(f"page {number}: {len(seen)} spans read, {len(rows)} rows accepted")
-        if len(rows) >= options.target_count:
+            progress(f"page {number}: {len(seen)} spans read, {accepted} rows accepted")
+        if accepted >= options.target_count:
             stopped = "target_count"
             break
+    rows = converted.rows
+    result.conversion = converted.stats
+    result.duplicates = converted.duplicates
     result.spans = len(seen)
     result.traces = len(traces)
     result.failed_checks = len(result.exclusions)
-    result.exclusions.extend(converted)
+    result.exclusions.extend(converted.exclusions)
     result.produced_ids = {row.id for row in rows} | {
         e.row_id for e in result.exclusions if e.row_id is not None
     }
@@ -260,28 +266,36 @@ def collect(
     return result
 
 
-def _convert(
-    spans: Iterable[LLMObsSpan], reasoning: ReasoningMode
-) -> tuple[list[TrainingRow], list[Exclusion], ConversionStats]:
+@dataclass
+class _Converted:
+    rows: list[TrainingRow] = field(default_factory=list)
+    exclusions: list[Exclusion] = field(default_factory=list)
+    duplicates: list[tuple[TrainingRow, str]] = field(default_factory=list)
+    stats: ConversionStats = field(default_factory=ConversionStats)
+
+
+def _convert(spans: Iterable[LLMObsSpan], reasoning: ReasoningMode) -> _Converted:
     """The rows and exclusions of ``spans``; a repeated conversation is a duplicate."""
     conversion = rows_from_spans(spans, reasoning=reasoning)
-    rows: list[TrainingRow] = []
-    exclusions: list[Exclusion] = []
+    result = _Converted()
     by_hash: dict[str, str] = {}
     for converted in conversion:
         row = converted.row
         if row is None:
             if converted.exclusion is not None:
-                exclusions.append(converted.exclusion)
+                result.exclusions.append(converted.exclusion)
             continue
         digest = row_content_hash(row)
         other = by_hash.setdefault(digest, row.id)
         if other != row.id:
             detail = f"same conversation as row {other!r}"
-            exclusions.append(Exclusion.for_row(row, ExclusionCode.DUPLICATE_CONVERSATION, detail))
+            exclusion = Exclusion.for_row(row, ExclusionCode.DUPLICATE_CONVERSATION, detail)
+            result.exclusions.append(exclusion)
+            result.duplicates.append((row, other))
             continue
-        rows.append(row)
-    return rows, exclusions, conversion.stats
+        result.rows.append(row)
+    result.stats = conversion.stats
+    return result
 
 
 def _unreadable(span: UnreadableSpan) -> Exclusion:
@@ -307,13 +321,19 @@ def retirements(
     another conversation of its trace, typically a longer one on a page an earlier, shorter
     pull did not reach. A stored row is retired only once a row that contains it (the same
     messages and more, compared as conversion compares them) is accepted, in ``collection``
-    or the dataset, so a row is never retired in favour of one cut by ``target_count``. A
+    or the dataset, so a row is never retired in favour of one cut by ``target_count``. The
+    longer conversation can also be a duplicate of another trace's row: it then contains the
+    stored row when the row it repeats is accepted, as that row trains on the same turns. A
     stored exclusion of such an id is re-recorded as ``contained_conversation``.
     """
     stale = collection.read_ids - collection.produced_ids
     if not stale:
         return []
-    keepers = _Containers([*collection.rows, *(row for row in stored_rows if row.id not in stale)])
+    accepted = [*collection.rows, *(row for row in stored_rows if row.id not in stale)]
+    accepted_ids = {row.id for row in accepted}
+    repeats = {row.id: other for row, other in collection.duplicates if other in accepted_ids}
+    duplicates = [row for row, _ in collection.duplicates if row.id in repeats]
+    keepers = _Containers([*accepted, *duplicates])
     retired: list[Exclusion] = []
     for row in stored_rows:
         if row.id not in stale:
@@ -321,6 +341,11 @@ def retirements(
         container = keepers.find(row)
         if container is not None:
             detail = f"a prefix of row {container.id!r}, read by a later pull"
+            if (other := repeats.get(container.id)) is not None:
+                detail = (
+                    f"a prefix of {container.id!r}, the same conversation as row {other!r}, "
+                    "read by a later pull"
+                )
             retired.append(Exclusion.for_row(row, ExclusionCode.CONTAINED_CONVERSATION, detail))
     code = ExclusionCode.CONTAINED_CONVERSATION
     for record in stored_exclusions:
