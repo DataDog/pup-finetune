@@ -40,7 +40,7 @@ uv run python scripts/check_3rdparty.py # LICENSE-3rdparty.csv covers every depe
 
 ## Adding a provider
 
-The guide for adding a training provider lands together with the provider seam it describes.
+See the "Adding a provider" section of [AGENTS.md](AGENTS.md).
 
 ## License
 

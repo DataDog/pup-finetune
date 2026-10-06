@@ -38,6 +38,10 @@ pup finetune --help
 pup finetune doctor                  # pup version, Datadog login, and other readiness checks
 ```
 
+Live `train` and `deploy` from the checkout also need the `hf` extra and the Loops SDK:
+`uv sync --extra hf`, then `uv pip install baseten-loops==0.26.0`. A plain `uv sync` removes both
+again; the launcher's `uv run` keeps them.
+
 Environment variables for development and unusual setups:
 
 - `PUP_FINETUNE_PUP` - the pup executable to run (a path, or a name on `PATH`) instead of `pup`.
@@ -53,7 +57,8 @@ Opt-in test suites: `PUP_FINETUNE_LIVE=1` runs `live` tests (real external servi
 
 Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later PRs.
 
-- `cli/` - the Typer app; one module per command group.
+- `cli/` - the Typer app; one module per command group (`train.py`; `deploy.py` holds `deploy`
+  and `undeploy`).
 - `runtime.py` - non-secret settings from the environment (`PUP_OUTPUT`, `PUP_READ_ONLY`, ...).
 - `errors.py` - expected failures and their exit codes; the `--confirm` and read-only guards.
 - `output.py` - the one stdout result (through `pup format` under pup), progress on stderr.
@@ -72,16 +77,27 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   `jsonl.py` reads and writes rows and converts them to the provider form. Conversion from
   spans, checks, splits and dataset directories arrive later.
 - `curation/` - *later*. Keep/drop labels and judge-based triage.
-- `training/` - *later*. The shared, provider-neutral SFT loop, run state and detached worker.
-- `rendering/` - *later*. The `Renderer` protocol that turns chat rows into model tokens.
+- `training/` - the shared, provider-neutral LoRA SFT loop (`loop.py`), `SFTSettings`, microbatch
+  packing, the spend guard and the run directory (`run.py`: `plan.json`, `epochs.json`,
+  `run-state.json`, `result.json`). The detached worker arrives later.
+- `rendering/` - turns a canonical row into token datums with per-token loss weights by diffing
+  chat-template prefixes (`render.py`). `families.py` pins each model family's tokenizer
+  revision; `hf.py` is the only module that imports `transformers` (the `hf` extra).
 - `evaluation/` - *later*. Replay cases, deterministic metrics, LLM judge and reporting.
-- `providers/` - *later*. Provider protocols, the lazy registry and one package per provider.
+- `providers/` - the `Provider` protocol, its requests and the lazy registry (`__init__.py`), and
+  one package per provider. `baseten/`: `registration.py` (credential spec and `doctor` checks;
+  cheap, imported with the registry; its key check is the one Baseten call outside `client.py`),
+  `models.py` (supported models), `client.py` (all other Baseten HTTP, and the only module that
+  imports the Loops SDK, which is optional and not declared because it has no published license),
+  `training.py`, `deploy.py` and `provider.py`.
 - `_vendor/` - *later*. Minimal vendored third-party code, with its own license and attribution.
 
 Tests live under `tests/` and mirror `src/`. Shared fakes live in `tests/fakes/` (import them
 as `tests.fakes...`); `tests/fakes/pup.py` has `FakePup`, a fake pup runner that answers by
 argument prefix and records every call. `tests/fakes/keyring.py` has in-memory, failing and locked
 keyring backends; every test starts on the failing one, so none touches the real keychain.
+`tests/fakes/tokenizer.py` has `FakeChatTokenizer`, `tests/fakes/training.py` a scripted
+`FakeBackend`, and `tests/fakes/baseten.py` `FakeLoops` (the SDK) and an `httpx` mock transport.
 Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds canonical rows.
 
 ## Conventions
@@ -106,4 +122,10 @@ Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds can
 
 ## Adding a provider
 
-See `CONTRIBUTING.md` (the "Adding a provider" section arrives in a later PR).
+1. Add `providers/<name>/` whose `PROVIDER` implements `providers.Provider`, and add `<name>` to
+   `_PROVIDERS` in `providers/__init__.py`.
+2. Register its credential spec and `doctor` checks in a cheap `registration.py` that
+   `providers/__init__.py` imports; load everything else lazily inside the provider's methods.
+3. Keep every SDK import and remote call in `providers/<name>/client.py` (only the key check in
+   `registration.py` makes its own cheap call), and test it with fakes under `tests/fakes/`. See
+   `providers/baseten/` for a complete example.

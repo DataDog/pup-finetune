@@ -13,7 +13,7 @@ from typing import Annotated
 import typer
 
 from pup_finetune import __version__
-from pup_finetune.cli import auth, doctor
+from pup_finetune.cli import auth, deploy, doctor, train
 from pup_finetune.cli._common import PROG_NAME, run_app
 
 app = typer.Typer(
@@ -53,6 +53,8 @@ def root(
 
 auth.register(app)
 doctor.register(app)
+train.register(app)
+deploy.register(app)
 
 
 def main() -> None:

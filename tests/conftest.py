@@ -31,6 +31,14 @@ _RUNTIME_ENV: tuple[str, ...] = (
     "PUP_FINETUNE_DEBUG",
     "PUP_FINETUNE_PUP",
     "PUP_FINETUNE_KEEP_DD_TOKEN",
+    # The Baseten key, and the Loops SDK overrides the provider refuses.
+    "BASETEN_API_KEY",
+    "LOOPS_BASE_URL",
+    "LOOPS_REQUEST_LOG",
+    "LOOPS_REUSE_FROM_RUN_ID",
+    "LOOPS_REUSE_FROM_SESSION_ID",
+    "INTERNAL_LOOPS_BACKEND_VERSION",
+    "LOOPS_TEAM",
     # Terminal and color overrides that change how rich renders stderr.
     "FORCE_COLOR",
     "NO_COLOR",

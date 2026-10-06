@@ -49,7 +49,8 @@ dependencies = [
   "typer>=0.16",
 ]
 
-# Provider extras (e.g. `fireworks`) land with their provider client PRs.
+[project.optional-dependencies]
+hf = ["transformers>=5.10.4", "jinja2>=3.1"]
 
 [project.scripts]
 pup-finetune = "pup_finetune.cli:main"
@@ -99,6 +100,10 @@ python_version = "3.12"
 strict = true
 files = ["src"]
 plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["baseten", "baseten.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
