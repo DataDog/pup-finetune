@@ -17,6 +17,9 @@ Files, all ``0600`` in a ``0700`` directory, since rows hold trace content:
 - ``labels.jsonl`` - keep/drop labels (written by a later command; optional).
 - ``splits.json`` - split assignments (see :mod:`pup_finetune.data.split`).
 - ``summary.json`` - counts and warnings, rewritten after every change.
+- ``raw/`` - for a Datadog pull, the raw Export API pages it read, so an interrupted pull
+  resumes without fetching them again (see
+  :func:`~pup_finetune.datadog.spans.iter_span_pages`).
 """
 
 from __future__ import annotations
@@ -58,6 +61,7 @@ EXCLUDED_FILE = "excluded.jsonl"
 LABELS_FILE = "labels.jsonl"
 SPLITS_FILE = "splits.json"
 SUMMARY_FILE = "summary.json"
+RAW_DIR = "raw"
 
 SourceKind = Literal["import", "datadog"]
 
@@ -86,6 +90,8 @@ class AddResult:
     unchanged: int
     excluded: int
     summary: dict[str, Any]
+    retired: int = 0
+    """Stored rows taken out and recorded as excluded."""
 
 
 class DatasetDir:
@@ -118,6 +124,10 @@ class DatasetDir:
     def summary_path(self) -> Path:
         return self.path / SUMMARY_FILE
 
+    @property
+    def raw_path(self) -> Path:
+        return self.path / RAW_DIR
+
     def is_dataset(self) -> bool:
         return self.settings_path.is_file()
 
@@ -130,7 +140,10 @@ class DatasetDir:
         except FileNotFoundError:
             raise UsageError(
                 f"{self.path} is not a dataset directory (it has no {self.settings_path.name})",
-                hint="create one with `pup finetune dataset import DIR --file rows.jsonl`",
+                hint=(
+                    "create one with `pup finetune dataset import DIR --file rows.jsonl` or "
+                    "`pup finetune dataset pull DIR --ml-app APP`"
+                ),
             ) from None
         if not isinstance(data, dict):
             raise StateError(f"{self.settings_path}: expected a JSON object")
@@ -231,6 +244,7 @@ class DatasetDir:
         exclusions: Iterable[Exclusion] = (),
         *,
         settings: DatasetSettings,
+        retired: Iterable[Exclusion] = (),
     ) -> AddResult:
         """Add valid ``rows`` and record ``exclusions``, creating the directory if needed.
 
@@ -245,6 +259,12 @@ class DatasetDir:
         that are now accepted rows are dropped, so a fixed row re-imported under its id is
         counted once, as accepted.
 
+        ``retired`` takes stored rows out: each is an exclusion whose ``row_id`` names an
+        accepted row that no longer belongs, such as a conversation a later pull found inside
+        a longer one. The row is removed from ``rows.jsonl`` and the exclusion recorded. A
+        ``row_id`` that is not stored is recorded as an exclusion all the same, and one that
+        ``rows`` also holds raises :class:`ValueError`.
+
         A validation error (a conflicting id, changed settings) leaves existing dataset files
         unchanged. If writing fails part-way, re-running the same add repairs the directory.
         """
@@ -254,9 +274,15 @@ class DatasetDir:
             if not fresh:
                 self._check_split_params(settings.split)
                 FrozenSettings.check_or_write(self.path, SETTINGS_NAME, settings.to_json())
-            existing = self.rows()
-            excluded = list(exclusions)
-            new_rows, unchanged = _merge(existing, rows, excluded)
+            retiring = list(retired)
+            retired_ids = {e.row_id for e in retiring if e.row_id is not None}
+            stored = self.rows()
+            existing = [row for row in stored if row.id not in retired_ids]
+            incoming = list(rows)
+            if clash := retired_ids.intersection(row.id for row in incoming):
+                raise ValueError(f"rows both added and retired: {sorted(clash)}")
+            excluded = [*exclusions, *retiring]
+            new_rows, unchanged = _merge(existing, incoming, excluded)
             all_rows = [*existing, *new_rows]
             splits = SplitAssignments.load(self.splits_path, settings.split)
             for row in all_rows:
@@ -275,7 +301,17 @@ class DatasetDir:
             lines = "".join(canonical_json(record) + "\n" for record in records)
             atomic_write_text(self.excluded_path, lines)
             summary = self._write_summary()
-        return AddResult(len(new_rows), unchanged, len(excluded), summary)
+        retired_rows = len(stored) - len(existing)
+        return AddResult(len(new_rows), unchanged, len(excluded), summary, retired_rows)
+
+    def create_or_check(self, settings: DatasetSettings) -> dict[str, Any]:
+        """Create an empty dataset frozen with ``settings``, or check an existing one has them.
+
+        Raises as :meth:`add` does: :class:`StateError` when the frozen settings differ, and
+        :class:`UsageError` for a non-empty directory that is not a dataset. Returns the
+        summary.
+        """
+        return self.add((), settings=settings).summary
 
     def _check_split_params(self, params: SplitParams) -> None:
         stored = self.split_params()

@@ -22,6 +22,7 @@ from pup_finetune.data.split import (
     SplitParams,
     assign_split,
     check_isolation,
+    split_counts,
     split_position,
     split_warnings,
 )
@@ -256,3 +257,12 @@ def test_split_warnings_flag_empty_splits_and_few_train_rows() -> None:
     assert "only 2 training rows" in warnings[0]
     assert "validation split is empty" in warnings[1]
     assert "test split is empty" in warnings[2]
+
+
+def test_split_counts_follow_the_params_by_trace() -> None:
+    rows = [make_row(f"row-{i}", f"Q{i}", trace_id=KEYS[i // 2]) for i in range(40)]
+    counts = split_counts(rows, SplitParams())
+    assert sum(counts.values()) == 40
+    assert set(counts) == set(SPLITS)
+    assert all(count % 2 == 0 for count in counts.values())  # two rows per trace
+    assert split_counts(rows, SplitParams(1, 0.0, 0.0)) == {"train": 40, "validation": 0, "test": 0}

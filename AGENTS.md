@@ -49,6 +49,20 @@ uv run pup-finetune train --provider fake --model fake-model --dataset /tmp/ds -
 uv run pup-finetune status /tmp/run  # phase, losses, best epoch, worker, promoted model
 ```
 
+To build a dataset from your own Agent Observability traces (Datadog reads through pup, so
+both work with `PUP_READ_ONLY` set):
+
+```sh
+uv run pup-finetune dataset preview --ml-app my-app --from now-7d   # in memory, writes nothing
+uv run pup-finetune dataset pull /tmp/ds --ml-app my-app --from now-7d
+                                     # the same flags; rerun to resume (pages cached in /tmp/ds/raw)
+uv run pup-finetune dataset show /tmp/ds
+```
+
+`--from` and `--to` are frozen as written. Datadog resolves a relative time such as `now-7d`
+when it fetches each page, so a pull resumed later can read a shifted window. Pass ISO 8601 or
+epoch ms to pin the window.
+
 Add `--detach` to train in a background worker (output in `/tmp/run/worker.log`) and follow it
 with `status /tmp/run --watch`. `--provider-option step_delay_s=0.5 --batch-size 1` makes the
 fake slow enough to `cancel /tmp/run --confirm` (or press Ctrl-C in the foreground), and
@@ -72,8 +86,9 @@ Opt-in test suites: `PUP_FINETUNE_LIVE=1` runs `live` tests (real external servi
 
 Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later PRs.
 
-- `cli/` - the Typer app; one module per command group. `train.py` has `train`, `resume`,
-  `status`, `cancel` and the hidden `_worker` a detached run executes.
+- `cli/` - the Typer app; one module per command group. `dataset.py` has `dataset import`,
+  `preview`, `pull` and `show`; `train.py` has `train`, `resume`, `status`, `cancel` and the
+  hidden `_worker` a detached run executes.
 - `runtime.py` - non-secret settings from the environment (`PUP_OUTPUT`, `PUP_READ_ONLY`, ...).
 - `errors.py` - expected failures and their exit codes; the `--confirm` and read-only guards.
 - `output.py` - the one stdout result (through `pup format` under pup), progress on stderr.
@@ -88,10 +103,10 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   through: `pup --no-agent --output json ...`, a scrubbed environment, timeouts, and failures as
   `ExternalError`. `spans.py` exports LLM spans through the Export API
   (`POST v2/llm-obs/v1/spans/events/search` via `Pup.api`): `SpanQuery` (the filter, plus
-  `settings()` to freeze), `iter_spans` (cursor pagination, retries of timed-out pages, an
-  optional raw page cache that resumes without refetching, `ExportStats`), and tolerant
-  `LLMObs*` models that skip and count spans they cannot read. Datasets and experiments arrive
-  later.
+  `settings()` to freeze), `iter_spans` and `iter_span_pages` (cursor pagination, retries of
+  timed-out pages, an optional raw page cache that resumes without refetching, `ExportStats`),
+  and tolerant `LLMObs*` models that skip and count spans they cannot read (`UnreadableSpan`).
+  Datasets and experiments arrive later.
 - `data/` - training data. `schema.py` is the canonical row every provider consumes (OpenAI
   chat format plus its source) and the stable `RowErrorCode` reasons a row is rejected for;
   `jsonl.py` reads and writes rows and converts them to the provider form; `exclusions.py`
@@ -99,13 +114,22 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   schema cannot see (conversion problems, dataset-level rules);
   `split.py` assigns deterministic, persisted train/validation/test splits per trace;
   `dataset_dir.py` is the dataset directory (`settings.json`, `rows.jsonl`, `excluded.jsonl`,
-  `splits.json`, `summary.json`) behind `dataset import` and `dataset show`. `convert.py`
-  maps one LLM span to a canonical conversation (`span_conversation`: input then output
-  messages, tool calls and results, tools, `SourceRef`; reasoning omitted or preserved), with
-  conversion issues as stable codes; `trajectories.py` has `rows_from_spans`, which dedupes
-  spans by id, groups them by trace, collapses conversations that are a prefix or duplicate
-  of another (so sub-agents stay their own rows) and yields a validated row or an
-  `Exclusion` per kept conversation. The exclusion checks arrive later.
+  `splits.json`, `summary.json`, and `raw/`, a pull's page cache) behind `dataset import`,
+  `dataset pull` and `dataset show`. `convert.py` maps one LLM span to a canonical conversation
+  (`span_conversation`: input then output messages, tool calls and results, tools, `SourceRef`;
+  reasoning omitted or preserved), with conversion issues as stable codes; `trajectories.py` has
+  `rows_from_spans`, which dedupes spans by id, groups them by trace, collapses conversations
+  that are a prefix or duplicate of another (so sub-agents stay their own rows) and yields a
+  validated row or an `Exclusion` per kept conversation. `checks.py` has the span-level checks
+  that run before conversion, in order, first failure wins (`span_error`; errored calls are kept
+  with `--include-errors`); there is no `truncated_content` check, as the Export API gives no
+  explicit truncation signal. `exclusions.py` also explains every code (`explain`). `pull.py` is
+  what `dataset preview` (in memory) and `dataset pull` (into a dataset, through its `raw/`
+  cache, with the settings frozen first) run: export a page at a time, check, convert, drop
+  repeated conversations, and stop at `--target-count` rows or `--max-candidates` spans before
+  fetching another page. Unreadable items are excluded as `unreadable_span`; a re-run that reads
+  further retires a stored row its trace now shows to be a prefix of a longer conversation
+  (`retirements`, `contained_conversation`).
 - `curation/` - *later*. Keep/drop labels and judge-based triage.
 - `training/` - the shared, provider-neutral SFT loop. `datums.py` renders rows into
   `TokenizedExample`s (per turn when a renderer is not prefix-stable) and rejects rows that

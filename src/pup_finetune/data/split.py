@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Self, cast
 
-from pup_finetune.data.schema import TrainingRow, row_content_hash
+from pup_finetune.data.schema import TrainingRow, row_content_hash, split_key
 from pup_finetune.errors import StateError, UsageError
 from pup_finetune.storage import atomic_write_json, read_json
 
@@ -174,6 +174,14 @@ def check_isolation(rows_by_split: Mapping[SplitName, Iterable[TrainingRow]]) ->
                     "conversation in different splits",
                     hint="remove one of the two rows",
                 )
+
+
+def split_counts(rows: Iterable[TrainingRow], params: SplitParams) -> dict[SplitName, int]:
+    """How many of ``rows`` each split would get under ``params``, by split key, unpersisted."""
+    counts: dict[SplitName, int] = dict.fromkeys(SPLITS, 0)
+    for row in rows:
+        counts[params.assign(split_key(row))] += 1
+    return counts
 
 
 def split_warnings(counts: Mapping[SplitName, int]) -> list[str]:

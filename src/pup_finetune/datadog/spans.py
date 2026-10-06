@@ -16,6 +16,8 @@ With a ``cache_dir``, every raw page is written there before its spans are yield
 with ``cursor.json`` (the cursor to continue from), so an interrupted export resumes without
 fetching the cached pages again. A cache belongs to the query and to the Datadog site and org
 pup is logged in to (``pup auth status``), so it is never reused for another account.
+:func:`iter_span_pages` yields the same spans a page at a time, so a caller can stop between
+pages without fetching the next one.
 """
 
 from __future__ import annotations
@@ -47,6 +49,9 @@ TIMEOUT_BACKOFF_SECONDS: tuple[float, ...] = (2.0, 5.0, 10.0)
 """The waits before each retry of a page the API reported as timed out; one retry per entry."""
 
 CURSOR_FILE_NAME = "cursor.json"
+
+CACHED_PAGES_NOTE = "(cached pages are kept)"
+"""Appended to the hint of a timed-out export that has a cache to resume from."""
 
 
 def page_file_name(number: int) -> str:
@@ -267,6 +272,18 @@ class SpanQuery:
 # --- the export -----------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class UnreadableSpan:
+    """A ``data`` item the export skipped: where it was, and whatever ids it carried."""
+
+    page: int
+    """The page it was on, 1-based, counting cached pages."""
+    index: int
+    """Its position in the page's ``data`` list, 0-based."""
+    span_id: str | None = None
+    trace_id: str | None = None
+
+
 @dataclass
 class ExportStats:
     """Counts for one :func:`iter_spans` export, updated as it is consumed."""
@@ -279,12 +296,15 @@ class ExportStats:
     """Spans yielded."""
     invalid_spans: int = 0
     """Spans skipped because they did not fit :class:`LLMObsSpan`."""
+    unreadable: list[UnreadableSpan] = field(default_factory=list)
+    """Where each of the ``invalid_spans`` was, in the order they were read."""
     timeout_retries: int = 0
     """Retry attempts for pages the API reported as timed out."""
     exhausted: bool = False
     """Whether the export read to the end of the results.
 
-    ``False`` whenever it stopped at ``max_spans``, even if no matching span was left.
+    Stopping at ``max_spans`` counts only when that span was the last item of a page with no
+    next cursor; otherwise a matching span may be left, so this stays ``False``.
     """
 
 
@@ -300,6 +320,20 @@ class SpanExport(Iterator[LLMObsSpan]):
 
     def __next__(self) -> LLMObsSpan:
         return next(self._spans)
+
+
+class SpanPageExport(Iterator[list[LLMObsSpan]]):
+    """The iterator :func:`iter_span_pages` returns; :attr:`stats` fills in as it is consumed."""
+
+    def __init__(self, pages: Iterator[list[LLMObsSpan]], stats: ExportStats) -> None:
+        self._pages = pages
+        self.stats = stats
+
+    def __iter__(self) -> SpanPageExport:
+        return self
+
+    def __next__(self) -> list[LLMObsSpan]:
+        return next(self._pages)
 
 
 @dataclass(frozen=True)
@@ -337,27 +371,73 @@ def iter_spans(
     Re-read pages yield their spans again, so callers that persist results should dedupe
     by span id. Non-finite numbers in a page are stored as ``null``.
     """
+    pages = iter_span_pages(
+        pup, query, cache_dir=cache_dir, sleep=sleep, timeout_backoff=timeout_backoff
+    )
+    return SpanExport(_flatten(pages), pages.stats)
+
+
+def iter_span_pages(
+    pup: Pup,
+    query: SpanQuery,
+    *,
+    cache_dir: Path | None = None,
+    sleep: Sleep = time.sleep,
+    timeout_backoff: Sequence[float] = TIMEOUT_BACKOFF_SECONDS,
+) -> SpanPageExport:
+    """The export :func:`iter_spans` makes, as one list of spans per page.
+
+    The next page is fetched (or re-read from the cache) only when the next list is asked
+    for, so a caller that stops between pages fetches nothing more. A page whose spans all
+    failed to parse is an empty list; the page that reaches ``max_spans`` is cut there.
+    """
     stats = ExportStats()
     pages = _pages(pup, query, cache_dir, stats, sleep, timeout_backoff)
-    return SpanExport(_spans(pages, query.max_spans, stats), stats)
+    return SpanPageExport(_span_pages(pages, query.max_spans, stats), stats)
 
 
-def _spans(
+def _flatten(pages: Iterator[list[LLMObsSpan]]) -> Iterator[LLMObsSpan]:
+    for spans in pages:
+        yield from spans
+
+
+def _span_pages(
     pages: Iterator[Page], max_spans: int | None, stats: ExportStats
-) -> Iterator[LLMObsSpan]:
+) -> Iterator[list[LLMObsSpan]]:
     if max_spans == 0:
         return
-    for page in pages:
-        for item in _items(page):
+    for number, page in enumerate(pages, start=1):
+        spans: list[LLMObsSpan] = []
+        items = _items(page)
+        for index, item in enumerate(items):
             span = parse_span(item)
             if span is None:
                 stats.invalid_spans += 1
+                stats.unreadable.append(_unreadable(item, number, index))
                 continue
             stats.spans += 1
-            yield span
+            spans.append(span)
             if max_spans is not None and stats.spans >= max_spans:
+                # The cap fell on the very last span: nothing is left to read.
+                stats.exhausted = index == len(items) - 1 and _next_cursor(page) is None
+                yield spans
                 return
+        yield spans
     stats.exhausted = True
+
+
+def _unreadable(item: object, page: int, index: int) -> UnreadableSpan:
+    """Where the unreadable ``item`` was, with the span and trace ids it has, if any."""
+    attributes = item.get("attributes") if isinstance(item, Mapping) else None
+    attributes = attributes if isinstance(attributes, Mapping) else {}
+    span_id = attributes.get("span_id") or (item.get("id") if isinstance(item, Mapping) else None)
+    trace_id = attributes.get("trace_id")
+    return UnreadableSpan(
+        page,
+        index,
+        span_id if isinstance(span_id, str) and span_id else None,
+        trace_id if isinstance(trace_id, str) and trace_id else None,
+    )
 
 
 def _items(page: Page) -> list[Any]:
@@ -440,7 +520,7 @@ def _fetch_page(
     raise ExternalError(
         f"the span search timed out {attempts} times in a row",
         source="datadog",
-        hint=f"{hint} (cached pages are kept)" if cached else hint,
+        hint=f"{hint} {CACHED_PAGES_NOTE}" if cached else hint,
     )
 
 
