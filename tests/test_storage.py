@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -146,6 +147,27 @@ def test_read_json_corrupt_raises_state_error(tmp_path: Path) -> None:
         read_json(target)
 
 
+NON_FINITE_NUMBERS = ["NaN", "Infinity", "-Infinity", "1e999"]
+
+
+@pytest.mark.parametrize("number", NON_FINITE_NUMBERS)
+def test_read_json_rejects_non_finite_numbers(tmp_path: Path, number: str) -> None:
+    target = tmp_path / "run.json"
+    target.write_text(f'{{"loss": {number}}}\n')
+    with pytest.raises(StateError, match=rf"run\.json: invalid JSON: {re.escape(number)} "):
+        read_json(target)
+
+
+@pytest.mark.parametrize("number", NON_FINITE_NUMBERS)
+def test_read_jsonl_rejects_non_finite_numbers_naming_the_line(tmp_path: Path, number: str) -> None:
+    target = tmp_path / "rows.jsonl"
+    target.write_text(f'{{"a": 1}}\n{{"loss": [{number}]}}\n')
+    rows = read_jsonl(target)
+    assert next(rows) == {"a": 1}
+    with pytest.raises(StateError, match=rf"rows\.jsonl:2: invalid JSON: {re.escape(number)} "):
+        list(rows)
+
+
 def test_read_json_missing_raises_file_not_found(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         read_json(tmp_path / "missing.json")
@@ -258,7 +280,7 @@ def test_frozen_settings_mismatch_raises(tmp_path: Path) -> None:
     assert json.loads((tmp_path / "settings.json").read_text())["seed"] == 42
 
 
-@pytest.mark.parametrize("stored", ["[1, 2]\n", "{not json\n"])
+@pytest.mark.parametrize("stored", ["[1, 2]\n", "{not json\n", '{"seed": NaN}\n'])
 def test_frozen_settings_corrupt_file_raises(tmp_path: Path, stored: str) -> None:
     path = tmp_path / "settings.json"
     path.write_text(stored)

@@ -16,12 +16,13 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import math
 import os
 import tempfile
 from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Self
+from typing import Any, NoReturn, Self
 
 from pup_finetune.errors import StateError
 
@@ -114,18 +115,45 @@ def append_jsonl(path: Path, rows: Iterable[Mapping[str, Any]]) -> int:
     return len(lines)
 
 
+class _NonFiniteNumberError(ValueError):
+    """A ``NaN``, ``Infinity`` or out-of-range number, which Python's ``json`` reads.
+
+    JSON has no such values and :func:`canonical_json` cannot write them back, so a state
+    file holding one is corrupt.
+    """
+
+
+def _reject_constant(constant: str) -> NoReturn:
+    raise _NonFiniteNumberError(f"{constant} is not a JSON value")
+
+
+def _finite_float(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        raise _NonFiniteNumberError(f"{text} is out of range for a number")
+    return value
+
+
+def _loads(text: str) -> Any:
+    """``json.loads``, but ``NaN``, ``Infinity`` and overflowing numbers raise ``ValueError``."""
+    return json.loads(text, parse_constant=_reject_constant, parse_float=_finite_float)
+
+
 def read_json(path: Path) -> Any:
     """Parse a JSON file; invalid JSON raises :class:`StateError`.
 
-    A missing file raises ``FileNotFoundError`` so callers can tell absent from corrupt.
+    ``NaN``, ``Infinity`` and numbers beyond float range are invalid. A missing file raises
+    ``FileNotFoundError`` so callers can tell absent from corrupt.
     """
     path = Path(path)
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return _loads(path.read_text(encoding="utf-8"))
     except UnicodeDecodeError as exc:
         raise StateError(f"{path}: not valid UTF-8") from exc
     except json.JSONDecodeError as exc:
         raise StateError(f"{path}:{exc.lineno}: invalid JSON: {exc.msg}") from exc
+    except _NonFiniteNumberError as exc:
+        raise StateError(f"{path}: invalid JSON: {exc}") from exc
 
 
 def read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
@@ -139,11 +167,13 @@ def read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
             if not line.strip():
                 continue
             try:
-                row = json.loads(line.decode("utf-8"))
+                row = _loads(line.decode("utf-8"))
             except UnicodeDecodeError as exc:
                 raise StateError(f"{path}:{line_number}: not valid UTF-8") from exc
             except json.JSONDecodeError as exc:
                 raise StateError(f"{path}:{line_number}: invalid JSON: {exc.msg}") from exc
+            except _NonFiniteNumberError as exc:
+                raise StateError(f"{path}:{line_number}: invalid JSON: {exc}") from exc
             if not isinstance(row, dict):
                 raise StateError(f"{path}:{line_number}: expected a JSON object")
             yield row
