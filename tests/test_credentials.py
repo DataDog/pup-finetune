@@ -516,9 +516,45 @@ def test_install_log_redaction_covers_handlers_added_later(
 
 def test_install_log_redaction_is_idempotent() -> None:
     credentials.install_log_redaction()
-    factory = logging.getLogRecordFactory()
+    make_record = logging.Logger.makeRecord
     credentials.install_log_redaction()
-    assert logging.getLogRecordFactory() is factory
+    assert logging.Logger.makeRecord is make_record
+
+
+def test_install_log_redaction_covers_extra_fields_a_formatter_renders() -> None:
+    credentials.install_log_redaction()
+    credentials.register_secret(SECRET)
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(message)s url=%(url)s"))
+    logger = logging.getLogger("pup_finetune.tests.late_extra")
+    logger.addHandler(handler)
+    logger.propagate = False
+    try:
+        logger.warning("request failed", extra={"url": f"https://x.test/?key={SECRET}"})
+    finally:
+        logger.removeHandler(handler)
+    output = stream.getvalue()
+    assert SECRET not in output
+    assert "request failed url=https://x.test/?key=***" in output
+
+
+def test_logging_filter_redacts_extra_fields_a_formatter_renders() -> None:
+    credentials.register_secret(SECRET)
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.addFilter(credentials.RedactingFilter())
+    handler.setFormatter(logging.Formatter("%(message)s header=%(header)s count=%(count)d"))
+    logger = logging.getLogger("pup_finetune.tests.redaction_extra")
+    logger.addHandler(handler)
+    logger.propagate = False
+    try:
+        logger.warning("sent", extra={"header": f"Bearer {SECRET}", "count": 3})
+    finally:
+        logger.removeHandler(handler)
+    output = stream.getvalue()
+    assert SECRET not in output
+    assert "sent header=Bearer *** count=3" in output
 
 
 def test_install_log_redaction_covers_the_last_resort_handler(

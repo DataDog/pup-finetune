@@ -82,12 +82,12 @@ def _trust_fake_keychains(monkeypatch: pytest.MonkeyPatch) -> None:
 def _restore_logging() -> Iterator[None]:
     """Undo global logging changes (e.g. log redaction installed by ``run_app``)."""
     root = logging.getLogger()
-    factory = logging.getLogRecordFactory()
+    make_record = logging.Logger.makeRecord
     root_filters = list(root.filters)
     last_resort = logging.lastResort
     last_resort_filters = list(last_resort.filters) if last_resort is not None else []
     yield
-    logging.setLogRecordFactory(factory)
+    setattr(logging.Logger, "makeRecord", make_record)  # noqa: B010
     root.filters[:] = root_filters
     logging.lastResort = last_resort
     if last_resort is not None:

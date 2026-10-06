@@ -13,6 +13,7 @@ and anything shaped like ``Bearer <token>``, with ``***``.
 
 from __future__ import annotations
 
+import functools
 import logging
 import re
 import threading
@@ -57,6 +58,10 @@ def redact(text: str) -> str:
     return _BEARER.sub(rf"\g<1>{MASK}", text)
 
 
+_STANDARD_RECORD_ATTRIBUTES = frozenset(vars(logging.LogRecord("", 0, "", 0, "", None, None)))
+"""Attributes every record has; anything else came from ``extra=`` or a filter."""
+
+
 def _formatted_message(record: logging.LogRecord) -> str:
     """``record``'s message, even when a malformed log call cannot be formatted."""
     try:
@@ -69,14 +74,18 @@ def _formatted_message(record: logging.LogRecord) -> str:
 
 
 def _scrub(record: logging.LogRecord) -> None:
-    """Redact ``record``'s message, exception text and stack in place. Never raises.
+    """Redact ``record``'s message, exception text, stack and extra fields in place. Never raises.
 
     The message is formatted once and its arguments dropped, so no handler or formatter can
     re-render a secret from them. Exception text is rendered here (formatters reuse a set
-    ``exc_text``) so the traceback is redacted too.
+    ``exc_text``) so the traceback is redacted too. String-valued attributes beyond the
+    standard ones (the ``extra=`` fields a formatter may render) are redacted as well.
     """
     record.msg = redact(_formatted_message(record))
     record.args = None
+    for name, value in list(vars(record).items()):
+        if name not in _STANDARD_RECORD_ATTRIBUTES and isinstance(value, str):
+            setattr(record, name, redact(value))
     if record.exc_info and not record.exc_text:
         try:
             record.exc_text = logging.Formatter().formatException(record.exc_info)
@@ -89,7 +98,7 @@ def _scrub(record: logging.LogRecord) -> None:
 
 
 class RedactingFilter(logging.Filter):
-    """A logging filter that redacts each record's formatted message and exception text.
+    """A logging filter that redacts each record's message, exception text and extra fields.
 
     For explicit use on a handler or logger; :func:`install_log_redaction` covers every
     record in the process without one.
@@ -100,24 +109,25 @@ class RedactingFilter(logging.Filter):
         return True
 
 
-_REDACTING_FACTORY = "_pup_finetune_redacting"
+_REDACTING_MARKER = "_pup_finetune_redacting"
 
 
 def install_log_redaction() -> None:
-    """Redact every log record of this process when it is created.
+    """Redact every log record a logger of this process creates.
 
-    Wraps the global log record factory, so records are scrubbed before any logger filter,
-    handler or formatter sees them, whichever handlers exist now or are added later. Calling
-    this again does not wrap the factory twice.
+    Wraps ``logging.Logger.makeRecord``, so each record is scrubbed after its ``extra=``
+    fields are applied and before any logger filter, handler or formatter sees it, whichever
+    handlers exist now or are added later. Calling this again does not wrap it twice.
     """
-    current = logging.getLogRecordFactory()
-    if getattr(current, _REDACTING_FACTORY, False):
+    current = logging.Logger.makeRecord
+    if getattr(current, _REDACTING_MARKER, False):
         return
 
-    def factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
-        record = current(*args, **kwargs)
+    @functools.wraps(current)
+    def make_record(self: logging.Logger, *args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = current(self, *args, **kwargs)
         _scrub(record)
         return record
 
-    setattr(factory, _REDACTING_FACTORY, True)
-    logging.setLogRecordFactory(factory)
+    setattr(make_record, _REDACTING_MARKER, True)
+    setattr(logging.Logger, "makeRecord", make_record)  # noqa: B010 - avoids a mypy method-assign ignore
