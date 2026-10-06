@@ -264,6 +264,43 @@ def test_spawn_worker_refuses_a_symlinked_log(tmp_path: Path, fake_popen: type[F
     assert stat.S_IMODE(target.stat().st_mode) == 0o644
 
 
+def test_a_worker_that_ends_before_its_launch_is_recorded_keeps_its_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = new_run(tmp_path / "run")
+
+    class EndsAtOnce:
+        """Starts a "worker" (this process) that fails and records its exit at once."""
+
+        def __init__(self, args: list[str], **kwargs: Any) -> None:
+            self.pid = os.getpid()
+            record_worker_exit(run_dir, "train", StateError("no credentials"), now=lambda: NOW)
+
+    monkeypatch.setattr(subprocess, "Popen", EndsAtOnce)
+    assert spawn_worker(run_dir, "train", now=lambda: NOW) == os.getpid()
+    launched = read_json(run_dir.worker_path)
+    assert launched["pid"] == os.getpid()
+    assert launched["started_at"] == NOW.isoformat(timespec="seconds")
+    assert launched["ended_at"] == NOW.isoformat()
+    assert launched["exit_error"]["message"] == "no credentials"
+
+
+def test_a_new_launch_replaces_an_earlier_workers_record(
+    tmp_path: Path, fake_popen: type[FakePopen]
+) -> None:
+    run_dir = new_run(tmp_path / "run")
+    atomic_write_json(
+        run_dir.worker_path,
+        {"pid": 1, "mode": "train", "started_at": at(0), "ended_at": at(5), "exit_error": None},
+    )
+    spawn_worker(run_dir, "resume", now=lambda: NOW)
+    assert read_json(run_dir.worker_path) == {
+        "pid": 4242,
+        "mode": "resume",
+        "started_at": NOW.isoformat(timespec="seconds"),
+    }
+
+
 def test_record_worker_exit_notes_the_error(tmp_path: Path) -> None:
     run_dir = new_run(tmp_path / "run")
     atomic_write_json(

@@ -18,6 +18,9 @@ worker inherits this process's environment and nothing else: no secret is passed
 its arguments, extra environment variables or files; it resolves the provider's credentials
 again itself. When it ends, it notes that in ``worker.json`` (:func:`record_worker_exit`),
 with the error it ended with, so ``status`` can tell a worker that failed before training.
+Both updates of ``worker.json`` happen under a lock on ``.worker.lock`` and merge into the
+record of the same pid, so a worker that ends before its launcher has recorded it keeps its
+exit record.
 
 :func:`worker_status` tells whether a run's training process is alive (its pid, and how old
 the heartbeat is); :func:`cancel_training` sends SIGTERM to it after checking that the
@@ -27,11 +30,13 @@ process in ``state.json`` is alive, ours, and holds the run's lock.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import os
 import signal
 import stat
 import subprocess
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, get_args
@@ -143,10 +148,43 @@ def spawn_worker(run_dir: RunDir, mode: WorkerMode, *, now: Clock = utcnow) -> i
     finally:
         os.close(log_fd)
     started_at = now().isoformat(timespec="seconds")
-    atomic_write_json(
-        run_dir.worker_path, {"pid": process.pid, "mode": mode, "started_at": started_at}
-    )
+    launch = {"pid": process.pid, "mode": mode, "started_at": started_at}
+    with _worker_record_lock(run_dir):
+        recorded = _launched(run_dir) or {}
+        if recorded.get("pid") == process.pid:  # the worker already ended: keep its exit
+            launch = {**recorded, **launch}
+        atomic_write_json(run_dir.worker_path, launch)
     return process.pid
+
+
+WORKER_LOCK = ".worker.lock"
+"""The lock file ``worker.json`` updates are made under, in the run directory."""
+
+
+@contextlib.contextmanager
+def _worker_record_lock(run_dir: RunDir) -> Iterator[None]:
+    """Hold the (blocking) lock that serializes updates of ``worker.json``.
+
+    Not the run's lock, which the worker holds while it trains. The lock file is never
+    opened through a symlink, and must be a regular file of this user's.
+    """
+    path = run_dir.path / WORKER_LOCK
+    flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise StateError(f"cannot lock {path}: {exc.strerror or exc}") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise StateError(f"{path} is not a regular file of yours; not locking it")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def _open_log(run_dir: RunDir) -> int:
@@ -178,17 +216,18 @@ def record_worker_exit(
     with contextlib.suppress(Exception):
         if not run_dir.run_path.is_file():
             return
-        launched = _launched(run_dir) or {}
-        if launched.get("pid") != os.getpid():  # e.g. run by hand: this is the latest worker
-            launched = {"pid": os.getpid(), "mode": mode, "started_at": None}
-        atomic_write_json(
-            run_dir.worker_path,
-            {
-                **launched,
-                "ended_at": now().isoformat(),
-                "exit_error": None if error is None else error_json(error),
-            },
-        )
+        with _worker_record_lock(run_dir):
+            launched = _launched(run_dir) or {}
+            if launched.get("pid") != os.getpid():  # run by hand, or not yet recorded
+                launched = {"pid": os.getpid(), "mode": mode, "started_at": None}
+            atomic_write_json(
+                run_dir.worker_path,
+                {
+                    **launched,
+                    "ended_at": now().isoformat(),
+                    "exit_error": None if error is None else error_json(error),
+                },
+            )
 
 
 # --- Watching ----------------------------------------------------------------------------
