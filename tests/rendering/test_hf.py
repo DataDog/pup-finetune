@@ -332,8 +332,8 @@ def test_a_turn_that_does_not_continue_its_prompt_is_refused(
             assert reason in excinfo.value.detail
 
 
-def test_role_tag_families_train_the_next_role_tag_as_the_stop() -> None:
-    r = HFChatTemplateRenderer(
+def role_tag_renderer() -> HFChatTemplateRenderer:
+    return HFChatTemplateRenderer(
         "example/role-tags",
         SHA,
         response_parser=Qwen3XmlToolParser(turn_end="<|user|>"),
@@ -342,6 +342,10 @@ def test_role_tag_families_train_the_next_role_tag_as_the_stop() -> None:
         prefix_stable=True,
         tokenizer=FakeChatTokenizer(template=role_tag_template),
     )
+
+
+def test_role_tag_families_train_the_next_role_tag_as_the_stop() -> None:
+    r = role_tag_renderer()
     examples = r.per_turn_examples(TOOL_ROW[1:], [])
     assert [trained_runs(r, e) for e in examples] == [
         [
@@ -353,6 +357,35 @@ def test_role_tag_families_train_the_next_role_tag_as_the_stop() -> None:
     full = r.supervised_example(TOOL_ROW[1:], [])
     assert trained_runs(r, full) == [run for e in examples for run in trained_runs(r, e)]
     assert r.stop_token_ids == [SPECIAL_IDS["<|user|>"], SPECIAL_IDS["<|observation|>"]]
+
+
+@pytest.mark.parametrize(
+    ("make", "stop", "turn_end"),
+    [
+        (renderer, "<|im_end|>", "<|im_end|>"),
+        (role_tag_renderer, "<|user|>", "<|user|>"),
+        (role_tag_renderer, "<|observation|>", "<|user|>"),
+    ],
+    ids=["stop_token", "role_tag", "other_role_tag"],
+)
+def test_a_reply_that_spells_a_stop_token_is_refused(
+    make: Callable[[], HFChatTemplateRenderer], stop: str, turn_end: str
+) -> None:
+    # Sampling ends at the first stop, so the text after it could never be generated.
+    r = make()
+    conversation: list[ChatMessage] = [
+        {"role": "user", "content": "Quote it."},
+        {"role": "assistant", "content": f"a {stop} b"},
+    ]
+    for render in (r.per_turn_examples, r.supervised_example):
+        with pytest.raises(RendererError) as excinfo:
+            render(conversation, [])
+        assert excinfo.value.code is RendererErrorCode.UNSUPPORTED_MESSAGE
+        assert excinfo.value.detail == (
+            "messages[1]: the completion contains an embedded stop token"
+        )
+    [example] = r.per_turn_examples(TWO_TURNS[:2], [])
+    assert trained_runs(r, example)[-1].endswith(f"One.{turn_end}")
 
 
 def _role_tags_with_a_trailing_newline(

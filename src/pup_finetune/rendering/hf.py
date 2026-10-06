@@ -22,7 +22,8 @@ completion is the rest of the rendered text encoded on its own, after the prompt
 Families whose models stop by emitting the next role tag (no end-of-turn token) append that
 tag to the completion as its stop target, after dropping any whitespace the template renders
 after the reply. A turn whose render does not continue its own prompt is refused with
-``prompt_mismatch``.
+``prompt_mismatch``; one whose completion holds a stop token before its own stop (content
+that spells ``<|im_end|>`` encodes to that token) with ``unsupported_message``.
 
 **One example per row, when it is exact.** A renderer built with ``prefix_stable=True`` (the
 family pins it) also offers :meth:`HFChatTemplateRenderer.supervised_example`: the whole
@@ -459,6 +460,7 @@ class HFChatTemplateRenderer:
             raise RendererError(
                 RendererErrorCode.NO_TRAINABLE_TOKENS, f"{where}: the turn rendered no tokens"
             )
+        stops = set(self._stop_ids())
         if self._next_role_tag is not None:
             # The reply ends where the template's trailing whitespace starts; the tag follows.
             end = len(tokens)
@@ -468,14 +470,29 @@ class HFChatTemplateRenderer:
                 raise RendererError(
                     RendererErrorCode.NO_TRAINABLE_TOKENS, f"{where}: the turn rendered no text"
                 )
+            _refuse_embedded_stop(tokens[len(prompt) : end], stops, where)
             tag = self._single_token(self._next_role_tag(messages[index]))
             return _Turn([*tokens[:end], tag], len(prompt))
-        stops = set(self._stop_ids())
         for end in range(len(tokens), len(prompt), -1):
             if tokens[end - 1] in stops:
+                _refuse_embedded_stop(tokens[len(prompt) : end - 1], stops, where)
                 return _Turn(tokens[:end], len(prompt))
         raise RendererError(
             RendererErrorCode.TEMPLATE_ERROR, f"{where}: the turn does not end with a stop token"
+        )
+
+
+def _refuse_embedded_stop(completion: Sequence[int], stops: set[int], where: str) -> None:
+    """Refuse a completion holding a stop token before its own stop target.
+
+    Content that spells a stop token (``<|im_end|>`` in a reply) encodes to its special id.
+    Training on it would teach text after a stop, which sampling, ending at the first stop,
+    can never produce.
+    """
+    if any(token in stops for token in completion):
+        raise RendererError(
+            RendererErrorCode.UNSUPPORTED_MESSAGE,
+            f"{where}: the completion contains an embedded stop token",
         )
 
 
