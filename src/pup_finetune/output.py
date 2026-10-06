@@ -65,8 +65,13 @@ def emit(
     runtime: Runtime,
     runner: FormatRunner = run_pup,
 ) -> None:
-    """Write exactly one result document to stdout."""
-    document = to_json(result)
+    """Write exactly one result document to stdout.
+
+    Every string in ``result`` (keys included) is passed through
+    :func:`~pup_finetune.redaction.redact` first, so a known secret that slipped into a result
+    never reaches stdout.
+    """
+    document = to_json(_redacted(result))
     text = _format_with_pup(document, runner) if runtime.under_pup else None
     if text is None:
         text = document
@@ -77,14 +82,20 @@ def emit(
 
 
 def _redacted(value: Any) -> Any:
-    """``value`` with every string inside it (keys included) passed through ``redact``."""
+    """``value`` with every string inside it (keys included) passed through ``redact``.
+
+    Values JSON cannot represent natively (paths, dates, arbitrary objects) are
+    rendered with ``str`` first, as :func:`to_json` would, so their text is redacted too.
+    """
+    if value is None or isinstance(value, bool | int | float):
+        return value
     if isinstance(value, str):
         return redact(value)
     if isinstance(value, Mapping):
         return {_redacted(key): _redacted(item) for key, item in value.items()}
-    if isinstance(value, list | tuple):
+    if isinstance(value, list | tuple | set | frozenset):
         return [_redacted(item) for item in value]
-    return value
+    return redact(str(value))
 
 
 def emit_error(
@@ -97,8 +108,8 @@ def emit_error(
 
     A :class:`ConfirmRequired` also emits its preview as the stdout result, so agents can
     parse what would happen and the command that runs it. Every line, and every string in
-    the preview, is passed through :func:`~pup_finetune.redaction.redact`, so a known secret
-    never reaches the terminal.
+    the preview (through :func:`emit`), is passed through
+    :func:`~pup_finetune.redaction.redact`, so a known secret never reaches the terminal.
     """
     if isinstance(err, ConfirmRequired):
         print(redact(f"Confirmation required: {err}"), file=sys.stderr)
@@ -112,8 +123,8 @@ def emit_error(
         emit(
             {
                 "status": "confirmation_required",
-                "preview": _redacted(err.preview),
-                "next_command": redact(err.rerun),
+                "preview": err.preview,
+                "next_command": err.rerun,
             },
             runtime=runtime,
             runner=runner,

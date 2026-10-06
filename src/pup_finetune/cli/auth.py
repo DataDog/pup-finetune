@@ -116,7 +116,7 @@ def _status_entry(spec: credentials.CredentialSpec) -> dict[str, Any]:
     try:
         found = credentials.lookup(spec.provider)
     except ExternalError as exc:
-        entry["error"] = exc.message
+        entry["error"] = credentials.redact(exc.message)
         return entry
     if found is not None:
         entry.update(configured=True, source=found.source)

@@ -80,7 +80,8 @@ def run_check(name: str, fn: CheckFn, *, required: bool = True) -> CheckResult:
     """Run one check. A check that raises fails with the error as its detail.
 
     An unexpected exception is summarized in one line; with ``PUP_FINETUNE_DEBUG=1`` its
-    traceback is also printed to stderr. Failure details are redacted of known secrets.
+    traceback is also printed to stderr. Every detail, passing or failing, is redacted of
+    known secrets.
     """
     try:
         outcome = fn()
@@ -95,7 +96,7 @@ def run_check(name: str, fn: CheckFn, *, required: bool = True) -> CheckResult:
         suffix = "" if debug else " (set PUP_FINETUNE_DEBUG=1 for a traceback)"
         detail = redact(f"check failed unexpectedly ({reason}){suffix}")
         return CheckResult(name, False, detail, required)
-    return CheckResult(name, outcome.ok, outcome.detail, required)
+    return CheckResult(name, outcome.ok, redact(outcome.detail), required)
 
 
 def run_registered_checks() -> list[CheckResult]:

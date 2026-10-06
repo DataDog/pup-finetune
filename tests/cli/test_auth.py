@@ -24,7 +24,7 @@ from pup_finetune import doctor as doctor_registry
 from pup_finetune.cli import app
 from pup_finetune.cli import auth as auth_cli
 from pup_finetune.credentials import CredentialSpec
-from pup_finetune.errors import UsageError
+from pup_finetune.errors import ExternalError, UsageError
 from tests.fakes.keyring import FailKeyring, LockedKeyring, MemoryKeyring, StickyKeyring
 
 SECRET = "zq9Xsynthetic0000keyVALUEw7Pm"  # noqa: S105 - synthetic test value
@@ -136,6 +136,22 @@ def test_status_reports_a_locked_keychain_without_failing(
     assert entry["configured"] is False
     assert entry["source"] is None
     assert "could not read the acme key" in entry["error"]
+
+
+def test_status_redacts_a_provider_config_error(keychain: MemoryKeyring) -> None:
+    credentials.register_secret(SECRET)
+
+    def reader() -> str:
+        raise ExternalError(f"could not parse the acme config near {SECRET}", source="acme")
+
+    credentials.register(
+        CredentialSpec(provider="acme", env_var="ACME_API_KEY", config_reader=reader)
+    )
+    result = invoke("status")
+    assert result.exit_code == 0, result.stderr
+    [entry] = json.loads(result.stdout)["providers"]
+    assert entry["error"] == "could not parse the acme config near ***"
+    assert_no_leak(result.stdout + result.stderr)
 
 
 def test_unknown_provider_is_a_usage_error_listing_the_registered_ones() -> None:

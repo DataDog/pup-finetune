@@ -466,6 +466,19 @@ def test_doctor_redacts_failing_check_details(
         assert "RuntimeError: crashed with ***" in err
 
 
+def test_doctor_redacts_returned_check_details(capsys: pytest.CaptureFixture[str]) -> None:
+    credentials.register_secret(SECRET)
+    doctor_registry.register_check(
+        "passing", lambda: doctor_registry.CheckOutcome(True, f"using {SECRET}")
+    )
+    doctor_registry.register_check(
+        "failing", lambda: doctor_registry.CheckOutcome(False, "Authorization: Bearer tok3n")
+    )
+    passing, failing = doctor_registry.run_registered_checks()
+    assert passing.detail == "using ***"
+    assert failing.detail == "Authorization: Bearer ***"
+
+
 def test_doctor_check_reports_a_locked_keychain(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(keyring.core, "_keyring_backend", LockedKeyring())
     credentials.register(SPEC)

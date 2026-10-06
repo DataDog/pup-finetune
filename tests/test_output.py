@@ -9,17 +9,18 @@ from __future__ import annotations
 import io
 import json
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import pytest
 from rich.console import Console
 
-from pup_finetune import output
+from pup_finetune import output, redaction
 from pup_finetune.errors import ConfirmRequired, UsageError
 from pup_finetune.output import emit, emit_error, info, status, to_json, warn
 from pup_finetune.runtime import Runtime
 
+SECRET = "zq9Xsynthetic0000keyVALUEw7Pm"  # noqa: S105 - synthetic test value
 STANDALONE = Runtime()
 UNDER_PUP = Runtime(output_format="yaml")
 
@@ -146,6 +147,58 @@ def test_confirm_required_also_emits_preview_json(capsys: pytest.CaptureFixture[
     }
     assert "preview only" in stderr
     assert "pup finetune dataset push d --confirm" in stderr
+
+
+@pytest.fixture
+def registered_secret() -> Iterator[str]:
+    redaction.clear_secrets()
+    redaction.register_secret(SECRET)
+    yield SECRET
+    redaction.clear_secrets()
+
+
+class _Holder:
+    def __str__(self) -> str:
+        return f"holder({SECRET})"
+
+
+@pytest.mark.parametrize("runtime", [STANDALONE, UNDER_PUP], ids=["standalone", "under-pup"])
+def test_emit_redacts_every_string_in_a_result(
+    runtime: Runtime, registered_secret: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runner = FakePupRunner()
+    result = {
+        "detail": f"key={registered_secret}",
+        f"k-{registered_secret}": [("Bearer abc.DEF", 1, 2.5, True, None)],
+        "path": Path(f"/runs/{registered_secret}"),
+    }
+    emit(result, runtime=runtime, runner=runner)
+    out = capsys.readouterr().out
+    document = runner.calls[0][1] if runtime.under_pup else out
+    assert registered_secret not in document
+    assert json.loads(document) == {
+        "detail": "key=***",
+        "k-***": [["Bearer ***", 1, 2.5, True, None]],
+        "path": "/runs/***",
+    }
+
+
+def test_confirm_required_redacts_sets_and_objects_in_the_preview(
+    registered_secret: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    err = ConfirmRequired(
+        "preview only",
+        preview={"tags": {f"t:{registered_secret}"}, "obj": _Holder()},
+        rerun=f"pup finetune x --name {registered_secret} --confirm",
+    )
+    emit_error(err, runtime=STANDALONE)
+    out, stderr = capsys.readouterr()
+    assert registered_secret not in out + stderr
+    assert json.loads(out) == {
+        "status": "confirmation_required",
+        "preview": {"tags": ["t:***"], "obj": "holder(***)"},
+        "next_command": "pup finetune x --name *** --confirm",
+    }
 
 
 def test_confirm_required_preview_goes_through_pup_under_pup(
