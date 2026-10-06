@@ -481,7 +481,7 @@ def test_content_hash_is_a_stable_sha256() -> None:
         ),
         pytest.param(
             next(r for r in VALID_ROWS if r["id"] == "row-weather-001"),
-            "f7971b6ddb678987d8ad402f04e046aa222524395159e235421600af5c7b9ec0",
+            "a424eac1204787238c5895ffd0611c3473cd1bf6c3c271c610a5b9b0f5e599a2",
             id="row-weather-001",
         ),
     ],
@@ -529,6 +529,49 @@ def test_content_hash_covers_tool_call_arguments() -> None:
 
     base = row_content_hash(validate_row(calling('{"city": "Northvale"}')))
     assert row_content_hash(validate_row(calling('{"city": "Eastport"}'))) != base
+
+
+def tool_round(
+    ids: tuple[str, str], answers: tuple[str, str], *, row_id: str = "row-1"
+) -> dict[str, Any]:
+    """A parallel call of two cities, results for ``answers`` (ids) in that order, a reply."""
+    northvale, eastport = ids
+    return row(
+        USER,
+        {
+            "role": "assistant",
+            "tool_calls": [
+                call(northvale, arguments='{"city": "Northvale"}'),
+                call(eastport, arguments='{"city": "Eastport"}'),
+            ],
+        },
+        {"role": "tool", "content": "14°C", "tool_call_id": answers[0]},
+        {"role": "tool", "content": "9°C", "tool_call_id": answers[1]},
+        ANSWER,
+        id=row_id,
+    )
+
+
+def test_content_hash_ignores_tool_call_ids() -> None:
+    base = row_content_hash(validate_row(tool_round(("c1", "c2"), ("c1", "c2"))))
+    renumbered = tool_round(("call_9f3a", "call_77b0"), ("call_9f3a", "call_77b0"))
+    assert row_content_hash(validate_row(renumbered)) == base
+
+
+def test_content_hash_keeps_results_paired_with_their_call() -> None:
+    # The same results, but answering the other call of the parallel pair.
+    base = row_content_hash(validate_row(tool_round(("c1", "c2"), ("c1", "c2"))))
+    swapped = tool_round(("c1", "c2"), ("c2", "c1"))
+    assert row_content_hash(validate_row(swapped)) != base
+
+
+def test_content_hash_leaves_the_stored_ids_unchanged() -> None:
+    validated = validate_row(tool_round(("c1", "c2"), ("c1", "c2")))
+    row_content_hash(validated)
+    calls = validated.messages[1].tool_calls
+    assert calls is not None
+    assert [c.id for c in calls] == ["c1", "c2"]
+    assert [m.tool_call_id for m in validated.messages[2:4]] == ["c1", "c2"]
 
 
 def test_content_hash_depends_on_turn_order() -> None:

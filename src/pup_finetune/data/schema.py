@@ -414,11 +414,25 @@ def _format_location(loc: tuple[int | str, ...]) -> str:
 
 def _content_payload(row: TrainingRow) -> dict[str, Any]:
     # Weight is training metadata, not content: the same conversation is the same row.
+    messages = [
+        message.model_dump(mode="json", exclude_none=True, exclude={"weight"})
+        for message in row.messages
+    ]
+    # Tool call ids are generated, by the provider or by conversion, so they differ between
+    # recordings of the same conversation: a call is named by its position instead
+    # (``m{message index}.c{call index}``) and a result by the position of the call it
+    # answers. The position keeps results paired with different calls of a parallel call
+    # apart. An id no call has is kept as given (a valid row has none).
+    positions: dict[str, str] = {}
+    for index, message in enumerate(messages):
+        for call_index, call in enumerate(message.get("tool_calls") or ()):
+            position = f"m{index}.c{call_index}"
+            positions.setdefault(call["id"], position)
+            call["id"] = position
+        if (call_id := message.get("tool_call_id")) is not None:
+            message["tool_call_id"] = positions.get(call_id, call_id)
     return {
-        "messages": [
-            message.model_dump(mode="json", exclude_none=True, exclude={"weight"})
-            for message in row.messages
-        ],
+        "messages": messages,
         "tools": [tool.model_dump(mode="json", exclude_none=True) for tool in row.tools],
     }
 
@@ -426,8 +440,11 @@ def _content_payload(row: TrainingRow) -> dict[str, Any]:
 def row_content_hash(row: TrainingRow) -> str:
     """The sha256 hex digest of the row's messages and tools as canonical JSON.
 
-    The id, source, schema version and per-message weights are left out, so two rows with
-    the same conversation hash the same. Used for deduplication and split-leakage checks.
+    The id, source, schema version and per-message weights are left out, and tool call ids
+    are replaced by the call's position (a tool result's ``tool_call_id`` by the position
+    of the call it answers), so two rows with the same conversation hash the same however
+    their calls were numbered. The row's stored ids are unchanged. Used for deduplication
+    and split-leakage checks.
     """
     return hashlib.sha256(canonical_json(_content_payload(row)).encode("utf-8")).hexdigest()
 

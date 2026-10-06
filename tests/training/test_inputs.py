@@ -92,6 +92,30 @@ def test_the_run_hash_covers_loss_weights_as_trained() -> None:
     assert run_hash((0, None)) != run_hash((None, 0))
 
 
+def _tool_row(call_id: str) -> TrainingRow:
+    call = {"id": call_id, "type": "function", "function": {"name": "f", "arguments": "{}"}}
+    return validate_row(
+        {
+            "id": "a",
+            "messages": [
+                {"role": "user", "content": "question"},
+                {"role": "assistant", "tool_calls": [call]},
+                {"role": "tool", "content": "result", "tool_call_id": call_id},
+                {"role": "assistant", "content": "answer"},
+            ],
+        }
+    )
+
+
+def test_the_run_hash_covers_the_stored_tool_call_ids() -> None:
+    # The content hash names calls by position, but a chat template may render the ids.
+    def run_hash(call_id: str) -> str:
+        return rows_content_hash({"train": [_tool_row(call_id)], "validation": [], "test": []})
+
+    assert run_hash("call_1") == run_hash("call_1")
+    assert run_hash("call_1") != run_hash("call_2")
+
+
 def test_a_resume_refuses_a_dataset_whose_loss_weights_changed(tmp_path: Path) -> None:
     dataset = DatasetDir(tmp_path / "ds")
     dataset.add([_two_turn_row("a", (None, None)), _row("b")], settings=SETTINGS)

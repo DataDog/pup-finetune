@@ -266,6 +266,30 @@ def test_duplicate_conversations_are_excluded(tmp_path: Path) -> None:
     assert (again.summary["total"], again.summary["excluded"]) == (3, 1)
 
 
+def test_conversations_that_differ_only_in_tool_call_ids_are_duplicates(tmp_path: Path) -> None:
+    def tool_row(row_id: str, call_id: str) -> TrainingRow:
+        call = {"id": call_id, "type": "function", "function": {"name": "f", "arguments": "{}"}}
+        return validate_row(
+            {
+                "id": row_id,
+                "messages": [
+                    {"role": "user", "content": "Look it up."},
+                    {"role": "assistant", "tool_calls": [call]},
+                    {"role": "tool", "content": "Found.", "tool_call_id": call_id},
+                    {"role": "assistant", "content": "Here it is."},
+                ],
+            }
+        )
+
+    dataset = DatasetDir(tmp_path / "ds")
+    result = dataset.add(
+        [tool_row("row-a", "call_3e1a"), tool_row("row-b", "call_b70c")], settings=IMPORT
+    )
+    assert (result.added, result.excluded) == (1, 1)
+    assert [row.id for row in dataset.rows()] == ["row-a"]
+    assert dataset.excluded()[0]["code"] == "duplicate_conversation"
+
+
 def test_a_fixed_row_reimported_under_its_id_replaces_its_exclusion(tmp_path: Path) -> None:
     broken = json.loads(INVALID.read_text().splitlines()[0])
     assert broken["id"] == "bad-no-assistant"

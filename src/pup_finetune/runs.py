@@ -188,26 +188,35 @@ def dataset_content_hash(dataset: DatasetDir) -> str:
 
 
 def rows_content_hash(by_split: Mapping[SplitName, Sequence[TrainingRow]]) -> str:
-    """A sha256 over rows by split: their ids, content hashes and loss weights, in id order.
+    """A sha256 over rows by split: ids, content hashes, loss weights and call ids, in id order.
 
     The order of the rows does not change it, so whoever trains on rows it describes must
     put them in a canonical order, such as :func:`in_id_order`. Unlike
     :func:`~pup_finetune.data.schema.row_content_hash` (the conversation, for dedupe), it
     covers each message's weight, normalized (``0``, or ``1`` for ``1`` and unset), since a
-    changed weight changes what a run trains on.
+    changed weight changes what a run trains on, and the tool call ids as stored, which the
+    content hash leaves out but a chat template may render.
     """
     hashed = {split: sorted(_row_identity(row) for row in rows) for split, rows in by_split.items()}
     return hashlib.sha256(canonical_json(hashed).encode("utf-8")).hexdigest()
 
 
-def _row_identity(row: TrainingRow) -> tuple[str, str, list[int]]:
+def _row_identity(row: TrainingRow) -> tuple[str, str, list[int], list[str]]:
     """What :func:`rows_content_hash` covers of ``row``, as it sorts rows."""
     weights = [0 if message.weight == 0 else 1 for message in row.messages]
-    return (row.id, row_content_hash(row), weights)
+    call_ids = [
+        call_id
+        for message in row.messages
+        for call_id in (
+            *(call.id for call in message.tool_calls or ()),
+            *((message.tool_call_id,) if message.tool_call_id is not None else ()),
+        )
+    ]
+    return (row.id, row_content_hash(row), weights, call_ids)
 
 
 def in_id_order(rows: Iterable[TrainingRow]) -> list[TrainingRow]:
-    """``rows`` in the order :func:`rows_content_hash` covers them: by id, content, weights."""
+    """``rows`` in the order :func:`rows_content_hash` covers them: id, content, weights, ids."""
     return sorted(rows, key=_row_identity)
 
 
