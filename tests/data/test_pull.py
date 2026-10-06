@@ -23,6 +23,7 @@ from pup_finetune.data.pull import (
     collect,
     contained,
     pull,
+    reasoning_updates,
     resolve_window,
     retirements,
 )
@@ -435,6 +436,81 @@ def test_a_pull_interrupted_while_retiring_keeps_the_retired_row_s_record(
     assert [(record["row_id"], record["code"]) for record in dataset.excluded()] == [
         ("synthetic-trace-9000:synthetic-span-1", "contained_conversation")
     ]
+
+
+# --- reasoning ------------------------------------------------------------------------------
+
+
+def thinking_item(span_id: str, messages: list[dict[str, Any]], thought: str) -> dict[str, Any]:
+    """A span item whose output is a reasoning message, then the last of ``messages``."""
+    reasoning = {"role": "reasoning", "content": thought}
+    return span_item(
+        span_id,
+        "synthetic-trace-9000",
+        input={"messages": messages[:-1]},
+        output={"messages": [reasoning, messages[-1]]},
+    )
+
+
+def donor_on_page_two() -> list[dict[str, Any]]:
+    """The kept conversation on page 1; a shorter one, with reasoning, on page 2."""
+    return [
+        page([item("synthetic-span-2", [SYSTEM, Q1, A1, Q2, A2])], after="cursor-2"),
+        page([thinking_item("synthetic-span-1", [SYSTEM, Q1, A1], "Think one.")]),
+    ]
+
+
+def pull_reasoning(dataset: DatasetDir, **options: Any) -> Any:
+    api = FakeExportApi(donor_on_page_two())
+    pup = api.install(FakePup()).client()
+    query = SpanQuery(ml_app="synthetic")
+    return pull(pup, PullOptions(query, reasoning="preserve", **options), dataset, SplitParams())
+
+
+def stored_reasoning(dataset: DatasetDir) -> list[str | None]:
+    [row] = dataset.rows()
+    assert row.id == "synthetic-trace-9000:synthetic-span-2"
+    return [message.reasoning_content for message in row.messages]
+
+
+def test_a_re_run_reading_more_reasoning_updates_the_stored_row(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    _, first = pull_reasoning(dataset, target_count=1)
+    assert first.added == 1
+    assert stored_reasoning(dataset) == [None] * 5
+
+    # Page 2 collapses a shorter conversation, with reasoning, into the stored row.
+    collection, added = pull_reasoning(dataset)
+    assert [row.id for row in collection.rows] == ["synthetic-trace-9000:synthetic-span-2"]
+    assert (added.added, added.unchanged, added.updated, added.retired) == (0, 0, 1, 0)
+    assert stored_reasoning(dataset) == [None, None, "Think one.", None, None]
+    assert dataset.summary()["accepted"] == 1
+
+    # A lower limit stops before page 2 again: the stored reasoning stays.
+    _, again = pull_reasoning(dataset, target_count=1)
+    assert (again.added, again.unchanged, again.updated) == (0, 1, 0)
+    assert stored_reasoning(dataset) == [None, None, "Think one.", None, None]
+
+
+def test_reasoning_updates_fill_in_reasoning_and_never_replace_it() -> None:
+    [row] = collected([page([item("synthetic-span-1", [SYSTEM, Q1, A1, Q2, A2])])])[0].rows
+
+    def thinking(**by_index: str) -> Any:
+        messages = [
+            message.model_copy(update={"reasoning_content": by_index.get(f"m{index}")})
+            for index, message in enumerate(row.messages)
+        ]
+        return row.model_copy(update={"messages": messages})
+
+    stored = thinking(m2="Stored.")
+    newer = thinking(m2="Newer.", m4="Two.")
+    assert reasoning_updates([newer], [stored]) == ([], [thinking(m2="Stored.", m4="Two.")])
+    assert reasoning_updates([row], [stored]) == ([stored], [])
+    # Anything else that differs is left to the dataset, and a new row passes through.
+    question = row.messages[1].model_copy(update={"content": "Another question?"})
+    other = row.model_copy(update={"messages": [row.messages[0], question, *row.messages[2:]]})
+    assert reasoning_updates([other], [stored]) == ([other], [])
+    assert reasoning_updates([newer], []) == ([newer], [])
 
 
 # --- the time range -------------------------------------------------------------------------

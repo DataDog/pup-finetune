@@ -437,6 +437,44 @@ def test_an_add_stopped_before_its_rows_leaves_the_retired_row_in_place(
     assert dataset.excluded() == [retire(short).to_json()]
 
 
+def with_reasoning(row: TrainingRow, text: str) -> TrainingRow:
+    """``row`` with ``text`` as the reasoning of its last (assistant) message."""
+    *before, last = row.messages
+    thought = last.model_copy(update={"reasoning_content": text})
+    return row.model_copy(update={"messages": [*before, thought]})
+
+
+def test_an_updated_row_replaces_the_stored_one_in_place(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    first, second = make_row("first", "one", trace_id="t1"), make_row("second", "two")
+    dataset.add([first, second], settings=IMPORT)
+    splits = dataset.splits_path.read_bytes()
+    thinking = with_reasoning(first, "Think.")
+    added = dataset.add([], settings=IMPORT, updated=[thinking, second])
+    assert (added.added, added.unchanged, added.updated) == (0, 0, 1)
+    assert dataset.rows() == [thinking, second]
+    assert dataset.splits_path.read_bytes() == splits
+    assert dataset.summary()["accepted"] == 2
+
+
+def test_an_update_must_name_a_stored_row_and_change_only_reasoning(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    stored = make_row("stored", "one")
+    dataset.add([stored], settings=IMPORT)
+    before = snapshot(dataset.path)
+    other = make_row("stored", "changed text")
+    with pytest.raises(ValueError, match="more than its reasoning"):
+        dataset.add([], settings=IMPORT, updated=[other])
+    with pytest.raises(ValueError, match="not stored"):
+        dataset.add([], settings=IMPORT, updated=[make_row("unknown", "one")])
+    thinking = with_reasoning(stored, "Think.")
+    with pytest.raises(ValueError, match="both updated and added or retired"):
+        dataset.add([], settings=IMPORT, retired=[retire(stored)], updated=[thinking])
+    with pytest.raises(ValueError, match="both updated and added or retired"):
+        dataset.add([thinking], settings=IMPORT, updated=[thinking])
+    assert snapshot(dataset.path) == before
+
+
 def test_rows_of_one_trace_share_a_split(tmp_path: Path) -> None:
     dataset = DatasetDir(tmp_path / "ds")
     rows = [make_row(f"row-{i}", f"text {i}", trace_id=f"trace-{i // 3}") for i in range(60)]

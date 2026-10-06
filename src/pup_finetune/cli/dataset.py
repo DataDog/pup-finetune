@@ -370,6 +370,7 @@ def pull_rows(
             "unchanged": added.unchanged,
             "excluded": added.excluded,
             "retired": added.retired,
+            "updated": added.updated,
             **collection.stats(),
         },
         "next_command": f"pup finetune dataset show {_quoted(directory)}",

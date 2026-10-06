@@ -452,3 +452,14 @@ def row_content_hash(row: TrainingRow) -> str:
 def split_key(row: TrainingRow) -> str:
     """The key a row is assigned to a split by: its trace id, so a trace never straddles splits."""
     return row.source.trace_id or row.id
+
+
+def without_reasoning(row: TrainingRow) -> TrainingRow:
+    """``row`` with no ``reasoning_content`` on any message.
+
+    Two recordings of one conversation that are equal this way differ only in the reasoning
+    they carry, which a pull with ``reasoning="preserve"`` fills in from the conversations
+    collapsed into a row, and so depends on how much of its trace was read.
+    """
+    messages = [message.model_copy(update={"reasoning_content": None}) for message in row.messages]
+    return row.model_copy(update={"messages": messages})

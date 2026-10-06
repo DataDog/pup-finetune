@@ -30,7 +30,9 @@ with higher limits to read further. When it does, a trace an earlier pull read o
 may now show that a stored row is a prefix of a longer conversation: :func:`pull` retires
 such a row as ``contained_conversation`` (see :func:`retirements`), so the latest conversion
 of every span it read is what the dataset holds. A re-run with lower limits, which stops before
-that longer conversation, does not add the shorter row back (see :func:`contained`).
+that longer conversation, does not add the shorter row back (see :func:`contained`). With
+``reasoning="preserve"`` a stored row a re-run reads more reasoning for takes that reasoning,
+and one a re-run reads less for keeps its own (see :func:`reasoning_updates`).
 
 A relative ``--from`` or ``--to`` (``now-7d``) is resolved to epoch milliseconds once, when a
 collection or a dataset's first pull starts (:meth:`PullOptions.resolved`), and the export
@@ -52,7 +54,7 @@ from pup_finetune.data.checks import CheckOptions, check_span
 from pup_finetune.data.convert import ReasoningMode, check_reasoning
 from pup_finetune.data.dataset_dir import AddResult, DatasetDir, DatasetSettings, SourceKind
 from pup_finetune.data.exclusions import Exclusion, ExclusionCode
-from pup_finetune.data.schema import TrainingRow, row_content_hash
+from pup_finetune.data.schema import TrainingRow, row_content_hash, without_reasoning
 from pup_finetune.data.split import SplitParams
 from pup_finetune.data.trajectories import (
     ConversionStats,
@@ -366,6 +368,50 @@ def contained(
     return kept, excluded
 
 
+def reasoning_updates(
+    rows: Sequence[TrainingRow], stored_rows: Sequence[TrainingRow]
+) -> tuple[list[TrainingRow], list[TrainingRow]]:
+    """``rows`` with stored ones as stored, and the stored rows they add reasoning to.
+
+    With ``reasoning="preserve"`` a kept row takes the reasoning of the conversations
+    collapsed into it (:mod:`pup_finetune.data.trajectories`) and keeps its id, so a re-run
+    that reads more or less of its trace can yield a stored id with more or less reasoning.
+    Such a row, equal to the stored one but for reasoning, is reconciled with it: each stored
+    assistant message without reasoning takes the row's, and stored reasoning is never
+    replaced. When nothing is filled in the stored row is returned among ``rows``, unchanged;
+    otherwise the filled-in row is returned among the updates, for
+    :meth:`~pup_finetune.data.dataset_dir.DatasetDir.add` to replace the stored one with. Any
+    other difference is left to the dataset, which rejects it.
+    """
+    stored = {row.id: row for row in stored_rows}
+    kept: list[TrainingRow] = []
+    updated: list[TrainingRow] = []
+    for row in rows:
+        known = stored.get(row.id)
+        merged = None if known is None else _fill_reasoning(known, row)
+        if merged is None:
+            kept.append(row)
+        elif merged == known:
+            kept.append(known)
+        else:
+            updated.append(merged)
+    return kept, updated
+
+
+def _fill_reasoning(stored: TrainingRow, row: TrainingRow) -> TrainingRow | None:
+    """``stored`` with the reasoning of ``row`` where it has none, or ``None`` when the two
+    differ in more than reasoning."""
+    if without_reasoning(stored) != without_reasoning(row):
+        return None
+    messages = [
+        mine.model_copy(update={"reasoning_content": theirs.reasoning_content})
+        if mine.reasoning_content is None and theirs.reasoning_content is not None
+        else mine
+        for mine, theirs in zip(stored.messages, row.messages, strict=True)
+    ]
+    return stored.model_copy(update={"messages": messages})
+
+
 class _Containers:
     """Rows that may contain another one, by trace, compared as conversion compares them.
 
@@ -434,9 +480,10 @@ def pull(
     pull with other settings fails fast with :class:`~pup_finetune.errors.StateError`, and
     an interrupted first pull leaves a dataset its re-run resumes; an :class:`ExternalError`
     part-way says so in its hint. The cache is locked while the export reads it. Stored rows
-    the new conversion collapsed are retired (:func:`retirements`), and new rows a stored row
-    contains are excluded instead of added (:func:`contained`); the returned collection is
-    what the export read and converted, before either.
+    the new conversion collapsed are retired (:func:`retirements`), stored rows it read more
+    reasoning for are updated (:func:`reasoning_updates`), and new rows a stored row contains
+    are excluded instead of added (:func:`contained`); the returned collection is what the
+    export read and converted, before any of these.
     """
     options = resolve_window(options, dataset, clock)
     settings = options.dataset_settings(split)
@@ -449,9 +496,14 @@ def pull(
             raise _with_resume_note(exc, raw) from exc
     stored = dataset.rows()
     retired = retirements(collection, stored, dataset.excluded())
-    rows, exclusions = contained(collection.rows, stored, retired)
+    rows, updated = reasoning_updates(collection.rows, stored)
+    rows, exclusions = contained(rows, stored, retired)
     added = dataset.add(
-        rows, [*collection.exclusions, *exclusions], settings=settings, retired=retired
+        rows,
+        [*collection.exclusions, *exclusions],
+        settings=settings,
+        retired=retired,
+        updated=updated,
     )
     return collection, added
 

@@ -32,7 +32,13 @@ from typing import Any, Literal
 
 from pup_finetune.data.exclusions import Exclusion, ExclusionCode
 from pup_finetune.data.jsonl import read_rows, scan_rows, to_provider_dict, write_rows
-from pup_finetune.data.schema import RowError, TrainingRow, row_content_hash, split_key
+from pup_finetune.data.schema import (
+    RowError,
+    TrainingRow,
+    row_content_hash,
+    split_key,
+    without_reasoning,
+)
 from pup_finetune.data.split import (
     SPLITS,
     SplitAssignments,
@@ -92,6 +98,8 @@ class AddResult:
     summary: dict[str, Any]
     retired: int = 0
     """Stored rows taken out and recorded as excluded."""
+    updated: int = 0
+    """Stored rows replaced by a version with more reasoning."""
 
 
 class DatasetDir:
@@ -245,6 +253,7 @@ class DatasetDir:
         *,
         settings: DatasetSettings,
         retired: Iterable[Exclusion] = (),
+        updated: Iterable[TrainingRow] = (),
     ) -> AddResult:
         """Add valid ``rows`` and record ``exclusions``, creating the directory if needed.
 
@@ -265,6 +274,12 @@ class DatasetDir:
         ``row_id`` that is not stored is recorded as an exclusion all the same, and one that
         ``rows`` also holds raises :class:`ValueError`.
 
+        ``updated`` replaces stored rows in place, by id: each must name a stored row and
+        differ from it only in ``reasoning_content``, such as reasoning a later pull read for
+        a row it already stored (see :func:`~pup_finetune.data.pull.reasoning_updates`). Its
+        split assignment is unchanged. An id that is not stored, that ``rows`` or ``retired``
+        also holds, or a change to anything but reasoning raises :class:`ValueError`.
+
         A validation error (a conflicting id, changed settings) leaves existing dataset files
         unchanged. If writing fails part-way, re-running the same add repairs the directory;
         the exclusions of ``retired`` are written before the rows are, so a retired row is
@@ -283,6 +298,9 @@ class DatasetDir:
             incoming = list(rows)
             if clash := retired_ids.intersection(row.id for row in incoming):
                 raise ValueError(f"rows both added and retired: {sorted(clash)}")
+            existing, changed = _apply_updates(
+                existing, list(updated), retired_ids | {row.id for row in incoming}
+            )
             excluded = [*exclusions, *retiring]
             new_rows, unchanged = _merge(existing, incoming, excluded)
             all_rows = [*existing, *new_rows]
@@ -311,7 +329,7 @@ class DatasetDir:
             self._write_excluded(records)
             summary = self._write_summary()
         retired_rows = len(stored) - len(existing)
-        return AddResult(len(new_rows), unchanged, len(excluded), summary, retired_rows)
+        return AddResult(len(new_rows), unchanged, len(excluded), summary, retired_rows, changed)
 
     def _write_excluded(self, records: Iterable[dict[str, Any]]) -> None:
         lines = "".join(canonical_json(record) + "\n" for record in records)
@@ -404,6 +422,37 @@ def _merge(
         by_hash[digest] = row.id
         new_rows.append(row)
     return new_rows, unchanged
+
+
+def _apply_updates(
+    existing: list[TrainingRow], updated: list[TrainingRow], taken: Collection[str]
+) -> tuple[list[TrainingRow], int]:
+    """``existing`` with each of ``updated`` in place of the stored row of its id.
+
+    Returns the rows and how many of them changed. Raises :class:`ValueError` for an update
+    of an id that is not stored, that is ``taken`` (added or retired in the same add), or
+    that changes anything but reasoning.
+    """
+    if not updated:
+        return existing, 0
+    replacements: dict[str, TrainingRow] = {}
+    for row in updated:
+        if row.id in taken:
+            raise ValueError(f"row {row.id!r} both updated and added or retired")
+        replacements[row.id] = row
+    stored = {row.id for row in existing}
+    if missing := sorted(set(replacements) - stored):
+        raise ValueError(f"updated rows are not stored: {missing}")
+    rows: list[TrainingRow] = []
+    changed = 0
+    for row in existing:
+        replacement = replacements.get(row.id, row)
+        if replacement != row:
+            if without_reasoning(replacement) != without_reasoning(row):
+                raise ValueError(f"row {row.id!r} updated in more than its reasoning")
+            changed += 1
+        rows.append(replacement)
+    return rows, changed
 
 
 def _reconcile(

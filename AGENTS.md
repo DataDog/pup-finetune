@@ -134,7 +134,9 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   further retires a stored row its trace now shows to be a prefix of a longer conversation
   (`retirements`, `contained_conversation`), and one with lower limits does not add such a row
   back (`contained`); both compare messages as conversion collapses them
-  (`comparable_messages` in `trajectories.py`).
+  (`comparable_messages` in `trajectories.py`). With `--reasoning preserve`, a stored row a
+  re-run reads more reasoning for is updated in place, never losing reasoning it has
+  (`reasoning_updates`, `DatasetDir.add(updated=...)`).
 - `curation/` - *later*. Keep/drop labels and judge-based triage.
 - `training/` - the shared, provider-neutral SFT loop. `datums.py` renders rows into
   `TokenizedExample`s (per turn when a renderer is not prefix-stable) and rejects rows that
