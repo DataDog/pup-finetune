@@ -213,9 +213,13 @@ class Resume:
 
     ``point`` is the training checkpoint the session was opened from; ``epochs`` are the
     epochs finished before it (best tracking and patience are replayed from them), and
-    ``warnings`` the run's warnings so far.
+    ``warnings`` the run's warnings so far. ``elapsed_seconds`` is the wall-clock time the
+    spend guard counted over every earlier attempt, as last recorded (e.g. in ``state.json``),
+    which includes time spent after ``point``: the budget resumes from the larger of it and
+    ``point.elapsed_seconds``, so time spent after the last checkpoint is not forgotten.
     """
 
     point: ResumePoint
     epochs: Sequence[EpochMetrics]
     warnings: Sequence[str] = ()
+    elapsed_seconds: float = 0.0

@@ -200,7 +200,8 @@ def run_training(
     a ``{"type": "step", "epoch", "step", "loss", "tokens", "elapsed_s"}`` dict per optimizer
     step, and ``"epoch"``, ``"checkpoint"``, ``"retry"`` and ``"stopped"`` events, with any
     non-finite number as ``None``. ``resume`` continues a run in a session opened from
-    ``resume.point.checkpoint``, with the same rows and spec. A failing ``finalize`` raises
+    ``resume.point.checkpoint``, with the same rows and spec; ``budget`` then also counts the
+    time spent before (see :class:`Resume`). A failing ``finalize`` raises
     :class:`FinalizeFailed`.
     """
     if not train_rows:
@@ -451,7 +452,8 @@ class _Loop:
         self._step = self._checkpoint_step = point.step
         self._last_training = point.checkpoint
         self._budget.record(point.train_tokens)
-        self._budget.add_elapsed(point.elapsed_seconds)
+        # The time spent after the checkpoint (later steps, validation, failed saves) was paid.
+        self._budget.add_elapsed(max(point.elapsed_seconds, resume.elapsed_seconds))
         if point.epoch == finished:  # saved at that epoch's end: continue with the next one
             self._start_epoch = finished + 1
             return
@@ -678,16 +680,18 @@ class _Loop:
         return self._stale_epochs >= self._spec.patience and epoch < self._spec.max_epochs
 
     def _validation_loss(self, epoch: int) -> float:
-        metrics = []
-        for microbatch in self._validation:
-            self._require_spend(f"finishing the validation of epoch {epoch}")
-            metrics.append(self._forward(microbatch))
+        metrics = [self._forward(microbatch, epoch) for microbatch in self._validation]
         return _token_mean(metrics, "validation")
 
-    def _forward(self, microbatch: Microbatch) -> StepMetrics:
-        """One validation ``forward``, retried up to :data:`VALIDATION_RETRIES` times."""
+    def _forward(self, microbatch: Microbatch, epoch: int) -> StepMetrics:
+        """One validation ``forward``, retried up to :data:`VALIDATION_RETRIES` times.
+
+        The spend guard is asked before every attempt, so a retry after the backoff is not
+        started once the budget ran out while waiting (:class:`_BudgetStop`).
+        """
         attempt = 0
         while True:
+            self._require_spend(f"finishing the validation of epoch {epoch}")
             try:
                 return self._session.forward(microbatch).result()
             except Exception as exc:

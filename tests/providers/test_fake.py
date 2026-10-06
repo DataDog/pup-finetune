@@ -268,6 +268,34 @@ def test_validation_before_training_does_not_start_an_epoch(session: FakeSession
     assert _epoch(session) == ([3.0, 3.0], 2.5)
 
 
+def _train(session: FakeSession, steps: int = 2) -> list[float]:
+    """Train ``steps`` steps without validating; their mean losses."""
+    losses = []
+    for _ in range(steps):
+        losses.append(session.forward_backward([_example()]).result().mean_loss)
+        session.optim_step(ADAM).result()
+    return losses
+
+
+def test_epochs_without_validation_end_at_the_sampler_checkpoints_then_by_steps(
+    backend: FakeBackend, session: FakeSession
+) -> None:
+    # The loop saves epoch 1's sampler checkpoint (always a new best): it ends the epoch and
+    # tells the fake an epoch has 2 steps.
+    assert _train(session) == [3.0, 3.0]
+    session.save_training_checkpoint("t1s2", epoch=1, step=2)
+    session.save_sampler_checkpoint("s1s2", epoch=1, step=2)
+    assert _train(session, 1) == [2.0]
+    session.save_training_checkpoint("t2s3", epoch=2, step=3)  # a timed one, mid-epoch
+    assert _train(session, 1) == [2.0]
+    # Epoch 2 is no new best: only its training checkpoint, yet epoch 3 starts after it.
+    epoch_end = session.save_training_checkpoint("t2s4", epoch=2, step=4)
+    assert _train(session) == [1.5, 1.5]
+    with backend.open_session(FAKE_PROFILE, LORA, resume_from=epoch_end, **SESSION) as resumed:
+        assert _train(resumed) == [1.5, 1.5]
+        assert resumed.step == 6
+
+
 def test_load_weights_restores_that_epochs_validation_loss(session: FakeSession) -> None:
     _epoch(session)
     _epoch(session)

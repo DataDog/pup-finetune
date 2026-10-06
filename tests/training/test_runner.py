@@ -59,6 +59,19 @@ class Clock:
             self.now += self.step_s
 
 
+class CrashingClock(Clock):
+    """A :class:`Clock` whose process crashes right after step ``crash_at`` finished."""
+
+    def __init__(self, crash_at: int, step_minutes: float = 4) -> None:
+        super().__init__(step_minutes)
+        self.crash_at = crash_at
+
+    def on_event(self, event: dict[str, Any]) -> None:
+        super().on_event(event)
+        if event["type"] == "step" and event["step"] == self.crash_at:
+            raise RuntimeError(f"simulated crash after step {self.crash_at}")
+
+
 def provider(**options: Any) -> FakeProvider:
     return FakeProvider(Runtime(dev_mode=True), **options)
 
@@ -313,6 +326,85 @@ def test_a_cancelled_run_resumes_and_completes(
     resumed = resume(run_dir)
     assert (resumed["phase"], resumed["stopped_reason"]) == ("completed", "completed")
     assert [e["epoch"] for e in resumed["epochs"]] == [1, 2, 3]
+
+
+def test_without_validation_a_resumed_run_stays_on_the_loss_curve(tmp_path: Path) -> None:
+    # Epoch 2 is no new best; the crash in epoch 3 resumes from step 7's timed checkpoint.
+    options = {"loss_curve": [2.0, 2.5, 1.1], "fail_at_step": 10}
+    run_dir = new_run(tmp_path / "run", provider_options=options)
+    clock = Clock()
+    with pytest.raises(FakeCrash, match="fail_at_step"):
+        start_training(
+            provider(),
+            run_dir,
+            train_rows=TRAIN,
+            validation_rows=[],
+            clock=clock,
+            on_event=clock.on_event,
+        )
+    clock = Clock()
+    result = resume_training(
+        provider(),
+        run_dir,
+        train_rows=TRAIN,
+        validation_rows=[],
+        clock=clock,
+        on_event=clock.on_event,
+    )
+    assert [epoch["train_loss"] for epoch in result["epochs"]] == [2.0, 2.5, 1.1]
+    assert (result["stopped_reason"], result["best_epoch"]) == ("completed", 3)
+
+
+# --- spend across attempts --------------------------------------------------------------
+
+
+def test_a_resume_counts_the_time_spent_after_the_last_checkpoint(tmp_path: Path) -> None:
+    # Only epoch-end checkpoints. 4-minute steps: the crash after step 8 comes 16 minutes
+    # after epoch 1's checkpoint (at 16 minutes), and steps 5 to 8 are trained again.
+    run_dir = new_run(tmp_path / "run", checkpoint_every_minutes=1000)
+    with pytest.raises(ExternalError, match="simulated crash"):
+        start(run_dir, clock=CrashingClock(crash_at=8))
+    point = run_dir.load_state().last_resume_point()
+    assert point is not None
+    assert (point.step, point.elapsed_seconds) == (4, 16 * 60)
+    assert read(run_dir.state_path)["elapsed_seconds"] == 32 * 60
+    assert read(run_dir.result_path)["elapsed_seconds"] == 32 * 60
+    result = resume(run_dir)
+    assert result["phase"] == "completed"
+    assert result["elapsed_seconds"] == (32 + 8 * 4) * 60  # not 16 + 8 * 4
+    assert read(run_dir.state_path)["elapsed_seconds"] == result["elapsed_seconds"]
+
+
+def test_repeated_crashes_after_the_last_checkpoint_stop_at_the_spend_cap(
+    tmp_path: Path,
+) -> None:
+    # 1 USD a minute; training stops at 40 USD (50 less 20%). Every attempt crashes after
+    # step 8, 16 minutes past epoch 1's checkpoint. Were only the checkpoint's 16 minutes
+    # restored, every resume would crash there again, paying another 16 minutes each time.
+    run_dir = new_run(
+        tmp_path / "run",
+        max_spend_usd=50.0,
+        hourly_rate_usd=60.0,
+        spend_reserve_fraction=0.2,
+        checkpoint_every_minutes=1000,
+    )
+    with pytest.raises(ExternalError, match="simulated crash"):
+        start(run_dir, clock=CrashingClock(crash_at=8))
+    crashed = 0
+    for _ in range(3):
+        try:
+            result = resume(run_dir, clock=CrashingClock(crash_at=8))
+            break
+        except ExternalError:
+            crashed += 1
+    # The resume starts at 32 minutes; steps 5 and 6 reach 40, before the crash at step 8.
+    assert crashed == 0
+    assert (result["phase"], result["stopped_reason"]) == ("completed", "budget_exhausted")
+    assert result["elapsed_seconds"] == 40 * 60
+    assert result["elapsed_seconds"] <= 50 * 60
+    assert "less the 20% kept" in result["warnings"][0]
+    assert result["checkpoints"]["last_training"]["step"] == 6  # paid from the reserve
+    assert result["promoted_model"]["model_id"] == RUN_ID
 
 
 # --- promotion --------------------------------------------------------------------------

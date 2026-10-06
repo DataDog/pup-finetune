@@ -13,15 +13,17 @@ Files, all ``0600`` in a ``0700`` directory, written atomically:
   rendering identity, the hash of those settings, and when it was created.
 - ``state.json`` - :class:`RunState`, rewritten at every step: the phase, epoch and step,
   the last step's training loss, every checkpoint, the resume point of the last training
-  checkpoint, the best epoch, the loop's warnings, what a resume would do, a heartbeat and
-  the training process id. With ``heartbeat_s``, :func:`execute_run` also rewrites it on a
-  timer, so the heartbeat stays fresh through slow steps, validation and promotion.
+  checkpoint, the best epoch, the loop's warnings, what a resume would do, the wall-clock
+  seconds the spend guard counted over every attempt, a heartbeat and the training process
+  id. With ``heartbeat_s``, :func:`execute_run` also rewrites it on a timer, so the
+  heartbeat and the elapsed time stay fresh through slow steps, validation and promotion.
 - ``epochs.json`` - one record per finished epoch, with the training checkpoint saved at its
   end.
 - ``result.json`` - how the run ended; :func:`execute_run` writes it on every exit, also on
   failure, Ctrl-C or SIGTERM (which it reports as :class:`TrainingTerminated`): the best
   epoch and validation loss, why training stopped, the promoted model and the deployable
-  checkpoint, the best and last checkpoints, the epochs, the warnings and any error.
+  checkpoint, the best and last checkpoints, the epochs, the warnings, the elapsed seconds
+  over every attempt and any error.
 - ``worker.json`` and ``worker.log`` - for a detached run, the worker process that was
   started and how it ended (written by :mod:`pup_finetune.training.worker`), and its output.
 
@@ -40,6 +42,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import hashlib
+import math
 import os
 import re
 import secrets
@@ -185,21 +188,27 @@ def dataset_content_hash(dataset: DatasetDir) -> str:
 
 
 def rows_content_hash(by_split: Mapping[SplitName, Sequence[TrainingRow]]) -> str:
-    """A sha256 over rows by split: their ids and content hashes, in id order.
+    """A sha256 over rows by split: their ids, content hashes and loss weights, in id order.
 
     The order of the rows does not change it, so whoever trains on rows it describes must
-    put them in a canonical order, such as :func:`in_id_order`.
+    put them in a canonical order, such as :func:`in_id_order`. Unlike
+    :func:`~pup_finetune.data.schema.row_content_hash` (the conversation, for dedupe), it
+    covers each message's weight, normalized (``0``, or ``1`` for ``1`` and unset), since a
+    changed weight changes what a run trains on.
     """
-    hashed = {
-        split: sorted([row.id, row_content_hash(row)] for row in rows)
-        for split, rows in by_split.items()
-    }
+    hashed = {split: sorted(_row_identity(row) for row in rows) for split, rows in by_split.items()}
     return hashlib.sha256(canonical_json(hashed).encode("utf-8")).hexdigest()
 
 
+def _row_identity(row: TrainingRow) -> tuple[str, str, list[int]]:
+    """What :func:`rows_content_hash` covers of ``row``, as it sorts rows."""
+    weights = [0 if message.weight == 0 else 1 for message in row.messages]
+    return (row.id, row_content_hash(row), weights)
+
+
 def in_id_order(rows: Iterable[TrainingRow]) -> list[TrainingRow]:
-    """``rows`` in the order :func:`rows_content_hash` covers them: by id, then content."""
-    return sorted(rows, key=lambda row: (row.id, row_content_hash(row)))
+    """``rows`` in the order :func:`rows_content_hash` covers them: by id, content, weights."""
+    return sorted(rows, key=_row_identity)
 
 
 def _ckpt_json(ref: CheckpointRef | None) -> dict[str, Any] | None:
@@ -414,6 +423,12 @@ class RunState:
     resume does. :meth:`request_cancel` (e.g. from a signal handler) makes the loop stop at
     the next step boundary. :meth:`save` may be called from another thread
     (:meth:`keep_alive`); saves are serialized, and each writes the state as it is then.
+
+    :attr:`elapsed_seconds` is the wall-clock time the spend guard counted over every attempt
+    of the run. It never decreases: while :meth:`track_elapsed` follows a budget, it is the
+    larger of the recorded value and the budget's, and every save records it. So a resume
+    counts the time spent after the last training checkpoint too, up to the last save (at
+    most one step or heartbeat before a crash).
     """
 
     def __init__(
@@ -433,8 +448,13 @@ class RunState:
         heartbeat_at: str | None = None,
         pid: int | None = None,
         error: Mapping[str, Any] | None = None,
+        elapsed_seconds: float = 0.0,
         now: Clock = utcnow,
     ) -> None:
+        if not (math.isfinite(elapsed_seconds) and elapsed_seconds >= 0):
+            raise ValueError(
+                f"elapsed_seconds must be finite and not negative, got {elapsed_seconds}"
+            )
         self.run_dir = run_dir
         self.phase: Phase = phase
         self.epoch = epoch
@@ -449,6 +469,8 @@ class RunState:
         self.heartbeat_at = heartbeat_at
         self.pid = pid
         self.error = None if error is None else dict(error)
+        self._elapsed_seconds = float(elapsed_seconds)
+        self._elapsed: Callable[[], float] | None = None
         self._now = now
         self._cancel = threading.Event()
         self._save_lock = threading.Lock()
@@ -480,6 +502,7 @@ class RunState:
                 heartbeat_at=data.get("heartbeat_at"),
                 pid=data.get("pid"),
                 error=data.get("error"),
+                elapsed_seconds=float(data.get("elapsed_seconds") or 0.0),
                 now=now,
             )
         except (TypeError, ValueError) as exc:
@@ -500,12 +523,28 @@ class RunState:
             "heartbeat_at": self.heartbeat_at,
             "pid": self.pid,
             "error": self.error,
+            "elapsed_seconds": self.elapsed_seconds,
         }
+
+    @property
+    def elapsed_seconds(self) -> float:
+        """The spend guard's seconds over every attempt: see the class docstring."""
+        if self._elapsed is None:
+            return self._elapsed_seconds
+        return max(self._elapsed_seconds, self._elapsed())
+
+    def track_elapsed(self, elapsed: Callable[[], float]) -> None:
+        """Follow ``elapsed`` (e.g. a budget's ``elapsed_seconds``) from now on.
+
+        It must count every earlier attempt too, as a resumed budget does.
+        """
+        self._elapsed = elapsed
 
     def save(self) -> None:
         """Write ``state.json`` atomically, with a fresh heartbeat; non-finite numbers as null."""
         with self._save_lock:
             self.heartbeat_at = _iso(self._now())
+            self._elapsed_seconds = self.elapsed_seconds
             atomic_write_json(self.run_dir.state_path, finite_json(self.to_json()))
 
     @contextmanager
@@ -761,6 +800,7 @@ def _result_json(
         "phase": phase,
         "error": None if error is None else error_json(error),
         "finalize_error": None if finalize_error is None else error_json(finalize_error),
+        "elapsed_seconds": state.elapsed_seconds,
         "finished_at": _iso(finished_at),
     }
     if outcome is not None:

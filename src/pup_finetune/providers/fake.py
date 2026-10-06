@@ -511,17 +511,30 @@ def _raises(error: BaseException) -> Callable[[], NoReturn]:
 
 @dataclass(slots=True)
 class _State:
-    """What a fake checkpoint captures. ``trained`` is the epoch the weights reflect."""
+    """What a fake checkpoint captures, so a resumed session stays on the loss curves.
+
+    ``epoch`` indexes the curves for training (``0`` in the first epoch) and ``trained`` is
+    the epoch the weights reflect. ``ended`` says an epoch-end call (a validation ``forward``
+    or a sampler checkpoint) came since the last ``forward_backward``; ``steps_per_epoch`` is
+    learned from the first sampler checkpoint, ``None`` until then.
+    """
 
     step: int = 0
     epoch: int = 0
     trained: int | None = None
-    validating: bool = False
+    ended: bool = False
+    steps_per_epoch: int | None = None
 
     def to_query(self) -> str:
-        trained = -1 if self.trained is None else self.trained
-        flag = int(self.validating)
-        return urlencode({"step": self.step, "epoch": self.epoch, "trained": trained, "v": flag})
+        return urlencode(
+            {
+                "step": self.step,
+                "epoch": self.epoch,
+                "trained": -1 if self.trained is None else self.trained,
+                "v": int(self.ended),
+                "spe": self.steps_per_epoch or 0,
+            }
+        )
 
     @classmethod
     def from_ref(cls, ref: CheckpointRef) -> _State:
@@ -531,11 +544,13 @@ class _State:
             if parts.scheme != PROVIDER_NAME:
                 raise ValueError(parts.scheme)
             trained = int(query["trained"][0])
+            steps_per_epoch = int(query.get("spe", ["0"])[0])
             return cls(
                 step=int(query["step"][0]),
                 epoch=int(query["epoch"][0]),
                 trained=None if trained < 0 else trained,
-                validating=query["v"][0] == "1",
+                ended=query["v"][0] == "1",
+                steps_per_epoch=steps_per_epoch if steps_per_epoch > 0 else None,
             )
         except (KeyError, IndexError, ValueError):
             raise UsageError(f"{ref.uri!r} is not a fake provider checkpoint") from None
@@ -625,6 +640,7 @@ class FakeBackend:
             if resume_from.kind != "training":
                 raise UsageError("resume from a training checkpoint, not a sampler checkpoint")
             state = _State.from_ref(resume_from)
+            state.epoch = max(state.epoch, resume_from.epoch - 1)
         session_id = f"fake-{self._prefix}-{len(self.opened) + 1}"
         session = FakeSession(
             self, profile, lora, session_id, state, resumed=resume_from is not None
@@ -652,10 +668,18 @@ class FakeBackend:
 class FakeSession:
     """One fake training session; built by :meth:`FakeBackend.open_session`.
 
-    The fake places itself on the loss curves from the call sequence: the first
-    ``forward_backward`` after a validation pass (``forward``) that followed an optimizer step
-    starts the next epoch. That bookkeeping is not model state: ``forward`` never changes the
-    weights, and repeating it returns the same metrics.
+    The fake places itself on the loss curves from the call sequence, as the shared loop
+    drives it: the first ``forward_backward`` after an epoch-end call (a validation pass,
+    ``forward``, or a sampler checkpoint, which the loop saves only at an epoch's end) that
+    followed an optimizer step starts the next epoch. The first sampler checkpoint also
+    teaches it the steps per epoch (its ``step`` over its ``epoch``), so from then on the
+    epoch follows the step count, also through epochs with neither call (no validation rows
+    and no new best). A checkpoint's ``epoch`` (the loop's, from 1) is a lower bound on the
+    epoch it is in. That bookkeeping is carried in checkpoints, so a resumed session continues
+    on the curves; only a session resumed (without validation) from the first epoch's last
+    training checkpoint, saved before the fake learned the steps per epoch, may run an epoch
+    behind until the next epoch-end call. It is not model state: ``forward`` never changes
+    the weights, and repeating it returns the same metrics.
     """
 
     def __init__(
@@ -691,9 +715,11 @@ class FakeSession:
     def forward_backward(self, batch: Sequence[TokenizedExample]) -> PendingResult[StepMetrics]:
         self._require_open()
         state = self._state
-        if state.validating and state.trained == state.epoch:
+        if state.ended and state.trained == state.epoch:
             state.epoch += 1
-        state.validating = False
+        state.ended = False
+        if state.steps_per_epoch is not None:
+            state.epoch = max(state.epoch, state.step // state.steps_per_epoch)
         step = state.step + 1
         if step == self._options.fail_at_step and not self._resumed:
             self._crashed = True
@@ -703,7 +729,7 @@ class FakeSession:
 
     def forward(self, batch: Sequence[TokenizedExample]) -> PendingResult[StepMetrics]:
         self._require_open()
-        self._state.validating = True
+        self._state.ended = True
         return self._metrics(batch, _at(self._options.val_curve, self._state.trained))
 
     def optim_step(self, adam: AdamConfig) -> PendingResult[None]:
@@ -713,9 +739,16 @@ class FakeSession:
         return _Pending(lambda: None, self._options.step_delay_s)
 
     def save_training_checkpoint(self, name: str, *, epoch: int, step: int) -> CheckpointRef:
+        self._require_open()
+        self._state.epoch = max(self._state.epoch, epoch - 1)
         return self._save("training", name, epoch=epoch, step=step)
 
     def save_sampler_checkpoint(self, name: str, *, epoch: int, step: int) -> CheckpointRef:
+        self._require_open()
+        state = self._state
+        state.ended = True
+        if state.steps_per_epoch is None and epoch > 0 and step > 0 and step % epoch == 0:
+            state.steps_per_epoch = step // epoch
         return self._save("sampler", name, epoch=epoch, step=step)
 
     def load_weights(self, ckpt: CheckpointRef) -> None:
