@@ -38,9 +38,9 @@ pup finetune --help
 pup finetune doctor                  # pup version, Datadog login, and other readiness checks
 ```
 
-Live `train` and `deploy` from the checkout also need the `hf` extra and the Loops SDK:
-`uv sync --extra hf`, then `uv pip install baseten-loops==0.26.0`. A plain `uv sync` removes both
-again; the launcher's `uv run` keeps them.
+Live `train` and `deploy` from the checkout also need the `baseten` extra (the Loops SDK and the
+`hf` extra): `uv sync --extra baseten`. A plain `uv sync` removes it again; the launcher's
+`uv run` keeps it.
 
 Environment variables for development and unusual setups:
 
@@ -88,7 +88,7 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   one package per provider. `baseten/`: `registration.py` (credential spec and `doctor` checks;
   cheap, imported with the registry; its key check is the one Baseten call outside `client.py`),
   `models.py` (supported models), `client.py` (all other Baseten HTTP, and the only module that
-  imports the Loops SDK, which is optional and not declared because it has no published license),
+  imports the Loops SDK, lazily; the SDK comes with the `baseten` extra),
   `training.py`, `deploy.py` and `provider.py`.
 - `_vendor/` - *later*. Minimal vendored third-party code, with its own license and attribution.
 

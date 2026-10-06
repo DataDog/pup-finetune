@@ -164,7 +164,7 @@ def test_loops_sdk_check_missing_gives_the_install_hint(monkeypatch: pytest.Monk
     outcome = registration.check_loops_sdk()
     assert not outcome.ok
     assert "not installed" in outcome.detail
-    assert "pip install baseten-loops==0.26.0" in outcome.detail
+    assert "pip install 'pup-finetune[baseten]'" in outcome.detail
 
 
 def test_loops_sdk_check_tested_version(monkeypatch: pytest.MonkeyPatch) -> None:

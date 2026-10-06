@@ -51,6 +51,7 @@ dependencies = [
 
 [project.optional-dependencies]
 hf = ["transformers>=5.10.4", "jinja2>=3.1"]
+baseten = ["pup-finetune[hf]", "baseten-loops==0.26.0"]
 
 [project.scripts]
 pup-finetune = "pup_finetune.cli:main"

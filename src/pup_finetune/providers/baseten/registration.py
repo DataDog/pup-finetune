@@ -37,9 +37,7 @@ __all__ = [
 ]
 
 TESTED_LOOPS_VERSION = "0.26.0"
-LOOPS_INSTALL_HINT = (
-    f"pip install baseten-loops=={TESTED_LOOPS_VERSION} (pup-finetune does not bundle it)"
-)
+LOOPS_INSTALL_HINT = "install the baseten extra: pip install 'pup-finetune[baseten]'"
 HF_INSTALL_HINT = "install the hf extra: pip install 'pup-finetune[hf]'"
 
 _MODELS_URL = "https://api.baseten.co/v1/models"

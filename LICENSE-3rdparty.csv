@@ -1,4 +1,5 @@
 Component,Origin,License,Copyright
+baseten-loops,https://pypi.org/project/baseten-loops/,NOASSERTION,Baseten
 httpx,https://pypi.org/project/httpx/,BSD-3-Clause,Encode OSS Ltd
 jinja2,https://pypi.org/project/jinja2/,BSD-3-Clause,Pallets
 keyring,https://pypi.org/project/keyring/,MIT,Kang Zhang and Jason R. Coombs

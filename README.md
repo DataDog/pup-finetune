@@ -6,11 +6,11 @@ Curate a dataset from your Datadog Agent Observability traces, fine-tune an open
 ## Train and deploy on Baseten
 
 `train` runs LoRA SFT on Baseten Loops from canonical training-row JSONL files; `deploy` serves
-the best checkpoint behind an OpenAI-compatible endpoint. The Baseten Loops SDK is not bundled
-because it has no published license, so install it yourself:
+the best checkpoint behind an OpenAI-compatible endpoint. Install the `baseten` extra, which
+includes the Baseten Loops SDK:
 
 ```sh
-pip install 'pup-finetune[hf]' baseten-loops==0.26.0
+pip install 'pup-finetune[baseten]'
 pup finetune auth login baseten     # or set BASETEN_API_KEY
 
 # Previews the plan; run the printed next_command (it adds the run id and --confirm) to train.
