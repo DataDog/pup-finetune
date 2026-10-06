@@ -171,11 +171,17 @@ Rows are validated once, when they enter a dataset, so renderers can rely on thi
 ## The registry
 
 [`providers/__init__.py`](../src/pup_finetune/providers/__init__.py) maps each provider name
-to a `"module:attr"` import path. Listing providers imports nothing; `get_provider(name,
-runtime)` imports the module on first use and calls `attr(runtime)`, which must return a
-`Provider`. A provider whose SDK is not installed fails with a hint to install its extra.
+to a `"module:attr"` import path. Listing providers imports no provider implementation;
+`get_provider(name, runtime)` imports the module on first use and calls `attr(runtime)`, which
+must return a `Provider`. A provider whose SDK is not installed fails with a hint to install its extra.
 Entries registered with `dev_only=True`, like the offline `fake` provider used for
-development, are visible only with `PUP_FINETUNE_DEV=1`.
+development, are visible only with `PUP_FINETUNE_DEV=1`. `fireworks` is registered for
+everyone. The registry also imports the lightweight package of every provider that has an API
+key (today `fireworks`, through an import at the bottom of `providers/__init__.py`). That
+package's `__init__.py` does little more than register the provider's `CredentialSpec`, so
+`auth`, `doctor` and every other command know the API key without importing an SDK, an HTTP
+client or a tokenizer. The implementation lives in the package's `provider` module, which
+`get_provider` imports on first use.
 
 ## How a new provider plugs in
 
@@ -198,12 +204,16 @@ Using Baseten as the example:
    40-character revision, and check in `preflight` that the provider's model matches the
    profile.
 5. **Credentials.** Register a `CredentialSpec` for `BASETEN_API_KEY` in `credentials.py`'s
-   registry, so `auth login baseten`, `auth status` and `doctor` work without new code. Pass
-   the resolved key explicitly to the SDK; never copy it into the environment.
+   registry from the package's lightweight `__init__.py` (as `providers/fireworks/` does), and
+   import that package at the bottom of `providers/__init__.py` with
+   `from pup_finetune.providers import baseten as _baseten  # noqa: E402, F401`, so
+   `auth login baseten`, `auth status` and `doctor` work without new code. Pass the resolved
+   key explicitly to the SDK; never copy it into the environment.
 6. **Deploy.** Implement `deploy` and `undeploy` for a promoted `ModelRef`. Callers gate them
    behind `--confirm` and `PUP_READ_ONLY`.
 7. **Registration and install.** Call `register_provider("baseten",
-   "pup_finetune.providers.baseten:BasetenProvider")` in the registry, and add a `baseten`
+   "pup_finetune.providers.baseten.provider:BasetenProvider")` in the registry (the
+   implementation lives in `provider.py`, so the package `__init__.py` stays light), and add a `baseten`
    extra to `pyproject.toml` for the SDK (with its rows in `LICENSE-3rdparty.csv`).
 8. **Tests.** Subclass the contract suites in `tests/providers/contract/`
    (`RendererContract`, `BackendContract`, `ProviderContract`) against a fake of the SDK

@@ -288,8 +288,12 @@ def test_importing_the_cli_imports_no_provider_module() -> None:
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
     )
     report = json.loads(completed.stdout)
-    # Only the protocols module, never a provider implementation.
-    assert set(report["provider_modules"]) <= {"pup_finetune.providers.base"}
+    # Only the protocols module and the light packages that register provider API keys,
+    # never a provider implementation.
+    assert set(report["provider_modules"]) <= {
+        "pup_finetune.providers.base",
+        "pup_finetune.providers.fireworks",
+    }
     assert report["targets"]
     assert report["loaded_targets"] == []
     assert report["sdks"] == []
