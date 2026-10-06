@@ -6,6 +6,7 @@
 # Copyright 2026-present Datadog, Inc.
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 
@@ -15,6 +16,12 @@ from pup_finetune import __version__
 from pup_finetune.cli import app
 
 runner = CliRunner()
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def plain(text: str) -> str:
+    """Strip ANSI styling; Typer forces rich styling on CI (for example under GITHUB_ACTIONS)."""
+    return _ANSI.sub("", text)
 
 
 def test_version_prints_version_and_exits_zero() -> None:
@@ -30,13 +37,14 @@ def test_version_is_non_empty() -> None:
 def test_help_exits_zero_and_mentions_finetune() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    assert "finetune" in result.output
+    assert "finetune" in plain(result.output)
 
 
 def test_no_args_shows_help() -> None:
     result = runner.invoke(app, [])
-    assert "Usage" in result.output
-    assert "--version" in result.output
+    output = plain(result.output)
+    assert "Usage" in output
+    assert "--version" in output
 
 
 def test_python_dash_m_entry_point() -> None:
