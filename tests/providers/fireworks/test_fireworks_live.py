@@ -7,7 +7,8 @@
 """Read-only checks against the real Fireworks API (``PUP_FINETUNE_LIVE=1``, a key in the env).
 
 The key is read from ``FIREWORKS_API_KEY`` only, never from the keychain, and nothing is
-paid for: preflight and the key check are both GET requests.
+paid for: preflight, the key check and the account lookup are all GET requests; no training
+session is opened.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import pytest
 from pydantic import SecretStr
 
 from pup_finetune.providers.fireworks import validate_key
+from pup_finetune.providers.fireworks.client import FireworksTrainingClient
 from pup_finetune.providers.fireworks.provider import FireworksProvider
 from pup_finetune.runtime import Runtime
 
@@ -40,3 +42,12 @@ def test_every_profile_passes_preflight(api_key: str) -> None:
 
 def test_the_key_validates(api_key: str) -> None:
     validate_key(SecretStr(api_key))
+
+
+def test_the_training_client_resolves_the_account(api_key: str) -> None:
+    client = FireworksTrainingClient(SecretStr(api_key), env={})
+    try:
+        assert client.account_id
+        assert "/" not in client.account_id
+    finally:
+        client.close()

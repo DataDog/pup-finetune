@@ -195,7 +195,12 @@ Using Baseten as the example:
    stopped early or failed. Convert each `TokenizedExample` to the SDK's datum type, map
    `AdamConfig` onto its optimizer parameters, size the trainer from the `seed` and
    `max_seq_len` passed to `open_session`, set `max_checkpoint_name_len` to the provider's
-   limit, and declare `supports_resume` and `supports_promotion`.
+   limit, and declare `supports_resume` and `supports_promotion`. Map SDK failures onto the
+   neutral errors in `providers/base.py`: `ProviderCapacityError` when there is no capacity
+   or quota (end what the failed call started before raising it, and say so in the hint
+   only then), `ProviderAuthError` for a rejected key and
+   `TransientError` for a retryable server error or dropped connection, with redacted
+   messages (`providers/fireworks/client.py` does this in `fireworks_error`).
 3. **Renderer.** Reuse `HFChatTemplateRenderer` through the model's family in
    `rendering/families.py`: the same model renders the same way on every provider. A new
    family is a new table entry (plus a response parser when its output format is new) and

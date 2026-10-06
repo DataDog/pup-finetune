@@ -209,6 +209,20 @@ class TransientError(ExternalError):
     """
 
 
+class ProviderCapacityError(ExternalError):
+    """The provider has no capacity or quota for the request right now (e.g. HTTP 429).
+
+    It does not by itself mean nothing is running: a call in the middle of a session can
+    raise it while the session is still open. A provider that ends what a failed start had
+    provisioned says so in the hint. It is not a :class:`TransientError`: the loop does not
+    retry it, the user does, later.
+    """
+
+
+class ProviderAuthError(ExternalError):
+    """The provider rejected the API key (HTTP 401) or refused it the request (HTTP 403)."""
+
+
 # --- Results the seam returns ------------------------------------------------------------
 
 
