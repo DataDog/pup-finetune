@@ -138,6 +138,15 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   from the environment variable, then the OS keychain (`keyring`), as `SecretStr`; `store` refuses
   when there is no OS keychain rather than writing a file. `auth login/status/logout` use it.
 - `redaction.py` - masks resolved secrets and `Bearer` tokens in error output and logs.
+- `http_common.py` - what the `httpx` clients that send a provider key share: `bearer_key`
+  (refuses an empty or malformed key and registers it for redaction), `CLIENT_SOURCE`
+  (`pup-finetune/<version>`) and short, redacted failure text.
+- `inference.py` - `ChatClient`, an OpenAI-compatible `POST {base_url}/chat/completions` client
+  over `httpx` (no SDK): bounded retries with backoff and jitter on 408, 429, 5xx and connection
+  errors (honoring a capped `Retry-After`), no retry on other 4xx, 401/403 as
+  `ProviderAuthError` with a login hint, 429 after retries as `ProviderCapacityError`, the rest
+  as `TransientError` or `ExternalError`; `ChatCompleter` is its protocol. `JudgeConfig` is the
+  judge's model, endpoint, credential and sampling settings (`identity()` for resume checks).
 - `datadog/` - Datadog access via `pup`. `pup.py` is the client every Datadog call goes
   through: `pup --no-agent --output json ...`, a scrubbed environment, timeouts, and failures as
   `ExternalError`. `spans.py` exports LLM spans through the Export API
@@ -254,7 +263,13 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   turn. Tools are never executed, so replay measures agreement with the recorded behavior, not
   task success. `metrics.py` has the deterministic tool-call metrics (`MetricName`,
   `score_case`, `aggregate`; `None` when a metric does not apply) and `schema_errors`, a
-  validator for the common JSON Schema subset tool declarations use. The LLM judge, the
+  validator for the common JSON Schema subset tool declarations use. `judge.py` is the LLM
+  judge: `judge` asks whether a candidate action is an acceptable substitute for the reference
+  (the recorded data JSON-encoded in tagged blocks marked untrusted, reasoning never shown) and
+  parses `{"pass", "reason"}` strictly (`parse_verdict`, outside any `<think>` block; anything
+  else fails as `unparseable`, or `truncated` when the judge hit `max_tokens`); a malformed candidate fails without a call, and a judge outage raises rather
+  than failing the case. `calibrate` checks that references pass and `corrupt`ed ones fail on a
+  few mixed cases; `check_judge_differs` refuses a judge that is the model being trained. The
   replay runner and reporting arrive later.
 - `providers/` - the provider seam. `base.py` has the neutral types (`ModelProfile`,
   `TrainSpec`, `CheckpointRef`, `StepMetrics`, ...) and the `Provider`, `TrainingBackend`,
@@ -301,6 +316,8 @@ argument prefix (or computes the answer with a `handler`) and records every call
 behind the pup calls `LLMObsDatasets` makes, with failures to inject.
 `tests/fakes/tokenizer.py` has `FakeChatTokenizer`, a character-level chat tokenizer with a
 Qwen3.8-like Python template (optionally merging `\n\n` across the prompt boundary).
+`tests/fakes/chat_api.py` has `FakeChatApi`, an OpenAI-compatible chat completions endpoint
+(scripted responses or errors first, then an answer function) and `matching_judge`.
 `tests/fakes/fireworks_api.py` has `FakeFireworksApi`, the Fireworks model and account routes
 behind an `httpx.MockTransport`, with statuses and transport errors to inject.
 `tests/fakes/fireworks.py` has `FakeFireworksTrainingClient`, the Fireworks Training API

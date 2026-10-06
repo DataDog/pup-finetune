@@ -27,12 +27,11 @@ from typing import Any, Final, Self
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
-from pup_finetune import __version__
 from pup_finetune.credentials import login_hint
 from pup_finetune.errors import ExternalError, UsageError
+from pup_finetune.http_common import CLIENT_SOURCE, bearer_key, error_detail, exception_reason
 from pup_finetune.providers.base import ProviderAuthError
 from pup_finetune.providers.fireworks import CREDENTIALS
-from pup_finetune.redaction import redact, register_secret
 
 __all__ = [
     "API_URL",
@@ -47,8 +46,6 @@ __all__ = [
 
 API_URL: Final = "https://api.fireworks.ai"
 DEFAULT_TIMEOUT_S: Final = 30.0
-CLIENT_SOURCE: Final = f"pup-finetune/{__version__}"
-"""Sent as :data:`CLIENT_SOURCE_HEADER` (and ``User-Agent``) on every request."""
 CLIENT_SOURCE_HEADER: Final = "X-Fireworks-Client-Source"
 """The header Fireworks reads the calling client from."""
 
@@ -57,7 +54,6 @@ _DEFAULT_ACCOUNT: Final = "fireworks"
 _SEGMENT: Final = r"[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?"
 _MODEL_NAME: Final = re.compile(rf"accounts/({_SEGMENT})/models/({_SEGMENT})")
 _MODEL_ID: Final = re.compile(_SEGMENT)
-_DETAIL_LIMIT: Final = 200
 
 
 class FireworksAuthError(ProviderAuthError):
@@ -201,7 +197,7 @@ class FireworksApi:
             ) from exc
         except httpx.HTTPError as exc:
             raise ExternalError(
-                f"{what} failed: could not reach the Fireworks API ({_reason(exc)})",
+                f"{what} failed: could not reach the Fireworks API ({exception_reason(exc)})",
                 source=SOURCE,
                 hint="check the connection to api.fireworks.ai and retry",
             ) from exc
@@ -222,7 +218,7 @@ class FireworksApi:
         if status == 404 and missing is not None:
             raise UsageError(missing, hint="check the model name and that your account can use it")
         if not response.is_success:
-            detail = _error_detail(response)
+            detail = error_detail(response)
             raise ExternalError(
                 f"{what} failed with HTTP {status}" + (f": {detail}" if detail else ""),
                 source=SOURCE,
@@ -239,45 +235,7 @@ class FireworksApi:
 def checked_key(api_key: SecretStr) -> str:
     """The value of ``api_key``, registered for redaction, once it is safe to send.
 
-    Raises :class:`UsageError` for an empty key, or one that is not one word of printable
-    ASCII. A malformed key is refused before it reaches a header: the HTTP layer would echo an
-    illegal header value in its error, escaped, so redaction could not mask it whole.
+    Raises :class:`UsageError` for an empty or malformed key (see
+    :func:`~pup_finetune.http_common.bearer_key`).
     """
-    secret = api_key.get_secret_value()
-    if not secret:
-        raise UsageError("the Fireworks API key is empty", hint=login_hint(CREDENTIALS))
-    if not _is_token(secret):
-        raise UsageError(
-            "the Fireworks API key is malformed: it must be one word of printable ASCII, "
-            "with no spaces or line breaks",
-            hint=login_hint(CREDENTIALS),
-        )
-    register_secret(secret)
-    return secret
-
-
-def _is_token(secret: str) -> bool:
-    """Whether ``secret`` is one word of printable ASCII, safe to send in a header."""
-    return secret.isascii() and secret.isprintable() and not any(c.isspace() for c in secret)
-
-
-def _reason(exc: BaseException) -> str:
-    lines = redact(str(exc)).strip().splitlines()
-    return f"{type(exc).__name__}: {lines[0][:_DETAIL_LIMIT]}" if lines else type(exc).__name__
-
-
-def _error_detail(response: httpx.Response) -> str:
-    """The error message in a failed response, short and redacted; empty when there is none."""
-    text = ""
-    try:
-        body = response.json()
-    except ValueError:
-        body = None
-    if isinstance(body, dict):
-        error = body.get("error")
-        message = error.get("message") if isinstance(error, dict) else error
-        text = str(message or body.get("message") or "")
-    elif not response.headers.get("content-type", "").startswith("text/html"):
-        text = response.text
-    lines = redact(text).strip().splitlines()
-    return lines[0][:_DETAIL_LIMIT] if lines else ""
+    return bearer_key(api_key, label="the Fireworks API key", hint=login_hint(CREDENTIALS))
