@@ -17,9 +17,11 @@ and keeps, per trace, only the conversations no other one contains:
 - Of identical conversations, one is kept: a valid one over an invalid one, then the one with
   the latest ``start_ns``, then the one that arrived last.
 
-Messages compare by role, content and tool calls (name and arguments). Tool call ids and
+Messages compare by role, content and tool calls (name and arguments), and a tool message by
+the position of the call it answers (which message, which call in it). Tool call ids and
 reasoning do not take part: a generated id differs between spans, and a span's input rarely
-repeats the reasoning its predecessor output.
+repeats the reasoning its predecessor output. The position keeps apart conversations that
+pair the same results with different calls of a parallel tool call.
 
 Each kept conversation is a row with the id ``{trace_id}:{span_id}``, or an
 :class:`~pup_finetune.data.exclusions.Exclusion` with a stable code when it could not be
@@ -200,14 +202,17 @@ def _prefix_digests(conversation: Conversation) -> tuple[str, ...]:
     """A running digest over the messages' comparable parts, one per message."""
     digests: list[str] = []
     running = hashlib.sha256()
-    for message in conversation.messages:
-        calls = [
-            [call["function"]["name"], call["function"]["arguments"]]
-            for call in message.get("tool_calls", ())
-        ]
+    # Where each tool call is, as [message index, call index], by its id.
+    positions: dict[str, list[int]] = {}
+    for index, message in enumerate(conversation.messages):
+        calls = []
+        for call_index, call in enumerate(message.get("tool_calls", ())):
+            calls.append([call["function"]["name"], call["function"]["arguments"]])
+            positions.setdefault(call["id"], [index, call_index])
+        answers = positions.get(message.get("tool_call_id") or "")
         # Not canonical_json: a non-text content part is kept as given and may hold anything.
         part = json.dumps(
-            [message["role"], message["content"], calls],
+            [message["role"], message["content"], calls, answers],
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=False,

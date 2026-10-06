@@ -268,6 +268,36 @@ def test_tool_calls_that_differ_do_not_collapse(
     ]
 
 
+def test_parallel_results_paired_with_other_calls_do_not_collapse() -> None:
+    calls = {
+        "role": "assistant",
+        "tool_calls": [
+            {"name": "get_weather", "arguments": {"city": "Northvale"}, "tool_id": "call-a"},
+            {"name": "get_weather", "arguments": {"city": "Southvale"}, "tool_id": "call-b"},
+        ],
+    }
+
+    def results(*answering: str) -> dict[str, Any]:
+        """The same result texts, in the same order, answering the calls ``answering``."""
+        texts = ("cloudy", "sunny")
+        return {
+            "role": "tool",
+            "tool_results": [
+                {"result": text, "name": "get_weather", "tool_id": call_id}
+                for text, call_id in zip(texts, answering, strict=True)
+            ],
+        }
+
+    spans = [
+        make_span("synthetic-span-1", [Q1, calls, results("call-a", "call-b"), A1]),
+        make_span("synthetic-span-2", [Q1, calls, results("call-b", "call-a"), A1]),
+    ]
+    assert outcome(rows_from_spans(spans)) == [
+        "row:synthetic-trace-9000:synthetic-span-1",
+        "row:synthetic-trace-9000:synthetic-span-2",
+    ]
+
+
 def test_identical_tool_calls_collapse() -> None:
     spans = [
         make_span("synthetic-span-1", [Q1, calling("get_weather", "Northvale")]),
