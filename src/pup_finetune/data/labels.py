@@ -33,6 +33,7 @@ from pydantic import (
     model_validator,
 )
 
+from pup_finetune.data.schema import lone_surrogate
 from pup_finetune.errors import FinetuneError, StateError
 from pup_finetune.storage import parse_jsonl_line
 
@@ -55,6 +56,15 @@ class Label(BaseModel):
     by: LabelSource = "agent"
     at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
     """When the decision was made; stored in UTC."""
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_is_encodable(cls, value: str) -> str:
+        # JSON's \ud800 escape decodes to a lone surrogate, which UTF-8 cannot encode. Rejected
+        # here, a label file reports its line instead of failing when the label is written.
+        if (surrogate := lone_surrogate(value)) is not None:
+            raise ValueError(f"has a lone surrogate ({surrogate}); UTF-8 cannot encode it")
+        return value
 
     @field_validator("at")
     @classmethod

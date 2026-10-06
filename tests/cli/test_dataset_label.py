@@ -140,6 +140,21 @@ def test_label_requires_a_reason_to_drop(dataset: Path, tmp_path: Path) -> None:
     assert not (dataset / "labels.jsonl").exists()
 
 
+def test_label_rejects_a_lone_surrogate_in_a_reason(dataset: Path, tmp_path: Path) -> None:
+    keep = label_file(tmp_path, {"id": FIXTURE_IDS[0], "keep": True}, name="keep.jsonl")
+    output_json(label(dataset, keep))
+    before = (dataset / "labels.jsonl").read_bytes()
+    file = label_file(
+        tmp_path,
+        {"id": FIXTURE_IDS[1], "keep": True},
+        {"id": FIXTURE_IDS[2], "keep": False, "reason": "bad \ud800"},
+    )
+    result = label(dataset, file)
+    assert result.exit_code == 2
+    assert "labels.jsonl:2: invalid label: reason: has a lone surrogate (U+D800)" in result.stderr
+    assert (dataset / "labels.jsonl").read_bytes() == before
+
+
 @pytest.mark.parametrize(
     ("line", "problem"),
     [

@@ -139,7 +139,7 @@ def _find_lone_surrogate(value: object, root: str = "") -> str | None:
     while stack:
         item, where = stack.pop()
         if isinstance(item, str):
-            if (surrogate := _lone_surrogate(item)) is not None:
+            if (surrogate := lone_surrogate(item)) is not None:
                 return f"{where} has a lone surrogate ({surrogate}); UTF-8 cannot encode it"
         elif isinstance(item, dict):
             children: list[tuple[object, str]] = []
@@ -148,7 +148,7 @@ def _find_lone_surrogate(value: object, root: str = "") -> str | None:
                 # Escaped, so the description itself stays encodable.
                 name = text.encode("utf-8", "backslashreplace").decode("utf-8")
                 path = f"{where}.{name}" if where else name
-                if (surrogate := _lone_surrogate(text)) is not None:
+                if (surrogate := lone_surrogate(text)) is not None:
                     return (
                         f"the key {path} has a lone surrogate ({surrogate}); UTF-8 cannot encode it"
                     )
@@ -159,8 +159,11 @@ def _find_lone_surrogate(value: object, root: str = "") -> str | None:
     return None
 
 
-def _lone_surrogate(text: str) -> str | None:
-    """The first lone surrogate in ``text`` as ``U+XXXX``, or ``None``."""
+def lone_surrogate(text: str) -> str | None:
+    """The first lone surrogate in ``text`` as ``U+XXXX``, or ``None``.
+
+    Any string that may be written as UTF-8 can use it to fail at validation instead.
+    """
     try:
         text.encode("utf-8")
     except UnicodeEncodeError as exc:
