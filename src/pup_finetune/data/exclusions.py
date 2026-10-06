@@ -7,8 +7,9 @@
 """Why a row was left out of a dataset, as recorded in ``excluded.jsonl``.
 
 A row is excluded either because it breaks the canonical schema (a
-:class:`~pup_finetune.data.schema.RowErrorCode`) or for a dataset-level reason that applies
-to valid rows (an :class:`ExclusionCode`). Both sets of values are stable.
+:class:`~pup_finetune.data.schema.RowErrorCode`), or for a reason the schema cannot see (an
+:class:`ExclusionCode`): the source span could not be converted faithfully, or the row is
+valid but does not belong in the dataset. Both sets of values are stable.
 """
 
 from __future__ import annotations
@@ -23,10 +24,19 @@ from pup_finetune.data.schema import RowError, RowErrorCode, TrainingRow
 
 
 class ExclusionCode(StrEnum):
-    """Dataset-level reasons a valid row is excluded. The values are stable."""
+    """Reasons a row is excluded that are not schema violations. The values are stable."""
 
     DUPLICATE_CONVERSATION = "duplicate_conversation"
     """The same conversation (by content hash) is already in the dataset under another id."""
+    NON_TEXT_CONTENT = "non_text_content"
+    """A source message has a content part that is not text, such as an image."""
+    UNSTRUCTURED_TOOL_MESSAGE = "unstructured_tool_message"
+    """A tool message with no structured tool call or result to pair with, as sent by apps
+    that write tool calls into the assistant's text instead of the tool-call fields."""
+
+
+ExclusionReason = RowErrorCode | ExclusionCode
+"""Any stable exclusion code."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,7 +48,7 @@ class Exclusion:
     diagnostic, such as the same line of two files with the same name.
     """
 
-    code: RowErrorCode | ExclusionCode
+    code: ExclusionReason
     detail: str
     row_id: str | None = None
     trace_id: str | None = None
@@ -48,6 +58,29 @@ class Exclusion:
     @classmethod
     def for_row(cls, row: TrainingRow, code: ExclusionCode, detail: str) -> Exclusion:
         return cls(code, detail, row.id, row.source.trace_id, row.source.span_id)
+
+    @classmethod
+    def for_source(
+        cls,
+        code: ExclusionReason,
+        detail: str,
+        *,
+        row_id: str | None = None,
+        trace_id: str | None = None,
+        span_id: str | None = None,
+    ) -> Exclusion:
+        """An exclusion for a candidate row that was never valid, such as a converted span.
+
+        As in :meth:`for_invalid`, ids UTF-8 cannot encode are dropped and the detail is
+        escaped, so the record can always be written.
+        """
+        return cls(
+            code,
+            detail.encode("utf-8", "backslashreplace").decode("utf-8"),
+            _text(row_id),
+            _text(trace_id),
+            _text(span_id),
+        )
 
     @classmethod
     def for_invalid(

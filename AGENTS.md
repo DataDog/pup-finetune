@@ -95,11 +95,17 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
 - `data/` - training data. `schema.py` is the canonical row every provider consumes (OpenAI
   chat format plus its source) and the stable `RowErrorCode` reasons a row is rejected for;
   `jsonl.py` reads and writes rows and converts them to the provider form; `exclusions.py`
-  records why a row was left out (`excluded.jsonl`), with dataset-level `ExclusionCode`s;
+  records why a row was left out (`excluded.jsonl`), with `ExclusionCode`s for reasons the
+  schema cannot see (conversion problems, dataset-level rules);
   `split.py` assigns deterministic, persisted train/validation/test splits per trace;
   `dataset_dir.py` is the dataset directory (`settings.json`, `rows.jsonl`, `excluded.jsonl`,
-  `splits.json`, `summary.json`) behind `dataset import` and `dataset show`. Conversion from
-  spans and the exclusion checks arrive later.
+  `splits.json`, `summary.json`) behind `dataset import` and `dataset show`. `convert.py`
+  maps one LLM span to a canonical conversation (`span_conversation`: input then output
+  messages, tool calls and results, tools, `SourceRef`; reasoning omitted or preserved), with
+  conversion issues as stable codes; `trajectories.py` has `rows_from_spans`, which dedupes
+  spans by id, groups them by trace, collapses conversations that are a prefix or duplicate
+  of another (so sub-agents stay their own rows) and yields a validated row or an
+  `Exclusion` per kept conversation. The exclusion checks arrive later.
 - `curation/` - *later*. Keep/drop labels and judge-based triage.
 - `training/` - the shared, provider-neutral SFT loop. `datums.py` renders rows into
   `TokenizedExample`s (per turn when a renderer is not prefix-stable) and rejects rows that
