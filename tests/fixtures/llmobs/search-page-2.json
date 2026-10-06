@@ -1,0 +1,228 @@
+{
+  "data": [
+    {
+      "id": "synthetic-span-0301",
+      "type": "span",
+      "attributes": {
+        "span_id": "synthetic-span-0301",
+        "trace_id": "synthetic-trace-0103",
+        "parent_id": "undefined",
+        "name": "chat",
+        "span_kind": "llm",
+        "ml_app": "synthetic-unit-converter",
+        "model_name": "example-model-large",
+        "model_provider": "example-provider",
+        "status": "ok",
+        "start_ns": 1767225630000000000,
+        "duration": 1834000000.0,
+        "input": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "You convert units."
+            },
+            {
+              "role": "user",
+              "content": "What is 5 kg in pounds?"
+            }
+          ]
+        },
+        "tool_definitions": [],
+        "metadata": {
+          "temperature": 0.2,
+          "max_tokens": 1024
+        },
+        "tags": [
+          "env:synthetic",
+          "ml_app:synthetic-unit-converter",
+          "service:synthetic-unit-converter",
+          "version:0.1.0"
+        ],
+        "metrics": {
+          "input_tokens": 412,
+          "output_tokens": 38,
+          "total_tokens": 450
+        },
+        "output": {
+          "messages": [
+            {
+              "role": "reasoning",
+              "content": "One kilogram is about 2.20462 pounds, so 5 kg is about 11.02 lb."
+            },
+            {
+              "role": "assistant",
+              "content": "5 kg is about 11.02 lb."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "synthetic-span-0401",
+      "type": "span",
+      "attributes": {
+        "span_id": "synthetic-span-0401",
+        "trace_id": "synthetic-trace-0104",
+        "parent_id": "undefined",
+        "name": "chat",
+        "span_kind": "llm",
+        "ml_app": "synthetic-support-desk",
+        "model_name": "example-model-large",
+        "model_provider": "example-provider",
+        "status": "ok",
+        "start_ns": 1767225640000000000,
+        "duration": 1834000000.0,
+        "input": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "You answer questions about support tickets."
+            },
+            {
+              "role": "user",
+              "content": "What's the status of ticket SUP-0042?"
+            }
+          ]
+        },
+        "tool_definitions": [],
+        "metadata": {
+          "temperature": 0.2,
+          "max_tokens": 1024
+        },
+        "tags": [
+          "env:synthetic",
+          "ml_app:synthetic-support-desk",
+          "service:synthetic-support-desk",
+          "version:0.1.0"
+        ],
+        "metrics": {
+          "input_tokens": 412,
+          "output_tokens": 38,
+          "total_tokens": 450
+        },
+        "output": {
+          "messages": [
+            {
+              "content": "Ticket SUP-0042 is open and assigned to the billing queue."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "synthetic-span-0501",
+      "type": "span",
+      "attributes": {
+        "span_id": "synthetic-span-0501",
+        "trace_id": "synthetic-trace-0105",
+        "parent_id": "undefined",
+        "name": "chat",
+        "span_kind": "llm",
+        "ml_app": "synthetic-support-desk",
+        "model_name": "example-model-large",
+        "model_provider": "example-provider",
+        "status": "ok",
+        "start_ns": 1767225650000000000,
+        "duration": 1834000000.0,
+        "input": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "You answer questions about support tickets."
+            },
+            {
+              "role": "user",
+              "content": "Close ticket SUP-0043, please."
+            }
+          ]
+        },
+        "tool_definitions": [],
+        "metadata": {
+          "temperature": 0.2,
+          "max_tokens": 1024
+        },
+        "tags": [
+          "env:synthetic",
+          "ml_app:synthetic-support-desk",
+          "service:synthetic-support-desk",
+          "version:0.1.0"
+        ],
+        "metrics": {
+          "input_tokens": 412,
+          "output_tokens": 38,
+          "total_tokens": 450
+        }
+      }
+    },
+    {
+      "id": "synthetic-span-0601",
+      "type": "span",
+      "attributes": {
+        "span_id": "synthetic-span-0601",
+        "trace_id": "synthetic-trace-0106",
+        "parent_id": "undefined",
+        "name": "chat",
+        "span_kind": "llm",
+        "ml_app": "synthetic-expense-helper",
+        "model_name": "example-model-large",
+        "model_provider": "example-provider",
+        "status": "ok",
+        "start_ns": 1767225660000000000,
+        "duration": 1834000000.0,
+        "input": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "You read receipts."
+            },
+            {
+              "role": "user",
+              "content": [
+                {
+                  "type": "text",
+                  "text": "What is the total on this receipt?"
+                },
+                {
+                  "type": "image_url",
+                  "image_url": {
+                    "url": "https://example.com/synthetic-receipt.png"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "tool_definitions": [],
+        "metadata": {
+          "temperature": 0.2,
+          "max_tokens": 1024
+        },
+        "tags": [
+          "env:synthetic",
+          "ml_app:synthetic-expense-helper",
+          "service:synthetic-expense-helper",
+          "version:0.1.0"
+        ],
+        "metrics": {
+          "input_tokens": 412,
+          "output_tokens": 38,
+          "total_tokens": 450
+        },
+        "output": {
+          "messages": [
+            {
+              "role": "assistant",
+              "content": "The total is 23.40."
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "meta": {
+    "page": {},
+    "status": "done",
+    "elapsed": 412,
+    "request_id": "synthetic-request-0002"
+  }
+}

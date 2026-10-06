@@ -99,9 +99,14 @@ def atomic_write_text(path: Path, text: str) -> None:
     _fsync_dir(path.parent)
 
 
-def atomic_write_json(path: Path, data: Any) -> None:
-    """Replace ``path`` with ``data`` as indented, key-sorted JSON (see :func:`atomic_write_text`)."""
-    text = json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False)
+def atomic_write_json(path: Path, data: Any, *, ensure_ascii: bool = False) -> None:
+    """Replace ``path`` with ``data`` as indented, key-sorted JSON (see :func:`atomic_write_text`).
+
+    ``ensure_ascii=True`` writes non-ASCII characters as ``\\u`` escapes. Use it for upstream
+    data that may hold lone surrogates: UTF-8 cannot encode them, but the escapes round-trip
+    through :func:`read_json`.
+    """
+    text = json.dumps(data, indent=2, sort_keys=True, ensure_ascii=ensure_ascii, allow_nan=False)
     atomic_write_text(path, text + "\n")
 
 
