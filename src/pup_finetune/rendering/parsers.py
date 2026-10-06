@@ -92,7 +92,9 @@ def _parse_blocks(
     """The parse both formats share: reasoning, then content and ``<tool_call>`` blocks.
 
     ``parse_call`` reads one block's inner text as ``(name, arguments)``, or ``None`` when
-    the block is malformed; a malformed block stays in ``content`` as raw text. With
+    the block is malformed; a malformed block stays in ``content`` as raw text, as does a
+    stray ``<tool_call>`` or ``</tool_call>`` before, between or after the blocks, and either
+    makes the format invalid. With
     ``prompt_opens_think`` the text continues a reasoning block the prompt opened, so it must
     close it: when it does not, the whole text is reasoning and the format is invalid.
     """
@@ -122,7 +124,10 @@ def _parse_blocks(
     calls: list[dict[str, Any]] = []
     position = 0
     for match in _CALL_BLOCK.finditer(body):
-        content.append(body[position : match.start()])
+        segment = body[position : match.start()]
+        if _CALL_OPEN in segment or _CALL_CLOSE in segment:
+            valid = False
+        content.append(segment)
         position = match.end()
         parsed = parse_call(match.group(1))
         if parsed is None or _CALL_OPEN in match.group(1):
@@ -164,7 +169,7 @@ class Qwen3XmlToolParser:
     turn_end: str = "<|im_end|>"
     prompt_opens_think: bool = True
     name: ClassVar[str] = "qwen3_xml"
-    version: ClassVar[str] = "1"
+    version: ClassVar[str] = "2"
 
     def parse(self, text: str) -> ParsedResponse:
         return _parse_blocks(
@@ -202,7 +207,7 @@ class JsonToolCallParser:
     turn_end: str = "<|im_end|>"
     prompt_opens_think: bool = False
     name: ClassVar[str] = "json_tool_call"
-    version: ClassVar[str] = "1"
+    version: ClassVar[str] = "2"
 
     def parse(self, text: str) -> ParsedResponse:
         return _parse_blocks(

@@ -129,6 +129,59 @@ def test_qwen_a_malformed_block_keeps_its_text_and_the_good_calls() -> None:
     assert parsed.message["content"] == f"Checking.\n\n{bad}"
 
 
+TWO_CALLS = [("get_weather", {"city": "Paris"}), ("now", {})]
+BLOCKS = pytest.mark.parametrize(
+    ("parser", "first", "second"),
+    [
+        (
+            Qwen3XmlToolParser(prompt_opens_think=False),
+            WEATHER_CALL,
+            "<tool_call>\n<function=now>\n</function>\n</tool_call>",
+        ),
+        (
+            JsonToolCallParser(),
+            '<tool_call>{"name": "get_weather", "arguments": {"city": "Paris"}}</tool_call>',
+            '<tool_call>{"name": "now", "arguments": {}}</tool_call>',
+        ),
+    ],
+    ids=["qwen3_xml", "json_tool_call"],
+)
+PLACES = pytest.mark.parametrize(
+    "template", ["{stray}{a}\n{b}", "{a}\n{stray}\n{b}", "{a}\n{b}\n{stray}"]
+)
+
+
+@BLOCKS
+def test_consecutive_tool_call_blocks_are_format_valid(
+    parser: Qwen3XmlToolParser | JsonToolCallParser, first: str, second: str
+) -> None:
+    parsed = parser.parse(f"{first}\n{second}<|im_end|>")
+    assert parsed.format_valid
+    assert calls(parsed.message) == TWO_CALLS
+    assert parsed.message["content"] == ""
+
+
+@BLOCKS
+@PLACES
+def test_a_stray_closing_tag_outside_the_blocks_is_format_invalid(
+    parser: Qwen3XmlToolParser | JsonToolCallParser, first: str, second: str, template: str
+) -> None:
+    parsed = parser.parse(template.format(a=first, b=second, stray="</tool_call>"))
+    assert not parsed.format_valid
+    assert calls(parsed.message) == TWO_CALLS
+    assert parsed.message["content"] == "</tool_call>"
+
+
+@BLOCKS
+@PLACES
+def test_a_stray_opening_tag_outside_the_blocks_is_format_invalid(
+    parser: Qwen3XmlToolParser | JsonToolCallParser, first: str, second: str, template: str
+) -> None:
+    parsed = parser.parse(template.format(a=first, b=second, stray="<tool_call>"))
+    assert not parsed.format_valid
+    assert "<tool_call>" in parsed.message["content"]
+
+
 @pytest.mark.parametrize("text", ["", "\n\n", "<|", '{"unclosed": ', "<tool_call>"])
 def test_parsers_never_raise(text: str) -> None:
     for name in PARSERS:
