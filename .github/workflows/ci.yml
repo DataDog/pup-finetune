@@ -1,0 +1,70 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Unless explicitly stated otherwise all files in this repository are licensed under the Apache License Version 2.0.
+#
+# This product includes software developed at Datadog (https://www.datadoghq.com/).
+# Copyright 2026-present Datadog, Inc.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: checks (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: uv sync --locked --all-extras
+      - name: Lint
+        run: uv run ruff check
+      - name: Format
+        run: uv run ruff format --check
+      - name: Type-check
+        run: uv run mypy src
+      - name: Test
+        run: uv run pytest
+      - name: License headers
+        run: uv run python scripts/check_headers.py
+      - name: Third-party licenses
+        run: uv run python scripts/check_3rdparty.py
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # hatch-vcs derives the version from git tags
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+      - name: Build
+        run: uv build
+      - name: Smoke-test the wheel in a fresh venv
+        run: |
+          uv venv /tmp/v
+          uv pip install --python /tmp/v dist/*.whl
+          /tmp/v/bin/pup-finetune --version
