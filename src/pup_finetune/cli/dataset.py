@@ -39,7 +39,14 @@ from pup_finetune.data.pull import (
     pull,
     resolve_window,
 )
-from pup_finetune.data.push import PushPlan, plan_push, push_dataset, push_path, read_push_state
+from pup_finetune.data.push import (
+    IN_FLIGHT_SETTLE,
+    PushPlan,
+    plan_push,
+    push_dataset,
+    push_path,
+    read_push_state,
+)
 from pup_finetune.data.split import (
     DEFAULT_SEED,
     DEFAULT_TEST_FRACTION,
@@ -330,10 +337,11 @@ def _push_preview(plan: PushPlan) -> dict[str, Any]:
     }
     warnings = []
     if plan.in_flight:
+        settle = int(IN_FLIGHT_SETTLE.total_seconds() // 60)
         warnings.append(
             f"an interrupted push sent {len(plan.in_flight)} records without learning whether "
             "they were added; the push lists the dataset's records first and sends only those "
-            "it does not find"
+            f"it does not find, and none until {settle} minutes after the batch was sent"
         )
     if plan.stale_records:
         warnings.append(_stale_warning(len(plan.stale_records)))
