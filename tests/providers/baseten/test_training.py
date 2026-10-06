@@ -23,13 +23,15 @@ from pydantic import SecretStr
 
 from pup_finetune import redaction
 from pup_finetune.data import read_rows, write_rows
+from pup_finetune.data.schema import TrainingRow, validate_row
 from pup_finetune.errors import ExternalError, FinetuneError, StateError, UsageError
 from pup_finetune.providers import TrainRequest
 from pup_finetune.providers.baseten import training
 from pup_finetune.providers.baseten.client import CHECKPOINT_URI, BasetenHTTP
+from pup_finetune.providers.baseten.models import get_model
 from pup_finetune.providers.baseten.registration import LOOPS_INSTALL_HINT
 from pup_finetune.providers.baseten.training import TerminationRequested, plan_training, train
-from pup_finetune.rendering import ModelFamily
+from pup_finetune.rendering import ModelFamily, render_row
 from pup_finetune.training import SFTSettings, TrainingDataError
 from tests.fakes.baseten import BasetenTransport, FakeLoops, baseten_transport, http_status_error
 from tests.fakes.tokenizer import FakeChatTokenizer
@@ -84,6 +86,29 @@ def run_dir(tmp_path: Path) -> Path:
 
 def fake_tokenizer(family: ModelFamily) -> FakeChatTokenizer:
     return FakeChatTokenizer()
+
+
+def sized_row(row_id: str, tokens: int) -> TrainingRow:
+    """A one-turn row whose datum renders to exactly ``tokens`` fake tokens."""
+
+    def row(filler: int) -> TrainingRow:
+        messages = [
+            {"role": "user", "content": "x" * filler},
+            {"role": "assistant", "content": "ok"},
+        ]
+        return validate_row({"id": row_id, "messages": messages})
+
+    family = get_model("qwen3p5-9b").family
+    [datum] = render_row(row(1), family, FakeChatTokenizer(), max_seq_len=family.max_seq_len)
+    return row(tokens - len(datum.tokens) + 1)
+
+
+def sized_run_dir(tmp_path: Path, train: list[int], validation: list[int]) -> Path:
+    """A run dir whose train and validation files hold rows of these datum lengths."""
+    write_rows(tmp_path / "train.jsonl", [sized_row(f"t{i}", n) for i, n in enumerate(train)])
+    rows = [sized_row(f"v{i}", n) for i, n in enumerate(validation)]
+    write_rows(tmp_path / "validation.jsonl", rows)
+    return tmp_path / "run"
 
 
 def make_request(run_dir: Path, **settings: Any) -> TrainRequest:
@@ -182,7 +207,8 @@ def test_plan_reads_renders_and_sizes_the_run(run_dir: Path) -> None:
         "batch_size": 8,
         "seed": 42,
         "lora_rank": 8,
-        "max_seq_len": 131_072,
+        "max_seq_len": 2048,
+        "max_seq_len_source": "data",
         "microbatch_token_budget": 131_072,
         "capacity": "dedicated",
     }
@@ -199,7 +225,7 @@ def test_plan_reads_renders_and_sizes_the_run(run_dir: Path) -> None:
     assert plan["estimates"]["max_context_tokens"] == 1692
     assert (prepared.lora_rank, prepared.max_seq_len, prepared.token_budget) == (
         8,
-        131_072,
+        2048,
         131_072,
     )
     assert len(prepared.train_rows) == 12
@@ -226,6 +252,7 @@ def test_plan_excludes_training_rows_that_do_not_fit(run_dir: Path) -> None:
         16,
         2000,
     )
+    assert config["max_seq_len_source"] == "flag"
 
 
 def test_plan_caps_max_seq_len_at_the_model_limit(run_dir: Path) -> None:
@@ -233,6 +260,62 @@ def test_plan_caps_max_seq_len_at_the_model_limit(run_dir: Path) -> None:
         make_request(run_dir, max_seq_len=10**7), tokenizer_loader=fake_tokenizer
     )
     assert plan["config"]["max_seq_len"] == 131_072
+
+
+@pytest.mark.parametrize(
+    ("train_lengths", "validation_lengths", "expected"),
+    [
+        ([500, 760], [300], 1024),
+        ([100], [50], 1024),
+        ([900, 1500], [300], 2048),
+        ([2048], [300], 2048),
+        ([2049], [300], 4096),
+        ([700], [1500], 2048),
+    ],
+    ids=["760", "floor", "1500", "exactly-2048", "2049", "validation-counts"],
+)
+def test_the_default_max_seq_len_fits_the_longest_datum(
+    tmp_path: Path, train_lengths: list[int], validation_lengths: list[int], expected: int
+) -> None:
+    run_dir = sized_run_dir(tmp_path, train_lengths, validation_lengths)
+    plan, prepared = plan_training(make_request(run_dir), tokenizer_loader=fake_tokenizer)
+    longest = max(train_lengths + validation_lengths)
+    assert plan["estimates"]["max_context_tokens"] == longest
+    assert (plan["config"]["max_seq_len"], plan["config"]["max_seq_len_source"]) == (
+        expected,
+        "data",
+    )
+    assert prepared.max_seq_len == expected
+    assert plan["config"]["microbatch_token_budget"] == prepared.token_budget == 131_072
+    assert plan["dataset"]["rejected_train_rows"] == []
+
+
+def test_the_default_max_seq_len_excludes_rows_over_the_model_limit(tmp_path: Path) -> None:
+    run_dir = sized_run_dir(tmp_path, [700, 131_073], [300])
+    plan, prepared = plan_training(make_request(run_dir), tokenizer_loader=fake_tokenizer)
+    assert [row["id"] for row in plan["dataset"]["rejected_train_rows"]] == ["t1"]
+    assert (plan["config"]["max_seq_len"], plan["config"]["max_seq_len_source"]) == (1024, "data")
+    assert prepared.max_seq_len == 1024
+
+
+def test_an_explicit_max_seq_len_wins_and_still_rejects_longer_rows(tmp_path: Path) -> None:
+    run_dir = sized_run_dir(tmp_path, [700, 1500], [300])
+    plan, prepared = plan_training(
+        make_request(run_dir, max_seq_len=1000), tokenizer_loader=fake_tokenizer
+    )
+    assert (plan["config"]["max_seq_len"], plan["config"]["max_seq_len_source"]) == (1000, "flag")
+    assert [row["id"] for row in plan["dataset"]["rejected_train_rows"]] == ["t1"]
+    assert plan["config"]["microbatch_token_budget"] == prepared.token_budget == 131_072
+
+
+@pytest.mark.parametrize(
+    ("longest", "limit", "expected"),
+    [(1, 131_072, 1024), (1025, 131_072, 2048), (40_000, 40_960, 40_960), (100, 512, 512)],
+)
+def test_the_fitted_max_seq_len_is_capped_at_the_model_limit(
+    longest: int, limit: int, expected: int
+) -> None:
+    assert training._fitted_seq_len(longest, limit) == expected
 
 
 def test_plan_reports_the_spend_guard(run_dir: Path) -> None:
@@ -336,7 +419,7 @@ def test_train_runs_the_loop_cleans_up_and_writes_the_contract(
             "rank": 8,
             "replicas": 1,
             "seed": 42,
-            "max_seq_len": 131_072,
+            "max_seq_len": 2048,
             "with_sampler": False,
             "name": "sft-test",
         }
@@ -413,20 +496,20 @@ def test_training_off_the_main_thread_leaves_signals_alone(run_dir: Path) -> Non
             "ask Baseten to enable the model",
         ),
         (
-            capabilities(max_enabled_seq_len=65_536),
+            capabilities(max_enabled_seq_len=1024),
             UsageError,
-            f"Baseten trains {BASE_MODEL} on at most 65536 tokens, below this run's "
-            "max_seq_len of 131072",
-            "rerun with --max-seq-len 65536",
+            f"Baseten trains {BASE_MODEL} on at most 1024 tokens, below this run's "
+            "max_seq_len of 2048",
+            "rerun with --max-seq-len 1024",
         ),
         (
             {
-                "supported_models": [{"model_name": BASE_MODEL, "max_context_length": 32_768}],
+                "supported_models": [{"model_name": BASE_MODEL, "max_context_length": 1536}],
             },
             UsageError,
-            f"Baseten trains {BASE_MODEL} on at most 32768 tokens, below this run's "
-            "max_seq_len of 131072",
-            "rerun with --max-seq-len 32768",
+            f"Baseten trains {BASE_MODEL} on at most 1536 tokens, below this run's "
+            "max_seq_len of 2048",
+            "rerun with --max-seq-len 1536",
         ),
         (
             capabilities(max_context_length=None),

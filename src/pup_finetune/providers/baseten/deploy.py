@@ -39,15 +39,14 @@ from pup_finetune.providers.baseten.client import (
     load_sampler_checkpoint,
     loops_sdk,
 )
-from pup_finetune.providers.baseten.models import BasetenModel, get_model
+from pup_finetune.providers.baseten.models import MIN_SEQ_LEN, BasetenModel, get_model
 from pup_finetune.rendering import ChatTokenizer, ModelFamily, load_tokenizer, prompt_tokens
 from pup_finetune.storage import DirectoryLock, atomic_write_json, read_json
 from pup_finetune.training import RunDir
 
-__all__ = ["MIN_SEQ_LEN", "RECEIPT_FILE", "deploy", "deploy_preview", "undeploy"]
+__all__ = ["RECEIPT_FILE", "deploy", "deploy_preview", "undeploy"]
 
 RECEIPT_FILE = "endpoint.json"
-MIN_SEQ_LEN = 1024
 MAX_TIMEOUT_SECONDS = 7200.0
 UNDEPLOY_TIMEOUT_SECONDS = 120.0
 POLL_SECONDS = 5.0
@@ -109,6 +108,7 @@ class _Target:
     model: BasetenModel
     checkpoint: dict[str, str]
     settings: dict[str, Any]
+    max_seq_len_source: str
     timeout: float
 
     @property
@@ -151,15 +151,24 @@ def _target(request: DeployRequest) -> _Target:
         "checkpoint_name": match[2],
         "base_model": model.base_model,
     }
-    settings = _settings(request, model)
+    settings, source = _settings(request, model, plan.get("config"))
     return _Target(
-        run_dir, request.serving_mode, model, checkpoint, settings, request.timeout_seconds
+        run_dir, request.serving_mode, model, checkpoint, settings, source, request.timeout_seconds
     )
 
 
-def _settings(request: DeployRequest, model: BasetenModel) -> dict[str, Any]:
+def _settings(
+    request: DeployRequest, model: BasetenModel, config: object
+) -> tuple[dict[str, Any], str]:
+    """The serving settings, and where ``max_seq_len`` came from: the flag, the run or the model."""
     limit = model.family.max_seq_len
-    max_seq_len = limit if request.max_seq_len is None else request.max_seq_len
+    trained = config.get("max_seq_len") if isinstance(config, dict) else None
+    if request.max_seq_len is not None:
+        max_seq_len, source = request.max_seq_len, "flag"
+    elif _is_int(trained):
+        max_seq_len, source = max(trained, MIN_SEQ_LEN), "run"
+    else:
+        max_seq_len, source = limit, "model"
     if not MIN_SEQ_LEN <= max_seq_len <= limit:
         raise UsageError(
             f"--max-seq-len must be between {MIN_SEQ_LEN} and {limit} for {model.alias}"
@@ -177,13 +186,13 @@ def _settings(request: DeployRequest, model: BasetenModel) -> dict[str, Any]:
                 "--accelerator applies only to --serving-mode dedicated",
                 hint="a Loops sampler chooses its own GPUs; drop --accelerator",
             )
-        return {"max_seq_len": max_seq_len}
+        return {"max_seq_len": max_seq_len}, source
     if request.accelerator is None or not _ACCELERATOR.fullmatch(request.accelerator):
         raise UsageError(
             "--serving-mode dedicated needs --accelerator TYPE:COUNT, e.g. H100:1",
             hint="or serve from a Loops sampler with --serving-mode sampler",
         )
-    return {"accelerator": request.accelerator, "max_seq_len": max_seq_len}
+    return {"accelerator": request.accelerator, "max_seq_len": max_seq_len}, source
 
 
 def _read_receipt(path: Path) -> dict[str, Any] | None:
@@ -676,6 +685,7 @@ def deploy_preview(request: DeployRequest) -> dict[str, Any]:
         "checkpoint_path": target.checkpoint["checkpoint_path"],
         "accelerator": target.settings.get("accelerator"),
         "max_seq_len": target.settings["max_seq_len"],
+        "max_seq_len_source": target.max_seq_len_source,
         "timeout_seconds": target.timeout,
         "billing": f"the {what} bills per hour until `pup finetune undeploy`",
         "cleanup_command": target.cleanup_command,

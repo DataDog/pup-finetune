@@ -38,6 +38,8 @@ MODELS: Mapping[str, BasetenModel] = MappingProxyType(
 )
 
 DEFAULT_MODEL = "qwen3p5-9b"
+# The shortest context a run trains or serves with.
+MIN_SEQ_LEN = 1024
 
 
 def get_model(alias: str) -> BasetenModel:

@@ -205,6 +205,7 @@ def test_preview_describes_a_dedicated_deployment_from_local_files(run_dir: Path
         "checkpoint_path": CHECKPOINT_PATH,
         "accelerator": "H100:1",
         "max_seq_len": 8192,
+        "max_seq_len_source": "flag",
         "timeout_seconds": 60.0,
         "billing": "the dedicated deployment bills per hour until `pup finetune undeploy`",
         "cleanup_command": cleanup_command(run_dir),
@@ -214,7 +215,37 @@ def test_preview_describes_a_dedicated_deployment_from_local_files(run_dir: Path
 def test_preview_of_a_sampler_defaults_to_the_model_context(run_dir: Path) -> None:
     preview = deploy_preview(make_request(run_dir, "sampler"))
     assert (preview["accelerator"], preview["max_seq_len"]) == (None, 131_072)
+    assert preview["max_seq_len_source"] == "model"
     assert "Loops sampler bills per hour" in preview["billing"]
+
+
+@pytest.mark.parametrize("mode", ["dedicated", "sampler"])
+@pytest.mark.parametrize(
+    ("trained", "flag", "expected", "source"),
+    [
+        (2048, None, 2048, "run"),
+        (512, None, 1024, "run"),
+        (2048, 8192, 8192, "flag"),
+        ("2048", None, 131_072, "model"),
+    ],
+)
+def test_preview_defaults_to_the_trained_context(
+    tmp_path: Path, mode: str, trained: object, flag: int | None, expected: int, source: str
+) -> None:
+    run_dir = write_training_run(tmp_path / "run", plan={"config": {"max_seq_len": trained}})
+    preview = deploy_preview(make_request(run_dir, mode, max_seq_len=flag))
+    assert (preview["max_seq_len"], preview["max_seq_len_source"]) == (expected, source)
+
+
+@pytest.mark.parametrize("mode", ["dedicated", "sampler"])
+def test_deploy_serves_the_trained_context_by_default(tmp_path: Path, mode: str) -> None:
+    run_dir = write_training_run(tmp_path / "run", plan={"config": {"max_seq_len": 2048}})
+    routes = dedicated_routes() if mode == "dedicated" else sampler_routes()
+    transport = baseten_transport(routes)
+    assert run_deploy(make_request(run_dir, mode), transport)["state"] == "ready"
+    assert receipt(run_dir)["settings"]["max_seq_len"] == 2048
+    if mode == "sampler":
+        assert transport.bodies(SAMPLERS)[0]["max_seq_length"] == 2048
 
 
 @pytest.mark.parametrize(

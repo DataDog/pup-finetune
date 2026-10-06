@@ -20,6 +20,8 @@ pup finetune undeploy --run-dir finetune/runs/<run-id> --confirm
 ```
 
 Training runs in the foreground and writes its plan, epochs and result to the run directory.
+Without `--max-seq-len`, the trainer's context is the longest rendered row rounded up to a power
+of two (at least 1024), and `deploy` serves that same context.
 A deployment bills per hour until `undeploy`; `--serving-mode dedicated` (the default) also
 needs `--accelerator`, for example `H100:1`.
 

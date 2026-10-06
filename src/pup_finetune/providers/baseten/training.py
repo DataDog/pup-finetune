@@ -35,7 +35,7 @@ from pup_finetune.providers.baseten.client import (
     loops_sdk,
     open_trainer,
 )
-from pup_finetune.providers.baseten.models import BasetenModel, get_model
+from pup_finetune.providers.baseten.models import MIN_SEQ_LEN, BasetenModel, get_model
 from pup_finetune.rendering import (
     ChatTokenizer,
     ModelFamily,
@@ -96,14 +96,15 @@ def plan_training(
     model = get_model(request.model)
     family = model.family
     settings = request.settings
-    max_seq_len = min(settings.max_seq_len or family.max_seq_len, family.max_seq_len)
-    token_budget = settings.microbatch_token_budget or max_seq_len
+    limit = family.max_seq_len
+    render_limit = min(settings.max_seq_len or limit, limit)
+    token_budget = settings.microbatch_token_budget or limit
     lora_rank = settings.lora_rank or model.default_lora_rank
     train_rows = _read(request.train_path)
     validation_rows = _read(request.validation_path)
     tokenizer = tokenizer_loader(family)
-    train = check_rows(train_rows, family, tokenizer, max_seq_len=max_seq_len)
-    validation = check_rows(validation_rows, family, tokenizer, max_seq_len=max_seq_len)
+    train = check_rows(train_rows, family, tokenizer, max_seq_len=render_limit)
+    validation = check_rows(validation_rows, family, tokenizer, max_seq_len=render_limit)
     if validation.rejected:
         first = validation.rejected[0]
         raise UsageError(
@@ -129,6 +130,11 @@ def plan_training(
     # Packing also refuses a datum over the microbatch token budget before anything is paid.
     train_batches = pack_microbatches(train_datums, token_budget)
     validation_batches = pack_microbatches(validation_datums, token_budget)
+    longest = max(len(datum.tokens) for datum in (*train_datums, *validation_datums))
+    if settings.max_seq_len is None:
+        max_seq_len, source = _fitted_seq_len(longest, limit), "data"
+    else:
+        max_seq_len, source = render_limit, "flag"
     steps = math.ceil(len(train_datums) / settings.batch_size)
     guard = _budget_guard(settings)
     plan = {
@@ -153,6 +159,7 @@ def plan_training(
             ),
             "lora_rank": lora_rank,
             "max_seq_len": max_seq_len,
+            "max_seq_len_source": source,
             "microbatch_token_budget": token_budget,
             "capacity": "dedicated",
         },
@@ -170,9 +177,7 @@ def plan_training(
             "train_microbatches": len(train_batches),
             "validation_microbatches": len(validation_batches),
             "train_target_tokens": sum(sum(datum.weights) for datum in train_datums),
-            "max_context_tokens": max(
-                len(datum.tokens) for datum in (*train_datums, *validation_datums)
-            ),
+            "max_context_tokens": longest,
         },
     }
     prepared = PreparedData(
@@ -228,6 +233,11 @@ def _read(path: Path) -> list[TrainingRow]:
         raise UsageError(f"cannot read {path}: {exc.strerror or exc}") from exc
     except RowError as exc:
         raise UsageError(str(exc), hint="fix the row and rerun") from exc
+
+
+def _fitted_seq_len(longest: int, limit: int) -> int:
+    """The smallest power of two ``>= longest``, at least :data:`MIN_SEQ_LEN`, at most ``limit``."""
+    return min(max(MIN_SEQ_LEN, 1 << (longest - 1).bit_length()), limit)
 
 
 def _budget_guard(settings: SFTSettings) -> BudgetGuard:

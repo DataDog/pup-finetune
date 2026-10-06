@@ -61,7 +61,10 @@ def deploy(
     ] = None,
     max_seq_len: Annotated[
         int | None,
-        typer.Option("--max-seq-len", help="Serving context limit (default: the model's)."),
+        typer.Option(
+            "--max-seq-len",
+            help="Serving context limit (default: the training run's, at least 1024).",
+        ),
     ] = None,
     timeout: Annotated[
         float,

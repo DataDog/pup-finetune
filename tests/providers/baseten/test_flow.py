@@ -101,7 +101,9 @@ def test_a_trained_run_deploys_and_undeploys(
         max_seq_len=None,
         timeout_seconds=60.0,
     )
-    assert deploy_preview(deploy_request)["checkpoint_path"] == CHECKPOINT_PATH
+    preview = deploy_preview(deploy_request)
+    assert preview["checkpoint_path"] == CHECKPOINT_PATH
+    assert (preview["max_seq_len"], preview["max_seq_len_source"]) == (2048, "run")
     clock = FakeClock()
     statuses = [deployment("ACTIVE"), deployment("ACTIVE"), deployment("INACTIVE")]
     transport = baseten_transport(sampler_routes() | {f"GET {DEPLOYMENT}": statuses})

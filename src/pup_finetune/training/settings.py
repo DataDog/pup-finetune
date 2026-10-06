@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class SFTSettings(BaseModel):
-    """LoRA SFT hyperparameters and the optional spend guard. ``None`` means the model default.
+    """LoRA SFT hyperparameters and the optional spend guard. ``None`` means the provider's default.
 
     Strict: numbers keep their types (no bools or strings), and floats must be finite.
     """

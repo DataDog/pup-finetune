@@ -119,7 +119,9 @@ def train(
     max_seq_len: Annotated[
         int | None,
         typer.Option(
-            "--max-seq-len", help="Context limit in tokens (default and maximum: the model's)."
+            "--max-seq-len",
+            help="Context limit in tokens (default: the longest rendered row rounded up to a "
+            "power of two, at least 1024; maximum: the model's).",
         ),
     ] = None,
     seed: Annotated[
