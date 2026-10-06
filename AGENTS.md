@@ -43,6 +43,11 @@ Opt-in test suites: `PUP_FINETUNE_LIVE=1` runs `live` tests (real external servi
 Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later PRs.
 
 - `cli/` - the Typer app; one module per command group.
+- `runtime.py` - non-secret settings from the environment (`PUP_OUTPUT`, `PUP_READ_ONLY`, ...).
+- `errors.py` - expected failures and their exit codes; the `--confirm` and read-only guards.
+- `output.py` - the one stdout result (through `pup format` under pup), progress on stderr.
+- `storage.py` - atomic writes, `0600` files and `0700` directories, directory locks, frozen
+  settings.
 - `datadog/` - *later*. Datadog access via `pup` (span export, datasets, experiments).
 - `data/` - *later*. Canonical row schema, conversion from spans, checks, splits, dataset dirs.
 - `curation/` - *later*. Keep/drop labels and judge-based triage.
@@ -59,7 +64,9 @@ Tests live under `tests/` and mirror `src/`.
 - Every first-party file starts with the Apache-2.0 license header (see any `.py` file); shell
   scripts and YAML use the same lines with `#`.
 - Everything is typed; `mypy --strict` must pass on `src/`.
-- Each command writes exactly one JSON result to stdout; progress and logs go to stderr.
+- Each command writes exactly one JSON result to stdout; progress and logs go to stderr. Wrap
+  commands with `run_command` from `cli/_common.py`: return the result mapping and raise a
+  `FinetuneError` subclass for expected failures.
 - Exit codes: `0` success, `1` external or runtime failure, `2` usage, validation or a missing
   `--confirm`.
 - Paid or remote-changing actions preview by default and run only with `--confirm`. `--confirm`
