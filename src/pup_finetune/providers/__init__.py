@@ -141,5 +141,4 @@ def _is_first_party(missing: str, module_name: str) -> bool:
 
 
 # Built-in providers register below by import path only, so listing them imports nothing.
-# The development-only fake provider registers here together with its module in the next
-# change, so the registry never names a module that does not exist yet.
+register_provider("fake", "pup_finetune.providers.fake:FakeProvider", dev_only=True)
