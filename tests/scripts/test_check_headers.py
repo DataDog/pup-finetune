@@ -32,13 +32,23 @@ check_headers = _load_script()
 
 # Variables git honors over cwd; if inherited (git hooks, `git rebase --exec`), the
 # tmp-repo commands below would act on the developer's real repository instead.
-_GIT_ENV_OVERRIDES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY")
+_GIT_ENV_OVERRIDES = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_COMMON_DIR",
+)
+
+
+def _clear_git_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in _GIT_ENV_OVERRIDES:
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture(autouse=True)
 def _isolate_git_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in _GIT_ENV_OVERRIDES:
-        monkeypatch.delenv(name, raising=False)
+    _clear_git_env(monkeypatch)
 
 
 _HEADER = "\n".join(check_headers.HEADER) + "\n"
@@ -141,3 +151,31 @@ def test_main_lists_offenders_and_returns_one(
     assert "bad.py" in err
     assert "bin/tool" in err
     assert "good.py" not in err
+
+
+def _loose_objects(git_dir: Path) -> list[Path]:
+    objects = git_dir / "objects"
+    return [path for path in objects.glob("??/*") if path.is_file()]
+
+
+def test_git_env_isolation_keeps_tmp_repos_self_contained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Simulate running inside a hook or a linked worktree of another repository.
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=outer, check=True)  # noqa: S607
+    outer_git = outer / ".git"
+    monkeypatch.setenv("GIT_DIR", str(outer_git))
+    monkeypatch.setenv("GIT_WORK_TREE", str(outer))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(outer_git / "index"))
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", str(outer_git / "objects"))
+    monkeypatch.setenv("GIT_COMMON_DIR", str(outer_git))
+
+    _clear_git_env(monkeypatch)
+    inner = tmp_path / "inner"
+    inner.mkdir()
+    _git_repo(inner, {"a.py": "x = 1\n"})
+
+    assert _loose_objects(outer_git) == []
+    assert _loose_objects(inner / ".git") != []
