@@ -489,10 +489,11 @@ class RecordingPublisher:
         generations: Mapping[PairKey, Mapping[str, Any]],
         results: Mapping[PairKey, Mapping[str, Any]],
         summary: Mapping[str, Any],
-    ) -> None:
+    ) -> dict[str, Any] | None:
         self.published.append(
             {"cases": len(cases), "generations": len(generations), "results": len(results)}
         )
+        return {"status": "published", "count": len(self.published)}
 
 
 def test_the_publisher_gets_a_complete_evaluation_only(tmp_path: Path) -> None:
@@ -500,10 +501,17 @@ def test_the_publisher_gets_a_complete_evaluation_only(tmp_path: Path) -> None:
     cancel = threading.Event()
     cancel.set()
     samplers = {"base": ScriptedSampler(), "tuned": ScriptedSampler()}
-    replay(tmp_path / "eval", samplers, Judge(), cancel=cancel, publisher=publisher)
+    cut = replay(tmp_path / "eval", samplers, Judge(), cancel=cancel, publisher=publisher)
     assert publisher.published == []
-    replay(tmp_path / "eval", samplers, Judge(), publisher=publisher)
+    assert cut.publication is None
+    done = replay(tmp_path / "eval", samplers, Judge(), publisher=publisher)
     assert publisher.published == [{"cases": 6, "generations": 12, "results": 12}]
+    assert done.publication == {"status": "published", "count": 1}  # what it reported
+
+
+def test_the_default_publisher_reports_nothing(tmp_path: Path) -> None:
+    samplers = {"base": ScriptedSampler(), "tuned": ScriptedSampler()}
+    assert replay(tmp_path / "eval", samplers, Judge()).publication is None
 
 
 # --- the summary --------------------------------------------------------------------------

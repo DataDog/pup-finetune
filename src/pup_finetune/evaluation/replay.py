@@ -33,8 +33,9 @@ new pairs from starting; the ones in flight finish and are kept.
 Like the metrics and the judge, every score measures agreement with the recorded behavior
 on held-out conversations, not task success: tools were never executed (:data:`CAVEAT`).
 
-Datadog publishing arrives later behind :class:`Publisher`; :class:`NoopPublisher` is the
-default.
+Once every pair has a result, the evaluation goes to a :class:`Publisher`, which reports it
+elsewhere (:class:`~pup_finetune.datadog.experiments.ExperimentsPublisher` publishes it as
+Agent Observability experiments); :class:`NoopPublisher`, the default, publishes nothing.
 """
 
 from __future__ import annotations
@@ -77,6 +78,7 @@ __all__ = [
     "EvalDir",
     "JudgeFn",
     "NoopPublisher",
+    "PairKey",
     "Publisher",
     "ReplaySummary",
     "Target",
@@ -334,7 +336,11 @@ def _by_pair(rows: Iterable[Mapping[str, Any]]) -> dict[PairKey, dict[str, Any]]
 
 
 class Publisher(Protocol):
-    """Receives a complete evaluation, e.g. to report it to Datadog. Called once per run."""
+    """Receives a complete evaluation, e.g. to report it to Datadog. Called once per run.
+
+    Called with the directory's lock held. Returns what to report of it (strict JSON), or
+    ``None`` for nothing; :attr:`ReplaySummary.publication` carries it.
+    """
 
     def publish(
         self,
@@ -343,7 +349,7 @@ class Publisher(Protocol):
         generations: Mapping[PairKey, Mapping[str, Any]],
         results: Mapping[PairKey, Mapping[str, Any]],
         summary: Mapping[str, Any],
-    ) -> None: ...
+    ) -> dict[str, Any] | None: ...
 
 
 class NoopPublisher:
@@ -356,8 +362,9 @@ class NoopPublisher:
         generations: Mapping[PairKey, Mapping[str, Any]],
         results: Mapping[PairKey, Mapping[str, Any]],
         summary: Mapping[str, Any],
-    ) -> None:
+    ) -> dict[str, Any] | None:
         del cases, generations, results, summary
+        return None
 
 
 # --- replay -------------------------------------------------------------------------------
@@ -368,13 +375,15 @@ class ReplaySummary:
     """How a :func:`run_replay` ended: ``summary.json``, the pairs left and whether it was cut.
 
     ``pending`` counts the pairs without a result (cancelled before they ran); ``cancelled``
-    says ``cancel`` was set. A complete evaluation has neither.
+    says ``cancel`` was set. A complete evaluation has neither. ``publication`` is what the
+    publisher reported, ``None`` when it reported nothing or the evaluation is incomplete.
     """
 
     summary: dict[str, Any]
     pending: int
     cancelled: bool
     out_dir: Path
+    publication: dict[str, Any] | None = None
 
     @property
     def complete(self) -> bool:
@@ -529,8 +538,8 @@ def run_replay(
     is needed only while one of its pairs still needs a generation, so a rerun with nothing
     left to generate may pass fewer. Holds the directory's lock throughout. ``on_progress``
     receives ``{"done", "total", "target", "case_id", "status"}`` per finished pair.
-    ``publisher`` gets the evaluation once every pair has a result. Returns the summary
-    also written to ``summary.json``.
+    ``publisher`` gets the evaluation once every pair has a result, and what it reports is
+    the outcome's ``publication``. Returns the summary also written to ``summary.json``.
     """
     max_tokens, seed = identity.get("max_tokens"), identity.get("seed")
     if concurrency < 1:
@@ -569,12 +578,14 @@ def run_replay(
             summary=summary, pending=pending, cancelled=cancel.is_set(), out_dir=eval_dir.path
         )
         if outcome.complete:
-            (publisher or NoopPublisher()).publish(
+            publication = (publisher or NoopPublisher()).publish(
                 cases=cases,
                 generations=replay.generations,
                 results=replay.results,
                 summary=summary,
             )
+            if publication is not None:
+                outcome = dataclasses.replace(outcome, publication=finite_json(publication))
     return outcome
 
 

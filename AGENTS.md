@@ -54,6 +54,21 @@ uv run pup-finetune evaluate /tmp/run --confirm
                                      # /tmp/run/eval; rerun to resume; summary.json at the end
 ```
 
+A complete evaluation is also published to Datadog as two Agent Observability experiments
+(`pup-finetune-base-<run id>` and `pup-finetune-tuned-<run id>`) on the dataset `dataset push`
+created, at the version it pushed: a root span per test conversation linked to its dataset
+record and a child span per replayed action, with the metrics and judge verdicts. It needs the
+dataset's push receipt (`push.json`): without one the preview and the result warn and the
+evaluation is not published (the local results are complete either way); `--no-publish`
+(`--eval-no-publish` for `train --evaluate`) skips it without a warning. Publishing resumes:
+`experiments.json` and `published.json` in the evaluation directory record the experiments
+created and the spans sent, so a rerun creates and sends nothing twice, and a failed publish
+exits 1 with a `next_command` that publishes the rest (a Ctrl-C while publishing leaves a
+`cancelled` publication that the rerun continues too). Spans already published keep the
+results they were sent with: retrying an evaluation's errors updates only the local results,
+so evaluate into a new `--out-dir` for experiments with every result. Spans not indexed within
+two minutes (one budget for both experiments) are a warning. Tests serve it with `FakePup` and `FakeExperimentsApi`; nothing reaches Datadog.
+
 `evaluate` on a fake run uses the offline fake judge (`--judge-model fake-judge`, dev mode
 only), and the fake's tuned checkpoint calls the tools its training data called, so the
 summary shows a positive `tuned_minus_base`. `train ... --evaluate --confirm` evaluates in the
@@ -149,9 +164,8 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   `preview`, `pull`, `show`, `sample`, `label` and `push`; `train.py` has `train`, `resume`,
   `status`, `cancel` and the hidden `_worker` a detached run executes (and `train
   --evaluate`); `models.py` has `models list` (with `--check`, a preflight per profile);
-  `evaluate.py` has `evaluate` and the planning, calibration and replay helpers `train
-  --evaluate` shares (`EvalPlan`, `open_judge_client`, `EvaluateAfterTraining`, the
-  `after_finalize` hook that evaluates in the training session).
+  `evaluate.py` has `evaluate`, which only parses its flags and emits what
+  `evaluation/runner.py` returns.
 - `runtime.py` - non-secret settings from the environment (`PUP_OUTPUT`, `PUP_READ_ONLY`, ...).
 - `errors.py` - expected failures and their exit codes; the `--confirm` and read-only guards.
 - `output.py` - the one stdout result (through `pup format` under pup), progress on stderr.
@@ -182,8 +196,17 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   (listed and created through `Pup.api` on `v2/llm-obs/v1/<project>/datasets`, since pup
   1.10.7 cannot read the response of `pup llm-obs datasets create`), `records-add --confirm`
   and `records-all`; lists are read page by page, a create whose response is lost is found
-  again by name, and `--file` bodies are `0600` in a private temporary directory, removed
-  afterwards. Experiments arrive later.
+  again by name. `jsonapi.py` has the JSON:API helpers both clients share: the media type,
+  `private_json_file` (`--file` bodies are `0600` in a private temporary directory, removed
+  afterwards) and `object_id`. `experiments.py` publishes an evaluation: `LLMObsExperiments` (`pup llm-obs
+  experiments create --file`, `list`, `events list`, and spans plus metrics through `Pup.api`
+  on `v2/llm-obs/v1/experiments/<id>/events`) and `ExperimentsPublisher`, the evaluation's
+  `Publisher`: one experiment per target on the pushed dataset version, a `replay_trajectory`
+  root span per test row (`dataset_record_id` from `push.json`) and a `replay_assistant`
+  child per case, metrics stamped at submission, at most 100 spans a request, uuid5 span ids,
+  `experiments.json` and `published.json` so a rerun sends nothing twice (a batch whose
+  response was lost is sent again with the same span ids), cancellation between requests,
+  and a bounded read-back until the events are indexed.
 - `data/` - training data. `schema.py` is the canonical row every provider consumes (OpenAI
   chat format plus its source) and the stable `RowErrorCode` reasons a row is rejected for;
   `jsonl.py` reads and writes rows and converts them to the provider form; `exclusions.py`
@@ -308,8 +331,15 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   `summary.json`: per-target pass rates (judge and metrics), per-trajectory agreement, the
   paired wins, regressions and ties, and `tuned_minus_base` with a seeded paired bootstrap
   95% CI over trajectories (`paired_bootstrap_ci`), plus the agreement-not-task-success
-  `CAVEAT`. `Publisher` (default `NoopPublisher`) is the seam for reporting to Datadog, which
-  arrives later. `targets.py` makes the two samplers from a session: the live training
+  `CAVEAT`. A `Publisher` (default `NoopPublisher`) gets a complete evaluation and returns
+  what it reports, the outcome's `publication`. `runner.py` is what `evaluate` and `train
+  --evaluate` run: `plan_evaluation` (an `EvalPlan`: cases, judge, settings and `Publishing`,
+  whether the dataset's push receipt allows publishing), calibration (`prepare_eval_dir`
+  stores a passing one), `replay` with the plan's publisher, `replay_result` and
+  `evaluation_exit_code`, `plan_standalone` and `StandaloneEvaluation` for `evaluate`, and
+  `EvaluateAfterTraining`, the `after_finalize` hook that evaluates in the training session.
+  The package exports its names lazily, so importing the runner (the CLI does, for every
+  command) loads no judge client. `targets.py` makes the two samplers from a session: the live training
   session's best sampler checkpoint, or the best training checkpoint loaded and saved again
   as an `ev...` sampler checkpoint in a new session (`run_samplers`).
 - `providers/` - the provider seam. `base.py` has the neutral types (`ModelProfile`,
@@ -356,6 +386,10 @@ argument prefix (or computes the answer with a `handler`) and records every call
 `tests/fakes/llmobs.py` has `FakeExportApi`, the Export API search route served by cursor.
 `tests/fakes/datasets.py` has `FakeDatasetsApi`, in-memory projects, datasets and records
 behind the pup calls `LLMObsDatasets` makes, with failures to inject.
+`tests/fakes/experiments.py` has `FakeExperimentsApi`, in-memory experiments and their events
+behind the pup calls `LLMObsExperiments` makes (failed and lost creates and event posts,
+delayed or capped indexing); it chains to the `api` handler installed before it, so it serves
+one `FakePup` with `FakeDatasetsApi`.
 `tests/fakes/tokenizer.py` has `FakeChatTokenizer`, a character-level chat tokenizer with a
 Qwen3.8-like Python template (optionally merging `\n\n` across the prompt boundary).
 `tests/fakes/chat_api.py` has `FakeChatApi`, an OpenAI-compatible chat completions endpoint

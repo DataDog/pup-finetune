@@ -11,14 +11,15 @@ allowed with ``PUP_READ_ONLY`` set) and print the exact command that runs it. Th
 the foreground, with progress on stderr, or with ``--detach`` in a worker that keeps going
 after the command returns (see :mod:`pup_finetune.training.worker`).
 
-``train --evaluate`` also evaluates the run (see :mod:`pup_finetune.cli.evaluate`) in its
+``train --evaluate`` also evaluates the run (see :mod:`pup_finetune.evaluation.runner`) in its
 training session, after the best checkpoint is promoted and before the session closes, so
 no second session is opened. The judge is calibrated, and ``--eval-out-dir`` checked, before
 training starts: a failed calibration trains nothing. The run's end is recorded before the
 evaluation starts, so a crash during it keeps the trained and promoted run. A failed
 evaluation exits 1, with the trained run and the command that evaluates it again. It needs
 the foreground: ``--detach`` with ``--evaluate`` is refused (evaluate a detached run with
-``pup finetune evaluate`` once it completed).
+``pup finetune evaluate`` once it completed). Like ``evaluate``, a complete evaluation is
+published as experiments when the dataset was pushed, unless ``--eval-no-publish``.
 """
 
 from __future__ import annotations
@@ -34,7 +35,6 @@ from typing import Annotated, Any
 import typer
 from pydantic import ValidationError
 
-from pup_finetune.cli import evaluate as evaluation
 from pup_finetune.cli._common import CommandResult, get_runtime, run_command
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.errors import (
@@ -44,6 +44,7 @@ from pup_finetune.errors import (
     require_confirm,
     require_writable,
 )
+from pup_finetune.evaluation import runner as evaluation
 from pup_finetune.output import info
 from pup_finetune.providers import get_provider
 from pup_finetune.providers.base import ModelProfile, Provider, TrainSpec
@@ -417,6 +418,13 @@ def train(
             "--eval-skip-calibration", help="With --evaluate: do not check the judge first."
         ),
     ] = False,
+    eval_no_publish: Annotated[
+        bool,
+        typer.Option(
+            "--eval-no-publish",
+            help="With --evaluate: do not publish the evaluation to Datadog as experiments.",
+        ),
+    ] = False,
     detach: DetachOption = False,
     confirm: ConfirmOption = False,
 ) -> dict[str, Any] | CommandResult:
@@ -473,6 +481,7 @@ def train(
             max_tokens=eval_max_tokens,
             seed=eval_seed,
             skip_calibration=eval_skip_calibration,
+            publish=not eval_no_publish,
         )
         # Before anything is paid for: an out dir the evaluation cannot use fails here, not
         # after training.
@@ -511,7 +520,7 @@ def train(
             # Before anything is trained: a judge that fails calibration stops the run here.
             calibration = evaluation.run_calibration(plan, client)
             if calibration is not None and not calibration.get("ok"):
-                return evaluation.calibration_failed(plan, calibration)
+                return CommandResult(evaluation.calibration_failed(plan, calibration), exit_code=1)
             hook = evaluation.EvaluateAfterTraining(
                 plan,
                 client,

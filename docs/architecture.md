@@ -288,8 +288,38 @@ provider, and talks to models only through the `Sampler` protocol.
   cases of one conversation are not independent. Every number is finite or `null`, and the
   summary says what the scores measure: agreement with the recorded behavior on held-out
   conversations, not task success.
-- **Publishing**. `Publisher` receives a complete evaluation (cases, generations, results,
-  summary); the default publishes nothing, and reporting to Datadog plugs in there.
+- **Runner** ([`runner.py`](../src/pup_finetune/evaluation/runner.py)). What `evaluate` and
+  `train --evaluate` run, so the CLI only parses flags and emits: an `EvalPlan` (cases,
+  judge, settings, and whether the evaluation can be published), calibration, the replay
+  with the plan's publisher, and the result and exit code. The package exports its names
+  lazily, so the CLI loads the runner for every command without loading the judge's client.
+- **Publishing** ([`datadog/experiments.py`](../src/pup_finetune/datadog/experiments.py)).
+  `Publisher` receives a complete evaluation and returns what it reports. Datadog is the
+  system of record: `ExperimentsPublisher` publishes the evaluation, through pup's OAuth, as
+  one Agent Observability experiment per target on the curated dataset `dataset push`
+  created, pinned to the pushed version (`push.json`), so the training data and the
+  evaluation of the model trained on it stay on one dataset and the two experiments compare
+  side by side. Its config holds the provider, the models, the tuned checkpoint, the run, the
+  judge and the metrics version. Each test row is a root span, `replay_trajectory`, linked to
+  its dataset record and holding the record's input and expected output, with the replayed
+  steps as its output; each case is a child span in the same trace, `replay_assistant`, with
+  the prefix and tools in, the generated message out and the recorded one expected, timed by
+  its generation. Metrics join spans by id: a boolean per deterministic metric that applies
+  and `judge_pass` (with the judge's reason) on children, `trajectory_agreement` and
+  `completed_actions` on roots; an error case is an error span with no metric, as it counts
+  in no local rate either. Metrics are stamped when they are sent (the API refuses ones more
+  than a day old), and a request carries at most 100 spans. Span ids are uuid5 of the
+  evaluation's identity, the target and the row or case, the experiments are recorded in
+  `experiments.json` and the spans sent in `published.json`, so a rerun creates and sends
+  nothing twice. A span is recorded once its request is answered, so a batch whose
+  response was lost is sent again by the rerun, with the same deterministic span ids. A
+  span already published keeps the result it was sent with: a retried error updates only
+  the local results, and the experiments keep the error (the result's hint says so, and a
+  new `--out-dir` publishes experiments with every result). A cancel stops between requests
+  and leaves a `cancelled` publication the rerun continues. A read-back waits up to two
+  minutes, one budget for both experiments, for the events to be indexed; spans not indexed
+  by then, or events that cannot be counted, are a warning. Without a push receipt the evaluation is not
+  published, with a warning; `--no-publish` turns publishing off.
 
 The fake provider makes the loop meaningful offline: its tuned checkpoints learn, from the
 conversations they trained on, whether an assistant turn after a message of each role calls

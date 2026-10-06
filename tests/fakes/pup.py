@@ -136,6 +136,11 @@ class FakePup:
         )
         return self
 
+    def handler(self, *prefix: str, raw: bool = False) -> Handler | None:
+        """The ``handler`` registered for exactly ``prefix``, or ``None`` (to chain one)."""
+        response = self._responses.get((raw, tuple(prefix)))
+        return None if response is None else response.handler
+
     def client(self, environ: Mapping[str, str] | None = None) -> Pup:
         """A :class:`Pup` that runs through this fake (``environ`` defaults to empty)."""
         return Pup(runner=self, binary=self.binary, environ={} if environ is None else environ)

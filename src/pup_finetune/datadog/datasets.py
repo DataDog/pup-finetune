@@ -27,16 +27,12 @@ and removed afterwards, since records hold trace content.
 
 from __future__ import annotations
 
-import contextlib
-import json
-import os
-import tempfile
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from pup_finetune.datadog.jsonapi import JSON_API, object_id, private_json_file
 from pup_finetune.datadog.pup import Pup
 from pup_finetune.errors import ExternalError
 
@@ -52,7 +48,6 @@ RECORDS_ALL_MAX_PAGES = 200
 """The pages after which ``records-all`` stops, with only a warning on stderr: a listing of
 this many pages may be missing records although it reports ``truncated: false``."""
 
-JSON_API = "application/vnd.api+json"
 _SOURCE = "Agent Observability"
 
 
@@ -124,7 +119,7 @@ class LLMObsDatasets:
         body = {
             "data": {"type": "projects", "attributes": {"name": name, "description": description}}
         }
-        with _json_file(body) as path:
+        with private_json_file(body) as path:
             return self._created(
                 lambda: self._pup.run_json(["llm-obs", "projects", "create", "--file", str(path)]),
                 lambda: self.find_project(name),
@@ -186,7 +181,7 @@ class LLMObsDatasets:
             raise ValueError("no records to add")
         args = ["llm-obs", "datasets", "records-add", "--project-id", project_id]
         args += ["--dataset-id", dataset_id]
-        with _json_file(list(records)) as path:
+        with private_json_file(list(records)) as path:
             data = self._pup.run_json([*args, "--file", str(path), "--confirm"])
         return _records_added(data, expected=len(records), dataset_id=dataset_id)
 
@@ -229,7 +224,7 @@ class LLMObsDatasets:
     def _created(create: Callable[[], Any], find: Callable[[], str | None], *, what: str) -> str:
         """Run ``create`` and return the new id, or the id ``find`` finds when that fails."""
         try:
-            created = _object_id(create())
+            created = object_id(create())
         except ExternalError as original:
             try:
                 found = find()
@@ -251,26 +246,6 @@ class LLMObsDatasets:
 
 def _datasets_path(project_id: str) -> str:
     return f"v2/llm-obs/v1/{quote(project_id, safe='')}/datasets"
-
-
-@contextlib.contextmanager
-def _json_file(data: Any) -> Iterator[Path]:
-    """``data`` as a ``0600`` JSON file in a fresh private directory, removed afterwards."""
-    with tempfile.TemporaryDirectory(prefix="pup-finetune-") as directory:
-        path = Path(directory) / "body.json"
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, ensure_ascii=False, allow_nan=False)
-        yield path
-
-
-def _object_id(data: Any) -> str | None:
-    """``data.id`` of a JSON:API response, or ``None`` when it has none."""
-    if isinstance(data, dict) and isinstance(item := data.get("data"), dict):
-        identifier = item.get("id")
-        if isinstance(identifier, str) and identifier:
-            return identifier
-    return None
 
 
 def _find_by_name(

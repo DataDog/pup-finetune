@@ -8,15 +8,18 @@
 
 Every test runs in development mode; no test makes a network or paid call. The judge is the
 offline fake judge (the default for a fake run), or a fake swapped in for
-:func:`pup_finetune.cli.evaluate.open_judge_client`.
+:func:`pup_finetune.evaluation.runner.open_judge_client`.
 """
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import shlex
 import signal
+import subprocess
+import sys
 import threading
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -27,9 +30,9 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from pup_finetune.cli import app
-from pup_finetune.cli import evaluate as evaluate_module
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.evaluation import cases as cases_module
+from pup_finetune.evaluation import runner as runner_module
 from pup_finetune.evaluation import targets as targets_module
 from pup_finetune.evaluation.fake_judge import FAKE_JUDGE_MODEL, FakeJudge
 from pup_finetune.inference import ChatCompleter, ChatCompletion, JudgeConfig
@@ -41,7 +44,7 @@ from pup_finetune.storage import append_jsonl
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
 
 runner = CliRunner()
-OPEN_JUDGE_CLIENT = evaluate_module.open_judge_client
+OPEN_JUDGE_CLIENT = runner_module.open_judge_client
 
 
 @pytest.fixture(autouse=True)
@@ -161,7 +164,7 @@ def use_judge(monkeypatch: pytest.MonkeyPatch, judge: ChatCompleter) -> None:
     def opened(config: JudgeConfig) -> Iterator[ChatCompleter]:
         yield judge
 
-    monkeypatch.setattr(evaluate_module, "open_judge_client", opened)
+    monkeypatch.setattr(runner_module, "open_judge_client", opened)
 
 
 # --- evaluate: the preview ----------------------------------------------------------------
@@ -344,7 +347,7 @@ def test_a_failed_calibration_generates_nothing(
     assert not (run_dir / "eval" / "generations.jsonl").exists()
     assert not (run_dir / "eval" / "results.jsonl").exists()
     # With a sound judge, the same directory takes it: nothing was generated yet.
-    monkeypatch.setattr(evaluate_module, "open_judge_client", OPEN_JUDGE_CLIENT)
+    monkeypatch.setattr(runner_module, "open_judge_client", OPEN_JUDGE_CLIENT)
     fixed = invoke("evaluate", str(run_dir), "--confirm")
     assert fixed.exit_code == 0, fixed.stderr
 
@@ -379,7 +382,7 @@ def test_a_judge_outage_is_not_a_complete_evaluation(
     assert "retry" in data["hint"]
     assert data["next_command"] is not None
     # The generations are kept: the rerun only judges, and completes.
-    monkeypatch.setattr(evaluate_module, "open_judge_client", OPEN_JUDGE_CLIENT)
+    monkeypatch.setattr(runner_module, "open_judge_client", OPEN_JUDGE_CLIENT)
     preview = output(invoke("evaluate", str(run_dir), "--skip-calibration"))["preview"]
     assert preview["generation_calls"] == 0
     assert preview["judge_calls"] == 2 * cases
@@ -418,7 +421,7 @@ def test_a_second_ctrl_c_stops_at_once_with_how_to_continue(
     assert result.exit_code == 1
     assert "stopped at once" in result.stderr
     assert "pup finetune evaluate" in result.stderr
-    monkeypatch.setattr(evaluate_module, "open_judge_client", OPEN_JUDGE_CLIENT)
+    monkeypatch.setattr(runner_module, "open_judge_client", OPEN_JUDGE_CLIENT)
     again = invoke("evaluate", str(run_dir), "--skip-calibration", "--confirm")
     assert again.exit_code == 0, again.stderr
     assert output(again)["status"] == "complete"
@@ -426,19 +429,17 @@ def test_a_second_ctrl_c_stops_at_once_with_how_to_continue(
 
 def test_the_fake_judge_is_for_development_only() -> None:
     with pytest.raises(UsageError, match="development"):
-        evaluate_module.resolve_judge(FAKE_JUDGE_MODEL, provider="other", runtime=Runtime())
-    config = evaluate_module.resolve_judge(None, provider="other", runtime=Runtime())
+        runner_module.resolve_judge(FAKE_JUDGE_MODEL, provider="other", runtime=Runtime())
+    config = runner_module.resolve_judge(None, provider="other", runtime=Runtime())
     assert config == JudgeConfig()
     dev = Runtime(dev_mode=True)
-    assert (
-        evaluate_module.resolve_judge(None, provider="fake", runtime=dev).model == FAKE_JUDGE_MODEL
-    )
-    assert evaluate_module.resolve_judge("x/y", provider="fake", runtime=dev).model == "x/y"
+    assert runner_module.resolve_judge(None, provider="fake", runtime=dev).model == FAKE_JUDGE_MODEL
+    assert runner_module.resolve_judge("x/y", provider="fake", runtime=dev).model == "x/y"
 
 
 def test_signals_cancel_first_and_stop_at_once_second() -> None:
     cancel = threading.Event()
-    with evaluate_module.cancel_on_signals(cancel):
+    with runner_module.cancel_on_signals(cancel):
         os.kill(os.getpid(), signal.SIGINT)
         assert cancel.wait(5)
         os.kill(os.getpid(), signal.SIGTERM)  # a repeated SIGTERM changes nothing
@@ -586,7 +587,35 @@ def test_a_cancel_during_the_evaluation_keeps_the_trained_run(
     assert evaluation["status"] == "partial"
     assert evaluation["cancelled"] is True
     assert evaluation["pending"] > 0
-    monkeypatch.setattr(evaluate_module, "open_judge_client", OPEN_JUDGE_CLIENT)
+    monkeypatch.setattr(runner_module, "open_judge_client", OPEN_JUDGE_CLIENT)
     again = rerun(evaluation["next_command"] + " --confirm")  # it previews without
     assert again.exit_code == 0, again.stderr
     assert output(again)["status"] == "complete"
+
+
+# --- the evaluation layer -----------------------------------------------------------------
+
+
+def test_loading_the_cli_does_not_load_the_evaluation_or_its_http_client() -> None:
+    code = (
+        "import sys, pup_finetune.cli; "
+        "print(sorted(m for m in ('httpx', 'pup_finetune.evaluation.replay', "
+        "'pup_finetune.datadog.experiments') if m in sys.modules)); "
+        "print('pup_finetune.evaluation.runner' in sys.modules)"
+    )
+    done = subprocess.run(  # noqa: S603 - this interpreter, fixed arguments
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
+    # The CLI loads the runner, and nothing the runner drives.
+    assert done.stdout.split() == ["[]", "True"]
+
+
+def test_the_evaluation_package_exports_lazily() -> None:
+    import pup_finetune.evaluation as evaluation
+
+    assert evaluation.run_replay.__module__ == "pup_finetune.evaluation.replay"
+    assert sorted(evaluation.__all__) == sorted(evaluation._EXPORTS)
+    for name, module in evaluation._EXPORTS.items():
+        assert getattr(evaluation, name) is getattr(importlib.import_module(module), name)
+    with pytest.raises(AttributeError):
+        _ = evaluation.no_such_name  # type: ignore[attr-defined]
