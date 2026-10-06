@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from pup_finetune.curation.labels import Label, apply_labels, read_labels
+from pup_finetune.curation.labels import Label, apply_labels, parse_labels, read_labels
 from pup_finetune.curation.samples import describe_row, render_assistant, sample_rows, truncate
 from pup_finetune.data.dataset_dir import DatasetDir, DatasetSettings
 from pup_finetune.data.schema import Message, TrainingRow, validate_row
@@ -103,6 +103,13 @@ def test_labels_reject_unknown_fields_and_loose_values() -> None:
         Label.model_validate({"id": "a", "keep": True, "by": "robot"})
     with pytest.raises(ValidationError):
         Label.model_validate({"id": "", "keep": True})
+
+
+def test_a_reason_with_a_lone_surrogate_is_rejected() -> None:
+    # UTF-8 cannot encode it, so the label could never be written to labels.jsonl.
+    with pytest.raises(ValidationError, match=r"lone surrogate \(U\+D800\)"):
+        Label(id="a", keep=False, reason="bad \ud800")
+    assert Label(id="a", keep=False, reason="emoji \U0001f600").reason == "emoji \U0001f600"
 
 
 def test_label_times_are_stored_in_utc() -> None:
@@ -259,6 +266,22 @@ def test_a_corrupt_labels_file_is_reported_with_its_line(tmp_path: Path) -> None
         dataset.kept_rows()
     with pytest.raises(StateError, match=r"labels\.jsonl:2"):
         apply_labels(dataset, [keep("a")])
+
+
+def test_a_lone_surrogate_in_a_reason_is_reported_with_its_line(tmp_path: Path) -> None:
+    path = tmp_path / "labels.jsonl"
+    # json.dumps writes the lone surrogate as a "\ud800" escape: valid JSON, not valid UTF-8.
+    path.write_text(
+        json.dumps(keep("a").to_json())
+        + "\n"
+        + json.dumps({"id": "a", "keep": False, "reason": "x\ud800"})
+        + "\n"
+    )
+    with pytest.raises(StateError) as excinfo:
+        parse_labels(path)
+    assert excinfo.value.message == (
+        f"{path}:2: invalid label: reason: has a lone surrogate (U+D800); UTF-8 cannot encode it"
+    )
 
 
 def test_labels_of_rows_no_longer_accepted_are_ignored(tmp_path: Path) -> None:
