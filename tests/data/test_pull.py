@@ -8,14 +8,25 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.exclusions import ExclusionCode
-from pup_finetune.data.pull import Collection, PullOptions, collect, retirements
+from pup_finetune.data.pull import (
+    Collection,
+    PullOptions,
+    collect,
+    pull,
+    resolve_window,
+    retirements,
+)
+from pup_finetune.data.split import SplitParams
 from pup_finetune.datadog.spans import SpanQuery
-from pup_finetune.errors import UsageError
+from pup_finetune.errors import StateError, UsageError
 from tests.fakes.llmobs import FakeExportApi, fixture_pages, page, span_item
 from tests.fakes.pup import FakePup
 
@@ -260,3 +271,88 @@ def test_a_stored_exclusion_of_a_collapsed_conversation_is_re_recorded() -> None
     ]
     already = {**stale, "code": "contained_conversation"}
     assert retirements(full, [], [already]) == []
+
+
+# --- the time range -------------------------------------------------------------------------
+
+NOW_MS = 1767225600000
+HOUR_MS = 60 * 60 * 1000
+
+
+def at(now_ms: int) -> Any:
+    """A clock reading ``now_ms``, in seconds like :func:`time.time`."""
+    return lambda: now_ms / 1000
+
+
+def windows(api: FakeExportApi) -> list[tuple[object, object]]:
+    filters = [body["data"]["attributes"]["filter"] for body in api.requests]
+    return [(f.get("from"), f.get("to")) for f in filters]
+
+
+def relative_options(**options: Any) -> PullOptions:
+    return PullOptions(SpanQuery(ml_app="synthetic", from_="now-2h", to="now"), **options)
+
+
+def test_collect_resolves_a_relative_time_range_once_at_the_clock() -> None:
+    api = FakeExportApi(three_pages())
+    pup = api.install(FakePup()).client()
+    readings = iter([NOW_MS / 1000, (NOW_MS + HOUR_MS) / 1000])
+    collect(pup, relative_options(), clock=lambda: next(readings))
+    assert windows(api) == [(NOW_MS - 2 * HOUR_MS, NOW_MS)] * 3
+
+
+def test_settings_freeze_the_resolved_window_and_the_expressions() -> None:
+    settings = relative_options().resolved(NOW_MS).settings()
+    assert (settings["filter"]["from"], settings["filter"]["to"]) == (NOW_MS - 2 * HOUR_MS, NOW_MS)
+    assert (settings["from_expr"], settings["to_expr"]) == ("now-2h", "now")
+
+
+def test_an_unresolved_relative_query_has_no_export_query() -> None:
+    with pytest.raises(ValueError, match="resolve"):
+        relative_options().settings()
+    absolute = PullOptions(SpanQuery(from_=NOW_MS - HOUR_MS, to=NOW_MS))
+    assert absolute.export_query == absolute.query
+
+
+def test_a_pull_resumed_later_reuses_the_frozen_window(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    first = FakeExportApi(three_pages())
+    pull(
+        first.install(FakePup()).client(),
+        relative_options(target_count=1),
+        dataset,
+        SplitParams(),
+        clock=at(NOW_MS),
+    )
+    later = at(NOW_MS + 5 * HOUR_MS)
+    resolved = resolve_window(relative_options(), dataset, later)
+    assert resolved.window == (NOW_MS - 2 * HOUR_MS, NOW_MS)
+    second = FakeExportApi(three_pages())
+    pull(
+        second.install(FakePup()).client(), relative_options(), dataset, SplitParams(), clock=later
+    )
+    assert windows(first) + windows(second) == [(NOW_MS - 2 * HOUR_MS, NOW_MS)] * 3
+    settings = json.loads(dataset.settings_path.read_text())
+    assert settings["source"]["filter"]["to"] == NOW_MS
+
+
+def test_a_pull_with_other_expressions_resolves_them_and_is_rejected(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    api = FakeExportApi(three_pages())
+    pup = api.install(FakePup()).client()
+    pull(pup, relative_options(), dataset, SplitParams(), clock=at(NOW_MS))
+    requests = len(api.requests)
+    other = PullOptions(SpanQuery(ml_app="synthetic", from_="now-3h", to="now"))
+    assert resolve_window(other, dataset, at(NOW_MS)).window == (NOW_MS - 3 * HOUR_MS, NOW_MS)
+    with pytest.raises(StateError, match="settings changed"):
+        pull(pup, other, dataset, SplitParams(), clock=at(NOW_MS))
+    assert len(api.requests) == requests
+
+
+def test_a_first_pull_resolves_at_the_clock(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    assert resolve_window(relative_options(), dataset, at(NOW_MS)).window == (
+        NOW_MS - 2 * HOUR_MS,
+        NOW_MS,
+    )
+    assert not dataset.path.exists()

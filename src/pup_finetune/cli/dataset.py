@@ -9,8 +9,10 @@
 from __future__ import annotations
 
 import shlex
+import time
 from collections import Counter
 from collections.abc import Iterable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -27,6 +29,7 @@ from pup_finetune.data.pull import (
     PullOptions,
     collect,
     pull,
+    resolve_window,
 )
 from pup_finetune.data.schema import TrainingRow
 from pup_finetune.data.split import (
@@ -39,7 +42,7 @@ from pup_finetune.data.split import (
     split_warnings,
 )
 from pup_finetune.datadog.pup import Pup
-from pup_finetune.datadog.spans import SpanQuery
+from pup_finetune.datadog.spans import Clock, SpanQuery, TimeBound, epoch_ms
 from pup_finetune.errors import UsageError
 from pup_finetune.output import info
 
@@ -51,6 +54,9 @@ EXPLAINED_CODES = 5
 
 DEFAULT_FROM = "now-7d"
 DEFAULT_TO = "now"
+
+clock: Clock = time.time
+"""What ``now`` in ``--from`` and ``--to`` is resolved against; tests replace it."""
 
 _LOCAL_ONLY = "Reads and writes local files only, so it is allowed with PUP_READ_ONLY set."
 _DATADOG_READ = "It only reads from Datadog (through pup), so it is allowed with PUP_READ_ONLY set."
@@ -106,7 +112,11 @@ FromOption = Annotated[
     str,
     typer.Option(
         "--from",
-        help="Start of the time range: ISO 8601, date math such as now-7d, or epoch ms.",
+        help=(
+            "Start of the time range: ISO 8601, epoch ms, or a relative time: now, or "
+            "now-<n><unit> with unit s, m, h, d or w, such as now-7d. A relative time is "
+            "resolved once, when the command starts."
+        ),
     ),
 ]
 ToOption = Annotated[
@@ -225,8 +235,8 @@ def show(directory: DirArgument) -> dict[str, Any]:
     short_help="Try a Datadog span filter without writing anything.",
     help=(
         "Export LLM spans from Datadog, check and convert them into training rows, and "
-        "assign splits, all in memory: nothing is written. Shows how many spans matched, how "
-        "many rows would be accepted, why the rest would be excluded, a few samples, and the "
+        "assign splits, all in memory: nothing is written. Shows the time range it read, how "
+        "many spans matched, how many rows would be accepted, why the rest would be excluded, a few samples, and the "
         f"`dataset pull` command with the same flags. {_PULL_FLAGS} {_DATADOG_READ}"
     ),
 )
@@ -259,11 +269,13 @@ def preview(
         reasoning=reasoning,
         include_errors=include_errors,
     )
+    options = options.resolved(epoch_ms(clock))
     collection = collect(Pup(), options, progress=info)
     excluded_by_code = _count_codes(exclusion.code.value for exclusion in collection.exclusions)
     counts = split_counts(collection.rows, params)
     return {
         "query": options.settings(),
+        "time_range": _time_range(options),
         "limits": {"target_count": target_count, "max_candidates": max_candidates},
         "matched_spans": collection.spans,
         "traces": collection.traces,
@@ -295,9 +307,9 @@ def preview(
         "interrupted pull with the same flags resumes without fetching them again, and a "
         "higher --target-count or --max-candidates reads further (a stored row that turns "
         "out to be a prefix of a longer conversation of its trace is then excluded as "
-        "contained_conversation). --from and --to are frozen as written: a relative time "
-        "such as the default now-7d is resolved by Datadog when each page is fetched, so pass "
-        "ISO 8601 or epoch ms to pin the window of a pull you may resume later. "
+        "contained_conversation). A relative --from or --to, such as the default now-7d, is "
+        "resolved when the first pull starts and that window is frozen with the expressions; "
+        "a re-run with the same expressions reads the same window. "
         f"{_PULL_FLAGS} {_DATADOG_READ}"
     ),
 )
@@ -332,6 +344,7 @@ def pull_rows(
         include_errors=include_errors,
     )
     dataset = DatasetDir(directory)
+    options = resolve_window(options, dataset, clock)
     collection, added = pull(Pup(), options, dataset, params, progress=info)
     summary = added.summary
     return {
@@ -342,6 +355,7 @@ def pull_rows(
         "exclusion_explanations": _explanations(summary["excluded_by_code"]),
         "splits": summary["splits"],
         "warnings": [*_collection_warnings(collection, options), *summary["warnings"]],
+        "time_range": _time_range(options),
         "pull": {
             "matched_spans": collection.spans,
             "traces": collection.traces,
@@ -414,6 +428,29 @@ def _time_bound(value: str) -> str | int:
     if not text:
         raise UsageError("--from and --to must not be empty")
     return int(text) if text.isascii() and text.isdigit() else text
+
+
+def _time_range(options: PullOptions) -> dict[str, Any]:
+    """The time range as written and as exported; an epoch ms bound also in UTC ISO 8601."""
+    from_, to = options.export_query.from_, options.export_query.to
+    return {
+        "from_expr": options.query.from_,
+        "to_expr": options.query.to,
+        "from": from_,
+        "to": to,
+        "from_utc": _utc(from_),
+        "to_utc": _utc(to),
+    }
+
+
+def _utc(bound: TimeBound) -> str | None:
+    if not isinstance(bound, int):
+        return None
+    try:
+        moment = datetime.fromtimestamp(bound / 1000, tz=UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return moment.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _pull_command(directory: str, options: PullOptions, params: SplitParams) -> str:

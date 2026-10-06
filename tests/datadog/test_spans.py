@@ -19,9 +19,12 @@ from pup_finetune.datadog.spans import (
     TIMEOUT_BACKOFF_SECONDS,
     LLMObsSpan,
     SpanQuery,
+    epoch_ms,
+    is_relative_time,
     iter_spans,
     page_file_name,
     parse_span,
+    resolve_time,
 )
 from pup_finetune.errors import ExternalError, StateError, UsageError
 from pup_finetune.storage import atomic_write_json, read_json, settings_hash
@@ -140,6 +143,72 @@ def test_query_rejects_bad_limits() -> None:
         SpanQuery(page_limit=0)
     with pytest.raises(UsageError):
         SpanQuery(max_spans=-1)
+
+
+# --- relative times -------------------------------------------------------------------------
+
+NOW_MS = 1767225600000
+
+
+@pytest.mark.parametrize(
+    ("value", "offset_ms"),
+    [
+        ("now", 0),
+        ("now-0d", 0),
+        ("now-30s", 30 * 1000),
+        ("now-15m", 15 * 60 * 1000),
+        ("now-2h", 2 * 60 * 60 * 1000),
+        ("now-7d", 7 * 24 * 60 * 60 * 1000),
+        ("now-1w", 7 * 24 * 60 * 60 * 1000),
+        (" now-1d ", 24 * 60 * 60 * 1000),
+    ],
+)
+def test_a_relative_time_resolves_to_epoch_ms(value: str, offset_ms: int) -> None:
+    assert is_relative_time(value)
+    assert resolve_time(value, NOW_MS) == NOW_MS - offset_ms
+
+
+@pytest.mark.parametrize(
+    "value", ["2025-12-01T00:00:00Z", "2025-12-01", 1767225600000, "1767225600000", None, "²"]
+)
+def test_an_absolute_time_is_returned_unchanged(value: str | int | None) -> None:
+    assert not is_relative_time(value)
+    assert resolve_time(value, NOW_MS) == value
+
+
+@pytest.mark.parametrize(
+    "value", ["now-", "now-7", "now-d", "now-7y", "now-1M", "now+1h", "now - 7d", "Now", "nowish"]
+)
+def test_an_unreadable_relative_time_is_a_usage_error(value: str) -> None:
+    assert is_relative_time(value)
+    with pytest.raises(UsageError, match="cannot read the relative time"):
+        resolve_time(value, NOW_MS)
+    with pytest.raises(UsageError, match="cannot read the relative time"):
+        SpanQuery(from_=value)
+    with pytest.raises(UsageError, match="cannot read the relative time"):
+        SpanQuery(to=value)
+
+
+def test_a_relative_time_before_the_epoch_is_a_usage_error() -> None:
+    with pytest.raises(UsageError, match="before the epoch"):
+        resolve_time("now-1d", 1000)
+
+
+def test_a_resolved_query_sends_epoch_ms() -> None:
+    query = SpanQuery(ml_app="synthetic-app", from_="now-1h", to="now")
+    assert query.is_relative
+    resolved = query.resolved(NOW_MS)
+    assert not resolved.is_relative
+    assert resolved.to_filter()["from"] == NOW_MS - 60 * 60 * 1000
+    assert resolved.to_filter()["to"] == NOW_MS
+    assert resolved.ml_app == "synthetic-app"
+    pinned = SpanQuery(from_="2025-12-01T00:00:00Z", to=NOW_MS)
+    assert not pinned.is_relative
+    assert pinned.resolved(0) == pinned
+
+
+def test_epoch_ms_reads_the_clock_in_milliseconds() -> None:
+    assert epoch_ms(lambda: 1767225600.1234) == 1767225600123
 
 
 # --- pagination -----------------------------------------------------------------------------

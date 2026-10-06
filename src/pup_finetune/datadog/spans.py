@@ -18,13 +18,18 @@ fetching the cached pages again. A cache belongs to the query and to the Datadog
 pup is logged in to (``pup auth status``), so it is never reused for another account.
 :func:`iter_span_pages` yields the same spans a page at a time, so a caller can stop between
 pages without fetching the next one.
+
+A query's ``from_`` and ``to`` are sent as they are. A relative time such as ``now-7d`` is
+resolved by Datadog when each page is fetched; :meth:`SpanQuery.resolved` turns it into epoch
+milliseconds first, so every page of an export reads the same window.
 """
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +57,62 @@ CURSOR_FILE_NAME = "cursor.json"
 
 CACHED_PAGES_NOTE = "(cached pages are kept)"
 """Appended to the hint of a timed-out export that has a cache to resume from."""
+
+
+TimeBound = str | int | None
+"""A ``from`` or ``to`` bound: ISO 8601 or a relative time (text), epoch ms, or unbounded."""
+
+Clock = Callable[[], float]
+"""The current time in seconds since the epoch, like :func:`time.time`."""
+
+RELATIVE_TIME_UNITS_MS: Mapping[str, int] = {
+    "s": 1000,
+    "m": 60 * 1000,
+    "h": 60 * 60 * 1000,
+    "d": 24 * 60 * 60 * 1000,
+    "w": 7 * 24 * 60 * 60 * 1000,
+}
+"""The units of a relative time, ``now-<n><unit>``, in milliseconds."""
+
+_RELATIVE_TIME = re.compile(r"now(?:-([0-9]+)([smhdw]))?")
+_RELATIVE_TIME_FORMS = "now, or now-<n><unit> with unit s, m, h, d or w (such as now-7d)"
+
+
+def is_relative_time(value: TimeBound) -> bool:
+    """Whether ``value`` is a relative time: text starting with ``now``, in any case."""
+    return isinstance(value, str) and value.strip().lower().startswith("now")
+
+
+def resolve_time(value: TimeBound, now_ms: int) -> TimeBound:
+    """``value`` as epoch milliseconds when it is a relative time, at ``now_ms``; else as is.
+
+    A relative time is ``now`` or ``now-<n><unit>`` (see :data:`RELATIVE_TIME_UNITS_MS`);
+    any other text starting with ``now`` raises :class:`UsageError` rather than being sent
+    to Datadog unresolved. ISO 8601 text and epoch milliseconds are returned unchanged.
+    """
+    if not isinstance(value, str) or not is_relative_time(value):
+        return value
+    resolved = now_ms - _relative_offset_ms(value)
+    if resolved < 0:
+        raise UsageError(f"time {value!r} is before the epoch")
+    return resolved
+
+
+def epoch_ms(clock: Clock) -> int:
+    """What ``clock`` reads, in whole epoch milliseconds."""
+    return int(clock() * 1000)
+
+
+def _relative_offset_ms(value: str) -> int:
+    """How far before now the relative time ``value`` is, in milliseconds."""
+    match = _RELATIVE_TIME.fullmatch(value.strip())
+    if match is None:
+        raise UsageError(
+            f"cannot read the relative time {value!r}",
+            hint=f"pass ISO 8601, epoch ms, or {_RELATIVE_TIME_FORMS}",
+        )
+    amount, unit = match.groups()
+    return int(amount) * RELATIVE_TIME_UNITS_MS[unit] if amount else 0
 
 
 def page_file_name(number: int) -> str:
@@ -208,7 +269,9 @@ def parse_span(item: object) -> LLMObsSpan | None:
 class SpanQuery:
     """Which spans to export, and how many.
 
-    ``from_`` and ``to`` take ISO 8601, date math such as ``now-7d``, or epoch milliseconds.
+    ``from_`` and ``to`` take ISO 8601, a relative time such as ``now-7d`` (see
+    :func:`resolve_time`; another one starting with ``now`` raises :class:`UsageError`), or
+    epoch milliseconds.
     ``query`` is a search query string; ``tags`` must all match. ``max_spans`` caps how many
     spans :func:`iter_spans` yields (``None``: all of them).
     """
@@ -217,8 +280,8 @@ class SpanQuery:
     span_name: str | None = None
     query: str | None = None
     tags: Mapping[str, str] = field(default_factory=dict)
-    from_: str | int | None = None
-    to: str | int | None = None
+    from_: TimeBound = None
+    to: TimeBound = None
     span_kind: str = "llm"
     page_limit: int = DEFAULT_PAGE_LIMIT
     max_spans: int | None = None
@@ -228,7 +291,21 @@ class SpanQuery:
             raise UsageError(f"page limit must be at least 1, not {self.page_limit}")
         if self.max_spans is not None and self.max_spans < 0:
             raise UsageError(f"max spans must not be negative, not {self.max_spans}")
+        for bound in (self.from_, self.to):
+            if isinstance(bound, str) and is_relative_time(bound):
+                _relative_offset_ms(bound)
         object.__setattr__(self, "tags", dict(self.tags))
+
+    @property
+    def is_relative(self) -> bool:
+        """Whether ``from_`` or ``to`` is a relative time, which Datadog resolves per page."""
+        return is_relative_time(self.from_) or is_relative_time(self.to)
+
+    def resolved(self, now_ms: int) -> SpanQuery:
+        """This query with a relative ``from_`` or ``to`` resolved at ``now_ms`` to epoch ms."""
+        return replace(
+            self, from_=resolve_time(self.from_, now_ms), to=resolve_time(self.to, now_ms)
+        )
 
     def to_filter(self) -> dict[str, Any]:
         """The Export API ``filter``; unset fields are left out."""

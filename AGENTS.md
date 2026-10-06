@@ -59,9 +59,10 @@ uv run pup-finetune dataset pull /tmp/ds --ml-app my-app --from now-7d
 uv run pup-finetune dataset show /tmp/ds
 ```
 
-`--from` and `--to` are frozen as written. Datadog resolves a relative time such as `now-7d`
-when it fetches each page, so a pull resumed later can read a shifted window. Pass ISO 8601 or
-epoch ms to pin the window.
+A relative `--from` or `--to` (`now`, or `now-<n><unit>` with unit `s`, `m`, `h`, `d` or `w`)
+is resolved to epoch ms when the command starts. The first pull into a directory freezes that
+window together with the expressions as written, and a re-run with the same expressions reads
+the frozen window, so a resumed pull reads the same spans.
 
 Add `--detach` to train in a background worker (output in `/tmp/run/worker.log`) and follow it
 with `status /tmp/run --watch`. `--provider-option step_delay_s=0.5 --batch-size 1` makes the
@@ -125,7 +126,8 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   with `--include-errors`); there is no `truncated_content` check, as the Export API gives no
   explicit truncation signal. `exclusions.py` also explains every code (`explain`). `pull.py` is
   what `dataset preview` (in memory) and `dataset pull` (into a dataset, through its `raw/`
-  cache, with the settings frozen first) run: export a page at a time, check, convert, drop
+  cache, with the settings frozen first) run, a relative time range resolved once (a re-run
+  reuses the frozen window, `resolve_window`): export a page at a time, check, convert, drop
   repeated conversations, and stop at `--target-count` rows or `--max-candidates` spans before
   fetching another page. Unreadable items are excluded as `unreadable_span`; a re-run that reads
   further retires a stored row its trace now shows to be a prefix of a longer conversation

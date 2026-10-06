@@ -34,6 +34,29 @@ FIXTURE_EXCLUSIONS = 3
 
 UsePup = Callable[[Pup], None]
 
+NOW_MS = 1767225600000
+"""What the commands' clock reads: 2026-01-01T00:00:00Z."""
+DAY_MS = 24 * 60 * 60 * 1000
+WEEK_AGO_MS = NOW_MS - 7 * DAY_MS
+
+
+class FakeClock:
+    """A clock the test moves; reads seconds, like :func:`time.time`."""
+
+    def __init__(self, now_ms: int) -> None:
+        self.now_ms = now_ms
+
+    def __call__(self) -> float:
+        return self.now_ms / 1000
+
+
+@pytest.fixture(autouse=True)
+def clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
+    """The clock the dataset commands resolve ``now`` against."""
+    fake = FakeClock(NOW_MS)
+    monkeypatch.setattr(dataset_cli, "clock", fake)
+    return fake
+
 
 @pytest.fixture
 def use_pup(monkeypatch: pytest.MonkeyPatch) -> UsePup:
@@ -117,9 +140,19 @@ def test_preview_reports_counts_samples_and_the_pull_command(api: FakeExportApi)
         "ml_app": "synthetic-trip-planner",
         "span_name": "chat",
         "tags": {"env": "synthetic"},
-        "from": "now-7d",
-        "to": "now",
+        "from": WEEK_AGO_MS,
+        "to": NOW_MS,
     }
+    assert (data["query"]["from_expr"], data["query"]["to_expr"]) == ("now-7d", "now")
+    assert data["time_range"] == {
+        "from_expr": "now-7d",
+        "to_expr": "now",
+        "from": WEEK_AGO_MS,
+        "to": NOW_MS,
+        "from_utc": "2025-12-25T00:00:00.000Z",
+        "to_utc": "2026-01-01T00:00:00.000Z",
+    }
+    assert data["query"]["filter"] == api.requests[0]["data"]["attributes"]["filter"]
     assert (data["query"]["reasoning"], data["query"]["include_errors"]) == ("omit", False)
     assert data["limits"] == {"target_count": 200, "max_candidates": 5000}
     assert (data["matched_spans"], data["traces"]) == (10, 6)
@@ -233,6 +266,7 @@ def test_preview_passes_every_non_default_flag_to_the_pull_command(api: FakeExpo
     ]
     data = output_json(preview(*flags))
     assert data["query"]["filter"]["from"] == 1767225600000
+    assert data["query"]["filter"]["to"] == NOW_MS - DAY_MS
     command = data["next_command"]
     assert command.startswith("pup finetune dataset pull <DIR> ")
     words = shlex.split(command.replace("<DIR>", "DIR"))
@@ -529,6 +563,8 @@ def test_a_rerun_retires_a_stored_prefix_of_a_conversation_on_a_later_page(
         ("--include-errors",),
         ("--tag", "env:other"),
         ("--from", "now-30d"),
+        ("--from", "1766620800000"),
+        ("--to", "now-1h"),
         ("--seed", "7"),
     ],
 )
@@ -569,3 +605,75 @@ def test_a_non_ascii_digit_time_is_passed_through_as_text(api: FakeExportApi) ->
     result = preview("--from", "²")
     assert result.exit_code == 0, result.stderr
     assert output_json(result)["query"]["filter"]["from"] == "²"
+
+
+# --- the time range -------------------------------------------------------------------------
+
+
+def sent_windows(api: FakeExportApi) -> list[tuple[object, object]]:
+    """The ``from`` and ``to`` of every request sent to the Export API."""
+    filters = [body["data"]["attributes"]["filter"] for body in api.requests]
+    return [(f.get("from"), f.get("to")) for f in filters]
+
+
+def test_a_pull_freezes_the_resolved_window_and_the_expressions(
+    api: FakeExportApi, tmp_path: Path
+) -> None:
+    target = tmp_path / "ds"
+    result = pull(target, "--from", "now-1d", "--to", "now-1h")
+    assert result.exit_code == 0, result.stderr
+    window = (NOW_MS - DAY_MS, NOW_MS - 60 * 60 * 1000)
+    assert sent_windows(api) == [window, window]
+    source = json.loads((target / "settings.json").read_text())["source"]
+    assert (source["filter"]["from"], source["filter"]["to"]) == window
+    assert (source["from_expr"], source["to_expr"]) == ("now-1d", "now-1h")
+    time_range = output_json(result)["time_range"]
+    assert (time_range["from"], time_range["to"]) == window
+    assert (time_range["from_expr"], time_range["to_expr"]) == ("now-1d", "now-1h")
+
+
+def test_a_pull_resumed_later_reads_the_frozen_window(
+    api: FakeExportApi, tmp_path: Path, clock: FakeClock
+) -> None:
+    target = tmp_path / "ds"
+    api.failures[PAGE_2_CURSOR] = 1
+    assert pull(target).exit_code == 1
+    clock.now_ms += 3 * DAY_MS
+    result = pull(target)
+    assert result.exit_code == 0, result.stderr
+    assert api.cursors == [None, PAGE_2_CURSOR, PAGE_2_CURSOR]
+    assert sent_windows(api) == [(WEEK_AGO_MS, NOW_MS)] * 3
+    assert output_json(result)["time_range"]["to"] == NOW_MS
+    assert output_json(result)["pull"]["pages_cached"] == 1
+
+
+def test_a_finished_pull_rerun_later_with_a_higher_target_reads_the_same_window(
+    api: FakeExportApi, tmp_path: Path, clock: FakeClock
+) -> None:
+    target = tmp_path / "ds"
+    assert pull(target, "--target-count", "2").exit_code == 0
+    clock.now_ms += 30 * DAY_MS
+    result = pull(target)
+    assert result.exit_code == 0, result.stderr
+    assert api.cursors == [None, PAGE_2_CURSOR]
+    assert sent_windows(api) == [(WEEK_AGO_MS, NOW_MS)] * 2
+
+
+def test_absolute_times_are_sent_unchanged(api: FakeExportApi, tmp_path: Path) -> None:
+    target = tmp_path / "ds"
+    result = pull(target, "--from", "2025-12-01T00:00:00Z", "--to", "1767225500000")
+    assert result.exit_code == 0, result.stderr
+    assert sent_windows(api)[0] == ("2025-12-01T00:00:00Z", 1767225500000)
+    time_range = output_json(result)["time_range"]
+    assert (time_range["from_utc"], time_range["to_utc"]) == (None, "2025-12-31T23:58:20.000Z")
+
+
+@pytest.mark.parametrize("bad", ["now-7", "now-7y", "now-d", "now+1h", "now - 7d", "NOW"])
+def test_an_unreadable_relative_time_is_a_usage_error(
+    api: FakeExportApi, tmp_path: Path, bad: str
+) -> None:
+    for result in (preview("--from", bad), pull(tmp_path / "ds", "--to", bad)):
+        assert result.exit_code == 2
+        assert "cannot read the relative time" in result.stderr
+    assert api.requests == []
+    assert not (tmp_path / "ds").exists()

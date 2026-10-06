@@ -30,6 +30,13 @@ with higher limits to read further. When it does, a trace an earlier pull read o
 may now show that a stored row is a prefix of a longer conversation: :func:`pull` retires
 such a row as ``contained_conversation`` (see :func:`retirements`), so the latest conversion
 of every span it read is what the dataset holds.
+
+A relative ``--from`` or ``--to`` (``now-7d``) is resolved to epoch milliseconds once, when a
+collection or a dataset's first pull starts (:meth:`PullOptions.resolved`), and the export
+sends the resolved window. A dataset freezes both: the resolved window in its ``filter`` and
+the expressions as written in ``from_expr`` and ``to_expr``. A later pull with the same
+expressions reuses the frozen window (:func:`resolve_window`), so it reads the same spans
+however much later it runs.
 """
 
 from __future__ import annotations
@@ -50,10 +57,13 @@ from pup_finetune.data.trajectories import ConversionStats, rows_from_spans
 from pup_finetune.datadog.pup import Pup
 from pup_finetune.datadog.spans import (
     CACHED_PAGES_NOTE,
+    Clock,
     ExportStats,
     LLMObsSpan,
     SpanQuery,
+    TimeBound,
     UnreadableSpan,
+    epoch_ms,
     iter_span_pages,
 )
 from pup_finetune.errors import ExternalError, UsageError
@@ -75,6 +85,7 @@ class PullOptions:
     """What to export and convert, and when to stop reading."""
 
     query: SpanQuery
+    """The spans to export, with ``from_`` and ``to`` as written (``now-7d``)."""
     reasoning: ReasoningMode = "omit"
     include_errors: bool = False
     """Keep errored LLM calls instead of excluding them as ``span_error``."""
@@ -82,6 +93,9 @@ class PullOptions:
     """Stop reading once this many rows are accepted."""
     max_candidates: int = DEFAULT_MAX_CANDIDATES
     """Read at most this many spans."""
+    window: tuple[TimeBound, TimeBound] | None = None
+    """The ``from`` and ``to`` the export sends, a relative time resolved to epoch ms;
+    ``None`` until :meth:`resolved` or :meth:`with_window` sets it."""
 
     def __post_init__(self) -> None:
         check_reasoning(self.reasoning)
@@ -90,10 +104,39 @@ class PullOptions:
         if self.max_candidates < 1:
             raise UsageError(f"--max-candidates must be at least 1, not {self.max_candidates}")
 
+    def resolved(self, now_ms: int) -> PullOptions:
+        """These options with the time range of ``query`` resolved at ``now_ms``."""
+        query = self.query.resolved(now_ms)
+        return self.with_window(query.from_, query.to)
+
+    def with_window(self, from_: TimeBound, to: TimeBound) -> PullOptions:
+        """These options exporting the window ``from_`` to ``to``, such as a frozen one."""
+        return replace(self, window=(from_, to))
+
+    @property
+    def export_query(self) -> SpanQuery:
+        """The query the export sends: ``query`` over :attr:`window`.
+
+        Raises :class:`ValueError` when ``query`` has a relative time and no window is set,
+        rather than letting Datadog resolve it again for every page.
+        """
+        if self.window is None:
+            if self.query.is_relative:
+                raise ValueError("resolve the relative time range of the query first")
+            return self.query
+        from_, to = self.window
+        return replace(self.query, from_=from_, to=to)
+
     def settings(self) -> dict[str, Any]:
-        """What selects and shapes the rows, to freeze in the dataset's settings."""
+        """What selects and shapes the rows, to freeze in the dataset's settings.
+
+        The ``filter`` holds the window the export sends; ``from_expr`` and ``to_expr`` the
+        time range as written, which a later pull is matched by (:func:`resolve_window`).
+        """
         return {
-            **self.query.settings(),
+            **self.export_query.settings(),
+            "from_expr": self.query.from_,
+            "to_expr": self.query.to,
             "reasoning": self.reasoning,
             "include_errors": self.include_errors,
         }
@@ -150,15 +193,19 @@ def collect(
     options: PullOptions,
     *,
     cache_dir: Path | None = None,
+    clock: Clock = time.time,
     sleep: Callable[[float], None] = time.sleep,
     progress: Progress | None = None,
 ) -> Collection:
     """Export, check and convert the spans ``options`` select; see the module docstring.
 
     ``cache_dir`` is the raw page cache :func:`~pup_finetune.datadog.spans.iter_span_pages`
-    resumes from; without one nothing is written.
+    resumes from; without one nothing is written. Options without a window are resolved at
+    ``clock`` first.
     """
-    query = replace(options.query, max_spans=options.max_candidates)
+    if options.window is None:
+        options = options.resolved(epoch_ms(clock))
+    query = replace(options.export_query, max_spans=options.max_candidates)
     pages = iter_span_pages(pup, query, cache_dir=cache_dir, sleep=sleep)
     check_options = CheckOptions(include_errors=options.include_errors)
     result = Collection(export=pages.stats)
@@ -304,23 +351,48 @@ def _comparable(message: Message) -> tuple[object, ...]:
     return (message.role, message.content, calls)
 
 
+def resolve_window(options: PullOptions, dataset: DatasetDir, clock: Clock) -> PullOptions:
+    """``options`` with the window a pull into ``dataset`` exports.
+
+    When ``dataset`` already froze the same ``from_expr`` and ``to_expr``, that is its frozen
+    window, however far ``clock`` has moved since; otherwise (a first pull, or other
+    expressions, which the settings check then rejects) the time range resolved at ``clock``.
+    Options that already have a window are returned unchanged.
+    """
+    if options.window is not None:
+        return options
+    source = dataset.settings().get("source") if dataset.is_dataset() else None
+    if isinstance(source, dict):
+        frozen = source.get("filter")
+        same = (source.get("from_expr"), source.get("to_expr")) == (
+            options.query.from_,
+            options.query.to,
+        )
+        if same and isinstance(frozen, dict):
+            return options.with_window(frozen.get("from"), frozen.get("to"))
+    return options.resolved(epoch_ms(clock))
+
+
 def pull(
     pup: Pup,
     options: PullOptions,
     dataset: DatasetDir,
     split: SplitParams,
     *,
+    clock: Clock = time.time,
     sleep: Callable[[float], None] = time.sleep,
     progress: Progress | None = None,
 ) -> tuple[Collection, AddResult]:
     """Collect into ``dataset``: freeze its settings, export through its ``raw/`` cache, add.
 
-    The settings are frozen (or checked) before anything is fetched, so a pull with other
-    settings fails fast with :class:`~pup_finetune.errors.StateError`, and an interrupted
-    first pull leaves a dataset its re-run resumes; an :class:`ExternalError` part-way says
-    so in its hint. The cache is locked while the export reads it. Stored rows the new
-    conversion collapsed are retired (:func:`retirements`).
+    The window is resolved first (:func:`resolve_window`), so a re-run reads the window the
+    first pull froze. The settings are frozen (or checked) before anything is fetched, so a
+    pull with other settings fails fast with :class:`~pup_finetune.errors.StateError`, and
+    an interrupted first pull leaves a dataset its re-run resumes; an :class:`ExternalError`
+    part-way says so in its hint. The cache is locked while the export reads it. Stored rows
+    the new conversion collapsed are retired (:func:`retirements`).
     """
+    options = resolve_window(options, dataset, clock)
     settings = options.dataset_settings(split)
     dataset.create_or_check(settings)
     raw = make_private_dir(dataset.raw_path)
