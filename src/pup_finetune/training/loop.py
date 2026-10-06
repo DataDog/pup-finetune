@@ -353,12 +353,18 @@ def _token_mean(metrics: Sequence[StepMetrics], what: str) -> float:
 
 
 def _mean(loss_sum: float, weight: float, what: str) -> float:
-    if not (math.isfinite(loss_sum) and math.isfinite(weight) and weight > 0):
+    """``loss_sum / weight``, or :class:`ExternalError` unless all three are finite.
+
+    A finite sum over a tiny weight can still overflow; every recorded loss is finite, so
+    it is written to the run directory and replayed on resume exactly.
+    """
+    mean = loss_sum / weight if math.isfinite(weight) and weight > 0 else math.nan
+    if not (math.isfinite(loss_sum) and math.isfinite(mean)):
         raise ExternalError(
             f"the {what} returned a loss sum of {loss_sum} over a weight of {weight}",
             source="training",
         )
-    return loss_sum / weight
+    return mean
 
 
 class _BudgetStop(Exception):

@@ -206,7 +206,9 @@ def test_the_step_loss_is_a_token_mean_over_its_microbatches() -> None:
 
 
 @pytest.mark.parametrize(
-    "metrics", [StepMetrics(1.0, 0.0, 5), StepMetrics(math.nan, 1.0, 5)], ids=["zero", "nan"]
+    "metrics",
+    [StepMetrics(1.0, 0.0, 5), StepMetrics(math.nan, 1.0, 5), StepMetrics(1e308, 1e-10, 5)],
+    ids=["zero", "nan", "overflowing-mean"],
 )
 def test_an_unusable_training_loss_fails(metrics: StepMetrics) -> None:
     with recording(train_metrics=[metrics]) as session, pytest.raises(ExternalError):
