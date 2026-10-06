@@ -55,8 +55,12 @@ def run_pup(args: Sequence[str], stdin: str) -> subprocess.CompletedProcess[str]
 
 
 def to_json(result: Mapping[str, Any]) -> str:
-    """Serialize a result the way it is printed when not running under pup."""
-    return json.dumps(result, indent=2, sort_keys=True, default=str)
+    """Serialize a result the way it is printed when not running under pup.
+
+    Raises ``ValueError`` for NaN or Infinity, which strict JSON cannot represent, so a
+    non-finite number never reaches stdout as invalid JSON.
+    """
+    return json.dumps(result, indent=2, sort_keys=True, default=str, allow_nan=False)
 
 
 def _first_line(text: str, limit: int = 200) -> str:

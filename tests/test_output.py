@@ -69,6 +69,18 @@ def test_under_pup_pipes_json_through_pup_format(capsys: pytest.CaptureFixture[s
     assert err == ""
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("runtime", [STANDALONE, UNDER_PUP], ids=["standalone", "under-pup"])
+def test_non_finite_numbers_are_rejected_not_printed(
+    value: float, runtime: Runtime, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runner = FakePupRunner()
+    with pytest.raises(ValueError, match="JSON compliant"):
+        emit({"loss": value}, runtime=runtime, runner=runner)
+    assert capsys.readouterr().out == ""
+    assert runner.calls == []
+
+
 def test_pup_output_gets_a_trailing_newline(capsys: pytest.CaptureFixture[str]) -> None:
     emit({"a": 1}, runtime=UNDER_PUP, runner=FakePupRunner(stdout="a: 1"))
     assert capsys.readouterr().out == "a: 1\n"
