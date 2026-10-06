@@ -35,8 +35,11 @@ from pup_finetune.providers.baseten.client import (
     CreatedDeployment,
     DeploymentRejected,
     inference_url,
+    loops_failure,
+    loops_sampling_client,
     loops_sdk,
     loops_service,
+    loops_trainer,
     to_loops_datum,
 )
 from pup_finetune.rendering.tokens import TokenizedExample
@@ -44,6 +47,7 @@ from tests.fakes.baseten import (
     BasetenTransport,
     FakeLoops,
     FakeModelInput,
+    FakeServerShutdownError,
     FakeTensorData,
     baseten_transport,
     http_status_error,
@@ -380,6 +384,22 @@ def test_create_sampler_asks_for_dedicated_capacity() -> None:
     ]
 
 
+def test_create_sampler_can_serve_the_base_model() -> None:
+    sampler = {"id": "smp1", "model_id": "m1", "deployment_id": "d1", "base_url": SAMPLER_URL}
+    http, transport = make_http({"POST /v1/loops/samplers": (200, {"sampler": sampler})})
+    http.create_sampler(session_id="s1", base_model="Qwen/Qwen3.5-9B", max_seq_len=1024)
+    (body,) = transport.bodies("POST /v1/loops/samplers")
+    assert (body["base_model"], "model_path" in body) == ("Qwen/Qwen3.5-9B", False)
+
+
+@pytest.mark.parametrize("target", [{}, {"model_path": "bt://x", "base_model": "m"}])
+def test_create_sampler_serves_exactly_one_model(target: dict[str, str]) -> None:
+    http, transport = make_http({})
+    with pytest.raises(ValueError, match="exactly one"):
+        http.create_sampler(session_id="s1", max_seq_len=1024, **target)
+    assert transport.requests == []
+
+
 @pytest.mark.parametrize(
     ("status", "rejected"), [(400, True), (422, True), (408, False), (503, False)]
 )
@@ -633,6 +653,7 @@ def test_the_real_sdk_provides_every_name_the_client_uses() -> None:
     loaded = loops_sdk()
     for name in client._SDK_NAMES:
         assert getattr(loaded, name) is getattr(sdk, name)
+    assert loaded.BasetenDeployment is sdk.sampling_client.BasetenDeployment
 
 
 # --- loops_service -------------------------------------------------------------------
@@ -722,6 +743,283 @@ def test_session_creation_errors_are_explained(
     assert caught.value.source == "baseten"
     assert caught.value.__cause__ is error
     assert_clean(caught.value)
+
+
+# --- loops_trainer and loops_sampling_client -----------------------------------------
+
+TRAINER = {
+    "base_model": "Qwen/Qwen3.5-9B",
+    "rank": 8,
+    "seed": 7,
+    "max_seq_len": 2048,
+    "name": "pup-finetune-test",
+}
+
+
+def test_loops_trainer_creates_one_dedicated_run_without_a_sampler() -> None:
+    loops = FakeLoops()
+    trainer = loops_trainer(loops_service(KEY, loops=loops), **TRAINER)
+    assert trainer.run_id == "run1"
+    assert loops.kwargs("create_lora_training_client") == [
+        {**TRAINER, "replicas": 1, "with_sampler": False}
+    ]
+
+
+ORPHAN_HINT = "a run may remain in Loops session session1; deactivate it in the Baseten UI"
+TRAINER_URL = "https://model-t1.api.baseten.co/deployment/d1/sync/init_trainer_server"
+
+
+def _without_request(status: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "https://api.baseten.co/v1/loops/trainers")
+    return httpx.HTTPStatusError("HTTP", request=request, response=httpx.Response(status))
+
+
+@pytest.mark.parametrize(
+    ("error", "kind", "message", "hint"),
+    [
+        (
+            http_status_error(422, json={"detail": "unsupported model"}),
+            ExternalError,
+            "Baseten refused to create the trainer (HTTP 422): unsupported model",
+            None,
+        ),
+        (
+            http_status_error(429, json={"detail": "no H100s"}),
+            ProviderCapacityError,
+            "Baseten has no capacity for the trainer (HTTP 429): no H100s",
+            "nothing was left running; retry later",
+        ),
+        (
+            http_status_error(403),
+            ProviderAuthError,
+            "Baseten refused to create the trainer (HTTP 403)",
+            AUTH_HINT,
+        ),
+        (
+            RuntimeError(f"trainer never became ready for {SECRET}"),
+            ExternalError,
+            "creating the Baseten trainer failed (RuntimeError: trainer never became ready for ***)",
+            ORPHAN_HINT,
+        ),
+        (
+            httpx.ReadTimeout("slow"),
+            ExternalError,
+            "creating the Baseten trainer failed (ReadTimeout: slow)",
+            ORPHAN_HINT,
+        ),
+        (
+            http_status_error(503),
+            ExternalError,
+            "creating the Baseten trainer failed (HTTP 503)",
+            ORPHAN_HINT,
+        ),
+        (
+            http_status_error(400, json={"detail": "bad rank"}, url=TRAINER_URL),
+            ExternalError,
+            "creating the Baseten trainer failed (HTTP 400): bad rank",
+            ORPHAN_HINT,
+        ),
+        (
+            http_status_error(401, url=TRAINER_URL),
+            ProviderAuthError,
+            "creating the Baseten trainer failed (HTTP 401)",
+            f"{ORPHAN_HINT}; {AUTH_HINT}",
+        ),
+        (
+            http_status_error(429, url=TRAINER_URL),
+            ProviderCapacityError,
+            "Baseten has no capacity for the trainer (HTTP 429)",
+            f"{ORPHAN_HINT}; retry later",
+        ),
+        (
+            _without_request(400),
+            ExternalError,
+            "creating the Baseten trainer failed (HTTP 400)",
+            ORPHAN_HINT,
+        ),
+    ],
+    ids=[
+        "refused",
+        "capacity",
+        "auth",
+        "runtime",
+        "timeout",
+        "server-error",
+        "refused-after-the-create",
+        "auth-after-the-create",
+        "capacity-after-the-create",
+        "no-request",
+    ],
+)
+def test_trainer_creation_errors_say_whether_a_run_may_remain(
+    error: Exception, kind: type[ExternalError], message: str, hint: str | None
+) -> None:
+    loops = FakeLoops()
+    service = loops_service(KEY, loops=loops)
+    loops.fail_on("create_lora_training_client", error=error)
+    with pytest.raises(ExternalError) as caught:
+        loops_trainer(service, **TRAINER)
+    assert type(caught.value) is kind
+    assert (caught.value.message, caught.value.hint) == (message, hint)
+    assert_clean(caught.value)
+
+
+def test_an_interrupted_trainer_creation_notes_the_session() -> None:
+    loops = FakeLoops()
+    service = loops_service(KEY, loops=loops)
+    loops.fail_on("create_lora_training_client", error=KeyboardInterrupt())
+    with pytest.raises(KeyboardInterrupt) as caught:
+        loops_trainer(service, **TRAINER)
+    assert caught.value.__notes__ == [ORPHAN_HINT]
+
+
+def test_a_trainer_without_a_valid_run_id_is_closed_and_refused() -> None:
+    loops = FakeLoops()
+    service: Any = loops_service(KEY, loops=loops)
+    created = service.create_lora_training_client
+    service.create_lora_training_client = lambda **kwargs: _with_run_id(created(**kwargs))
+    with pytest.raises(ExternalError, match="no valid run id"):
+        loops_trainer(service, **TRAINER)
+    assert loops.trainers[0].closed
+
+
+def _with_run_id(trainer: Any) -> Any:
+    trainer.run_id = "../run1"
+    return trainer
+
+
+SAMPLER = {"id": "smp1", "model_id": "abc123", "deployment_id": "dep456", "base_url": SAMPLER_URL}
+
+
+def test_loops_sampling_client_attaches_to_the_sampler_with_the_key() -> None:
+    loops = FakeLoops()
+    service = loops_service(KEY, loops=loops)
+    created = BasetenHTTP(KEY, transport=loops.transport()).create_sampler(
+        session_id=service.session_id, base_model="Qwen/Qwen3.5-9B", max_seq_len=1024
+    )
+    loops_sampling_client(
+        KEY,
+        created,
+        base_model="Qwen/Qwen3.5-9B",
+        session_id="session1",
+        checkpoint_path=None,
+        ready_timeout=60.0,
+        timeout=30.0,
+        loops=loops,
+    )
+    (kwargs,) = loops.kwargs("SamplingClient")
+    assert kwargs.pop("deployment") == loops.BasetenDeployment(
+        base_url=created["base_url"],
+        model_id="model1",
+        deployment_id="dep1",
+        api_base_url=API_BASE,
+    )
+    assert kwargs == {
+        "api_key": SECRET,
+        "base_model": "Qwen/Qwen3.5-9B",
+        "sampler_id": "sampler1",
+        "session_id": "session1",
+        "checkpoint_path": None,
+        "ready_timeout": 60.0,
+        "timeout": 30.0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ({"base_url": "https://evil.example.com/sync"}, "non-Baseten URL"),
+        ({"base_url": None}, "without its URL"),
+        ({"id": "a/b"}, "invalid Baseten sampler id"),
+    ],
+)
+def test_loops_sampling_client_refuses_a_sampler_it_cannot_trust(
+    field: dict[str, Any], message: str
+) -> None:
+    loops = FakeLoops()
+    with pytest.raises(ExternalError, match=message):
+        loops_sampling_client(
+            KEY,
+            {**SAMPLER, **field},
+            base_model="Qwen/Qwen3.5-9B",
+            session_id="session1",
+            checkpoint_path=None,
+            ready_timeout=60.0,
+            timeout=30.0,
+            loops=loops,
+        )
+    assert loops.calls == []
+
+
+# --- loops_failure -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("error", "repeatable", "kind", "message", "hint"),
+    [
+        (
+            http_status_error(503),
+            True,
+            TransientError,
+            "the call failed (HTTP 503, HTTPStatusError)",
+            None,
+        ),
+        (
+            http_status_error(503),
+            False,
+            ExternalError,
+            "the call failed (HTTP 503, HTTPStatusError)",
+            None,
+        ),
+        (httpx.ReadTimeout("slow"), True, TransientError, "the call failed (ReadTimeout)", None),
+        (TimeoutError("slow"), True, TransientError, "the call failed (TimeoutError)", None),
+        (
+            FakeServerShutdownError("going away"),
+            True,
+            TransientError,
+            "the call failed (FakeServerShutdownError)",
+            None,
+        ),
+        (
+            http_status_error(400),
+            True,
+            ExternalError,
+            "the call failed (HTTP 400, HTTPStatusError)",
+            None,
+        ),
+        (
+            http_status_error(429, headers={"Retry-After": "5"}),
+            True,
+            ProviderCapacityError,
+            "the call failed (HTTP 429, HTTPStatusError)",
+            "retry after 5 s",
+        ),
+        (
+            raised_from(RuntimeError(f"denied {SECRET}"), http_status_error(401)),
+            True,
+            ProviderAuthError,
+            "the call failed (HTTP 401, RuntimeError)",
+            AUTH_HINT,
+        ),
+    ],
+    ids=[
+        "5xx-repeatable",
+        "5xx-not-repeatable",
+        "read-timeout",
+        "timeout",
+        "shutdown",
+        "4xx",
+        "capacity",
+        "auth-in-chain",
+    ],
+)
+def test_loops_failure_maps_sdk_errors_to_the_shared_classes(
+    error: Exception, repeatable: bool, kind: type[ExternalError], message: str, hint: str | None
+) -> None:
+    mapped = loops_failure(error, "the call", FakeLoops(), repeatable=repeatable)
+    assert type(mapped) is kind
+    assert (mapped.message, mapped.hint, mapped.source) == (message, hint, "baseten")
+    assert_clean(mapped)
 
 
 # --- datum conversion ----------------------------------------------------------------

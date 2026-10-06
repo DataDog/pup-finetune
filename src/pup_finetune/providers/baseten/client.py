@@ -20,7 +20,11 @@
   first use, never when this module is imported, after refusing the environment variables
   that would make it send data elsewhere or reuse other resources.
   :func:`loops_service` opens a Loops session with the API key, base URL and availability
-  passed explicitly, so none of them comes from the environment.
+  passed explicitly, so none of them comes from the environment; :func:`loops_trainer`
+  creates a LoRA trainer (a Loops run) in it and :func:`loops_sampling_client` connects to a
+  sampler created over REST. :func:`loops_failure` maps a failed SDK call to an
+  :class:`ExternalError` (auth and capacity as above), a :class:`TransientError` only for a
+  call safe to repeat.
 - :func:`to_loops_datum` converts a :class:`TokenizedExample` into the SDK's ``Datum``.
 
 ``tests/fakes/baseten.py`` has a fake of the SDK (``loops=``) and of the HTTP routes
@@ -66,11 +70,15 @@ __all__ = [
     "DeploymentRejected",
     "LoopsFuture",
     "LoopsModule",
+    "LoopsSamplingClient",
     "LoopsService",
     "LoopsTrainingClient",
     "inference_url",
+    "loops_failure",
+    "loops_sampling_client",
     "loops_sdk",
     "loops_service",
+    "loops_trainer",
     "to_loops_datum",
 ]
 
@@ -96,6 +104,7 @@ _LOGIN_HINT: Final = (
 )
 _AUTH_HINT: Final = f"{_LOGIN_HINT} to a valid key"
 _CREATED_HINT: Final = "it may have created something that bills; check the Baseten UI"
+_TRAINERS: Final = "/trainers"
 _REJECTED_ENV: Final = (
     "LOOPS_REQUEST_LOG",
     "LOOPS_REUSE_FROM_RUN_ID",
@@ -109,6 +118,8 @@ _SDK_NAMES: Final = (
     "ModelInput",
     "TensorData",
     "AdamParams",
+    "SamplingClient",
+    "SamplingParams",
     "ServerShutdownError",
 )
 
@@ -240,13 +251,21 @@ class BasetenHTTP:
         self._request("POST", url, "the Loops run deactivation", body={}, idempotent=True)
 
     def create_sampler(
-        self, *, session_id: str, model_path: str, max_seq_len: int
+        self,
+        *,
+        session_id: str,
+        max_seq_len: int,
+        model_path: str | None = None,
+        base_model: str | None = None,
     ) -> dict[str, Any]:
-        """A dedicated sampler serving ``model_path``, as Baseten describes it."""
+        """A dedicated sampler serving ``model_path`` (a checkpoint) or ``base_model``."""
+        if (model_path is None) == (base_model is None):
+            raise ValueError("pass exactly one of model_path and base_model")
         label = "the Loops sampler creation"
+        target = {"model_path": model_path} if base_model is None else {"base_model": base_model}
         body = {
             "session_id": _id(session_id, "session"),
-            "model_path": model_path,
+            **target,
             "max_seq_length": max_seq_len,
             "availability_model": "dedicated",
         }
@@ -537,6 +556,18 @@ class LoopsTrainingClient(Protocol):
     def close(self) -> None: ...
 
 
+class LoopsSamplingClient(Protocol):
+    """The parts of the SDK's ``SamplingClient`` used here.
+
+    Closing it releases its HTTP client only: the sampler keeps its GPU until its deployment
+    is deactivated through :meth:`BasetenHTTP.deactivate_deployment`.
+    """
+
+    def sample(self, prompt: Any, num_samples: int, sampling_params: Any) -> Any: ...
+
+    def close(self) -> None: ...
+
+
 class LoopsService(Protocol):
     """The parts of the SDK's ``ServiceClient`` (one Loops session) used here."""
 
@@ -570,6 +601,12 @@ class LoopsModule(Protocol):
     @property
     def AdamParams(self) -> Callable[..., Any]: ...
     @property
+    def SamplingClient(self) -> Callable[..., LoopsSamplingClient]: ...
+    @property
+    def SamplingParams(self) -> Callable[..., Any]: ...
+    @property
+    def BasetenDeployment(self) -> Callable[..., Any]: ...
+    @property
     def ServerShutdownError(self) -> type[Exception]: ...
 
 
@@ -599,6 +636,7 @@ def loops_sdk(loops: LoopsModule | None = None) -> LoopsModule:
         return loops
     try:
         import baseten.loops as sdk
+        from baseten.loops.sampling_client import BasetenDeployment
     except ModuleNotFoundError as exc:
         if (exc.name or "").partition(".")[0] != "baseten":
             raise _broken_sdk(exc) from exc
@@ -608,7 +646,8 @@ def loops_sdk(loops: LoopsModule | None = None) -> LoopsModule:
         ) from exc
     except ImportError as exc:
         raise _broken_sdk(exc) from exc
-    return cast(LoopsModule, SimpleNamespace(**{name: getattr(sdk, name) for name in _SDK_NAMES}))
+    names = {name: getattr(sdk, name) for name in _SDK_NAMES}
+    return cast(LoopsModule, SimpleNamespace(**names, BasetenDeployment=BasetenDeployment))
 
 
 def _broken_sdk(exc: ImportError) -> UsageError:
@@ -636,11 +675,127 @@ def loops_service(api_key: SecretStr, *, loops: LoopsModule | None = None) -> Lo
         raise _creation_error(exc, "Loops session") from exc
 
 
-def _creation_error(exc: Exception, what: str) -> ExternalError:
+def loops_trainer(
+    service: LoopsService,
+    *,
+    base_model: str,
+    rank: int,
+    seed: int,
+    max_seq_len: int,
+    name: str,
+) -> LoopsTrainingClient:
+    """A dedicated LoRA trainer (a Loops run) in ``service``'s session, once it is ready. Paid.
+
+    A failure that may leave a run behind (anything but a 4xx answer to the create itself, as
+    the SDK calls the new run before it returns) says how to find it; a refusal for lack of
+    capacity says nothing was left running.
+    """
+    session_id = _id(service.session_id, "session")
+    try:
+        trainer = service.create_lora_training_client(
+            base_model=base_model,
+            rank=rank,
+            replicas=1,
+            seed=seed,
+            max_seq_len=max_seq_len,
+            with_sampler=False,
+            name=name,
+        )
+    except Exception as exc:
+        error = _creation_error(exc, "trainer", route=_TRAINERS)
+        if not _refused(_http_response(exc), _TRAINERS):
+            error.hint = "; ".join(filter(None, (_orphan_hint(session_id), error.hint)))
+        elif isinstance(error, ProviderCapacityError):
+            error.hint = f"nothing was left running; {error.hint}"
+        raise error from exc
+    except BaseException as exc:  # e.g. Ctrl-C while the trainer provisions
+        exc.add_note(_orphan_hint(session_id))
+        raise
+    run_id = trainer.run_id
+    if not isinstance(run_id, str) or not _ID.fullmatch(run_id):
+        trainer.close()
+        raise ExternalError(
+            "Baseten returned no valid run id for the trainer",
+            source=SOURCE,
+            hint=_orphan_hint(session_id),
+        )
+    return trainer
+
+
+def _orphan_hint(session_id: str) -> str:
+    return f"a run may remain in Loops session {session_id}; deactivate it in the Baseten UI"
+
+
+def loops_sampling_client(
+    api_key: SecretStr,
+    sampler: Mapping[str, Any],
+    *,
+    base_model: str,
+    session_id: str,
+    checkpoint_path: str | None,
+    ready_timeout: float,
+    timeout: float,
+    loops: LoopsModule | None = None,
+) -> LoopsSamplingClient:
+    """An SDK client of ``sampler`` (as :meth:`BasetenHTTP.create_sampler` returned it).
+
+    Its first sample waits up to ``ready_timeout`` seconds for the sampler to be ready, and
+    a sample that takes over ``timeout`` seconds fails with a :class:`TimeoutError`;
+    ``checkpoint_path`` routes every sample to that checkpoint, else the base model serves.
+    """
+    sdk = loops_sdk(loops)
+    base_url = sampler.get("base_url")
+    if not isinstance(base_url, str):
+        raise ExternalError("Baseten described the sampler without its URL", source=SOURCE)
+    deployment = sdk.BasetenDeployment(
+        base_url=inference_url(base_url),
+        model_id=_id(sampler.get("model_id"), "model"),
+        deployment_id=_id(sampler.get("deployment_id"), "deployment"),
+        api_base_url=API_BASE,
+    )
+    return sdk.SamplingClient(
+        api_key=_checked_key(api_key),
+        base_model=base_model,
+        deployment=deployment,
+        sampler_id=_id(sampler.get("id"), "sampler"),
+        session_id=_id(session_id, "session"),
+        checkpoint_path=checkpoint_path,
+        ready_timeout=ready_timeout,
+        timeout=timeout,
+    )
+
+
+def loops_failure(
+    exc: Exception, label: str, loops: LoopsModule, *, repeatable: bool
+) -> ExternalError:
+    """``exc``, raised by an SDK call or its future, as an :class:`ExternalError`.
+
+    It names only the HTTP status, read from ``exc`` or an exception it was raised from, and
+    the error type. HTTP 429 is a :class:`ProviderCapacityError` and 401 or 403 a
+    :class:`ProviderAuthError`. It is a :class:`TransientError` when the call is
+    ``repeatable`` (changes nothing when repeated) and failed in a way worth retrying: a
+    timeout, a dropped connection, a trainer shutting down or a retryable status.
+    """
+    response = _http_response(exc)
+    status = None if response is None else response.status_code
+    reason = f"HTTP {status}, {type(exc).__name__}" if status else type(exc).__name__
+    message = f"{label} failed ({reason})"
+    if response is not None and status == 429:
+        return ProviderCapacityError(message, source=SOURCE, hint=_capacity_hint(response))
+    if status in _AUTH_STATUS:
+        return ProviderAuthError(message, source=SOURCE, hint=_AUTH_HINT)
+    retryable = (httpx.TransportError, TimeoutError, ConnectionError, loops.ServerShutdownError)
+    transient = status in _TRANSIENT_STATUS or isinstance(exc, retryable)
+    error = TransientError if repeatable and transient else ExternalError
+    return error(message, source=SOURCE)
+
+
+def _creation_error(exc: Exception, what: str, *, route: str | None = None) -> ExternalError:
     """``exc``, raised by the SDK while creating the Baseten ``what``, as an error to raise.
 
     The HTTP status comes from ``exc`` or an exception it was raised from: 429 is a
-    :class:`ProviderCapacityError`, 401 or 403 a :class:`ProviderAuthError`.
+    :class:`ProviderCapacityError`, 401 or 403 a :class:`ProviderAuthError`. It reads as a
+    refusal only when :func:`_refused` says so.
     """
     response = _http_response(exc)
     if response is None:
@@ -656,10 +811,27 @@ def _creation_error(exc: Exception, what: str) -> ExternalError:
             source=SOURCE,
             hint=_capacity_hint(response),
         )
-    message = f"Baseten refused to create the {what} (HTTP {status}){suffix}"
+    if _refused(response, route):
+        message = f"Baseten refused to create the {what} (HTTP {status}){suffix}"
+    else:
+        message = f"creating the Baseten {what} failed (HTTP {status}){suffix}"
     if status in _AUTH_STATUS:
         return ProviderAuthError(message, source=SOURCE, hint=_AUTH_HINT)
     return ExternalError(message, source=SOURCE)
+
+
+def _refused(response: httpx.Response | None, route: str | None) -> bool:
+    """Whether ``response`` refused a create, which then made nothing: a 4xx but 408, to
+    ``POST <route>`` itself when ``route`` is given."""
+    if response is None or not 400 <= response.status_code < 500 or response.status_code == 408:
+        return False
+    if route is None:
+        return True
+    try:
+        request = response.request
+    except RuntimeError:  # a response without its request
+        return False
+    return request.method == "POST" and request.url.path.endswith(route)
 
 
 def _http_response(exc: BaseException) -> httpx.Response | None:

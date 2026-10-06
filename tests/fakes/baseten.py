@@ -35,6 +35,13 @@ What it mimics:
   raises, but the run stays active until it is deactivated over HTTP
   (``POST /v1/loops/runs/<id>/deactivate``, served by :meth:`FakeLoops.transport`). A
   deactivated run reads ``INACTIVE`` and refuses training calls with HTTP 404.
+- ``POST /v1/loops/samplers`` creates a sampler (``sampler1``...) on its own deployment
+  (``model1``/``dep1``...) serving a saved sampler checkpoint (an unknown or expired one is
+  refused with HTTP 404) or the base model; the deployment reads ``ACTIVE`` until it is
+  deactivated (``POST /v1/models/<m>/deployments/<d>/deactivate``). A ``SamplingClient`` of
+  it answers ``completion`` (token ids; by default the code points of ``Hello.``), cut after
+  the first stop token id of ``SamplingParams.stop`` or at ``max_tokens``, and refuses to
+  sample once closed, once its deployment is inactive or when its checkpoint expired.
 
 Failures are injected with :meth:`FakeLoops.fail_on`, at the call or in its future. Every SDK
 call is recorded in ``loops.calls`` with its keyword arguments.
@@ -60,7 +67,7 @@ from __future__ import annotations
 
 import json as jsonlib
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -73,6 +80,12 @@ Answer = tuple[int, Any] | httpx.Response | Callable[[httpx.Request], httpx.Resp
 
 _CLOSED = "Cannot send a request, as the client has been closed."
 _RUN_ROUTE = re.compile(r"/v1/loops/runs/([A-Za-z0-9_-]+)(/deactivate)?")
+_DEPLOYMENT_ROUTE = re.compile(
+    r"/v1/models/([A-Za-z0-9_-]+)/deployments/([A-Za-z0-9_-]+)(/deactivate)?"
+)
+
+COMPLETION: tuple[int, ...] = tuple(ord(char) for char in "Hello.")
+"""What a fake sampler answers by default: token ids a character-level tokenizer reads as text."""
 
 
 def loss_at(steps: int) -> float:
@@ -168,6 +181,42 @@ class FakeLoadWeightsResponse:
     step: int = 0
 
 
+@dataclass
+class FakeSamplingParams:
+    max_tokens: int | None = None
+    seed: int | None = None
+    stop: str | list[str] | list[int] | None = None
+    temperature: float = 1.0
+    top_k: int = -1
+    top_p: float = 1.0
+    structured_outputs: dict[str, Any] | None = None
+
+
+@dataclass
+class FakeSampledSequence:
+    tokens: list[int] = field(default_factory=list)
+    stop_reason: Literal["stop", "length"] = "length"
+
+
+@dataclass
+class FakeSampleResponse:
+    sequences: list[FakeSampledSequence] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class FakeBasetenDeployment:
+    """Stands in for ``baseten.loops.sampling_client.BasetenDeployment``."""
+
+    base_url: str
+    model_id: str
+    deployment_id: str
+    api_base_url: str
+
+
+class FakeSamplerTerminatedError(RuntimeError):
+    """Stands in for ``baseten.loops.SamplerTerminatedError``: the sampler stopped."""
+
+
 class FakeServerShutdownError(Exception):
     """Stands in for ``baseten.loops.ServerShutdownError`` (the trainer pod is going away)."""
 
@@ -200,6 +249,33 @@ class FakeCheckpoint:
     kind: Literal["state", "sampler_weights"]
     steps: int
     expired: bool = False
+
+
+@dataclass
+class FakeSampler:
+    """One Loops sampler: a Baseten deployment serving a checkpoint or the base model."""
+
+    sampler_id: str
+    session_id: str
+    model_id: str
+    deployment_id: str
+    model_path: str | None
+    base_model: str | None
+    max_seq_len: int
+    active: bool = True
+
+    @property
+    def base_url(self) -> str:
+        return f"https://model-{self.model_id}.api.baseten.co/deployment/{self.deployment_id}/sync"
+
+    def record(self) -> dict[str, Any]:
+        """The sampler as ``POST /v1/loops/samplers`` describes it."""
+        return {
+            "id": self.sampler_id,
+            "model_id": self.model_id,
+            "deployment_id": self.deployment_id,
+            "base_url": self.base_url,
+        }
 
 
 def _done(value: Any) -> Future[Any]:
@@ -315,6 +391,48 @@ class FakeTrainingClient:
         return _done(FakeLoadWeightsResponse(step=checkpoint.steps))
 
 
+class FakeSamplingClient:
+    """What ``SamplingClient(...)`` returns: a client of one :class:`FakeSampler`."""
+
+    def __init__(self, loops: FakeLoops, sampler: FakeSampler, checkpoint_path: str | None) -> None:
+        self._loops = loops
+        self.sampler = sampler
+        self.checkpoint_path = checkpoint_path
+        self.closed = False
+
+    def sample(
+        self,
+        prompt: FakeModelInput,
+        num_samples: int = 1,
+        sampling_params: FakeSamplingParams | None = None,
+    ) -> FakeSampleResponse:
+        loops = self._loops
+        kwargs = {"prompt": prompt, "num_samples": num_samples, "sampling_params": sampling_params}
+        loops._raise_on_failure("sample", kwargs)
+        if self.closed:
+            raise RuntimeError(_CLOSED)
+        if not self.sampler.active:
+            raise FakeSamplerTerminatedError(f"sampler {self.sampler.deployment_id} is INACTIVE")
+        if self.checkpoint_path is not None and not loops._serves(self.checkpoint_path):
+            raise http_status_error(404, json={"detail": "checkpoint not found"})
+        params = sampling_params or FakeSamplingParams()
+        if prompt.length + (params.max_tokens or 0) > self.sampler.max_seq_len:
+            raise http_status_error(400, json={"detail": "longer than the sampler's context"})
+        stops = params.stop if isinstance(params.stop, list) else []
+        tokens = list(loops.completion)
+        cut = next((index + 1 for index, token in enumerate(tokens) if token in stops), None)
+        tokens = tokens[:cut]
+        reason: Literal["stop", "length"] = "stop"
+        if params.max_tokens is not None and len(tokens) > params.max_tokens:
+            tokens, reason = tokens[: params.max_tokens], "length"
+        sequence = FakeSampledSequence(tokens=tokens, stop_reason=reason)
+        return FakeSampleResponse(sequences=[sequence] * num_samples)
+
+    def close(self) -> None:
+        self._loops._record("close", {})
+        self.closed = True
+
+
 class FakeServiceClient:
     """What ``ServiceClient(...)`` returns: one Loops session."""
 
@@ -342,16 +460,22 @@ class FakeLoops:
     ModelInput = FakeModelInput
     TensorData = FakeTensorData
     AdamParams = FakeAdamParams
+    SamplingParams = FakeSamplingParams
+    BasetenDeployment = FakeBasetenDeployment
     ServerShutdownError = FakeServerShutdownError
     RemoteOpError = FakeRemoteOpError
+    SamplerTerminatedError = FakeSamplerTerminatedError
 
-    def __init__(self, *, logprobs: bool = True) -> None:
+    def __init__(self, *, logprobs: bool = True, completion: Sequence[int] = COMPLETION) -> None:
         self.logprobs = logprobs
+        self.completion = list(completion)
         self.calls: list[LoopsCall] = []
         self.sessions: list[str] = []
         self.runs: dict[str, FakeRun] = {}
         self.trainers: list[FakeTrainingClient] = []
         self.checkpoints: dict[str, FakeCheckpoint] = {}
+        self.samplers: dict[str, FakeSampler] = {}
+        self.sampling_clients: list[FakeSamplingClient] = []
         self._failures: dict[tuple[str, int], tuple[BaseException, bool]] = {}
 
     def ServiceClient(self, **kwargs: Any) -> FakeServiceClient:
@@ -359,6 +483,19 @@ class FakeLoops:
         session_id = f"session{len(self.sessions) + 1}"
         self.sessions.append(session_id)
         return FakeServiceClient(self, session_id)
+
+    def SamplingClient(self, **kwargs: Any) -> FakeSamplingClient:
+        self._raise_on_failure("SamplingClient", kwargs)
+        deployment = kwargs["deployment"]
+        sampler = next(
+            sampler
+            for sampler in self.samplers.values()
+            if (sampler.model_id, sampler.deployment_id, sampler.base_url)
+            == (deployment.model_id, deployment.deployment_id, deployment.base_url)
+        )
+        client = FakeSamplingClient(self, sampler, kwargs.get("checkpoint_path"))
+        self.sampling_clients.append(client)
+        return client
 
     def fail_on(
         self, method: str, *, error: BaseException, call: int = 1, on_result: bool = False
@@ -410,7 +547,51 @@ class FakeLoops:
         if failed is not None:
             failed.result()
 
+    def _serves(self, path: str) -> bool:
+        """Whether ``path`` is a sampler checkpoint a sampler can serve."""
+        checkpoint = self.checkpoints.get(path)
+        return checkpoint is not None and not checkpoint.expired and checkpoint.kind != "state"
+
+    def _create_sampler(self, request: httpx.Request) -> httpx.Response:
+        body = jsonlib.loads(request.content)
+        path = body.get("model_path")
+        if body["session_id"] not in self.sessions or (path is not None and not self._serves(path)):
+            return httpx.Response(404, json={"detail": "not found"})
+        number = len(self.samplers) + 1
+        sampler = FakeSampler(
+            sampler_id=f"sampler{number}",
+            session_id=body["session_id"],
+            model_id=f"model{number}",
+            deployment_id=f"dep{number}",
+            model_path=path,
+            base_model=body.get("base_model"),
+            max_seq_len=body["max_seq_length"],
+        )
+        self.samplers[sampler.sampler_id] = sampler
+        return httpx.Response(200, json={"sampler": sampler.record()})
+
+    def _handle_deployment(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        model_id, deployment_id, deactivate = match.groups()
+        found = (s for s in self.samplers.values() if s.deployment_id == deployment_id)
+        sampler = next((s for s in found if s.model_id == model_id), None)
+        if sampler is None:
+            return httpx.Response(404, json={"detail": "not found"})
+        if request.method == "POST" and deactivate:
+            sampler.active = False
+            return httpx.Response(200, json={"success": True})
+        if request.method == "GET" and not deactivate:
+            status = "ACTIVE" if sampler.active else "INACTIVE"
+            return httpx.Response(
+                200, json={"id": deployment_id, "model_id": model_id, "status": status}
+            )
+        raise AssertionError(f"no fake Baseten route for {request.method} {request.url.path}")
+
     def _handle(self, request: httpx.Request) -> httpx.Response:
+        if (request.method, request.url.path) == ("POST", "/v1/loops/samplers"):
+            return self._create_sampler(request)
+        deployment = _DEPLOYMENT_ROUTE.fullmatch(request.url.path)
+        if deployment is not None:
+            return self._handle_deployment(request, deployment)
         match = _RUN_ROUTE.fullmatch(request.url.path)
         if match is None:
             raise AssertionError(f"no fake Baseten route for {request.method} {request.url.path}")
