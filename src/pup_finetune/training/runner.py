@@ -242,11 +242,12 @@ class _Run:
         """``body`` in a new session; an error ending the session does not lose its result.
 
         Once ``body`` returned (training and promotion done), a failure to end the session
-        becomes a warning on the result. When ``body`` raised :class:`FinalizeFailed`, that is
-        raised (it carries the training result) with the session's error as a note.
+        becomes a warning on the result. When ``body`` raised, its error is what propagates,
+        with the session's error as a note: a :class:`FinalizeFailed` keeps the training
+        result, and a provider error or an interrupt (Ctrl-C) keeps how the run ended.
         """
         outcome: TrainResult | None = None
-        failed: FinalizeFailed | None = None
+        raised: BaseException | None = None
         try:
             with self.backend.open_session(
                 self.profile,
@@ -257,13 +258,13 @@ class _Run:
             ) as session:
                 try:
                     outcome = body(session)
-                except FinalizeFailed as exc:
-                    failed = exc
+                except BaseException as exc:
+                    raised = exc
                     raise
         except BaseException as exc:
-            if failed is not None and exc is not failed:
-                failed.add_note(f"ending the session also failed: {_describe(exc)}")
-                raise failed from failed.cause
+            if raised is not None and exc is not raised:
+                raised.add_note(f"ending the session also failed: {_describe(exc)}")
+                raise raised from raised.__cause__
             if outcome is None:
                 raise
             warning = f"ending the training session failed: {_describe(exc)}"

@@ -408,6 +408,18 @@ def test_a_failure_ending_the_session_keeps_the_promoted_model(tmp_path: Path) -
         resume(run_dir)
 
 
+def test_a_training_error_is_kept_when_ending_the_session_fails_too(tmp_path: Path) -> None:
+    run_dir = new_run(tmp_path / "run", provider_options={"fail_at_step": 8})
+    fake = provider()
+    fake.backend().fail_session_ends = 1
+    with pytest.raises(FakeCrash, match="fail_at_step") as info:
+        start(run_dir, fake)
+    assert any("ending the session also failed" in note for note in info.value.__notes__)
+    state = run_dir.load_state()
+    assert state.phase == "interrupted"
+    assert state.error is not None and "fail_at_step" in state.error["message"]
+
+
 def test_a_failed_promotion_is_kept_when_ending_the_session_fails_too(tmp_path: Path) -> None:
     run_dir = new_run(tmp_path / "run")
     fake = provider()
