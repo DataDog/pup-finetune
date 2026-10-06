@@ -57,6 +57,8 @@ uv run pup-finetune dataset preview --ml-app my-app --from now-7d   # in memory,
 uv run pup-finetune dataset pull /tmp/ds --ml-app my-app --from now-7d
                                      # the same flags; rerun to resume (pages cached in /tmp/ds/raw)
 uv run pup-finetune dataset show /tmp/ds
+uv run pup-finetune dataset sample /tmp/ds --n 20            # rows in brief, to review
+uv run pup-finetune dataset label /tmp/ds --file labels.jsonl  # {id, keep, reason} per line
 ```
 
 A relative `--from` or `--to` (`now`, or `now-<n><unit>` with unit `s`, `m`, `h`, `d` or `w`)
@@ -88,8 +90,8 @@ Opt-in test suites: `PUP_FINETUNE_LIVE=1` runs `live` tests (real external servi
 Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later PRs.
 
 - `cli/` - the Typer app; one module per command group. `dataset.py` has `dataset import`,
-  `preview`, `pull` and `show`; `train.py` has `train`, `resume`, `status`, `cancel` and the
-  hidden `_worker` a detached run executes.
+  `preview`, `pull`, `show`, `sample` and `label`; `train.py` has `train`, `resume`, `status`,
+  `cancel` and the hidden `_worker` a detached run executes.
 - `runtime.py` - non-secret settings from the environment (`PUP_OUTPUT`, `PUP_READ_ONLY`, ...).
 - `errors.py` - expected failures and their exit codes; the `--confirm` and read-only guards.
 - `output.py` - the one stdout result (through `pup format` under pup), progress on stderr.
@@ -116,9 +118,12 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   `split.py` assigns deterministic, persisted train/validation/test splits per trace;
   `dataset_dir.py` is the dataset directory (`settings.json`, `rows.jsonl`, `excluded.jsonl`,
   `splits.json`, `summary.json`, and `raw/`, a pull's page cache) behind `dataset import`,
-  `dataset pull` and `dataset show`. `convert.py` maps one LLM span to a canonical conversation
-  (`span_conversation`: input then output messages, tool calls and results, tools, `SourceRef`;
-  reasoning omitted or preserved), with conversion issues as stable codes; `trajectories.py` has
+  `dataset pull` and `dataset show`; `labels.py` has the keep/drop `Label` and the
+  `labels.jsonl` format (append-only, last label per id wins, a reason required to drop;
+  `DatasetDir.kept_rows` leaves dropped rows out of training and split exports).
+  `convert.py` maps one LLM span to a canonical conversation (`span_conversation`: input then
+  output messages, tool calls and results, tools, `SourceRef`; reasoning omitted or
+  preserved), with conversion issues as stable codes; `trajectories.py` has
   `rows_from_spans`, which dedupes spans by id, groups them by trace, collapses conversations
   that are a prefix or duplicate of another (so sub-agents stay their own rows) and yields a
   validated row or an `Exclusion` per kept conversation. `checks.py` has the span-level checks
@@ -135,7 +140,11 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   (`retirements`, `contained_conversation`), and one with lower limits does not add such a row
   back (`contained`); both compare messages as conversion collapses them
   (`comparable_messages` in `trajectories.py`).
-- `curation/` - *later*. Keep/drop labels and judge-based triage.
+- `curation/` - deciding which accepted rows to train on. `labels.py` has `apply_labels`
+  (every id an accepted row, last label per id wins, repeats skipped, appended through
+  `DatasetDir.append_labels`); `samples.py` picks a seeded, readable sample of rows for
+  review. Judge-based triage is *later*. Curation builds on `data/`; `data/` never imports
+  `curation/`.
 - `training/` - the shared, provider-neutral SFT loop. `datums.py` renders rows into
   `TokenizedExample`s (per turn when a renderer is not prefix-stable) and rejects rows that
   exceed the context or train on nothing; `batching.py` shuffles rows per epoch and packs

@@ -14,7 +14,9 @@ Files, all ``0600`` in a ``0700`` directory, since rows hold trace content:
 - ``excluded.jsonl`` - one ``{row_id?, trace_id?, span_id?, line_sha256?, code, detail}`` per
   excluded row: the latest reason per ``row_id``, and none for an id that has since been
   accepted.
-- ``labels.jsonl`` - keep/drop labels (written by a later command; optional).
+- ``labels.jsonl`` - keep/drop labels, appended by ``dataset label`` (see
+  :mod:`pup_finetune.data.labels`); the last label of a row id wins. Optional: a row
+  with no label is kept, and a label of an id that is no longer accepted is ignored.
 - ``splits.json`` - split assignments (see :mod:`pup_finetune.data.split`).
 - ``summary.json`` - counts and warnings, rewritten after every change.
 - ``raw/`` - for a Datadog pull, the raw Export API pages it read, so an interrupted pull
@@ -25,13 +27,14 @@ Files, all ``0600`` in a ``0700`` directory, since rows hold trace content:
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
 from pup_finetune.data.exclusions import Exclusion, ExclusionCode
 from pup_finetune.data.jsonl import read_rows, scan_rows, to_provider_dict, write_rows
+from pup_finetune.data.labels import Label, label_counts, latest_labels, read_labels
 from pup_finetune.data.schema import RowError, TrainingRow, row_content_hash, split_key
 from pup_finetune.data.split import (
     SPLITS,
@@ -167,18 +170,17 @@ class DatasetDir:
         except RowError as exc:
             raise StateError(f"stored row is invalid: {exc}") from exc
 
+    def labels(self) -> dict[str, Label]:
+        """The label in force per row id: the last one recorded. Empty without labels."""
+        return latest_labels(read_labels(self.labels_path))
+
     def kept_rows(self) -> list[TrainingRow]:
         """The accepted rows minus those labeled ``keep: false``."""
-        return self._kept(self.rows())
+        return self._kept(self.rows(), self.labels())
 
-    def _kept(self, rows: list[TrainingRow]) -> list[TrainingRow]:
-        dropped = self._dropped_row_ids()
-        return [row for row in rows if row.id not in dropped]
-
-    def _dropped_row_ids(self) -> frozenset[str]:
-        # The seam for keep/drop labels (``labels.jsonl``), which arrive with `dataset label`.
-        # Until then no row is dropped, and a missing labels file means the same.
-        return frozenset()
+    @staticmethod
+    def _kept(rows: list[TrainingRow], labels: Mapping[str, Label]) -> list[TrainingRow]:
+        return [row for row in rows if (label := labels.get(row.id)) is None or label.keep]
 
     def excluded(self) -> list[dict[str, Any]]:
         """Every exclusion record, in the order it was recorded."""
@@ -196,9 +198,15 @@ class DatasetDir:
         return self.rows_by_split()[split]
 
     def summary(self) -> dict[str, Any]:
-        """Counts of accepted and excluded rows, per exclusion code and per split, and warnings."""
+        """Counts of accepted, excluded, kept and dropped rows, and warnings.
+
+        Exclusions are counted per code, kept rows per split, and drops per reason (the most
+        frequent reasons only).
+        """
         rows = self.rows()
-        by_split = _group_by_split(self._kept(rows), self.splits(), where=self.splits_path)
+        labels = self.labels()
+        kept = self._kept(rows, labels)
+        by_split = _group_by_split(kept, self.splits(), where=self.splits_path)
         excluded = _reconcile(self.excluded(), (), accepted_ids={row.id for row in rows})
         by_code = Counter(str(record.get("code")) for record in excluded)
         counts = {split: len(by_split[split]) for split in SPLITS}
@@ -207,6 +215,8 @@ class DatasetDir:
             "accepted": len(rows),
             "excluded": len(excluded),
             "excluded_by_code": dict(sorted(by_code.items())),
+            "kept": len(kept),
+            **label_counts(labels, (row.id for row in rows)),
             "splits": counts,
             "warnings": split_warnings(counts),
         }
@@ -217,6 +227,22 @@ class DatasetDir:
         """Recompute and write ``summary.json``; returns the summary."""
         with DirectoryLock(self.path):
             return self._write_summary()
+
+    def append_labels(self, labels: Sequence[Label]) -> dict[str, Any]:
+        """Append ``labels`` to ``labels.jsonl`` and rewrite ``summary.json``; returns it.
+
+        The caller holds the directory lock and has checked the labels (see
+        :func:`~pup_finetune.curation.labels.apply_labels`). The file is rewritten as its
+        current content plus ``labels`` in one atomic replace; ``rows.jsonl`` is untouched.
+        """
+        if labels:
+            path = self.labels_path
+            text = path.read_text(encoding="utf-8") if path.exists() else ""
+            if text and not text.endswith("\n"):
+                text += "\n"
+            text += "".join(canonical_json(label.to_json()) + "\n" for label in labels)
+            atomic_write_text(path, text)
+        return self._write_summary()
 
     def _write_summary(self) -> dict[str, Any]:
         summary = self.summary()

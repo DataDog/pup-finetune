@@ -472,6 +472,10 @@ def test_summary_counts(tmp_path: Path, fixture_rows: list[TrainingRow]) -> None
         "accepted": len(fixture_rows),
         "excluded": 3,
         "excluded_by_code": {"invalid_row": 2, "system_not_first": 1},
+        "kept": len(fixture_rows),
+        "labeled": 0,
+        "dropped": 0,
+        "drop_reasons": [],
         "splits": split_counts,
         "warnings": summary["warnings"],
     }

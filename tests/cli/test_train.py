@@ -632,6 +632,18 @@ def test_resume_refuses_a_changed_dataset(trained: Path, dataset: Path) -> None:
     assert "changed since the run" in result.stderr
 
 
+def test_resume_refuses_a_relabeled_dataset(trained: Path, dataset: Path, tmp_path: Path) -> None:
+    # Labels change a run's kept rows without touching rows.jsonl.
+    _set_state(trained, phase="interrupted")
+    row_id = DatasetDir(dataset).rows_for_split("train")[0].id
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(json.dumps({"id": row_id, "keep": False, "reason": "off topic"}) + "\n")
+    assert invoke("dataset", "label", str(dataset), "--file", str(labels)).exit_code == 0
+    result = invoke("resume", str(trained))
+    assert result.exit_code == 1
+    assert "changed since the run" in result.stderr
+
+
 def test_resume_is_blocked_by_read_only(trained: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _set_state(trained, phase="interrupted")
     monkeypatch.setenv("PUP_READ_ONLY", "true")
