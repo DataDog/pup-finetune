@@ -197,6 +197,8 @@ def test_progress_stays_plain_on_non_tty_even_when_forced(
 def test_terminal_progress_does_not_parse_markup(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    # Rich skips the transient status render on a dumb terminal, so ask for a capable one.
+    monkeypatch.setenv("TERM", "xterm-256color")
     buffer = io.StringIO()
     terminal = Console(file=buffer, force_terminal=True, highlight=False, width=80)
     monkeypatch.setattr(output, "stderr_console", lambda: terminal)

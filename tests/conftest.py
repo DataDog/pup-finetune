@@ -30,6 +30,7 @@ _RUNTIME_ENV: tuple[str, ...] = (
     "TTY_COMPATIBLE",
     "TTY_INTERACTIVE",
     "COLUMNS",
+    "TERM",
 )
 
 _GATES: dict[str, str] = {
