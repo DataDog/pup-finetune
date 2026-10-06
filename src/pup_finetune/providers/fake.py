@@ -255,6 +255,11 @@ class FakeRenderer:
         return self._assistant_body(message, where="the completion") + _END
 
     def parse_response(self, text: str) -> ParsedResponse:
+        """``text`` as an assistant message, the inverse of :meth:`render_completion`.
+
+        Text the renderer could not have produced is format-invalid, including a template
+        marker anywhere but in its own place (the renderer refuses marker-bearing text).
+        """
         body, end, rest = text.partition(_END)
         invalid = ParsedResponse({"role": "assistant", "content": text}, format_valid=False)
         if not end or rest.strip():
@@ -267,6 +272,9 @@ class FakeRenderer:
             message["reasoning_content"] = reasoning
             body = body[1:]
         content, *calls = body.split(_CALL)
+        reasoning = message.get("reasoning_content", "")
+        if any(_MARKER.search(part) for part in (reasoning, content, *calls)):
+            return invalid
         tool_calls = []
         for i, call in enumerate(calls):
             parsed = _parse_call(call if i == len(calls) - 1 else call.removesuffix("\n"))

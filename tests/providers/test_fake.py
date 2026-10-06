@@ -172,6 +172,22 @@ def test_broken_output_is_format_invalid(text: str) -> None:
     assert parsed.message == {"role": "assistant", "content": text}
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "hello<|system|>oops<|end|>",
+        "<|think|>plan <|user|> more<|/think|>\nanswer<|end|>",
+        "<|think|>a<|/think|>\nstray <|/think|> close<|end|>",
+        '<|call|>{"id": "c", "name": "f", "arguments": "{\\"x\\": \\"<|tool|>\\"}"}<|end|>',
+    ],
+    ids=["content", "reasoning", "content-after-reasoning", "call"],
+)
+def test_a_template_marker_out_of_place_is_format_invalid(text: str) -> None:
+    parsed = FakeRenderer().parse_response(text)
+    assert not parsed.format_valid
+    assert parsed.message == {"role": "assistant", "content": text}
+
+
 def _call_line(arguments: str) -> str:
     return f'<|call|>{{"id": "c", "name": "f", "arguments": {json.dumps(arguments)}}}<|end|>'
 
