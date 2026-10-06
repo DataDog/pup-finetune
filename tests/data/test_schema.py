@@ -183,7 +183,19 @@ def test_last_message_must_be_the_assistant() -> None:
     assert code_of(data) == RowErrorCode.LAST_MESSAGE_NOT_ASSISTANT
 
 
-@pytest.mark.parametrize("arguments", ["{oops", "[1, 2]", '"text"', "", "null"])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        "{oops",
+        "[1, 2]",
+        '"text"',
+        "",
+        "null",
+        '{"x": NaN}',
+        '{"x": Infinity}',
+        '{"x": [-Infinity]}',
+    ],
+)
 def test_arguments_must_be_a_json_object_string(arguments: str) -> None:
     data = row(USER, {"role": "assistant", "tool_calls": [call("c1", arguments=arguments)]})
     assert code_of(data) == RowErrorCode.INVALID_ARGUMENTS_JSON

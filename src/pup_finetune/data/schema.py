@@ -18,7 +18,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from enum import StrEnum
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, Literal, NoReturn, Self
 
 from pydantic import (
     BaseModel,
@@ -99,6 +99,14 @@ def _require_int(value: object, message: str) -> object:
 NonEmptyStr = Annotated[str, Field(min_length=1)]
 
 
+class _NonStandardJSONError(ValueError):
+    """A ``NaN`` or ``Infinity`` constant: Python's ``json`` accepts them, JSON does not."""
+
+
+def _reject_json_constant(constant: str) -> NoReturn:
+    raise _NonStandardJSONError(f"{constant} is not a JSON value")
+
+
 class FunctionCall(BaseModel):
     """The function an assistant calls; ``arguments`` is a JSON object encoded as a string."""
 
@@ -111,10 +119,14 @@ class FunctionCall(BaseModel):
     @classmethod
     def _arguments_are_a_json_object(cls, value: str) -> str:
         try:
-            parsed = json.loads(value)
+            parsed = json.loads(value, parse_constant=_reject_json_constant)
         except json.JSONDecodeError as exc:
             raise RowError(
                 RowErrorCode.INVALID_ARGUMENTS_JSON, f"arguments are not valid JSON: {exc.msg}"
+            ) from exc
+        except _NonStandardJSONError as exc:
+            raise RowError(
+                RowErrorCode.INVALID_ARGUMENTS_JSON, f"arguments are not valid JSON: {exc}"
             ) from exc
         if not isinstance(parsed, dict):
             raise RowError(
