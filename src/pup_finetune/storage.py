@@ -161,6 +161,12 @@ def read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
 
     A line that is not a JSON object raises :class:`StateError` naming its line number.
     """
+    for _, row in read_jsonl_numbered(path):
+        yield row
+
+
+def read_jsonl_numbered(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
+    """Like :func:`read_jsonl`, but yield ``(line_number, row)`` with 1-based line numbers."""
     path = Path(path)
     with path.open("rb") as handle:
         for line_number, line in enumerate(handle, start=1):
@@ -176,7 +182,7 @@ def read_jsonl(path: Path) -> Iterator[dict[str, Any]]:
                 raise StateError(f"{path}:{line_number}: invalid JSON: {exc}") from exc
             if not isinstance(row, dict):
                 raise StateError(f"{path}:{line_number}: expected a JSON object")
-            yield row
+            yield line_number, row
 
 
 class DirectoryLock:
