@@ -63,7 +63,7 @@ from pup_finetune.rendering.base import (
 )
 from pup_finetune.rendering.tokens import TokenizedExample
 from pup_finetune.runtime import Runtime
-from pup_finetune.storage import canonical_json
+from pup_finetune.storage import canonical_json, loads_finite
 
 if TYPE_CHECKING:
     from pup_finetune.providers.base import (
@@ -383,10 +383,15 @@ def _checked(text: str, where: str) -> str:
 
 
 def _parse_call(line: str) -> dict[str, Any] | None:
+    """One ``<|call|>`` line as a chat tool call, or ``None`` when it is malformed.
+
+    Malformed includes JSON the data schema rejects: ``NaN``, ``Infinity``, numbers beyond
+    float range, integers too long to parse and nesting too deep to parse.
+    """
     try:
-        call = json.loads(line)
-        arguments = json.loads(call["arguments"])
-    except (json.JSONDecodeError, KeyError, TypeError):
+        call = loads_finite(line)
+        arguments = loads_finite(call["arguments"])
+    except (ValueError, RecursionError, KeyError, TypeError):
         return None
     if (
         not isinstance(call, dict)
@@ -455,7 +460,7 @@ def _decode(key: str, value: Any) -> Any:
         return value
     try:
         return json.loads(value)
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:  # JSONDecodeError is a ValueError
         raise UsageError(
             f"fake provider option {key!r} must be JSON, got {value!r}",
             hint="for example loss_curve=[2.0,1.5] or prefix_stable=false",

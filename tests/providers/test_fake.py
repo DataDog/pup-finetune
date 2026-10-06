@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -166,6 +167,37 @@ def test_content_round_trips_with_tool_calls(content: str) -> None:
     ],
 )
 def test_broken_output_is_format_invalid(text: str) -> None:
+    parsed = FakeRenderer().parse_response(text)
+    assert not parsed.format_valid
+    assert parsed.message == {"role": "assistant", "content": text}
+
+
+def _call_line(arguments: str) -> str:
+    return f'<|call|>{{"id": "c", "name": "f", "arguments": {json.dumps(arguments)}}}<|end|>'
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        _call_line("[" * 100_000 + "]" * 100_000),
+        _call_line('{"n": ' + "9" * 5000 + "}"),
+        _call_line('{"n": NaN}'),
+        _call_line('{"n": -Infinity}'),
+        _call_line('{"n": 1e999}'),
+        '<|call|>{"id": "c", "name": "f", "arguments": "{}", "n": ' + "9" * 5000 + "}<|end|>",
+        "<|call|>" + "[" * 100_000 + "]" * 100_000 + "<|end|>",
+    ],
+    ids=[
+        "deep-arguments",
+        "long-int-arguments",
+        "nan-arguments",
+        "infinity-arguments",
+        "overflow-arguments",
+        "long-int-call",
+        "deep-call",
+    ],
+)
+def test_undecodable_or_non_finite_call_json_is_format_invalid(text: str) -> None:
     parsed = FakeRenderer().parse_response(text)
     assert not parsed.format_valid
     assert parsed.message == {"role": "assistant", "content": text}
@@ -469,6 +501,8 @@ def test_validate_options_returns_only_what_was_given() -> None:
     [
         ({"learning_rate": "1"}, "unknown fake provider option"),
         ({"loss_curve": "not json"}, "must be JSON"),
+        ({"loss_curve": "[" * 100_000 + "]" * 100_000}, "must be JSON"),
+        ({"fail_at_step": "9" * 5000}, "must be JSON"),
         ({"loss_curve": "[]"}, "loss_curve"),
         ({"val_curve": "[-1]"}, "val_curve"),
         ({"step_delay_s": "-0.5"}, "step_delay_s"),

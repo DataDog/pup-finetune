@@ -145,7 +145,7 @@ def _finite_float(text: str) -> float:
     return value
 
 
-def _loads(text: str) -> Any:
+def loads_finite(text: str) -> Any:
     """``json.loads``, but ``NaN``, ``Infinity`` and overflowing numbers raise ``ValueError``."""
     return json.loads(text, parse_constant=_reject_constant, parse_float=_finite_float)
 
@@ -158,7 +158,7 @@ def read_json(path: Path) -> Any:
     """
     path = Path(path)
     try:
-        return _loads(path.read_text(encoding="utf-8"))
+        return loads_finite(path.read_text(encoding="utf-8"))
     except UnicodeDecodeError as exc:
         raise StateError(f"{path}: not valid UTF-8") from exc
     except json.JSONDecodeError as exc:
@@ -197,7 +197,7 @@ def parse_jsonl_line(line: bytes) -> tuple[dict[str, Any], str | None]:
     long or nesting too deep to decode), or not an object.
     """
     try:
-        data = _loads(line.decode("utf-8"))
+        data = loads_finite(line.decode("utf-8"))
     except UnicodeDecodeError:
         return {}, "not valid UTF-8"
     except json.JSONDecodeError as exc:
