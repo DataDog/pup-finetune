@@ -300,14 +300,16 @@ def test_a_call_that_failed_in_flight_only_warns_on_a_normal_exit(
     assert fw.closed
 
 
+@pytest.mark.parametrize("wrapped", [True, False], ids=["as_the_client_raises", "bare"])
 def test_the_drain_is_bounded_and_abandons_a_call_that_never_resolves(
     fw: FakeFireworksTrainingClient,
     batch: list[TokenizedExample],
     capsys: pytest.CaptureFixture[str],
+    wrapped: bool,
 ) -> None:
     clock = Clock()
-    fw.stall("forward_backward", on_wait=clock.wait)
-    fw.stall("optim_step", on_wait=clock.wait)
+    fw.stall("forward_backward", on_wait=clock.wait, wrapped=wrapped)
+    fw.stall("optim_step", on_wait=clock.wait, wrapped=wrapped)
     with backend_for(fw, clock=clock).open_session(PROFILE, LORA, **SESSION) as session:
         session.forward_backward(batch)
         session.optim_step(ADAM)
@@ -317,6 +319,25 @@ def test_the_drain_is_bounded_and_abandons_a_call_that_never_resolves(
     assert capsys.readouterr().err.count("was abandoned") == 2
     assert _live(fw) == []
     assert fw.closed
+
+
+@pytest.mark.parametrize("wrapped", [True, False], ids=["as_the_client_raises", "bare"])
+def test_a_wait_that_runs_out_leaves_the_call_in_flight(
+    fw: FakeFireworksTrainingClient,
+    batch: list[TokenizedExample],
+    capsys: pytest.CaptureFixture[str],
+    wrapped: bool,
+) -> None:
+    clock = Clock()
+    fw.stall("forward_backward", on_wait=clock.wait, wrapped=wrapped)
+    with backend_for(fw, clock=clock).open_session(PROFILE, LORA, **SESSION) as session:
+        pending = session.forward_backward(batch)
+        with pytest.raises(TransientError if wrapped else TimeoutError):
+            pending.result(timeout=1.0)
+        assert getattr(pending, "done", None) is False
+    # Still in flight, so the session waited for it again when it ended.
+    assert fw.stalled[0].timeouts == [1.0, DRAIN_TIMEOUT_S]
+    assert "was abandoned" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("operation", ["close_service", "close_sampler", "close"])

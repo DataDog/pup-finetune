@@ -57,6 +57,7 @@ from pup_finetune.providers.base import (
     ModelRef,
     PendingResult,
     StepMetrics,
+    TransientError,
     is_transient,
 )
 from pup_finetune.providers.fireworks import PROVIDER_NAME
@@ -258,13 +259,25 @@ class _Tracked[S, T]:
     def result(self, timeout: float | None = None) -> T:
         try:
             value = self._inner.result(timeout=timeout)
-        except TimeoutError:
-            raise  # still in flight: the session still waits for it when it ends
-        except BaseException:
-            self.done = True
+        except BaseException as exc:
+            # A wait that ran out leaves the call in flight: the session still waits for it.
+            if not _is_wait_timeout(exc):
+                self.done = True
             raise
         self.done = True
         return self._convert(value)
+
+
+def _is_wait_timeout(exc: BaseException) -> bool:
+    """Whether ``exc`` is a wait for a result running out, not the call failing.
+
+    A standard future raises a bare :class:`TimeoutError`; the client maps it, like any SDK
+    failure, to a :class:`TransientError` raised from it. Only the direct cause counts: a call
+    that failed on an HTTP timeout chains a ``TimeoutError`` further down, and it is done.
+    """
+    if isinstance(exc, TimeoutError):
+        return True
+    return isinstance(exc, TransientError) and isinstance(exc.__cause__, TimeoutError)
 
 
 def _nothing(_value: object) -> None:
@@ -510,15 +523,17 @@ class FireworksSession:
                 continue
             try:
                 pending.result(timeout=max(deadline - clock(), 0.0))
-            except TimeoutError:
-                _warn(
-                    "a Fireworks call still in flight when the session ended was abandoned "
-                    f"(the session waits {DRAIN_TIMEOUT_S:g}s in all for such calls)"
-                )
             except Exception as exc:
-                _warn(
-                    f"a Fireworks call still in flight when the session ended failed: {_text(exc)}"
-                )
+                if _is_wait_timeout(exc):
+                    _warn(
+                        "a Fireworks call still in flight when the session ended was abandoned "
+                        f"(the session waits {DRAIN_TIMEOUT_S:g}s in all for such calls)"
+                    )
+                else:
+                    _warn(
+                        "a Fireworks call still in flight when the session ended failed: "
+                        f"{_text(exc)}"
+                    )
 
     # Internals.
 

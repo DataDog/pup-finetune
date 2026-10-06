@@ -37,7 +37,8 @@ Failures are injected per operation with :meth:`FakeFireworksTrainingClient.fail
 SDK-shaped errors mapped by the real :func:`fireworks_error`, so they arrive as the wrapper
 raises them (``ProviderCapacityError``, ``ProviderAuthError``, ``TransientError``, ...).
 :meth:`FakeFireworksTrainingClient.stall` makes a training call return a result that never
-resolves, to exercise the session's bounded drain. Every call is recorded in
+resolves, to exercise the session's bounded drain; a wait for it times out as the wrapper's
+does (a ``TransientError`` raised from the ``TimeoutError``), or as a bare ``TimeoutError``. Every call is recorded in
 :attr:`FakeFireworksTrainingClient.calls`.
 """
 
@@ -156,16 +157,30 @@ def _failed[T](error: BaseException) -> Future[T]:
 
 class StalledResult:
     """A result that never resolves: each wait records its timeout, calls ``on_wait`` with it
-    (to advance a fake clock) and raises :class:`TimeoutError`."""
+    (to advance a fake clock) and times out.
 
-    def __init__(self, on_wait: Callable[[float | None], None]) -> None:
+    The timeout is raised as the wrapper raises it, a :class:`TimeoutError` mapped by the real
+    :func:`fireworks_error` (a ``TransientError`` raised from it), or with ``wrapped=False``
+    as the bare :class:`TimeoutError` a standard future raises.
+    """
+
+    def __init__(
+        self, on_wait: Callable[[float | None], None], *, what: str, wrapped: bool = True
+    ) -> None:
         self._on_wait = on_wait
+        self._what = what
+        self._wrapped = wrapped
         self.timeouts: list[float | None] = []
 
     def result(self, timeout: float | None = None) -> Any:
         self.timeouts.append(timeout)
         self._on_wait(timeout)
-        raise TimeoutError
+        if not self._wrapped:
+            raise TimeoutError
+        try:
+            raise TimeoutError
+        except TimeoutError as exc:
+            raise fireworks_error(exc, what=self._what) from exc
 
 
 @dataclass
@@ -421,7 +436,7 @@ class FakeFireworksTrainingClient:
         self.calls: list[tuple[Any, ...]] = []
         self.closed = False
         self._failures: dict[str, list[FailureKind]] = {}
-        self._stalls: dict[str, list[Callable[[float | None], None]]] = {}
+        self._stalls: dict[str, list[tuple[Callable[[float | None], None], bool]]] = {}
         self.stalled: list[StalledResult] = []
         self._clock = 0
 
@@ -443,12 +458,14 @@ class FakeFireworksTrainingClient:
         *,
         on_wait: Callable[[float | None], None] = lambda _timeout: None,
         times: int = 1,
+        wrapped: bool = True,
     ) -> None:
         """Make the next ``times`` calls of ``operation`` (one of :data:`STALLABLE`) return a
-        :class:`StalledResult`, collected in :attr:`stalled`."""
+        :class:`StalledResult`, collected in :attr:`stalled`. Its waits time out as the wrapper
+        raises it, or with ``wrapped=False`` as a bare :class:`TimeoutError`."""
         if operation not in STALLABLE:
             raise ValueError(f"cannot stall {operation!r}; stallable: {sorted(STALLABLE)}")
-        self._stalls.setdefault(operation, []).extend([on_wait] * times)
+        self._stalls.setdefault(operation, []).extend([(on_wait, wrapped)] * times)
 
     def service(self) -> TrainingService:
         self.calls.append(("service",))
@@ -523,7 +540,8 @@ class FakeFireworksTrainingClient:
         queue = self._stalls.get(operation)
         if not queue:
             return None
-        stalled = StalledResult(queue.pop(0))
+        on_wait, wrapped = queue.pop(0)
+        stalled = StalledResult(on_wait, what=f"waiting for {operation}", wrapped=wrapped)
         self.stalled.append(stalled)
         return stalled
 

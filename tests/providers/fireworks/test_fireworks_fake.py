@@ -310,10 +310,15 @@ def test_a_stalled_call_never_resolves(fw: FakeFireworksTrainingClient) -> None:
     run = fw.service().create_lora_training_client(BASE_MODEL, 8)
     fw.stall("forward", on_wait=waited.append)
     pending = run.forward(EXAMPLES)
-    with pytest.raises(TimeoutError):
+    # As the wrapper raises a wait that ran out: mapped, and raised from the TimeoutError.
+    with pytest.raises(TransientError) as excinfo:
         pending.result(timeout=5.0)
+    assert isinstance(excinfo.value.__cause__, TimeoutError)
     assert waited == [5.0]
     assert fw.stalled[0].timeouts == [5.0]
+    fw.stall("forward", wrapped=False)
+    with pytest.raises(TimeoutError):
+        run.forward(EXAMPLES).result(timeout=1.0)
     run.forward(EXAMPLES).result()  # the stall was used up
     with pytest.raises(ValueError, match="cannot stall"):
         fw.stall("sample")
