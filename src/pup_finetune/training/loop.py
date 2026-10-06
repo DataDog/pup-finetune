@@ -615,8 +615,13 @@ class _Loop:
         """Validate, select and checkpoint epoch ``epoch``.
 
         Raises :class:`_BudgetStop`, before recording the epoch, when the spend guard refuses
-        a validation microbatch or a checkpoint.
+        a validation microbatch or a checkpoint. A time-based checkpoint that came due with
+        the epoch's last step is saved first, so a failed validation does not lose the epoch
+        (it then serves as the epoch's checkpoint too).
         """
+        if self._checkpoint_due():
+            self._require_spend(f"a timed checkpoint of epoch {epoch}")
+            self._save_training(epoch, "time")
         train_loss = _mean(self._epoch_loss_sum, self._epoch_weight, f"training of epoch {epoch}")
         val_loss = self._validation_loss(epoch) if self._validation else None
         metric = train_loss if val_loss is None else val_loss

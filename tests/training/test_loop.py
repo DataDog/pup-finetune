@@ -824,6 +824,34 @@ def test_a_spend_cap_reached_while_draining_for_a_timed_checkpoint_stops_there()
     assert reasons == [("stop", 4)]
 
 
+def test_a_checkpoint_due_at_the_epochs_end_is_saved_before_validation() -> None:
+    clock = Clock()
+    state = MemoryState()
+    events: list[dict[str, Any]] = []
+
+    def sink(event: dict[str, Any]) -> None:
+        ticking(clock, 4)(event)
+        events.append(event)
+
+    spec = make_spec(max_epochs=1, batch_size=1, pipeline_depth=1, checkpoint_every_minutes=10)
+    broken = ExternalError("validation is down", source="fake")
+    with recording(forward_errors=[broken]) as session, pytest.raises(ExternalError):
+        train(session, spec, rows=row_examples(3), state=state, clock=clock, on_event=sink)
+    # The third step ended 12 minutes in: its checkpoint is kept although validation failed.
+    assert [(ref.kind, ref.step) for ref in session.saved] == [("training", 3)]
+    assert [(p.step, p.steps_in_epoch) for p in state.resume_points] == [(3, 3)]
+    assert [e["reason"] for e in events if e["type"] == "checkpoint"] == ["time"]
+
+
+def test_a_checkpoint_saved_before_validation_is_the_epochs_checkpoint() -> None:
+    clock = Clock()
+    spec = make_spec(max_epochs=1, batch_size=1, pipeline_depth=1, checkpoint_every_minutes=10)
+    with recording() as session:
+        result = train(session, spec, rows=row_examples(3), clock=clock, on_event=ticking(clock, 4))
+    assert [(ref.kind, ref.step) for ref in session.saved] == [("training", 3), ("sampler", 3)]
+    assert result.epochs[0].training_ckpt == session.saved[0]
+
+
 def test_a_time_based_checkpoint_waits_for_the_steps_in_flight() -> None:
     clock = Clock()
     state = MemoryState()
