@@ -226,6 +226,30 @@ talks to the narrow interface in `providers/fireworks/client.py`, never to the S
   calls never are, since the loop owns that policy. `latency_s` times the successful attempt
   only.
 
+## Replay evaluation
+
+[`evaluation/`](../src/pup_finetune/evaluation/) is provider-neutral: it never imports a
+provider, and talks to models only through the `Sampler` protocol.
+
+- **Cases** ([`cases.py`](../src/pup_finetune/evaluation/cases.py)). Every assistant message
+  of a kept test-split row that does something visible (non-empty content or tool calls) and
+  was trained on (`weight` is not `0`) is a `ReplayCase`, with id `<row id>:<message index>`.
+  The model sees the recorded messages before it plus the row's tools, generates one
+  assistant message, and that message is compared with the recorded one, the reference. The
+  tool results that followed the reference are kept for a judge only. Tools are never
+  executed, so the conversation continues from the recording: replay measures agreement with
+  the recorded behavior, not whether the task succeeded. A per-trajectory cap keeps evenly
+  spaced turns, one per equal bucket at a seeded offset, and always the final turn.
+- **Metrics** ([`metrics.py`](../src/pup_finetune/evaluation/metrics.py)). Pure functions of
+  the candidate, the reference and the tools, each `true`, `false`, or `null` when it does not
+  apply: `tool_decision_match`, `tool_name_match`, `arguments_json_valid`,
+  `arguments_schema_valid` (against the declared `parameters`, with a small validator for the
+  common JSON Schema subset; other keywords are ignored), `reference_arguments_match`,
+  `parallel_call_set_match` (both order-insensitive for parallel calls) and `format_valid`,
+  from the sampler. Arguments compare as JSON values, and `reasoning_content` is never
+  compared. `aggregate` reports `{rate, passed, n}` per metric over the cases it applies to,
+  with `rate` `null` when `n` is `0`.
+
 ## How a new provider plugs in
 
 Using Baseten as the example:

@@ -246,7 +246,16 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   `JsonToolCallParser`) that turn sampled text back into a message; `families.py` is the
   model-family table (`qwen3_8` for now), each entry a tokenizer, revision, parser and stop
   tokens.
-- `evaluation/` - *later*. Replay cases, deterministic metrics, LLM judge and reporting.
+- `evaluation/` - replay evaluation, provider-neutral. `cases.py` turns a dataset's kept
+  test-split rows into `ReplayCase`s (`cases_from_dataset`, `build_cases`): one per trained
+  (`weight` not `0`) assistant message with a visible action, with the recorded prefix and
+  tools as input and the recorded message as the reference, capped per trajectory
+  (`max_cases_per_trajectory`) with evenly spaced, seeded picks that always keep the final
+  turn. Tools are never executed, so replay measures agreement with the recorded behavior, not
+  task success. `metrics.py` has the deterministic tool-call metrics (`MetricName`,
+  `score_case`, `aggregate`; `None` when a metric does not apply) and `schema_errors`, a
+  validator for the common JSON Schema subset tool declarations use. The LLM judge, the
+  replay runner and reporting arrive later.
 - `providers/` - the provider seam. `base.py` has the neutral types (`ModelProfile`,
   `TrainSpec`, `CheckpointRef`, `StepMetrics`, ...) and the `Provider`, `TrainingBackend`,
   `TrainingSession` and `Sampler` protocols; `__init__.py` is the lazy registry
