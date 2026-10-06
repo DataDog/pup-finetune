@@ -397,6 +397,30 @@ def test_a_truncated_listing_keeps_the_batch_in_flight(
     assert set(state.record_ids) == set(order[:4])
 
 
+def test_an_unreadable_listing_keeps_the_batch_in_flight(
+    dataset: DatasetDir, fake: FakePup, api: FakeDatasetsApi
+) -> None:
+    api.records_add_lost_responses = {2}
+    order = push_order(dataset)
+    with pytest.raises(ExternalError):
+        push(dataset, fake)
+    # An item without an id may be one of the lost batch's records.
+    api.records_all_extra = [{"attributes": {"metadata": {"row_id": order[4]}}}]
+    with pytest.raises(StateError, match="may already be there") as caught:
+        push(dataset, fake)
+    assert "1 items that are not readable records" in caught.value.message
+    assert caught.value.hint is not None and "in_flight" in caught.value.hint
+    assert records_add_calls(fake) == 2  # nothing sent again
+    state = read_push_state(dataset)
+    assert state is not None
+    assert state.in_flight == tuple(order[4:8])
+    assert set(state.record_ids) == set(order[:4])
+    api.records_all_extra = [{"id": "rec-other", "attributes": {"metadata": None}}]
+    receipt = push(dataset, fake)  # a record without metadata is readable, and not ours
+    assert sorted(remote_row_ids(api)) == sorted(order)
+    assert receipt.state.in_flight == ()
+
+
 def test_a_lost_create_response_is_recovered_in_the_same_push(
     dataset: DatasetDir, fake: FakePup, api: FakeDatasetsApi
 ) -> None:

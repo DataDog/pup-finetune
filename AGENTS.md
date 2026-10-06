@@ -160,8 +160,8 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   record id per row, the batch `in_flight`) around every batch, so a re-push sends only new
   rows and an interrupted push resumes, first adopting the records of a batch whose response
   was lost (matched on `metadata.row_id` through `records-all`) so no row is added twice (a
-  listing that is truncated or hit pup's page cap, `RecordsListTruncated`, keeps the batch
-  `in_flight` and stops); rows dropped after a push are reported as `stale_records`, not
+  listing that is truncated or hit pup's page cap, `RecordsListTruncated`, or that holds
+  items it cannot read, `RecordsListing.unreadable`, keeps the batch `in_flight` and stops); rows dropped after a push are reported as `stale_records`, not
   deleted.
 - `curation/` - deciding which accepted rows to train on. `labels.py` has `apply_labels`
   (every id an accepted row, last label per id wins, repeats skipped, appended through

@@ -18,6 +18,7 @@ from pup_finetune.datadog.datasets import (
     DatasetInfo,
     DatasetRecord,
     LLMObsDatasets,
+    RecordsListing,
     RecordsListTruncated,
 )
 from pup_finetune.errors import ExternalError
@@ -279,17 +280,34 @@ def test_list_records_reads_ids_and_metadata(
     project_id = api.add_project("pup-finetune")
     dataset = api.add_dataset(project_id, "synthetic-ds")
     client.add_records(project_id, dataset.id, [{"input": {}, "metadata": {"row_id": "r-1"}}])
-    assert client.list_records(dataset.id) == [
-        DatasetRecord(dataset.record_ids[0], {"row_id": "r-1"})
-    ]
+    assert client.list_records(dataset.id) == RecordsListing(
+        [DatasetRecord(dataset.record_ids[0], {"row_id": "r-1"})]
+    )
     assert fake.last.args == ("llm-obs", "datasets", "records-all", "--dataset-id", dataset.id)
 
 
-def test_list_records_skips_unreadable_items(fake: FakePup, client: LLMObsDatasets) -> None:
+def test_list_records_counts_unreadable_items(fake: FakePup, client: LLMObsDatasets) -> None:
     good = {"id": "rec-1", "attributes": {"metadata": {"row_id": "r-1"}}}
-    items = [good, {"id": "rec-2"}, "junk", {"attributes": {"metadata": {}}}]
+    no_metadata = {"id": "rec-3", "attributes": {"input": {}}}
+    null_metadata = {"id": "rec-4", "attributes": {"metadata": None}}
+    unreadable = [
+        {"id": "rec-2"},
+        "junk",
+        {"attributes": {"metadata": {}}},
+        {"id": "", "attributes": {}},
+        {"id": "rec-5", "attributes": {"metadata": "row_id=r-5"}},
+    ]
+    items = [good, no_metadata, *unreadable, null_metadata]
     fake.on("llm-obs", "datasets", "records-all", json={"records": items})
-    assert client.list_records("d1") == [DatasetRecord("rec-1", {"row_id": "r-1"})]
+    # A record without metadata is readable, just not one a push added.
+    assert client.list_records("d1") == RecordsListing(
+        [
+            DatasetRecord("rec-1", {"row_id": "r-1"}),
+            DatasetRecord("rec-3", {}),
+            DatasetRecord("rec-4", {}),
+        ],
+        unreadable=len(unreadable),
+    )
     fake.on("llm-obs", "datasets", "records-all", json={"data": []})
     with pytest.raises(ExternalError, match="no records list"):
         client.list_records("d1")
@@ -306,7 +324,7 @@ def test_list_records_refuses_a_truncated_listing(
     with pytest.raises(RecordsListTruncated, match=r"2 records, marked truncated"):
         client.list_records(dataset.id)
     api.records_all_limit = 3  # Every record fits: the listing is whole.
-    assert len(client.list_records(dataset.id)) == 3
+    assert len(client.list_records(dataset.id).records) == 3
 
 
 def test_list_records_refuses_a_listing_that_reached_the_page_cap(
@@ -319,7 +337,7 @@ def test_list_records_refuses_a_listing_that_reached_the_page_cap(
         client.list_records("d1")
     below = {**capped, "pages_fetched": RECORDS_ALL_MAX_PAGES - 1}
     fake.on("llm-obs", "datasets", "records-all", json=below)
-    assert client.list_records("d1") == [DatasetRecord("rec-1", {"row_id": "r-1"})]
+    assert client.list_records("d1") == RecordsListing([DatasetRecord("rec-1", {"row_id": "r-1"})])
 
 
 def test_add_records_needs_records(client: LLMObsDatasets) -> None:
