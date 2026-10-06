@@ -15,6 +15,7 @@ imports a provider SDK. See ``docs/architecture.md`` for how the pieces fit toge
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -38,6 +39,8 @@ if TYPE_CHECKING:
 
 # --- Models and training configuration ---------------------------------------------------
 
+_COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModelProfile:
@@ -45,8 +48,9 @@ class ModelProfile:
 
     ``alias`` is our short name (e.g. ``qwen3p8-27b``); ``base_model`` is the provider's id.
     ``tokenizer_model`` and ``tokenizer_revision`` pin the Hugging Face tokenizer and chat
-    template; ``renderer`` names the renderer; ``max_seq_len`` is the training context limit
-    in tokens.
+    template; the revision must be a full 40-character lowercase commit SHA, never a branch
+    or tag that can move. ``renderer`` names the renderer; ``max_seq_len`` is the training
+    context limit in tokens.
     """
 
     provider: str
@@ -61,6 +65,11 @@ class ModelProfile:
     notes: str = ""
 
     def __post_init__(self) -> None:
+        if not _COMMIT_SHA.fullmatch(self.tokenizer_revision):
+            raise ValueError(
+                "tokenizer_revision must be a full 40-character lowercase commit SHA, got "
+                f"{self.tokenizer_revision!r}"
+            )
         if self.max_seq_len <= 0:
             raise ValueError(f"max_seq_len must be positive, got {self.max_seq_len}")
         if self.default_lora_rank <= 0:

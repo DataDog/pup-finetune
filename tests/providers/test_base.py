@@ -184,6 +184,19 @@ def test_model_profile_rejects_non_positive_limits(overrides: dict[str, int]) ->
         _profile(**overrides)
 
 
+@pytest.mark.parametrize(
+    "revision", ["main", "v1.0", "0123abc", "A" * 40, "g" * 40, "0" * 41, "0" * 40 + "\n"]
+)
+def test_model_profile_rejects_a_movable_or_malformed_tokenizer_revision(revision: str) -> None:
+    with pytest.raises(ValueError, match="tokenizer_revision"):
+        _profile(tokenizer_revision=revision)
+
+
+def test_model_profile_accepts_a_full_commit_sha() -> None:
+    sha = "0123456789abcdef0123456789abcdef01234567"
+    assert _profile(tokenizer_revision=sha).tokenizer_revision == sha
+
+
 def test_model_profile_defaults() -> None:
     profile = _profile()
     assert profile.default_lora_rank == 8
