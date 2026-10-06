@@ -15,7 +15,8 @@ from collections.abc import Iterator
 import keyring.core
 import pytest
 
-from tests.fakes.keyring import FailKeyring
+from pup_finetune import credentials
+from tests.fakes.keyring import OS_KEYCHAIN_FAKES, FailKeyring
 
 pytest_plugins = ["pytester"]
 
@@ -66,6 +67,15 @@ def _clean_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def _no_real_keychain(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default every test to a keyring with no backend, so none can touch the real keychain."""
     monkeypatch.setattr(keyring.core, "_keyring_backend", FailKeyring())
+
+
+@pytest.fixture(autouse=True)
+def _trust_fake_keychains(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let the OS keychain fakes pass the credentials allowlist, as real keychains do."""
+    fakes = {credentials._backend_name(fake) for fake in OS_KEYCHAIN_FAKES}
+    monkeypatch.setattr(
+        credentials, "_OS_KEYCHAIN_BACKENDS", credentials._OS_KEYCHAIN_BACKENDS | fakes
+    )
 
 
 @pytest.fixture(autouse=True)

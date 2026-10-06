@@ -24,11 +24,13 @@ from pup_finetune.errors import ConfirmRequired, ExternalError, UsageError
 from pup_finetune.output import emit_error
 from pup_finetune.runtime import Runtime
 from tests.fakes.keyring import (
+    OS_KEYCHAIN_FAKES,
     FailKeyring,
     LockedKeyring,
     MemoryKeyring,
     PlaintextFileKeyring,
     StickyKeyring,
+    UnvettedKeyring,
     chainer_of,
 )
 
@@ -294,19 +296,43 @@ def test_store_through_a_chainer_vets_the_backend_that_receives_the_key() -> Non
         credentials.ensure_storable("acme", keyring_backend=chainer_of(FailKeyring()))
 
 
-def test_store_skips_chained_backends_that_cannot_write() -> None:
+def test_preflight_and_store_agree_on_a_chain_that_cannot_write() -> None:
     class ReadOnlyKeyring(MemoryKeyring):
         def set_password(self, service: str, username: str, password: str) -> None:
             raise NotImplementedError
 
     credentials.register(SPEC)
     memory = MemoryKeyring()
-    credentials.store(
-        "acme", SecretStr(SECRET), keyring_backend=chainer_of(ReadOnlyKeyring(), memory)
-    )
-    assert memory.passwords == {("pup-finetune", "acme"): SECRET}
-    with pytest.raises(UsageError, match="no OS keychain"):
-        credentials.store("acme", SecretStr(SECRET), keyring_backend=chainer_of(ReadOnlyKeyring()))
+    for backend in (chainer_of(ReadOnlyKeyring()), chainer_of(ReadOnlyKeyring(), memory)):
+        with pytest.raises(UsageError, match="no OS keychain"):
+            credentials.ensure_storable("acme", keyring_backend=backend)
+        with pytest.raises(UsageError, match="no OS keychain"):
+            credentials.store("acme", SecretStr(SECRET), keyring_backend=backend)
+    assert memory.passwords == {}
+
+
+def test_store_refuses_a_backend_that_is_not_an_allowlisted_os_keychain() -> None:
+    credentials.register(SPEC)
+    plugin = UnvettedKeyring()
+    memory = MemoryKeyring()
+    for backend in (plugin, chainer_of(plugin, memory)):
+        with pytest.raises(UsageError, match="no OS keychain"):
+            credentials.ensure_storable("acme", keyring_backend=backend)
+        with pytest.raises(UsageError, match="no OS keychain"):
+            credentials.store("acme", SecretStr(SECRET), keyring_backend=backend)
+    assert plugin.passwords == {}
+    assert memory.passwords == {}
+
+
+def test_the_allowlist_names_the_real_os_keychain_backends() -> None:
+    from keyring.backends import SecretService, Windows, kwallet, libsecret, macOS
+
+    real = {macOS.Keyring, SecretService.Keyring, libsecret.Keyring, Windows.WinVaultKeyring}
+    real |= {kwallet.DBusKeyring, kwallet.DBusKeyringKWallet4}
+    # The conftest seam adds the OS keychain fakes; everything else must be a real backend.
+    fakes = {credentials._backend_name(fake) for fake in OS_KEYCHAIN_FAKES}
+    allowlisted = credentials._OS_KEYCHAIN_BACKENDS - fakes
+    assert allowlisted == {credentials._backend_name(backend) for backend in real}
 
 
 def test_ensure_storable_accepts_an_os_keychain_and_refuses_none() -> None:

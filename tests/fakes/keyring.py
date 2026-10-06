@@ -13,7 +13,12 @@
   the entry, as macOS does when the user denies keychain access.
 - :class:`PlaintextFileKeyring` poses as a ``keyrings.alt`` file backend and really writes a
   file under ``$HOME``, so a test can prove it is never used.
+- :class:`UnvettedKeyring` works like :class:`MemoryKeyring` but stands for a third-party
+  plugin that is not on the OS keychain allowlist, so it must never receive a key.
 - :func:`chainer_of` builds a chainer backend over the given backends.
+
+:data:`OS_KEYCHAIN_FAKES` are the fakes that stand in for a real OS keychain; the shared
+conftest adds them to the credentials allowlist for every test.
 """
 
 from __future__ import annotations
@@ -102,6 +107,13 @@ class PlaintextFileKeyring(KeyringBackend):
 
     def delete_password(self, service: str, username: str) -> None:
         raise PasswordDeleteError("no such password")
+
+
+class UnvettedKeyring(MemoryKeyring):
+    """A working keychain from a plugin that is not an allowlisted OS keychain backend."""
+
+
+OS_KEYCHAIN_FAKES: tuple[type[KeyringBackend], ...] = (MemoryKeyring, LockedKeyring, StickyKeyring)
 
 
 def chainer_of(*backends: KeyringBackend) -> chainer.ChainerBackend:

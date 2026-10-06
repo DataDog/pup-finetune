@@ -143,11 +143,31 @@ def _backend(keyring_backend: KeyringBackend | None) -> KeyringBackend:
     return keyring.get_keyring()
 
 
-def _write_targets(backend: KeyringBackend) -> Iterator[KeyringBackend]:
-    """The concrete backends a write to ``backend`` tries, in order.
+# The keyring backends that keep secrets in an OS keychain, by exact class. Anything else (the
+# fail and null backends, keyrings.alt's plaintext files, or any other third-party plugin) never
+# receives a key: matching the exact class means a subclass that writes elsewhere is refused too.
+_OS_KEYCHAIN_BACKENDS: frozenset[str] = frozenset(
+    {
+        "keyring.backends.macOS.Keyring",
+        "keyring.backends.SecretService.Keyring",
+        "keyring.backends.libsecret.Keyring",
+        "keyring.backends.kwallet.DBusKeyring",
+        "keyring.backends.kwallet.DBusKeyringKWallet4",
+        "keyring.backends.Windows.WinVaultKeyring",
+    }
+)
 
-    A chainer writes to the first of its backends that implements writing, so it is
-    flattened here and each candidate is vetted before it receives the key.
+
+def _backend_name(backend_type: type[KeyringBackend]) -> str:
+    """The name :data:`_OS_KEYCHAIN_BACKENDS` lists ``backend_type`` under."""
+    return f"{backend_type.__module__}.{backend_type.__qualname__}"
+
+
+def _write_targets(backend: KeyringBackend) -> Iterator[KeyringBackend]:
+    """The concrete backends a write to ``backend`` could reach, in order.
+
+    A chainer writes to the first of its backends that accepts the write, so it is flattened
+    here and the candidate is vetted before it receives the key.
     """
     from keyring.backends import chainer
 
@@ -160,13 +180,21 @@ def _write_targets(backend: KeyringBackend) -> Iterator[KeyringBackend]:
 
 
 def _is_os_keychain(backend: KeyringBackend) -> bool:
-    """Whether ``backend`` is a real OS keychain (not the fail, null or a plaintext backend)."""
-    from keyring.backends import fail, null
+    """Whether ``backend`` is one of the allowlisted OS keychain backends."""
+    return _backend_name(type(backend)) in _OS_KEYCHAIN_BACKENDS
 
-    if isinstance(backend, fail.Keyring | null.Keyring):
-        return False
-    # keyrings.alt's file backends keep secrets in files on disk; we never write those.
-    return not type(backend).__module__.startswith("keyrings.alt")
+
+def _keychain_target(backend: KeyringBackend) -> KeyringBackend | None:
+    """The backend a stored key goes to, or ``None`` when storing must be refused.
+
+    That is the first write target, and only when it is an OS keychain: a key is never passed
+    over an unvetted backend to one further down the chain. :func:`ensure_storable` and
+    :func:`store` share this, so the preflight and the write always agree.
+    """
+    first = next(_write_targets(backend), None)
+    if first is None or not _is_os_keychain(first):
+        return None
+    return first
 
 
 def _no_keychain(spec: CredentialSpec) -> UsageError:
@@ -183,8 +211,7 @@ def ensure_storable(provider: str, *, keyring_backend: KeyringBackend | None = N
     Lets ``auth login`` refuse before it asks for the key or calls the provider.
     """
     spec = get_spec(provider)
-    first = next(_write_targets(_backend(keyring_backend)), None)
-    if first is None or not _is_os_keychain(first):
+    if _keychain_target(_backend(keyring_backend)) is None:
         raise _no_keychain(spec)
 
 
@@ -266,24 +293,20 @@ def store(
     if not secret:
         raise UsageError(f"the {spec.provider} API key is empty")
     register_secret(secret)
-    # Write through each candidate ourselves, in the order a chainer would, so the backend
-    # that actually receives the key is the one that was vetted.
-    for target in _write_targets(_backend(keyring_backend)):
-        if not _is_os_keychain(target):
-            break
-        try:
-            target.set_password(spec.keychain_service, spec.keychain_account, secret)
-        except NotImplementedError:
-            continue
-        except KeyringError as exc:
-            raise ExternalError(
-                f"could not store the {spec.provider} key in the OS keychain "
-                f"({type(exc).__name__}: {redact(str(exc)) or 'no detail'})",
-                source="keychain",
-                hint=f"set {spec.env_var} in the environment instead",
-            ) from exc
-        return
-    raise _no_keychain(spec)
+    # Write to the vetted backend ourselves rather than through a chainer, so the backend that
+    # actually receives the key is the one that was checked.
+    target = _keychain_target(_backend(keyring_backend))
+    if target is None:
+        raise _no_keychain(spec)
+    try:
+        target.set_password(spec.keychain_service, spec.keychain_account, secret)
+    except KeyringError as exc:
+        raise ExternalError(
+            f"could not store the {spec.provider} key in the OS keychain "
+            f"({type(exc).__name__}: {redact(str(exc)) or 'no detail'})",
+            source="keychain",
+            hint=f"set {spec.env_var} in the environment instead",
+        ) from exc
 
 
 def delete(provider: str, *, keyring_backend: KeyringBackend | None = None) -> bool:
