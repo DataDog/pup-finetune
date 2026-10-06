@@ -15,7 +15,11 @@ import pytest
 from pup_finetune.data.exclusions import ExclusionCode
 from pup_finetune.data.jsonl import row_to_dict
 from pup_finetune.data.schema import RowErrorCode
-from pup_finetune.data.trajectories import ConversionResult, rows_from_spans
+from pup_finetune.data.trajectories import (
+    ConversionResult,
+    comparable_messages,
+    rows_from_spans,
+)
 from pup_finetune.datadog.spans import LLMObsSpan, SpanQuery, iter_spans, parse_span
 from pup_finetune.errors import UsageError
 from tests.fakes.llmobs import FakeExportApi, fixture_pages, page, span_item
@@ -304,6 +308,65 @@ def test_identical_tool_calls_collapse() -> None:
         make_span("synthetic-span-2", answered("get_weather", "Northvale")),
     ]
     assert outcome(rows_from_spans(spans)) == ["row:synthetic-trace-9000:synthetic-span-2"]
+
+
+def test_the_same_arguments_as_a_dict_and_as_formatted_json_collapse() -> None:
+    # The span's output records the call as an object; the next span's input echoes it back
+    # as formatted JSON text with its keys in another order.
+    as_dict = {"name": "get_weather", "arguments": {"city": "Northvale", "units": "metric"}}
+    as_text = {
+        "name": "get_weather",
+        "arguments": '{\n  "units": "metric",\n  "city": "Northvale"\n}',
+    }
+    result = {"role": "tool", "tool_results": [{"result": "cloudy", "name": "get_weather"}]}
+    spans = [
+        make_span("synthetic-span-1", [Q1, {"role": "assistant", "tool_calls": [as_dict]}]),
+        make_span(
+            "synthetic-span-2",
+            [Q1, {"role": "assistant", "tool_calls": [as_text]}, result, A1],
+        ),
+    ]
+    results = list(rows_from_spans(spans))
+    assert outcome(results) == ["row:synthetic-trace-9000:synthetic-span-2"]
+    # The comparison is canonical; the kept row's arguments are the text it recorded.
+    row = results[0].row
+    assert row is not None
+    tool_calls = row.messages[1].tool_calls
+    assert tool_calls is not None
+    assert tool_calls[0].function.arguments == as_text["arguments"]
+
+
+def tool_call_message(arguments: str) -> dict[str, Any]:
+    call = {"id": "call_1", "type": "function", "function": {"name": "f", "arguments": arguments}}
+    return {"role": "assistant", "content": "", "tool_calls": [call]}
+
+
+def test_comparable_messages_canonicalize_json_arguments() -> None:
+    compact = comparable_messages([tool_call_message('{"a":1,"b":[2,3]}')])
+    spaced = comparable_messages([tool_call_message('{ "b": [2, 3],\n "a": 1 }')])
+    assert compact == spaced
+    assert compact != comparable_messages([tool_call_message('{"a":1,"b":[3,2]}')])
+
+
+def test_comparable_messages_keep_arguments_that_are_not_json_as_given() -> None:
+    raw = comparable_messages([tool_call_message("not json")])
+    # The canonical form of a JSON string never equals text that is not JSON.
+    assert raw != comparable_messages([tool_call_message('"not json"')])
+    assert raw == comparable_messages([tool_call_message("not json")])
+    assert raw != comparable_messages([tool_call_message("not  json")])
+
+
+def test_comparable_messages_of_row_dumps_match_conversion() -> None:
+    # A stored row's messages, dumped, compare as the conversation they came from did.
+    spans = [make_span("synthetic-span-1", answered("get_weather", "Northvale"))]
+    row = next(rows_from_spans(spans)).row
+    assert row is not None
+    dumped = comparable_messages([message.model_dump() for message in row.messages])
+    from_dicts = comparable_messages(row_to_dict(row)["messages"])
+    assert dumped == from_dicts
+    assert '"get_weather"' in dumped[1]
+    # The tool message names the call it answers by position, not by id.
+    assert dumped[2].endswith(",[1,0]]")
 
 
 def test_messages_that_differ_only_in_role_do_not_collapse() -> None:

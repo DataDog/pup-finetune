@@ -17,11 +17,13 @@ and keeps, per trace, only the conversations no other one contains:
 - Of identical conversations, one is kept: a valid one over an invalid one, then the one with
   the latest ``start_ns``, then the one that arrived last.
 
-Messages compare by role, content and tool calls (name and arguments), and a tool message by
-the position of the call it answers (which message, which call in it). Tool call ids and
-reasoning do not take part: a generated id differs between spans, and a span's input rarely
-repeats the reasoning its predecessor output. The position keeps apart conversations that
-pair the same results with different calls of a parallel tool call.
+Messages compare by role, content and tool calls (name, and arguments as canonical JSON), and
+a tool message by the position of the call it answers (which message, which call in it), as
+:func:`comparable_messages` gives them. Tool call ids and reasoning do not take part: a
+generated id differs between spans, and a span's input rarely repeats the reasoning its
+predecessor output. The position keeps apart conversations that pair the same results with
+different calls of a parallel tool call. Canonical arguments keep together the same call
+recorded as an object on one span and as formatted JSON text on another.
 
 Each kept conversation is a row with the id ``{trace_id}:{span_id}``, or an
 :class:`~pup_finetune.data.exclusions.Exclusion` with a stable code when it could not be
@@ -32,8 +34,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from pup_finetune.data.convert import (
     Conversation,
@@ -202,22 +205,55 @@ def _prefix_digests(conversation: Conversation) -> tuple[str, ...]:
     """A running digest over the messages' comparable parts, one per message."""
     digests: list[str] = []
     running = hashlib.sha256()
-    # Where each tool call is, as [message index, call index], by its id.
-    positions: dict[str, list[int]] = {}
-    for index, message in enumerate(conversation.messages):
-        calls = []
-        for call_index, call in enumerate(message.get("tool_calls", ())):
-            calls.append([call["function"]["name"], call["function"]["arguments"]])
-            positions.setdefault(call["id"], [index, call_index])
-        answers = positions.get(message.get("tool_call_id") or "")
-        # Not canonical_json: a non-text content part is kept as given and may hold anything.
-        part = json.dumps(
-            [message["role"], message["content"], calls, answers],
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            default=repr,
-        )
+    for part in comparable_messages(conversation.messages):
         running.update(hashlib.sha256(part.encode("utf-8", "surrogatepass")).digest())
         digests.append(running.copy().hexdigest())
     return tuple(digests)
+
+
+def comparable_messages(messages: Iterable[Mapping[str, Any]]) -> list[str]:
+    """What each of ``messages`` compares by when conversations are matched, one per message.
+
+    ``messages`` are canonical message dicts (a row's messages as ``model_dump`` gives them
+    work too). Each part covers the role, the content, the tool calls (name and arguments,
+    the arguments as canonical JSON, so the same object recorded as a dict on one span and
+    as formatted JSON on another compares equal) and, for a tool message, the position of
+    the call it answers. Tool call ids and reasoning are left out (see the module doc). Two
+    conversations share a prefix of ``k`` messages exactly when their first ``k`` parts are
+    equal, as a part depends only on its message and the ones before it.
+    """
+    parts: list[str] = []
+    # Where each tool call is, as [message index, call index], by its id.
+    positions: dict[str, list[int]] = {}
+    for index, message in enumerate(messages):
+        calls = []
+        for call_index, call in enumerate(message.get("tool_calls") or ()):
+            function = call["function"]
+            calls.append([function["name"], _canonical_arguments(function["arguments"])])
+            positions.setdefault(call["id"], [index, call_index])
+        answers = positions.get(message.get("tool_call_id") or "")
+        # Not canonical_json: a non-text content part is kept as given and may hold anything.
+        parts.append(
+            json.dumps(
+                [message["role"], message["content"], calls, answers],
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                default=repr,
+            )
+        )
+    return parts
+
+
+def _canonical_arguments(arguments: str) -> str:
+    """``arguments`` as compact JSON with sorted keys, or as given when it is not JSON.
+
+    A string that is not JSON never equals the canonical form of one that is, so the two
+    cannot be mistaken for each other.
+    """
+    try:
+        return json.dumps(
+            json.loads(arguments), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
+    except (ValueError, RecursionError):
+        return arguments
