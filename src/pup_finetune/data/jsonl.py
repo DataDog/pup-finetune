@@ -12,8 +12,13 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
-from pup_finetune.data.schema import Message, RowError, TrainingRow, validate_row
-from pup_finetune.storage import atomic_write_text, canonical_json, read_jsonl_numbered
+from pup_finetune.data.schema import Message, RowError, RowErrorCode, TrainingRow, validate_row
+from pup_finetune.storage import (
+    atomic_write_text,
+    canonical_json,
+    parse_jsonl_line,
+    read_jsonl_numbered,
+)
 
 
 def read_rows(path: Path) -> Iterator[TrainingRow]:
@@ -28,6 +33,35 @@ def read_rows(path: Path) -> Iterator[TrainingRow]:
             yield validate_row(data)
         except RowError as exc:
             raise RowError(exc.code, exc.detail, path=str(path), line=line_number) from exc
+
+
+def scan_rows(path: Path) -> Iterator[tuple[int, dict[str, Any], TrainingRow | RowError]]:
+    """Yield ``(line_number, data, row_or_error)`` for each non-blank line, without stopping.
+
+    Unlike :func:`read_rows`, a bad line does not end the scan: it yields a :class:`RowError`
+    carrying the file and line number. ``data`` is the parsed JSON object, or ``{}`` when the
+    line is not one (invalid UTF-8 or JSON, or another JSON value: code ``invalid_row``).
+    """
+    path = Path(path)
+    with path.open("rb") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            data, problem = parse_jsonl_line(line)
+            if problem is not None:
+                error = RowError(
+                    RowErrorCode.INVALID_ROW, problem, path=str(path), line=line_number
+                )
+                yield line_number, {}, error
+                continue
+            try:
+                yield line_number, data, validate_row(data)
+            except RowError as exc:
+                yield (
+                    line_number,
+                    data,
+                    RowError(exc.code, exc.detail, path=str(path), line=line_number),
+                )
 
 
 def row_to_dict(row: TrainingRow) -> dict[str, Any]:

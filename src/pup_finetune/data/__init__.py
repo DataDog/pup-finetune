@@ -8,12 +8,17 @@
 
 :mod:`pup_finetune.data.schema` defines :class:`TrainingRow` (OpenAI chat format plus its
 source) and the stable :class:`RowErrorCode` reasons a row is rejected for;
-:mod:`pup_finetune.data.jsonl` reads and writes rows and converts them for providers.
+:mod:`pup_finetune.data.jsonl` reads and writes rows and converts them for providers;
+:mod:`pup_finetune.data.exclusions` records why a row was left out of a dataset;
+:mod:`pup_finetune.data.split` assigns stable train / validation / test splits; and
+:mod:`pup_finetune.data.dataset_dir` is the on-disk dataset directory.
 """
 
 from __future__ import annotations
 
-from pup_finetune.data.jsonl import read_rows, row_to_dict, to_provider_dict, write_rows
+from pup_finetune.data.dataset_dir import AddResult, DatasetDir, DatasetSettings
+from pup_finetune.data.exclusions import Exclusion, ExclusionCode
+from pup_finetune.data.jsonl import read_rows, row_to_dict, scan_rows, to_provider_dict, write_rows
 from pup_finetune.data.schema import (
     SCHEMA_VERSION,
     FunctionCall,
@@ -29,21 +34,41 @@ from pup_finetune.data.schema import (
     split_key,
     validate_row,
 )
+from pup_finetune.data.split import (
+    SPLITS,
+    SplitAssignments,
+    SplitName,
+    SplitParams,
+    assign_split,
+    check_isolation,
+)
 
 __all__ = [
     "SCHEMA_VERSION",
+    "SPLITS",
+    "AddResult",
+    "DatasetDir",
+    "DatasetSettings",
+    "Exclusion",
+    "ExclusionCode",
     "FunctionCall",
     "Message",
     "RowError",
     "RowErrorCode",
     "SourceRef",
+    "SplitAssignments",
+    "SplitName",
+    "SplitParams",
     "Tool",
     "ToolCall",
     "ToolFunction",
     "TrainingRow",
+    "assign_split",
+    "check_isolation",
     "read_rows",
     "row_content_hash",
     "row_to_dict",
+    "scan_rows",
     "split_key",
     "to_provider_dict",
     "validate_row",
