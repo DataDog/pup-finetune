@@ -18,8 +18,10 @@
   ends.
 
 The run directory the loop reports into is :mod:`pup_finetune.runs`;
-:mod:`pup_finetune.training.runner` trains and resumes in one (it is not re-exported here,
-since it imports :mod:`pup_finetune.runs`, which imports this package).
+:mod:`pup_finetune.training.runner` trains and resumes in one,
+:mod:`pup_finetune.training.inputs` renders a run's rows and
+:mod:`pup_finetune.training.worker` runs it in the foreground or a detached worker (none is
+re-exported here, since they import :mod:`pup_finetune.runs`, which imports this package).
 """
 
 from __future__ import annotations

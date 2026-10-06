@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from pup_finetune.errors import StateError
+from pup_finetune.errors import LockBusy, StateError
 from pup_finetune.storage import (
     LOCK_FILE_NAME,
     DirectoryLock,
@@ -253,9 +253,37 @@ def test_directory_lock_is_exclusive(tmp_path: Path) -> None:
         pass
 
 
+def test_directory_lock_reports_whether_and_by_whom_it_is_held(tmp_path: Path) -> None:
+    lock = DirectoryLock(tmp_path)
+    assert not lock.is_held()
+    with DirectoryLock(tmp_path):
+        assert lock.is_held()
+        assert lock.owner_pid() == os.getpid()
+        with pytest.raises(LockBusy), DirectoryLock(tmp_path):
+            pass
+    assert not lock.is_held()
+
+
 def test_directory_lock_on_missing_dir_raises_state_error(tmp_path: Path) -> None:
     missing = tmp_path / "missing"
     with pytest.raises(StateError, match=r"cannot lock .*missing"), DirectoryLock(missing):
+        pass
+
+
+def test_directory_lock_never_writes_through_a_planted_symlink(tmp_path: Path) -> None:
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep me\n")
+    locked = tmp_path / "dir"
+    locked.mkdir()
+    (locked / LOCK_FILE_NAME).symlink_to(victim)
+    with pytest.raises(StateError, match="cannot lock"), DirectoryLock(locked):
+        pass
+    assert victim.read_text() == "keep me\n"
+
+
+def test_directory_lock_refuses_a_lock_path_that_is_not_a_regular_file(tmp_path: Path) -> None:
+    (tmp_path / LOCK_FILE_NAME).mkdir()
+    with pytest.raises(StateError, match="cannot lock"), DirectoryLock(tmp_path):
         pass
 
 

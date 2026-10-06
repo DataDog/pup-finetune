@@ -53,6 +53,7 @@ from pup_finetune.runs import (
     Clock,
     RunDir,
     RunState,
+    SignalMode,
     checkpoint_namer,
     execute_run,
     model_id_for_run,
@@ -77,15 +78,18 @@ def start_training(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     on_event: EventSink | None = None,
+    signals: SignalMode = "interrupt",
+    heartbeat_s: float | None = None,
     now: Clock = utcnow,
 ) -> dict[str, Any]:
     """Train the ``created`` run in ``run_dir`` on ``provider``; returns ``result.json``.
 
     ``clock`` (seconds) times checkpoints and the spend guard; ``now`` stamps the run files.
-    Errors are raised as :func:`~pup_finetune.runs.execute_run` documents.
+    ``signals`` and ``heartbeat_s`` are passed to :func:`~pup_finetune.runs.execute_run`,
+    which documents them and the errors raised.
     """
     run = _Run.load(provider, run_dir, train_rows, validation_rows, clock, sleep, on_event)
-    return execute_run(run_dir, run.train, now=now)
+    return execute_run(run_dir, run.train, signals=signals, heartbeat_s=heartbeat_s, now=now)
 
 
 def resume_training(
@@ -97,6 +101,8 @@ def resume_training(
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     on_event: EventSink | None = None,
+    signals: SignalMode = "interrupt",
+    heartbeat_s: float | None = None,
     now: Clock = utcnow,
 ) -> dict[str, Any]:
     """Resume the interrupted, failed or cancelled run in ``run_dir``; returns ``result.json``.
@@ -111,14 +117,17 @@ def resume_training(
     if state.phase != "training":  # a live trainer holds the lock; a dead one is resumable
         require_resumable(state)
     run = _Run.load(provider, run_dir, train_rows, validation_rows, clock, sleep, on_event)
+    body = run.train
     if state.resume_mode == "finalize_only":
-        return execute_run(run_dir, run.finalize_only, resume=True, now=now)
-    if not run.backend.supports_resume:
+        body = run.finalize_only
+    elif not run.backend.supports_resume:
         raise UsageError(
             f"the {provider.name} backend cannot resume training from a checkpoint",
             hint="start a new run to train again",
         )
-    return execute_run(run_dir, run.train, resume=True, now=now)
+    return execute_run(
+        run_dir, body, resume=True, signals=signals, heartbeat_s=heartbeat_s, now=now
+    )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

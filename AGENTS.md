@@ -38,6 +38,23 @@ pup finetune --help
 pup finetune doctor                  # pup version, Datadog login, and other readiness checks
 ```
 
+The offline dev loop trains end to end on the `fake` provider, with no network or credentials:
+
+```sh
+export PUP_FINETUNE_DEV=1
+uv run pup-finetune dataset import /tmp/ds --file tests/fixtures/rows/tool_use.jsonl
+uv run pup-finetune train --provider fake --model fake-model --dataset /tmp/ds --run-dir /tmp/run
+                                     # preview only (exit 2); its next_command adds --confirm
+uv run pup-finetune train --provider fake --model fake-model --dataset /tmp/ds --run-dir /tmp/run --confirm
+uv run pup-finetune status /tmp/run  # phase, losses, best epoch, worker, promoted model
+```
+
+Add `--detach` to train in a background worker (output in `/tmp/run/worker.log`) and follow it
+with `status /tmp/run --watch`. `--provider-option step_delay_s=0.5 --batch-size 1` makes the
+fake slow enough to `cancel /tmp/run --confirm` (or press Ctrl-C in the foreground), and
+`--provider-option fail_at_step=9` simulates a crash to `resume /tmp/run --confirm` from. Use a
+new `--run-dir` for each `train`.
+
 Environment variables for development and unusual setups:
 
 - `PUP_FINETUNE_PUP` - the pup executable to run (a path, or a name on `PATH`) instead of `pup`.
@@ -55,7 +72,8 @@ Opt-in test suites: `PUP_FINETUNE_LIVE=1` runs `live` tests (real external servi
 
 Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later PRs.
 
-- `cli/` - the Typer app; one module per command group.
+- `cli/` - the Typer app; one module per command group. `train.py` has `train`, `resume`,
+  `status`, `cancel` and the hidden `_worker` a detached run executes.
 - `runtime.py` - non-secret settings from the environment (`PUP_OUTPUT`, `PUP_READ_ONLY`, ...).
 - `errors.py` - expected failures and their exit codes; the `--confirm` and read-only guards.
 - `output.py` - the one stdout result (through `pup format` under pup), progress on stderr.
@@ -89,15 +107,23 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   `promotion.py` has `Promotion`, the `finalize` hook that promotes the best checkpoint
   before the session ends (re-creating its sampler checkpoint when that session expired) or
   records it as the deployable checkpoint; `runner.py` has `start_training` and
-  `resume_training`, which open a session for a run directory and train or resume in it.
-  The detached worker arrives later.
+  `resume_training`, which open a session for a run directory and train or resume in it;
+  `inputs.py` renders a dataset's train and validation rows for a run (and checks, for an
+  existing run, that the dataset and renderer did not change); `worker.py` runs a mode
+  (`train`, `resume`, `finalize`) in the foreground or a detached worker (`spawn_worker`:
+  `python -P -m pup_finetune _worker` in a new session, in the run directory, output in
+  `worker.log`, the environment inherited and no secret passed on; the worker notes how it
+  ended in `worker.json`), and has the liveness checks behind `status` and `cancel`.
 - `runs.py` - the run directory (`run.json`, `state.json`, `epochs.json`, `result.json`),
   `RunState`, which the loop reports into, and `execute_run`, which holds the directory lock
   while training and always writes `result.json`, also on Ctrl-C or SIGTERM (reported as
   `TrainingTerminated`, a `FinetuneError`). Any error during training leaves the run
   `interrupted`, resumable from its last training checkpoint; a failed promotion leaves it
   `failed` with `resume_mode` `finalize_only`, so a resume only retries the promotion.
-  `result.json` records `promoted_model`, `deployable_checkpoint` and `finalize_error`.
+  `result.json` records `promoted_model`, `deployable_checkpoint` and `finalize_error`. With
+  `signals="cancel"` (what the CLI uses), SIGTERM and the first Ctrl-C cancel gracefully
+  instead: stop at a step boundary, checkpoint, promote the best epoch, end `cancelled`; with
+  `heartbeat_s`, `state.json` is also saved on a timer so its heartbeat stays fresh.
 - `rendering/` - chat rows to model tokens and completions back to messages. `tokens.py` has
   `TokenizedExample`, the provider-neutral, next-token-shifted token and weight arrays;
   `base.py` has the `Renderer` protocol (built on Hugging Face chat templates) and

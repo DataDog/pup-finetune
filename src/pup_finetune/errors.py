@@ -81,6 +81,10 @@ class StateError(FinetuneError):
     exit_code: ClassVar[int] = 1
 
 
+class LockBusy(StateError):
+    """Another process holds the lock this one tried to take."""
+
+
 def require_writable(runtime: Runtime, action: str) -> None:
     """Raise :class:`ReadOnlyError` when ``PUP_READ_ONLY`` forbids ``action`` (a remote write)."""
     if runtime.read_only:
