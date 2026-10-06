@@ -18,6 +18,7 @@ progress. So that the calls in flight and the checkpoint saved when training sto
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable
 from typing import Any
@@ -64,6 +65,7 @@ class Budget:
         self.spend_reserve_fraction = spend_reserve_fraction
         self._clock = clock
         self._started_at: float | None = None
+        self._earlier_seconds = 0.0
         self.tokens_used = 0
 
     @classmethod
@@ -84,8 +86,15 @@ class Budget:
 
     @property
     def elapsed_seconds(self) -> float:
-        """Seconds since :meth:`start`; ``0.0`` before it."""
-        return 0.0 if self._started_at is None else self._clock() - self._started_at
+        """Seconds since :meth:`start`, plus those of earlier attempts (:meth:`add_elapsed`)."""
+        current = 0.0 if self._started_at is None else self._clock() - self._started_at
+        return self._earlier_seconds + current
+
+    def add_elapsed(self, seconds: float) -> None:
+        """Count ``seconds`` an earlier attempt of the run spent, e.g. when it is resumed."""
+        if not (math.isfinite(seconds) and seconds >= 0):
+            raise ValueError(f"elapsed seconds must be finite and not negative, got {seconds}")
+        self._earlier_seconds += seconds
 
     @property
     def spend_usd(self) -> float | None:

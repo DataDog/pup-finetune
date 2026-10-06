@@ -83,6 +83,26 @@ def test_the_default_reserve_is_a_tenth_of_the_cap() -> None:
     assert Budget().spend_exhausted(use_reserve=True) is None
 
 
+def test_time_from_earlier_attempts_counts_toward_the_spend() -> None:
+    clock = Clock()
+    budget = Budget(
+        max_spend_usd=1.0, hourly_rate_usd=3600.0, spend_reserve_fraction=0.0, clock=clock
+    )
+    budget.add_elapsed(0.75)
+    assert budget.elapsed_seconds == 0.75
+    budget.start()
+    clock.now += 0.25
+    assert budget.elapsed_seconds == 1.0
+    assert budget.spend_usd == pytest.approx(1.0)
+    assert budget.spend_exhausted() is not None
+
+
+@pytest.mark.parametrize("seconds", [-1.0, float("nan"), float("inf")])
+def test_earlier_time_must_be_finite_and_not_negative(seconds: float) -> None:
+    with pytest.raises(ValueError, match="elapsed seconds"):
+        Budget().add_elapsed(seconds)
+
+
 def test_the_clock_starts_once() -> None:
     clock = Clock()
     budget = Budget(clock=clock)

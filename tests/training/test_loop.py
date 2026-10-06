@@ -953,6 +953,59 @@ def test_the_token_budget_carries_over_a_resume() -> None:
     assert "stopped before step 7" in result.warnings[-1]
 
 
+def test_the_spend_budget_carries_over_a_resume() -> None:
+    # 60 USD/h is 1 USD a minute; steps take 4 minutes. Training stops at 24 USD (30 less
+    # the 20% reserve), before step 7, whether or not the run crashed and resumed.
+    spec = make_spec(max_epochs=3, batch_size=1, pipeline_depth=1, checkpoint_every_minutes=10)
+    options = FakeOptions(fail_at_step=6)  # after epoch 1's checkpoint, at 16 minutes
+    rows = row_examples(4)
+
+    def budget(clock: Clock) -> Budget:
+        return Budget(
+            max_spend_usd=30.0, hourly_rate_usd=60.0, spend_reserve_fraction=0.2, clock=clock
+        )
+
+    clock = Clock()
+    first = MemoryState()
+    with (
+        pytest.raises(Exception, match="fail_at_step"),
+        FakeBackend(options).open_session(FAKE_PROFILE, LORA, **SESSION) as session,
+    ):
+        train(
+            session,
+            spec,
+            rows=rows,
+            state=first,
+            budget=budget(clock),
+            clock=clock,
+            on_event=ticking(clock, 4),
+        )
+    point = first.resume_points[-1]
+    assert (point.step, point.elapsed_seconds) == (4, 16 * 60)
+
+    later = Clock()  # a new process: its clock does not know the first attempt's time
+    second = MemoryState()
+    resumed_budget = budget(later)
+    with FakeBackend(options).open_session(
+        FAKE_PROFILE, LORA, resume_from=point.checkpoint, **SESSION
+    ) as session:
+        result = train(
+            session,
+            spec,
+            rows=rows,
+            state=second,
+            budget=resumed_budget,
+            clock=later,
+            on_event=ticking(later, 4),
+            resume=Resume(point=point, epochs=first.epochs, warnings=first.warnings),
+        )
+    assert result.stopped_reason == "budget_exhausted"
+    assert second.steps == [(2, 5), (2, 6)]
+    assert resumed_budget.elapsed_seconds == 24 * 60
+    assert "stopped before step 7" in result.warnings[-1]
+    assert second.resume_points[-1].elapsed_seconds == 24 * 60
+
+
 def test_resuming_after_the_epoch_that_stops_early_stops_at_once() -> None:
     spec = make_spec(max_epochs=3, batch_size=1, pipeline_depth=1, patience=1)
     with recording(curve(1.0, 2.0)) as session:

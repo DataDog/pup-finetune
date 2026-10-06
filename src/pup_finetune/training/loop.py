@@ -451,6 +451,7 @@ class _Loop:
         self._step = self._checkpoint_step = point.step
         self._last_training = point.checkpoint
         self._budget.record(point.train_tokens)
+        self._budget.add_elapsed(point.elapsed_seconds)
         if point.epoch == finished:  # saved at that epoch's end: continue with the next one
             self._start_epoch = finished + 1
             return
@@ -715,6 +716,7 @@ class _Loop:
             epoch_weight=self._epoch_weight,
             epoch_tokens=self._epoch_tokens,
             train_tokens=self._budget.tokens_used,
+            elapsed_seconds=self._budget.elapsed_seconds,
         )
         self._recorded(ref, point, reason)
         return ref

@@ -60,7 +60,9 @@ class ResumePoint:
 
     ``step`` counts optimizer steps over the run and ``steps_in_epoch`` those of ``epoch``
     already trained. ``epoch_loss_sum``, ``epoch_weight`` and ``epoch_tokens`` accumulate
-    those steps' metrics; ``train_tokens`` counts the run's trained tokens (for the budget).
+    those steps' metrics; ``train_tokens`` counts the run's trained tokens and
+    ``elapsed_seconds`` the wall-clock seconds its spend guard counted over every attempt so
+    far, so a resumed run's budget carries on from them.
     """
 
     checkpoint: CheckpointRef
@@ -71,6 +73,7 @@ class ResumePoint:
     epoch_weight: float
     epoch_tokens: int
     train_tokens: int
+    elapsed_seconds: float
 
     def to_json(self) -> dict[str, Any]:
         return finite_json(dataclasses.asdict(self))
@@ -89,6 +92,7 @@ class ResumePoint:
             epoch_weight=_required(data, "epoch_weight", float),
             epoch_tokens=_required(data, "epoch_tokens", int),
             train_tokens=_required(data, "train_tokens", int),
+            elapsed_seconds=_required(data, "elapsed_seconds", float),
         )
 
 
