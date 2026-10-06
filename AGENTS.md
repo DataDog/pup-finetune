@@ -67,7 +67,10 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
 - `datadog/` - Datadog access via `pup`. `pup.py` is the client every Datadog call goes
   through: `pup --no-agent --output json ...`, a scrubbed environment, timeouts, and failures as
   `ExternalError`. Span export, datasets and experiments arrive later.
-- `data/` - *later*. Canonical row schema, conversion from spans, checks, splits, dataset dirs.
+- `data/` - training data. `schema.py` is the canonical row every provider consumes (OpenAI
+  chat format plus its source) and the stable `RowErrorCode` reasons a row is rejected for;
+  `jsonl.py` reads and writes rows and converts them to the provider form. Conversion from
+  spans, checks, splits and dataset directories arrive later.
 - `curation/` - *later*. Keep/drop labels and judge-based triage.
 - `training/` - *later*. The shared, provider-neutral SFT loop, run state and detached worker.
 - `rendering/` - *later*. The `Renderer` protocol that turns chat rows into model tokens.
@@ -79,6 +82,7 @@ Tests live under `tests/` and mirror `src/`. Shared fakes live in `tests/fakes/`
 as `tests.fakes...`); `tests/fakes/pup.py` has `FakePup`, a fake pup runner that answers by
 argument prefix and records every call. `tests/fakes/keyring.py` has in-memory, failing and locked
 keyring backends; every test starts on the failing one, so none touches the real keychain.
+Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds canonical rows.
 
 ## Conventions
 

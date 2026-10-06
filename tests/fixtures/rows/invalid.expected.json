@@ -1,0 +1,42 @@
+[
+  {
+    "line": 1,
+    "id": "bad-no-assistant",
+    "code": "no_assistant_message"
+  },
+  {
+    "line": 2,
+    "id": "bad-system-not-first",
+    "code": "system_not_first"
+  },
+  {
+    "line": 3,
+    "id": "bad-tool-result-without-call",
+    "code": "tool_result_without_call"
+  },
+  {
+    "line": 4,
+    "id": "bad-duplicate-tool-call-id",
+    "code": "duplicate_tool_call_id"
+  },
+  {
+    "line": 5,
+    "id": "bad-tool-not-declared",
+    "code": "tool_not_declared"
+  },
+  {
+    "line": 6,
+    "id": "bad-last-message-not-assistant",
+    "code": "last_message_not_assistant"
+  },
+  {
+    "line": 7,
+    "id": "bad-invalid-arguments-json",
+    "code": "invalid_arguments_json"
+  },
+  {
+    "line": 8,
+    "id": "bad-tool-message-without-id",
+    "code": "invalid_row"
+  }
+]
