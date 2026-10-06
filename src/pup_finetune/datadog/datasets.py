@@ -15,7 +15,8 @@
   the endpoint only previews; callers run this after their own ``--confirm`` gate. They are
   listed with ``pup llm-obs datasets records-all``, which pages through every record in one
   call and takes no cursor; a listing it reports ``truncated``, or that reached its page cap,
-  is refused as :class:`RecordsListTruncated` rather than read as the whole dataset.
+  is refused as :class:`RecordsListTruncated` rather than read as the whole dataset. Items it
+  cannot read are counted in :attr:`RecordsListing.unreadable`, not dropped silently.
 
 Lists are read page by page (``meta.after``) until the name is found. Creating is idempotent
 by name: when a create call fails or its response cannot be read, the project or dataset is
@@ -69,6 +70,17 @@ class DatasetRecord:
 
     id: str
     metadata: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class RecordsListing:
+    """A dataset's records, as ``records-all`` lists them."""
+
+    records: list[DatasetRecord]
+    """The readable records, in listed order; a record without metadata has it empty."""
+    unreadable: int = 0
+    """Listed items that are not a record with an id, attributes and object (or no) metadata:
+    any one of them may be a record the caller looks for."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,8 +190,8 @@ class LLMObsDatasets:
             data = self._pup.run_json([*args, "--file", str(path), "--confirm"])
         return _records_added(data, expected=len(records), dataset_id=dataset_id)
 
-    def list_records(self, dataset_id: str) -> list[DatasetRecord]:
-        """Every record of the dataset, through ``records-all``; unreadable items are skipped.
+    def list_records(self, dataset_id: str) -> RecordsListing:
+        """Every record of the dataset, through ``records-all``, and how many items were unreadable.
 
         Raises :class:`RecordsListTruncated` when the response is marked ``truncated`` or
         fetched :data:`RECORDS_ALL_MAX_PAGES` pages, since records missing from it would be
@@ -202,15 +214,14 @@ class LLMObsDatasets:
                 source=_SOURCE,
             )
         found: list[DatasetRecord] = []
+        unreadable = 0
         for item in items:
-            if not isinstance(item, dict):
-                continue
-            identifier = item.get("id")
-            attributes = item.get("attributes")
-            metadata = attributes.get("metadata") if isinstance(attributes, dict) else None
-            if isinstance(identifier, str) and identifier and isinstance(metadata, dict):
-                found.append(DatasetRecord(identifier, metadata))
-        return found
+            record = _dataset_record(item)
+            if record is None:
+                unreadable += 1
+            else:
+                found.append(record)
+        return RecordsListing(found, unreadable)
 
     # --- helpers ------------------------------------------------------------------------
 
@@ -302,6 +313,23 @@ def _next_cursor(data: dict[str, Any]) -> str | None:
     meta = data.get("meta")
     after = meta.get("after") if isinstance(meta, dict) else None
     return after if isinstance(after, str) and after else None
+
+
+def _dataset_record(item: Any) -> DatasetRecord | None:
+    """``item`` of a records-all listing as a record, or ``None`` when it cannot be read.
+
+    A record whose metadata is absent or null is readable, with empty metadata.
+    """
+    if not isinstance(item, dict):
+        return None
+    identifier = item.get("id")
+    attributes = item.get("attributes")
+    if not isinstance(identifier, str) or not identifier or not isinstance(attributes, dict):
+        return None
+    metadata = attributes.get("metadata")
+    if metadata is None:
+        return DatasetRecord(identifier, {})
+    return DatasetRecord(identifier, metadata) if isinstance(metadata, dict) else None
 
 
 def _records_added(data: Any, *, expected: int, dataset_id: str) -> RecordsAdded:

@@ -16,6 +16,7 @@ It answers the calls :class:`~pup_finetune.datadog.datasets.LLMObsDatasets` make
     api.records_add_lost_responses = {3}  # the 3rd adds its records, then exits 1
     api.page_size = 2  # serve project and dataset lists 2 items a page, by meta.after
     api.records_all_limit = 3  # records-all lists only the first 3 records, marked truncated
+    api.records_all_extra = ["junk"]  # records-all also lists these items, as they are
 
 Name filters match by substring, so callers must pick the exact name themselves. Every
 ``--file`` is read while the call runs; its permissions and those of its directory are kept
@@ -65,6 +66,8 @@ class FakeDatasetsApi:
         """Make every records-all call exit 1."""
         self.records_all_limit: int | None = None
         """List only this many records in records-all, with ``truncated: true``."""
+        self.records_all_extra: list[Any] = []
+        """Items records-all lists after the records, as they are (unreadable ones, say)."""
         self.page_size: int | None = None
         """Items per page of a projects or datasets list; ``None`` serves one page."""
         self.file_modes: list[tuple[int, int]] = []
@@ -198,6 +201,7 @@ class FakeDatasetsApi:
         truncated = self.records_all_limit is not None and len(records) > self.records_all_limit
         if truncated:
             records = records[: self.records_all_limit]
+        records = [*records, *self.records_all_extra]
         return {
             "dataset_id": dataset.id,
             "kind": "full_list",

@@ -69,6 +69,13 @@ _RESUME_HINT = (
     "adopts the records of it the dataset already holds before sending the rest"
 )
 
+_LOOK_UP_HINT = (
+    f"pushing again lists the same records, so {PUSH_FILE} keeps the rows as in_flight; look "
+    "them up in the dataset by metadata.row_id, add the ids of the records found to "
+    f"record_ids in {PUSH_FILE}, remove every row from in_flight, and push again to send only "
+    "the rows that are missing"
+)
+
 Progress = Callable[[str], None]
 
 
@@ -473,31 +480,25 @@ def _reconcile(
     in_flight = set(state.in_flight)
     report(f"checking dataset {dataset_id} for {len(in_flight)} records of an interrupted batch")
     try:
-        records = api.list_records(dataset_id)
+        listing = api.list_records(dataset_id)
     except RecordsListTruncated as exc:
         # A record missing from a cut-off listing may still be in the dataset: resending its
         # row would add it twice. Listing again reads no further, so say how to settle it.
-        raise StateError(
-            f"cannot tell which of {len(in_flight)} records sent to dataset {dataset_id} by an "
-            f"interrupted push were added ({exc}); they may already be there: "
-            f"{_some(state.in_flight)}",
-            hint=(
-                f"pushing again lists the same records, so {PUSH_FILE} keeps the rows as "
-                "in_flight; look them up in the dataset by metadata.row_id, add the ids of "
-                f"the records found to record_ids in {PUSH_FILE}, remove every row from "
-                "in_flight, and push again to send only the rows that are missing"
-            ),
-        ) from exc
+        raise _undecided(state, str(exc), hint=_LOOK_UP_HINT) from exc
     except ExternalError as exc:
-        raise StateError(
-            f"cannot tell which of {len(in_flight)} records sent to dataset {dataset_id} by an "
-            f"interrupted push were added ({exc}); they may already be there: "
-            f"{_some(state.in_flight)}",
+        raise _undecided(
+            state,
+            str(exc),
             hint=f"push again once the dataset's records can be listed; {PUSH_FILE} lists the "
             "rows as in_flight, and pushing them now could add them twice",
         ) from exc
+    if listing.unreadable:
+        # Any item the listing could not read may be a record of the batch: resending its row
+        # would add it twice.
+        why = f"records-all listed {listing.unreadable} items that are not readable records"
+        raise _undecided(state, why, hint=_LOOK_UP_HINT)
     found: dict[str, str] = {}
-    for record in records:
+    for record in listing.records:
         row_id = record.metadata.get("row_id")
         if isinstance(row_id, str) and row_id in in_flight:
             found.setdefault(row_id, record.id)
@@ -514,6 +515,16 @@ def _reconcile(
         f"{len(in_flight) - len(found)} are sent again"
     )
     return state
+
+
+def _undecided(state: PushState, why: str, *, hint: str) -> StateError:
+    """The error of a push that cannot tell which in-flight records reached the dataset."""
+    return StateError(
+        f"cannot tell which of {len(state.in_flight)} records sent to dataset "
+        f"{state.dataset_id} by an interrupted push were added ({why}); they may already be "
+        f"there: {_some(state.in_flight)}",
+        hint=hint,
+    )
 
 
 def _some(row_ids: Sequence[str]) -> str:
