@@ -76,6 +76,7 @@ _FLAGS: dict[str, str] = {
     "max_train_tokens": "--max-train-tokens",
     "max_spend_usd": "--max-spend-usd",
     "hourly_rate_usd": "--hourly-rate-usd",
+    "spend_reserve_fraction": "--spend-reserve-fraction",
     "microbatch_token_budget": "--microbatch-token-budget",
 }
 
@@ -330,6 +331,14 @@ def train(
         float | None,
         typer.Option(help="Your training price per hour (USD), for --max-spend-usd."),
     ] = None,
+    spend_reserve_fraction: Annotated[
+        float | None,
+        typer.Option(
+            help="The share of --max-spend-usd kept for the checkpoint and promotion at the "
+            "stop; training stops that much short of the cap "
+            f"(default: {_default('spend_reserve_fraction')})."
+        ),
+    ] = None,
     microbatch_token_budget: Annotated[
         int | None,
         typer.Option(help="Pack each step into microbatches of at most this many tokens."),
@@ -368,6 +377,7 @@ def train(
         "max_train_tokens": max_train_tokens,
         "max_spend_usd": max_spend_usd,
         "hourly_rate_usd": hourly_rate_usd,
+        "spend_reserve_fraction": spend_reserve_fraction,
         "microbatch_token_budget": microbatch_token_budget,
     }
     spec = _spec(flags, options)

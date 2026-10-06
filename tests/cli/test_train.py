@@ -139,6 +139,21 @@ def test_the_preview_counts_rows_examples_and_tokens(dataset: Path, tmp_path: Pa
     assert preview["data_destination"] == "training data is sent to fake"
 
 
+def test_the_spend_flags_reach_the_spec_and_the_rerun(dataset: Path, tmp_path: Path) -> None:
+    spend = ("--max-spend-usd", "5", "--hourly-rate-usd", "2.5")
+    result = invoke(
+        *train_args(dataset, tmp_path / "run", *spend, "--spend-reserve-fraction", "0.25")
+    )
+    data = output(result)
+    spec = data["preview"]["spec"]
+    assert (spec["max_spend_usd"], spec["hourly_rate_usd"]) == (5.0, 2.5)
+    assert spec["spend_reserve_fraction"] == 0.25
+    words = shlex.split(data["next_command"])
+    assert words[words.index("--spend-reserve-fraction") + 1] == "0.25"
+    default = output(invoke(*train_args(dataset, tmp_path / "other", *spend)))["preview"]
+    assert default["spec"]["spend_reserve_fraction"] == 0.1
+
+
 def test_the_preview_reports_rows_over_the_context(tmp_path: Path) -> None:
     lines = ROWS.read_text().splitlines()
     long_rows = []
@@ -221,6 +236,7 @@ def test_the_fake_provider_needs_dev_mode(
     [
         (("--max-epochs", "0"), "--max-epochs"),
         (("--max-spend-usd", "5"), "--hourly-rate-usd"),
+        (("--spend-reserve-fraction", "1"), "--spend-reserve-fraction"),
         (("--provider-option", "no-equals-sign"), "key=value"),
         (("--provider-option", "nope=1"), "unknown fake provider option"),
         (("--run-id", "Not Valid"), "invalid run id"),
