@@ -6,6 +6,7 @@
 # Copyright 2026-present Datadog, Inc.
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -60,6 +61,10 @@ def make_row(row_id: str, text: str, *, trace_id: str | None = None) -> Training
 
 def jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
 def snapshot(directory: Path) -> dict[str, bytes]:
@@ -469,14 +474,47 @@ def test_read_import_file_keeps_going_past_malformed_lines(tmp_path: Path) -> No
     )
     rows, exclusions = read_import_file(path)
     assert [row.id for row in rows] == ["row-weather-001"]
+    last = b'{"id": "x", "messages": [], "source": {"trace_id": "t", "span_id": 3}}'
     assert [e.to_json() for e in exclusions] == [
-        {"code": "invalid_row", "detail": "mixed.jsonl:1: invalid JSON: Expecting value"},
-        {"code": "invalid_row", "detail": "mixed.jsonl:2: expected a JSON object"},
-        {"code": "invalid_row", "detail": "mixed.jsonl:3: not valid UTF-8"},
+        {
+            "code": "invalid_row",
+            "detail": "mixed.jsonl:1: invalid JSON: Expecting value",
+            "line_sha256": sha256(b"not json"),
+        },
+        {
+            "code": "invalid_row",
+            "detail": "mixed.jsonl:2: expected a JSON object",
+            "line_sha256": sha256(b"[1, 2]"),
+        },
+        {
+            "code": "invalid_row",
+            "detail": "mixed.jsonl:3: not valid UTF-8",
+            "line_sha256": sha256(b"\xff\xfe"),
+        },
         {
             "code": "invalid_row",
             "detail": "mixed.jsonl:6: source.span_id: Input should be a valid string",
             "row_id": "x",
             "trace_id": "t",
+            "line_sha256": sha256(last),
         },
     ]
+
+
+def test_id_less_invalid_rows_from_same_named_files_are_counted_apart(tmp_path: Path) -> None:
+    # Same file name, line and diagnostic; only the line content tells them apart.
+    first, second = tmp_path / "a" / "rows.jsonl", tmp_path / "b" / "rows.jsonl"
+    for path, text in ((first, "one"), (second, "two")):
+        path.parent.mkdir()
+        path.write_text(json.dumps({"messages": [{"role": "user", "content": text}]}) + "\n")
+    dataset = DatasetDir(tmp_path / "ds")
+    dataset.add(*read_import_file(first), settings=IMPORT)
+    summary = dataset.add(*read_import_file(second), settings=IMPORT).summary
+    details = [record["detail"] for record in dataset.excluded()]
+    assert details == ["rows.jsonl:1: id: Field required"] * 2
+    assert (summary["total"], summary["excluded"]) == (2, 2)
+
+    # Re-importing either file is an exact repeat, so nothing is counted twice.
+    before = snapshot(dataset.path)
+    assert dataset.add(*read_import_file(first), settings=IMPORT).summary == summary
+    assert snapshot(dataset.path) == before

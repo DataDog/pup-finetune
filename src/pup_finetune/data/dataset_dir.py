@@ -11,8 +11,9 @@ Files, all ``0600`` in a ``0700`` directory, since rows hold trace content:
 - ``settings.json`` - frozen on first use: the source kind and its settings, and the split
   params. Later imports must pass the same settings.
 - ``rows.jsonl`` - accepted canonical rows.
-- ``excluded.jsonl`` - one ``{row_id?, trace_id?, span_id?, code, detail}`` per excluded row:
-  the latest reason per ``row_id``, and none for an id that has since been accepted.
+- ``excluded.jsonl`` - one ``{row_id?, trace_id?, span_id?, line_sha256?, code, detail}`` per
+  excluded row: the latest reason per ``row_id``, and none for an id that has since been
+  accepted.
 - ``labels.jsonl`` - keep/drop labels (written by a later command; optional).
 - ``splits.json`` - split assignments (see :mod:`pup_finetune.data.split`).
 - ``summary.json`` - counts and warnings, rewritten after every change.
@@ -305,10 +306,10 @@ def read_import_file(path: Path) -> tuple[list[TrainingRow], list[Exclusion]]:
     path = Path(path)
     rows: list[TrainingRow] = []
     exclusions: list[Exclusion] = []
-    for line_number, data, result in scan_rows(path):
+    for line_number, data, result, line in scan_rows(path):
         if isinstance(result, RowError):
             where = f"{path.name}:{line_number}"
-            exclusions.append(Exclusion.for_invalid(data, result, where=where))
+            exclusions.append(Exclusion.for_invalid(data, result, where=where, line=line))
         else:
             rows.append(result)
     return rows, exclusions
@@ -362,8 +363,9 @@ def _reconcile(
     """Stored exclusion ``records`` updated with new ``exclusions``, in first-recorded order.
 
     A record with a ``row_id`` is identified by it: a newer exclusion replaces it in place,
-    and it is dropped once that id is an accepted row. A record without one has no stable
-    identity, so only an exact repeat of it is dropped.
+    and it is dropped once that id is an accepted row. A record without one is identified by
+    all of its fields, including its location and the hash of its input line, so only an
+    exact repeat of it (the same line re-imported from the same place) is dropped.
     """
     merged: dict[str, dict[str, Any]] = {}
     for record in [*records, *(exclusion.to_json() for exclusion in exclusions)]:

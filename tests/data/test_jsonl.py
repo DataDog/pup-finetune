@@ -278,8 +278,11 @@ def test_scan_rows_yields_every_line_with_its_row_or_error(tmp_path: Path) -> No
     path = tmp_path / "rows.jsonl"
     path.write_text("\n".join([valid, "", "{oops", invalid]) + "\n")
     results = list(scan_rows(path))
-    assert [line for line, _, _ in results] == [1, 3, 4]
-    (_, data, row), (_, bad_data, bad_json), (_, invalid_data, invalid_row) = results
+    assert [line for line, _, _, _ in results] == [1, 3, 4]
+    assert [raw for _, _, _, raw in results] == [
+        f"{text}\n".encode() for text in (valid, "{oops", invalid)
+    ]
+    (_, data, row, _), (_, bad_data, bad_json, _), (_, invalid_data, invalid_row, _) = results
     assert isinstance(row, TrainingRow)
     assert data["id"] == row.id
     assert bad_data == {}

@@ -35,12 +35,15 @@ def read_rows(path: Path) -> Iterator[TrainingRow]:
             raise RowError(exc.code, exc.detail, path=str(path), line=line_number) from exc
 
 
-def scan_rows(path: Path) -> Iterator[tuple[int, dict[str, Any], TrainingRow | RowError]]:
-    """Yield ``(line_number, data, row_or_error)`` for each non-blank line, without stopping.
+def scan_rows(
+    path: Path,
+) -> Iterator[tuple[int, dict[str, Any], TrainingRow | RowError, bytes]]:
+    """Yield ``(line_number, data, row_or_error, line)`` for each non-blank line, without stopping.
 
     Unlike :func:`read_rows`, a bad line does not end the scan: it yields a :class:`RowError`
     carrying the file and line number. ``data`` is the parsed JSON object, or ``{}`` when the
     line is not one (invalid UTF-8 or JSON, or another JSON value: code ``invalid_row``).
+    ``line`` is the raw line as read, so a caller can identify even a line that did not parse.
     """
     path = Path(path)
     with path.open("rb") as handle:
@@ -52,15 +55,16 @@ def scan_rows(path: Path) -> Iterator[tuple[int, dict[str, Any], TrainingRow | R
                 error = RowError(
                     RowErrorCode.INVALID_ROW, problem, path=str(path), line=line_number
                 )
-                yield line_number, {}, error
+                yield line_number, {}, error, line
                 continue
             try:
-                yield line_number, data, validate_row(data)
+                yield line_number, data, validate_row(data), line
             except RowError as exc:
                 yield (
                     line_number,
                     data,
                     RowError(exc.code, exc.detail, path=str(path), line=line_number),
+                    line,
                 )
 
 
