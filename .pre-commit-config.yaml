@@ -43,3 +43,9 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: check-3rdparty
+        name: check LICENSE-3rdparty.csv
+        entry: uv run python scripts/check_3rdparty.py
+        language: system
+        files: ^(pyproject\.toml|LICENSE-3rdparty\.csv|scripts/check_3rdparty\.py)$
+        pass_filenames: false
