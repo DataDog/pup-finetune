@@ -40,7 +40,8 @@ uv run python scripts/check_3rdparty.py # LICENSE-3rdparty.csv covers every depe
 
 ## Adding a provider
 
-The guide for adding a training provider lands together with the provider seam it describes.
+[docs/architecture.md](docs/architecture.md#how-a-new-provider-plugs-in) explains the seam a
+training provider implements and walks through adding one.
 
 ## License
 
