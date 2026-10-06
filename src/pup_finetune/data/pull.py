@@ -504,32 +504,39 @@ def pull(
     first pull froze. The settings are frozen (or checked) before anything is fetched, so a
     pull with other settings fails fast with :class:`~pup_finetune.errors.StateError`, and
     an interrupted first pull leaves a dataset its re-run resumes; an :class:`ExternalError`
-    part-way says so in its hint. The cache is locked while the export reads it. Stored rows
-    the new conversion collapsed are retired (:func:`retirements`), stored rows it read more
-    reasoning for are updated (:func:`reasoning_updates`), and new rows a stored row contains
-    are excluded instead of added (:func:`contained`); the returned collection is what the
-    export read and converted, before any of these.
+    part-way says so in its hint. Stored rows the new conversion collapsed are retired
+    (:func:`retirements`), stored rows it read more reasoning for are updated
+    (:func:`reasoning_updates`), and new rows a stored row contains are excluded instead of
+    added (:func:`contained`); the returned collection is what the export read and
+    converted, before any of these.
+
+    The cache is locked from the export through the add, so a concurrent pull into the same
+    dataset fails with :class:`~pup_finetune.errors.LockBusy` instead of changing the stored
+    rows this one reconciles against.
     """
     options = resolve_window(options, dataset, clock)
     settings = options.dataset_settings(split)
     dataset.create_or_check(settings)
     raw = make_private_dir(dataset.raw_path)
+    # The raw/ lock is held through the add, so no other pull changes the stored rows between
+    # the read below and the add. DatasetDir.add locks the dataset directory itself, through
+    # another lock file, so holding this one does not block it.
     with DirectoryLock(raw):
         try:
             collection = collect(pup, options, cache_dir=raw, sleep=sleep, progress=progress)
         except ExternalError as exc:
             raise _with_resume_note(exc, raw) from exc
-    stored = dataset.rows()
-    retired = retirements(collection, stored, dataset.excluded())
-    rows, updated = reasoning_updates(collection.rows, stored)
-    rows, exclusions = contained(rows, stored, retired)
-    added = dataset.add(
-        rows,
-        [*collection.exclusions, *exclusions],
-        settings=settings,
-        retired=retired,
-        updated=updated,
-    )
+        stored = dataset.rows()
+        retired = retirements(collection, stored, dataset.excluded())
+        rows, updated = reasoning_updates(collection.rows, stored)
+        rows, exclusions = contained(rows, stored, retired)
+        added = dataset.add(
+            rows,
+            [*collection.exclusions, *exclusions],
+            settings=settings,
+            retired=retired,
+            updated=updated,
+        )
     return collection, added
 
 

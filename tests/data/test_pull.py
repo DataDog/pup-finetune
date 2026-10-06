@@ -29,7 +29,8 @@ from pup_finetune.data.pull import (
 )
 from pup_finetune.data.split import SplitParams
 from pup_finetune.datadog.spans import SpanQuery
-from pup_finetune.errors import StateError, UsageError
+from pup_finetune.errors import LockBusy, StateError, UsageError
+from pup_finetune.storage import DirectoryLock
 from tests.fakes.llmobs import FakeExportApi, fixture_pages, page, span_item
 from tests.fakes.pup import FakePup
 
@@ -462,6 +463,48 @@ def test_contained_leaves_out_new_rows_a_kept_stored_row_contains() -> None:
     ]
     # A row already stored is the dataset's to keep or retire.
     assert contained(collection.rows, [*stored, *collection.rows]) == (collection.rows, [])
+
+
+def test_a_pull_fails_while_another_holds_the_raw_cache(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    pull_into(dataset, target_count=1)
+    rows = dataset.rows_path.read_bytes()
+    api = FakeExportApi(two_page_conversation())
+    pup = api.install(FakePup()).client()
+    options = PullOptions(SpanQuery(ml_app="synthetic"))
+    with DirectoryLock(dataset.raw_path), pytest.raises(LockBusy):
+        pull(pup, options, dataset, SplitParams())
+    assert api.requests == []
+    assert dataset.rows_path.read_bytes() == rows
+
+
+class LockProbingDataset(DatasetDir):
+    """A dataset that notes whether the raw cache was locked the last time its rows were read
+    and the last time rows were added (the reconciliation after the export)."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self.raw_locked: dict[str, bool] = {}
+
+    def _note(self, step: str) -> None:
+        if self.raw_path.is_dir():
+            self.raw_locked[step] = DirectoryLock(self.raw_path).is_held()
+
+    def rows(self) -> list[Any]:
+        self._note("rows")
+        return super().rows()
+
+    def add(self, *args: Any, **kwargs: Any) -> Any:
+        self._note("add")
+        return super().add(*args, **kwargs)
+
+
+def test_a_pull_holds_the_raw_cache_until_its_rows_are_added(tmp_path: Path) -> None:
+    dataset = LockProbingDataset(tmp_path / "ds")
+    pull_into(dataset, target_count=1)
+    pull_into(dataset)
+    assert dataset.raw_locked == {"rows": True, "add": True}
+    assert [row.id for row in dataset.rows()] == ["synthetic-trace-9000:synthetic-span-2"]
 
 
 def test_a_pull_interrupted_while_retiring_keeps_the_retired_row_s_record(
