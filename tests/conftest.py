@@ -24,6 +24,8 @@ _RUNTIME_ENV: tuple[str, ...] = (
     "DD_SITE",
     "PUP_FINETUNE_DEV",
     "PUP_FINETUNE_DEBUG",
+    "PUP_FINETUNE_PUP",
+    "PUP_FINETUNE_KEEP_DD_TOKEN",
     # Terminal and color overrides that change how rich renders stderr.
     "FORCE_COLOR",
     "NO_COLOR",

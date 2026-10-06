@@ -1,0 +1,37 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# Unless explicitly stated otherwise all files in this repository are licensed under the Apache License Version 2.0.
+#
+# This product includes software developed at Datadog (https://www.datadoghq.com/).
+# Copyright 2026-present Datadog, Inc.
+
+# Development launcher: runs this checkout's pup-finetune through uv, from any directory.
+# Install it as the `pup finetune` extension (pup names it after this file) with:
+#   pup extension install --local bin/pup-finetune --link
+set -eu
+
+# Follow symlinks (pup links installed extensions) to find this file in the checkout.
+self=$0
+hops=0
+while [ -L "$self" ]; do
+    hops=$((hops + 1))
+    if [ "$hops" -gt 40 ]; then
+        echo "pup-finetune: too many levels of symlinks" >&2
+        exit 1
+    fi
+    target=$(readlink "$self")
+    case $target in
+        /*) self=$target ;;
+        *) self=$(dirname -- "$self")/$target ;;
+    esac
+done
+# A subshell, so the user's working directory is unchanged for the command below.
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$self")/.." && pwd -P)
+
+if ! command -v uv >/dev/null 2>&1; then
+    echo "pup-finetune: uv not found on PATH; install it from https://docs.astral.sh/uv/" >&2
+    exit 127
+fi
+
+exec uv run --quiet --project "$repo_root" pup-finetune "$@"

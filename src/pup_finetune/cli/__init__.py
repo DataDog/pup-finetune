@@ -13,6 +13,7 @@ from typing import Annotated
 import typer
 
 from pup_finetune import __version__
+from pup_finetune.cli import doctor
 from pup_finetune.cli._common import PROG_NAME, run_app
 
 app = typer.Typer(
@@ -48,6 +49,9 @@ def root(
 ) -> None:
     # Root help text lives in typer.Typer(help=...) above; this callback only hosts --version.
     del version  # handled eagerly by _version_callback
+
+
+doctor.register(app)
 
 
 def main() -> None:

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import io
 import json
-import os
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
@@ -18,7 +17,7 @@ from rich.console import Console
 
 from pup_finetune import output
 from pup_finetune.errors import ConfirmRequired, UsageError
-from pup_finetune.output import emit, emit_error, info, run_pup, status, to_json, warn
+from pup_finetune.output import emit, emit_error, info, status, to_json, warn
 from pup_finetune.runtime import Runtime
 
 STANDALONE = Runtime()
@@ -111,19 +110,6 @@ def test_missing_pup_on_path_falls_back(
     out, err = capsys.readouterr()
     assert json.loads(out) == {"a": 1}
     assert "pup not found on PATH" in err
-
-
-def test_run_pup_uses_list_args_stdin_and_inherited_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    fake_pup = tmp_path / "pup"
-    fake_pup.write_text('#!/bin/sh\nprintf "%s|%s|" "$1" "$PUP_OUTPUT"\ncat\n')
-    fake_pup.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}")
-    monkeypatch.setenv("PUP_OUTPUT", "yaml")
-    completed = run_pup(["format"], '{"a": 1}')
-    assert completed.returncode == 0
-    assert completed.stdout == 'format|yaml|{"a": 1}'
 
 
 def test_emit_error_writes_message_and_hint_to_stderr(

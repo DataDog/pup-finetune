@@ -19,7 +19,7 @@ import typer
 from typer.testing import CliRunner
 
 from pup_finetune import __version__, cli
-from pup_finetune.cli._common import get_runtime, run_app, run_command
+from pup_finetune.cli._common import CommandResult, get_runtime, run_app, run_command
 from pup_finetune.errors import (
     ConfirmRequired,
     ExternalError,
@@ -64,6 +64,11 @@ def make_app(error: BaseException | None = None) -> typer.Typer:
     def env() -> Mapping[str, Any]:
         return {"read_only": get_runtime().read_only}
 
+    @app.command()
+    @run_command
+    def report(code: Annotated[int, typer.Option()] = 1) -> CommandResult:
+        return CommandResult({"ok": code == 0}, exit_code=code)
+
     return app
 
 
@@ -71,6 +76,14 @@ def test_success_emits_exactly_one_json_document() -> None:
     result = runner.invoke(make_app(), ["ok", "--name", "x"])
     assert result.exit_code == 0
     assert json.loads(result.stdout) == {"name": "x", "next_command": "pup finetune show x"}
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize("code", [0, 1])
+def test_command_result_emits_one_json_document_then_exits_with_its_code(code: int) -> None:
+    result = runner.invoke(make_app(), ["report", "--code", str(code)])
+    assert result.exit_code == code
+    assert json.loads(result.stdout) == {"ok": code == 0}
     assert result.stderr == ""
 
 
@@ -187,6 +200,19 @@ def test_under_pup_success_goes_through_pup_format(fake_pup_on_path: Path) -> No
     prefix = "rendered-as-yaml:"
     assert result.stdout.startswith(prefix)
     assert json.loads(result.stdout.removeprefix(prefix))["name"] == "x"
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize("code", [0, 1])
+def test_under_pup_command_result_goes_through_pup_format_then_exits(
+    fake_pup_on_path: Path, code: int
+) -> None:
+    del fake_pup_on_path
+    result = runner.invoke(make_app(), ["report", "--code", str(code)], env={"PUP_OUTPUT": "yaml"})
+    assert result.exit_code == code
+    prefix = "rendered-as-yaml:"
+    assert result.stdout.startswith(prefix)
+    assert json.loads(result.stdout.removeprefix(prefix)) == {"ok": code == 0}
     assert result.stderr == ""
 
 

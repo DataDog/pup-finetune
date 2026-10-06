@@ -13,45 +13,18 @@ user's output format, ``--jq`` filter and agent envelope. Standalone, it is prin
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 import sys
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any
 
 from rich.console import Console
 from rich.text import Text
 
+from pup_finetune.datadog.pup import FormatRunner, run_pup
 from pup_finetune.errors import ConfirmRequired, FinetuneError
 from pup_finetune.runtime import Runtime
-
-PupRunner = Callable[[Sequence[str], str], "subprocess.CompletedProcess[str]"]
-"""Runs ``pup <args>`` with the given text on stdin and returns the completed process."""
-
-_FORMAT_TIMEOUT_SECONDS = 30.0
-
-
-def run_pup(args: Sequence[str], stdin: str) -> subprocess.CompletedProcess[str]:
-    """Run ``pup`` with list arguments (no shell), inheriting this process's environment.
-
-    Only for ``pup format`` from :func:`emit`; other modules must not spawn pup through this.
-    It is kept small and self-contained because pup process spawning moves to
-    ``datadog/pup.py``. Raises ``FileNotFoundError`` when ``pup`` is not on ``PATH``.
-    """
-    executable = shutil.which("pup")
-    if executable is None:
-        raise FileNotFoundError("pup not found on PATH")
-    return subprocess.run(  # noqa: S603 - fixed executable, list args, no shell
-        [executable, *args],
-        input=stdin,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-        timeout=_FORMAT_TIMEOUT_SECONDS,
-    )
 
 
 def to_json(result: Mapping[str, Any]) -> str:
@@ -65,7 +38,7 @@ def _first_line(text: str, limit: int = 200) -> str:
     return line[:limit]
 
 
-def _format_with_pup(document: str, runner: PupRunner) -> str | None:
+def _format_with_pup(document: str, runner: FormatRunner) -> str | None:
     """Return pup's rendering of ``document``, or ``None`` (with one stderr note) on failure."""
     try:
         completed = runner(["format"], document)
@@ -85,7 +58,7 @@ def emit(
     result: Mapping[str, Any],
     *,
     runtime: Runtime,
-    runner: PupRunner = run_pup,
+    runner: FormatRunner = run_pup,
 ) -> None:
     """Write exactly one result document to stdout."""
     document = to_json(result)
@@ -102,7 +75,7 @@ def emit_error(
     err: FinetuneError,
     *,
     runtime: Runtime,
-    runner: PupRunner = run_pup,
+    runner: FormatRunner = run_pup,
 ) -> None:
     """Report an expected failure: a concise message on stderr.
 
