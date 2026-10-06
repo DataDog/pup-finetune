@@ -24,6 +24,7 @@ from rich.text import Text
 
 from pup_finetune.datadog.pup import FormatRunner, run_pup
 from pup_finetune.errors import ConfirmRequired, FinetuneError
+from pup_finetune.redaction import redact
 from pup_finetune.runtime import Runtime
 
 
@@ -75,6 +76,17 @@ def emit(
     sys.stdout.flush()
 
 
+def _redacted(value: Any) -> Any:
+    """``value`` with every string inside it (keys included) passed through ``redact``."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, Mapping):
+        return {_redacted(key): _redacted(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_redacted(item) for item in value]
+    return value
+
+
 def emit_error(
     err: FinetuneError,
     *,
@@ -84,22 +96,24 @@ def emit_error(
     """Report an expected failure: a concise message on stderr.
 
     A :class:`ConfirmRequired` also emits its preview as the stdout result, so agents can
-    parse what would happen and the command that runs it.
+    parse what would happen and the command that runs it. Every line, and every string in
+    the preview, is passed through :func:`~pup_finetune.redaction.redact`, so a known secret
+    never reaches the terminal.
     """
     if isinstance(err, ConfirmRequired):
-        print(f"Confirmation required: {err}", file=sys.stderr)
-        print(f"Next: {err.rerun}", file=sys.stderr)
+        print(redact(f"Confirmation required: {err}"), file=sys.stderr)
+        print(redact(f"Next: {err.rerun}"), file=sys.stderr)
     else:
-        print(f"Error: {err}", file=sys.stderr)
+        print(redact(f"Error: {err}"), file=sys.stderr)
     if err.hint:
-        print(f"Hint: {err.hint}", file=sys.stderr)
+        print(redact(f"Hint: {err.hint}"), file=sys.stderr)
     sys.stderr.flush()
     if isinstance(err, ConfirmRequired):
         emit(
             {
                 "status": "confirmation_required",
-                "preview": err.preview,
-                "next_command": err.rerun,
+                "preview": _redacted(err.preview),
+                "next_command": redact(err.rerun),
             },
             runtime=runtime,
             runner=runner,

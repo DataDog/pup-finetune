@@ -4,13 +4,18 @@
 #
 # This product includes software developed at Datadog (https://www.datadoghq.com/).
 # Copyright 2026-present Datadog, Inc.
-"""Shared pytest configuration: opt-in gates for live and tokenizer tests, and a clean runtime env."""
+"""Shared pytest configuration: opt-in gates, a clean env, no real keychain, reset logging."""
 
 from __future__ import annotations
 
+import logging
 import os
+from collections.abc import Iterator
 
+import keyring.core
 import pytest
+
+from tests.fakes.keyring import FailKeyring
 
 pytest_plugins = ["pytester"]
 
@@ -55,3 +60,25 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 def _clean_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in _RUNTIME_ENV:
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_keychain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default every test to a keyring with no backend, so none can touch the real keychain."""
+    monkeypatch.setattr(keyring.core, "_keyring_backend", FailKeyring())
+
+
+@pytest.fixture(autouse=True)
+def _restore_logging() -> Iterator[None]:
+    """Undo global logging changes (e.g. log redaction installed by ``run_app``)."""
+    root = logging.getLogger()
+    factory = logging.getLogRecordFactory()
+    root_filters = list(root.filters)
+    last_resort = logging.lastResort
+    last_resort_filters = list(last_resort.filters) if last_resort is not None else []
+    yield
+    logging.setLogRecordFactory(factory)
+    root.filters[:] = root_filters
+    logging.lastResort = last_resort
+    if last_resort is not None:
+        last_resort.filters[:] = last_resort_filters
