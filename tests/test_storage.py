@@ -270,6 +270,23 @@ def test_directory_lock_on_missing_dir_raises_state_error(tmp_path: Path) -> Non
         pass
 
 
+def test_directory_lock_never_writes_through_a_planted_symlink(tmp_path: Path) -> None:
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep me\n")
+    locked = tmp_path / "dir"
+    locked.mkdir()
+    (locked / LOCK_FILE_NAME).symlink_to(victim)
+    with pytest.raises(StateError, match="cannot lock"), DirectoryLock(locked):
+        pass
+    assert victim.read_text() == "keep me\n"
+
+
+def test_directory_lock_refuses_a_lock_path_that_is_not_a_regular_file(tmp_path: Path) -> None:
+    (tmp_path / LOCK_FILE_NAME).mkdir()
+    with pytest.raises(StateError, match="cannot lock"), DirectoryLock(tmp_path):
+        pass
+
+
 def test_directory_lock_releases_on_error(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError), DirectoryLock(tmp_path):
         raise RuntimeError("boom")

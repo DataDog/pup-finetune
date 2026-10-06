@@ -18,6 +18,7 @@ import hashlib
 import json
 import math
 import os
+import stat
 import tempfile
 from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
@@ -215,7 +216,9 @@ class DirectoryLock:
     Use as a context manager. The lock is released when the context exits or the process
     dies. It is not reentrant: a second lock on the same directory fails, even in-process,
     with :class:`~pup_finetune.errors.LockBusy`. The holder writes its pid to the lock file
-    (see :meth:`owner_pid`).
+    (see :meth:`owner_pid`). The lock file is never opened through a symlink, and only a
+    regular file of this user's is written to; anything else raises
+    :class:`~pup_finetune.errors.StateError`.
     """
 
     def __init__(self, path: Path) -> None:
@@ -227,11 +230,17 @@ class DirectoryLock:
         return self.path / LOCK_FILE_NAME
 
     def __enter__(self) -> Self:
+        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
         try:
-            fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, _PRIVATE_FILE)
+            fd = os.open(self.lock_path, flags, _PRIVATE_FILE)
         except OSError as exc:
             raise StateError(f"cannot lock {self.path}: {exc.strerror or exc}") from exc
         try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                raise StateError(
+                    f"cannot lock {self.path}: {self.lock_path} is not a regular file of yours"
+                )
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             os.close(fd)
