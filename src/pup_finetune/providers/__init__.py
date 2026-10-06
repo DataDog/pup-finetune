@@ -63,13 +63,17 @@ def get_provider(name: str, runtime: Runtime) -> Provider:
     """Import and build the provider registered as ``name``.
 
     Raises :class:`UsageError` listing the known names for an unknown provider, and when the
-    provider's module or a package it needs is not installed.
+    provider's module or a package it needs is not installed, whether that package is
+    imported with the module or lazily, while the provider is built.
     """
     entry = _REGISTRY.get(name)
     if entry is None or not _visible(entry, runtime):
         raise _unknown(name, runtime, dev_only=entry is not None)
     factory = _load(name, entry.target)
-    provider = factory(runtime)
+    try:
+        provider = factory(runtime)
+    except ModuleNotFoundError as exc:
+        raise _not_installed(name, entry.target.partition(":")[0], exc) from exc
     if not isinstance(provider, Provider):
         raise FinetuneError(f"provider {name!r} ({entry.target}) did not build a Provider")
     return provider
@@ -92,16 +96,7 @@ def _load(name: str, target: str) -> Callable[[Runtime], object]:
     try:
         module = importlib.import_module(module_name)
     except ModuleNotFoundError as exc:
-        missing = exc.name or ""
-        if _is_first_party(missing, module_name):
-            raise UsageError(
-                f"provider {name!r} is registered but its module {module_name} is missing",
-                hint="reinstall pup-finetune; the installation looks incomplete",
-            ) from exc
-        raise UsageError(
-            f"provider {name!r} needs the {missing!r} package, which is not installed",
-            hint=f"install pup-finetune with the {name!r} extra: pup-finetune[{name}]",
-        ) from exc
+        raise _not_installed(name, module_name, exc) from exc
     try:
         factory: object = getattr(module, attr)
     except AttributeError as exc:
@@ -109,6 +104,25 @@ def _load(name: str, target: str) -> Callable[[Runtime], object]:
     if not callable(factory):
         raise FinetuneError(f"provider {name!r}: {target} is not callable")
     return factory
+
+
+def _not_installed(name: str, module_name: str, exc: ModuleNotFoundError) -> UsageError:
+    """The error for a module missing while importing provider ``name`` or building it."""
+    missing = exc.name or ""
+    if _is_first_party(missing, module_name):
+        # Name the target when it (or a parent) is what is missing, else our missing module.
+        target_missing = (
+            not missing or module_name == missing or module_name.startswith(f"{missing}.")
+        )
+        shown = module_name if target_missing else missing
+        return UsageError(
+            f"provider {name!r} is registered but its module {shown} is missing",
+            hint="reinstall pup-finetune; the installation looks incomplete",
+        )
+    return UsageError(
+        f"provider {name!r} needs the {missing!r} package, which is not installed",
+        hint=f"install pup-finetune with the {name!r} extra: pup-finetune[{name}]",
+    )
 
 
 def _is_first_party(missing: str, module_name: str) -> bool:

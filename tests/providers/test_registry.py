@@ -174,6 +174,40 @@ def test_a_missing_dependency_names_the_package_and_extra(
     assert "pup-finetune[needy]" in (info.value.hint or "")
 
 
+_LAZY_IMPORT_SOURCE = textwrap.dedent(
+    """
+    def build_sdk(runtime):
+        import pft_lazy_sdk_that_is_not_installed
+
+    def build_client(runtime):
+        import pup_finetune.providers.pft_absent_lazy_client
+    """
+)
+
+
+def test_a_dependency_missing_while_building_names_the_package_and_extra(
+    provider_module: Callable[[str], str],
+) -> None:
+    # Providers may import their SDK lazily, in the factory, rather than with the module.
+    register_provider("lazy", f"{provider_module(_LAZY_IMPORT_SOURCE)}:build_sdk")
+    with pytest.raises(UsageError) as info:
+        get_provider("lazy", USER)
+    assert "'pft_lazy_sdk_that_is_not_installed'" in info.value.message
+    assert "pup-finetune[lazy]" in (info.value.hint or "")
+
+
+def test_a_first_party_module_missing_while_building_is_a_broken_install(
+    provider_module: Callable[[str], str],
+) -> None:
+    register_provider("lazy", f"{provider_module(_LAZY_IMPORT_SOURCE)}:build_client")
+    with pytest.raises(UsageError) as info:
+        get_provider("lazy", USER)
+    assert "pup_finetune.providers.pft_absent_lazy_client is missing" in info.value.message
+    hint = info.value.hint or ""
+    assert "reinstall" in hint
+    assert "pup-finetune[lazy]" not in hint
+
+
 def test_a_missing_attribute_is_an_error(provider_module: Callable[[str], str]) -> None:
     register_provider("stub", f"{provider_module(_PROVIDER_SOURCE)}:Missing")
     with pytest.raises(FinetuneError, match="no attribute 'Missing'"):
