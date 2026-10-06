@@ -13,6 +13,7 @@ so sampler checkpoints from an earlier one have expired.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -496,12 +497,21 @@ def test_a_failed_promotion_whose_result_was_not_written_resumes_by_training(
 
 def test_the_model_id_is_the_run_id_made_safe() -> None:
     assert model_id_for_run(RUN_ID) == RUN_ID
-    assert model_id_for_run("2026-run") == "ft-2026-run"
+    assert model_id_for_run("x--y") == "x--y"
+    assert re.fullmatch(r"ft-2026-run-[0-9a-f]{8}", model_id_for_run("2026-run"))
     long_id = "a" * 64
     derived = model_id_for_run(long_id)
-    assert len(derived) <= 63 and derived.startswith("a" * 54 + "-")
+    assert len(derived) <= 63 and re.fullmatch("a" * 54 + r"-[0-9a-f]{8}", derived)
     assert model_id_for_run(long_id) == derived
-    assert model_id_for_run("run-") == "run"
+    assert re.fullmatch(r"run-[0-9a-f]{8}", model_id_for_run("run-"))
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [("x--y", "x-y"), ("2026-run", "ft-2026-run"), ("run-", "run"), ("a" * 64, "a" * 63)],
+)
+def test_distinct_run_ids_get_distinct_model_ids(first: str, second: str) -> None:
+    assert model_id_for_run(first) != model_id_for_run(second)
 
 
 @pytest.mark.parametrize(

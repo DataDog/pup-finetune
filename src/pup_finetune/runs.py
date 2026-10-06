@@ -51,6 +51,7 @@ from pup_finetune.data.schema import row_content_hash
 from pup_finetune.errors import ExternalError, FinetuneError, StateError, UsageError
 from pup_finetune.providers.base import (
     MAX_MODEL_ID_LEN,
+    MODEL_ID_PATTERN,
     CheckpointRef,
     ModelProfile,
     TrainSpec,
@@ -140,15 +141,18 @@ def model_id_for_run(run_id: str) -> str:
     :meth:`~pup_finetune.providers.base.TrainingSession.promote` requires: lowercase
     letters, digits and dashes, starting with a letter and not ending with a dash, at most
     :data:`~pup_finetune.providers.base.MAX_MODEL_ID_LEN` characters. A run id that already
-    fits is used as is; a longer one keeps a prefix plus 8 hex digits of its hash.
+    fits is used as is. Any other is made to fit (shortened, an ``ft-`` prefix when it does
+    not start with a letter) and ends with a dash and 8 hex digits of its hash, so two run
+    ids never map to the same model id (``x-y`` and ``x--y``, ``2026-run`` and
+    ``ft-2026-run`` stay apart).
     """
-    model_id = re.sub(r"[^a-z0-9]+", "-", run_id.lower()).strip("-")
-    if not model_id[:1].isalpha():
-        model_id = f"ft-{model_id}".rstrip("-")
-    if len(model_id) > MAX_MODEL_ID_LEN:
-        digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:8]
-        model_id = f"{model_id[:_MODEL_ID_HASHED_PREFIX].rstrip('-')}-{digest}"
-    return model_id
+    if MODEL_ID_PATTERN.fullmatch(run_id):
+        return run_id
+    safe = re.sub(r"[^a-z0-9]+", "-", run_id.lower()).strip("-")
+    if not safe[:1].isalpha():
+        safe = f"ft-{safe}".rstrip("-")
+    digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:8]
+    return f"{safe[:_MODEL_ID_HASHED_PREFIX].rstrip('-')}-{digest}"
 
 
 def dataset_content_hash(dataset: DatasetDir) -> str:
