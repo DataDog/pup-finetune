@@ -37,3 +37,9 @@ repos:
         types_or: [python, pyi]
         pass_filenames: false
         require_serial: true
+      - id: check-headers
+        name: check license headers
+        entry: uv run python scripts/check_headers.py
+        language: system
+        pass_filenames: false
+        always_run: true
