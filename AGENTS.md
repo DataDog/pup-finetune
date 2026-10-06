@@ -45,6 +45,8 @@ Environment variables for development and unusual setups:
   start. By default it is removed, so each child `pup` loads and refreshes its own stored OAuth
   token instead of reusing the short-lived token pup handed us. Set it only if you
   authenticate pup through environment variables alone.
+- `PUP_FINETUNE_DEV=1` - development mode: enables dev-only providers such as the offline
+  `fake` provider (`--provider fake`).
 
 Opt-in test suites: `PUP_FINETUNE_LIVE=1` runs `live` tests (real external services);
 `PUP_FINETUNE_TOKENIZER_TESTS=1` runs `tokenizer` tests (downloads real tokenizers).
@@ -86,13 +88,18 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   `TrainSpec`, `CheckpointRef`, `StepMetrics`, ...) and the `Provider`, `TrainingBackend`,
   `TrainingSession` and `Sampler` protocols; `__init__.py` is the lazy registry
   (`register_provider`, `get_provider`, `known_providers`), which imports a provider only on
-  first use. One package per provider arrives later. See `docs/architecture.md`.
+  first use. `fake.py` is the offline, deterministic, dev-only reference provider (registered
+  with `dev_only=True`, so it needs `PUP_FINETUNE_DEV=1`) that the default tests train
+  against. One package per real provider arrives later. See `docs/architecture.md`.
 - `_vendor/` - *later*. Minimal vendored third-party code, with its own license and attribution.
 
 Tests live under `tests/` and mirror `src/`. Shared fakes live in `tests/fakes/` (import them
 as `tests.fakes...`); `tests/fakes/pup.py` has `FakePup`, a fake pup runner that answers by
 argument prefix and records every call. `tests/fakes/keyring.py` has in-memory, failing and locked
 keyring backends; every test starts on the failing one, so none touches the real keychain.
+`tests/providers/contract/` has the `RendererContract`, `BackendContract` and
+`ProviderContract` suites every provider subclasses (`tests/providers/test_fake_contract.py`
+runs them against the fake provider).
 Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds canonical rows.
 
 ## Conventions

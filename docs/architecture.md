@@ -5,9 +5,11 @@ provider-neutral code and the per-provider pieces, so that a new training provid
 small package instead of new branches in the CLI.
 
 The protocols live in [`src/pup_finetune/providers/base.py`](../src/pup_finetune/providers/base.py)
-and [`src/pup_finetune/rendering/base.py`](../src/pup_finetune/rendering/base.py). The shared
-training loop and the development-only `fake` provider arrive in follow-up changes; this page
-describes the contract they build on.
+and [`src/pup_finetune/rendering/base.py`](../src/pup_finetune/rendering/base.py). The
+development-only `fake` provider in
+[`src/pup_finetune/providers/fake.py`](../src/pup_finetune/providers/fake.py) implements all of
+them offline and is the reference implementation; the shared training loop arrives in a
+follow-up change.
 
 ## Who owns what
 
@@ -155,7 +157,10 @@ Using Baseten as the example:
 7. **Registration and install.** Call `register_provider("baseten",
    "pup_finetune.providers.baseten:BasetenProvider")` in the registry, and add a `baseten`
    extra to `pyproject.toml` for the SDK (with its rows in `LICENSE-3rdparty.csv`).
-8. **Tests.** Add a fake of the SDK client, so the default suite makes no network or paid
-   calls, and gate live tests behind `PUP_FINETUNE_LIVE=1`.
+8. **Tests.** Subclass the contract suites in `tests/providers/contract/`
+   (`RendererContract`, `BackendContract`, `ProviderContract`) against a fake of the SDK
+   client, so the default suite makes no network or paid calls, and gate live tests behind
+   `PUP_FINETUNE_LIVE=1`. [CONTRIBUTING.md](../CONTRIBUTING.md#adding-a-provider) has the
+   full checklist.
 
 The shared loop, resume, evaluation and the CLI then work for the new provider unchanged.
