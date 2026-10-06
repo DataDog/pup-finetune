@@ -17,14 +17,18 @@ stopped (completed, early stop, budget, cancel):
   promoted instead;
 - on a backend without promotion, the best sampler checkpoint is recorded as the run's
   deployable artifact.
+
+Re-creating a sampler checkpoint is a paid save, so when a ``spend_guard`` refuses it the
+promotion fails (and the run stays resumable to retry only the promotion).
 """
 
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 from dataclasses import dataclass
 
-from pup_finetune.errors import StateError
+from pup_finetune.errors import ExternalError, StateError
 from pup_finetune.providers.base import CheckpointRef, TrainingSession
 from pup_finetune.training.loop import CheckpointNamer, checked_checkpoint_name
 from pup_finetune.training.records import TrainResult
@@ -41,14 +45,17 @@ class Promotion:
     ``supports_promotion`` is the backend's
     :attr:`~pup_finetune.providers.base.TrainingBackend.supports_promotion`. A re-created
     sampler checkpoint is named by ``checkpoint_namer`` (kind ``recreated``), at most
-    ``max_checkpoint_name_len`` characters. The returned result carries ``promoted_model``
-    (``None`` without promotion) and ``deployable_ckpt``.
+    ``max_checkpoint_name_len`` characters. ``spend_guard``, when given, says why a
+    re-creation must not be paid for (e.g. the training budget, reserve included, is spent).
+    The returned result carries ``promoted_model`` (``None`` without promotion) and
+    ``deployable_ckpt``.
     """
 
     model_id: str
     supports_promotion: bool
     checkpoint_namer: CheckpointNamer
     max_checkpoint_name_len: int
+    spend_guard: Callable[[], str | None] | None = None
 
     def __call__(self, session: TrainingSession, result: TrainResult) -> TrainResult:
         if not self.supports_promotion or result.best_epoch is None:
@@ -82,6 +89,13 @@ class Promotion:
             training.step,
             limit=self.max_checkpoint_name_len,
         )
+        why = None if self.spend_guard is None else self.spend_guard()
+        if why is not None:
+            raise ExternalError(
+                f"did not re-create epoch {result.best_epoch}'s sampler checkpoint to "
+                f"promote it: {why}",
+                source="budget",
+            )
         session.load_weights(training)
         return session.save_sampler_checkpoint(name, epoch=training.epoch, step=training.step)
 

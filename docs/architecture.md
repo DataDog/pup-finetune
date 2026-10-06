@@ -43,7 +43,8 @@ It owns everything that decides *how* training goes:
 - the `max_train_tokens` budget and the `max_spend_usd` / `hourly_rate_usd` wall-clock spend
   guard, which stop cleanly and still promote the best checkpoint; the spend guard is asked
   before every paid call and stops training `spend_reserve_fraction` short of the cap, so the
-  checkpoint saved at the stop fits under it;
+  checkpoint saved at the stop and the promotion fit under it, and the time spent carries
+  over a resume;
 - resume: the data order is deterministic, so resuming at step *k* of an epoch replays exactly
   the rest of that epoch. Each training checkpoint records its epoch, step, the steps already
   trained in the epoch and the epoch's loss so far, so a resumed run ends with the same epoch

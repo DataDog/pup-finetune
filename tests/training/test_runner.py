@@ -318,6 +318,50 @@ def test_a_cancelled_run_resumes_and_completes(
 # --- promotion --------------------------------------------------------------------------
 
 
+def test_a_spend_stop_keeps_the_reserve_for_its_checkpoint_and_promotes_the_best(
+    tmp_path: Path,
+) -> None:
+    # 1 USD a minute and 4-minute steps: training stops at 27 USD (30 less 10%), before step
+    # 8, and the checkpoint of steps 5 to 7 is saved from the reserve.
+    run_dir = new_run(
+        tmp_path / "run", max_spend_usd=30.0, hourly_rate_usd=60.0, spend_reserve_fraction=0.1
+    )
+    result = start(run_dir)
+    assert (result["phase"], result["stopped_reason"]) == ("completed", "budget_exhausted")
+    assert [e["epoch"] for e in result["epochs"]] == [1]
+    assert result["best_epoch"] == 1
+    assert result["promoted_model"]["model_id"] == RUN_ID
+    assert result["checkpoints"]["last_training"]["step"] == 7
+    assert "less the 10% kept" in result["warnings"][-1]
+
+
+def test_a_promotion_the_spent_reserve_cannot_pay_for_is_retried_on_resume(
+    tmp_path: Path,
+) -> None:
+    # 5-minute steps at 1 USD a minute; training stops at 21.6 USD, the cap is 24 USD.
+    run_dir = new_run(
+        tmp_path / "run",
+        max_spend_usd=24.0,
+        hourly_rate_usd=60.0,
+        spend_reserve_fraction=0.1,
+        provider_options={"fail_at_step": 5},
+    )
+    with pytest.raises(FakeCrash):
+        start(run_dir, clock=Clock(step_minutes=5))  # epoch 1 ends at 20 minutes
+    # The resumed attempt starts at 20 minutes; step 5 takes it to 25, past the whole cap,
+    # so neither a final checkpoint nor a new sampler checkpoint of epoch 1 can be paid for.
+    with pytest.raises(FinalizeFailed, match="did not re-create epoch 1's sampler checkpoint"):
+        resume(run_dir, clock=Clock(step_minutes=5))
+    failed = read(run_dir.result_path)
+    assert (failed["stopped_reason"], failed["promoted_model"]) == ("budget_exhausted", None)
+    assert any("did not save a training checkpoint" in w for w in failed["warnings"])
+    assert run_dir.load_state().resume_mode == "finalize_only"
+    # Retrying only the promotion is the user's call, so it is not held to the budget.
+    result = resume(run_dir)
+    assert (result["phase"], result["best_epoch"]) == ("completed", 1)
+    assert result["promoted_model"]["model_id"] == RUN_ID
+
+
 def test_without_promotion_the_deployable_checkpoint_is_recorded(tmp_path: Path) -> None:
     run_dir = new_run(tmp_path / "run")
     fake = provider(supports_promotion=False)

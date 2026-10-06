@@ -19,9 +19,12 @@ failure to end the session only adds a warning: the result, and the promoted mod
 kept.
 
 A resume opens the session from the last training checkpoint and continues at its epoch and
-step, keeping the epoch history, the best epoch and the patience counter. A run whose
-training ended but whose promotion failed (``resume_mode`` ``finalize_only``) only retries
-the promotion, in a session opened from the best training checkpoint.
+step, keeping the epoch history, the best epoch, the patience counter and the budget spent
+so far. The promotion after training may use the budget's spend reserve, but a sampler
+checkpoint it would have to re-create past ``max_spend_usd`` fails it. A run whose training
+ended but whose promotion failed (``resume_mode`` ``finalize_only``) only retries the
+promotion, in a session opened from the best training checkpoint; that retry, which the
+user asks for, is not held to the budget.
 
 The caller supplies the rendered rows, the same ones on every resume: the order of each
 epoch is a function of the seed and the rows, so other rows would skip the wrong steps.
@@ -197,6 +200,12 @@ class _Run:
         if point is not None:
             resume = Resume(point=point, epochs=history, warnings=state.warnings)
 
+        budget = Budget.from_spec(self.spec, clock=self.clock)
+        # Promotion may spend the reserve the budget keeps beyond where training stops.
+        promotion = dataclasses.replace(
+            self.promotion, spend_guard=lambda: budget.spend_exhausted(use_reserve=True)
+        )
+
         def train_in(session: TrainingSession) -> TrainResult:
             return run_training(
                 session,
@@ -204,13 +213,13 @@ class _Run:
                 validation_rows=self.validation_rows,
                 spec=self.spec,
                 state=state,
-                budget=Budget.from_spec(self.spec, clock=self.clock),
+                budget=budget,
                 checkpoint_namer=self.promotion.checkpoint_namer,
                 max_checkpoint_name_len=self.backend.max_checkpoint_name_len,
                 clock=self.clock,
                 sleep=self.sleep,
                 on_event=self.on_event,
-                finalize=self.promotion,
+                finalize=promotion,
                 resume=resume,
             )
 

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -134,6 +135,35 @@ def test_a_best_epoch_from_an_ended_session_is_saved_again_and_promoted() -> Non
     # The new sampler checkpoint holds epoch 1's weights (the fake counts epochs from 0).
     assert parse_qs(urlsplit(recreated.uri).query)["trained"] == ["0"]
     assert parse_qs(urlsplit(result.epochs[-1].training_ckpt.uri).query)["trained"] == ["2"]  # type: ignore[union-attr]
+
+
+def test_a_spend_guard_can_refuse_re_creating_a_sampler_checkpoint() -> None:
+    options = FakeOptions(val_curve=[1.0, 2.0, 3.0])
+    run_spec = spec(patience=5)
+    first = MemoryState(cancel_after_steps=3)
+    train(FakeBackend(options), run_spec, state=first, finalize=promotion())
+    resume = Resume(point=first.resume_points[-1], epochs=first.epochs)
+    backend = FakeBackend(options)
+    refusing = dataclasses.replace(promotion(), spend_guard=lambda: "the reserve is spent")
+    with pytest.raises(FinalizeFailed, match="the reserve is spent") as info:
+        train(backend, run_spec, resume=resume, finalize=refusing)
+    assert info.value.result.best_epoch == 1
+    assert backend.promoted == []
+    assert [ref.kind for ref in backend.saved if ref.kind == "sampler"] == []
+
+
+def test_a_spend_guard_is_not_asked_when_nothing_is_re_created() -> None:
+    asked: list[bool] = []
+
+    def guard() -> str | None:
+        asked.append(True)
+        return "refused"
+
+    backend = FakeBackend(FakeOptions(val_curve=[2.0, 1.0]))
+    finalize = dataclasses.replace(promotion(), spend_guard=guard)
+    result = train(backend, spec(), finalize=finalize)
+    assert result.promoted_model is not None
+    assert asked == []
 
 
 def test_without_promotion_the_best_sampler_checkpoint_is_the_deployable_one() -> None:

@@ -665,6 +665,40 @@ def test_a_stop_during_validation_keeps_the_best_epoch_already_saved() -> None:
     ]
 
 
+def test_a_run_stopped_during_validation_resumes_like_an_unbroken_one() -> None:
+    clock = Clock()
+    budget = spend_budget(clock, seconds=14.0, reserve=0.1)  # as in the test above
+    spec = make_spec(max_epochs=3, batch_size=2, pipeline_depth=1)
+    options = curve(2.0, 1.0, 0.5)
+    rows = row_examples(4)
+    first = MemoryState()
+    with priced(clock, 1.0, options) as session:
+        stopped = train(
+            session, spec, rows=rows, validation=VALIDATION_2, state=first, budget=budget
+        )
+    assert stopped.stopped_reason == "budget_exhausted"
+    point = first.resume_points[-1]
+    assert (point.epoch, point.step, point.steps_in_epoch) == (2, 4, 2)
+    with FakeBackend(options).open_session(
+        FAKE_PROFILE, LORA, resume_from=point.checkpoint, **SESSION
+    ) as inner:
+        resumed = RecordingSession(inner)
+        result = train(
+            resumed,
+            spec,
+            rows=rows,
+            validation=VALIDATION_2,
+            resume=Resume(point=point, epochs=first.epochs, warnings=first.warnings),
+        )
+    with recording(options) as unbroken_session:
+        unbroken = train(unbroken_session, spec, rows=rows, validation=VALIDATION_2)
+    assert _metrics(result) == _metrics(unbroken)
+    assert result.stopped_reason == "completed"
+    # Epoch 2 is validated and recorded with the stop's checkpoint; only epoch 3 trains.
+    assert resumed.train_batches == unbroken_session.train_batches[4:]
+    assert result.epochs[1].training_ckpt == point.checkpoint
+
+
 def test_a_stop_before_the_sampler_checkpoint_leaves_the_epoch_unrecorded() -> None:
     clock = Clock()
     # One step of 2 calls, 2 validation forwards and the training checkpoint: 5 s.
