@@ -379,6 +379,44 @@ def test_a_failed_delete_that_keeps_the_key_is_an_external_error() -> None:
     assert stored_in(backend) == SECRET
 
 
+def test_delete_through_a_chainer_removes_the_key_from_a_later_backend() -> None:
+    credentials.register(SPEC)
+    first, second = MemoryKeyring(), MemoryKeyring()
+    second.set_password("pup-finetune", "acme", SECRET)
+    chain = chainer_of(first, second)
+    assert credentials.delete("acme", keyring_backend=chain) is True
+    assert second.passwords == {}
+    assert credentials.lookup("acme", env={}, keyring_backend=chain) is None
+    assert credentials.delete("acme", keyring_backend=chain) is False
+
+
+def test_delete_through_a_chainer_removes_every_copy() -> None:
+    credentials.register(SPEC)
+    first, second = MemoryKeyring(), MemoryKeyring()
+    for backend in (first, second):
+        backend.set_password("pup-finetune", "acme", SECRET)
+    assert credentials.delete("acme", keyring_backend=chainer_of(first, second)) is True
+    assert first.passwords == second.passwords == {}
+
+
+def test_delete_through_a_chainer_still_reports_a_denied_delete() -> None:
+    credentials.register(SPEC)
+    sticky, memory = StickyKeyring(), MemoryKeyring()
+    for backend in (sticky, memory):
+        backend.set_password("pup-finetune", "acme", SECRET)
+    with pytest.raises(ExternalError, match="could not delete the acme key") as info:
+        credentials.delete("acme", keyring_backend=chainer_of(sticky, memory))
+    assert "allow keychain access" in (info.value.hint or "")
+    assert stored_in(sticky) == SECRET
+    assert memory.passwords == {}  # the other copy is still removed
+
+
+def test_delete_through_an_empty_chain_deletes_nothing() -> None:
+    credentials.register(SPEC)
+    assert credentials.delete("acme", keyring_backend=chainer_of()) is False
+    assert credentials.delete("acme", keyring_backend=chainer_of(FailKeyring())) is False
+
+
 def stored_in(backend: MemoryKeyring) -> str | None:
     return backend.passwords.get(("pup-finetune", "acme"))
 

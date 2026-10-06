@@ -309,20 +309,22 @@ def store(
         ) from exc
 
 
-def delete(provider: str, *, keyring_backend: KeyringBackend | None = None) -> bool:
-    """Remove ``provider``'s key from the OS keychain; whether there was one to remove."""
+def _delete_from(spec: CredentialSpec, target: KeyringBackend) -> bool:
+    """Remove ``spec``'s key from one concrete backend; whether it held one.
+
+    Raises :class:`ExternalError` when the backend holds the key but will not delete it.
+    """
     from keyring.errors import KeyringError, NoKeyringError, PasswordDeleteError
 
-    spec = get_spec(provider)
-    backend = _backend(keyring_backend)
     try:
-        backend.delete_password(spec.keychain_service, spec.keychain_account)
-    except NoKeyringError:
+        target.delete_password(spec.keychain_service, spec.keychain_account)
+    except (NoKeyringError, NotImplementedError):
+        # No keychain here, or a backend that does not support deleting (a chainer skips those).
         return False
     except PasswordDeleteError as exc:
         # Some backends (macOS) also report a denied or failed delete this way, so only
         # call it "nothing stored" when nothing is.
-        if not _read_keychain(spec, backend):
+        if not _read_keychain(spec, target):
             return False
         raise ExternalError(
             f"could not delete the {spec.provider} key from the OS keychain "
@@ -337,6 +339,26 @@ def delete(provider: str, *, keyring_backend: KeyringBackend | None = None) -> b
             source="keychain",
         ) from exc
     return True
+
+
+def delete(provider: str, *, keyring_backend: KeyringBackend | None = None) -> bool:
+    """Remove ``provider``'s key from the OS keychain; whether there was one to remove.
+
+    A chainer is flattened and the key deleted from every backend that holds it, since
+    :func:`lookup` reads through all of them; a chainer's own delete stops at the first
+    backend that has no entry. Every backend is tried before the first failure is raised.
+    """
+    spec = get_spec(provider)
+    deleted = False
+    failure: ExternalError | None = None
+    for target in _write_targets(_backend(keyring_backend)):
+        try:
+            deleted = _delete_from(spec, target) or deleted
+        except ExternalError as exc:
+            failure = failure or exc
+    if failure is not None:
+        raise failure
+    return deleted
 
 
 def _doctor_check(spec: CredentialSpec) -> Callable[[], CheckOutcome]:
