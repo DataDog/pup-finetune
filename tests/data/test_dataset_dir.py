@@ -19,7 +19,13 @@ import pytest
 from pup_finetune.data.dataset_dir import DatasetDir, DatasetSettings, read_import_file
 from pup_finetune.data.exclusions import Exclusion, ExclusionCode
 from pup_finetune.data.jsonl import read_rows, to_provider_dict
-from pup_finetune.data.schema import RowErrorCode, TrainingRow, split_key, validate_row
+from pup_finetune.data.schema import (
+    RowError,
+    RowErrorCode,
+    TrainingRow,
+    split_key,
+    validate_row,
+)
 from pup_finetune.data.split import SPLITS, SplitParams
 from pup_finetune.errors import StateError, UsageError
 from pup_finetune.storage import DirectoryLock
@@ -552,6 +558,56 @@ def test_read_import_file_keeps_going_past_malformed_lines(tmp_path: Path) -> No
             "line_sha256": sha256(last),
         },
     ]
+
+
+def test_read_import_file_excludes_lone_surrogates_and_keeps_going(tmp_path: Path) -> None:
+    # json.dumps writes a lone surrogate as a "\ud800" escape: valid JSON, but the decoded
+    # text cannot be encoded as UTF-8.
+    lines = TOOL_USE.read_text().splitlines()
+
+    def chat(text: str) -> list[dict[str, str]]:
+        return [{"role": "user", "content": text}, {"role": "assistant", "content": "ok"}]
+
+    bad = [
+        json.dumps({"id": "row-content", "messages": chat("\ud800")}),
+        json.dumps(
+            {
+                "id": "row-trace",
+                "messages": chat("hi"),
+                "source": {"trace_id": "t\ud800", "span_id": "s"},
+            }
+        ),
+        json.dumps({"id": "\udc00", "messages": chat("hi")}),
+    ]
+    path = tmp_path / "surrogates.jsonl"
+    path.write_text("\n".join([lines[0], *bad, lines[1]]) + "\n")
+    rows, exclusions = read_import_file(path)
+    assert [row.id for row in rows] == [validate_row(json.loads(line)).id for line in lines[:2]]
+    assert [(e.code, e.row_id, e.trace_id, e.span_id) for e in exclusions] == [
+        (RowErrorCode.INVALID_ROW, "row-content", None, None),
+        (RowErrorCode.INVALID_ROW, "row-trace", None, "s"),
+        (RowErrorCode.INVALID_ROW, None, None, None),
+    ]
+    assert exclusions[0].detail == (
+        "surrogates.jsonl:2: messages[0].content has a lone surrogate (U+D800); "
+        "UTF-8 cannot encode it"
+    )
+    dataset = DatasetDir(tmp_path / "ds")
+    summary = dataset.add(rows, exclusions, settings=IMPORT).summary
+    assert (summary["accepted"], summary["excluded"]) == (2, 3)
+    records = dataset.excluded()  # Written and read back as UTF-8.
+    assert sorted(str(record.get("row_id")) for record in records) == [
+        "None",
+        "row-content",
+        "row-trace",
+    ]
+
+
+def test_an_undecodable_file_name_is_escaped_in_the_exclusion() -> None:
+    # Python decodes undecodable bytes in a file name to lone surrogates.
+    error = RowError(RowErrorCode.INVALID_ROW, "id: Field required")
+    exclusion = Exclusion.for_invalid({}, error, where="rows-\udcff.jsonl:1", line=b"{}")
+    assert exclusion.detail == "rows-\\udcff.jsonl:1: id: Field required"
 
 
 def test_id_less_invalid_rows_from_same_named_files_are_counted_apart(tmp_path: Path) -> None:

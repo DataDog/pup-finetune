@@ -55,13 +55,15 @@ class Exclusion:
     ) -> Exclusion:
         """An exclusion for ``data``, read from ``line``, that failed validation.
 
-        Ids are taken when they are strings.
+        Ids are taken when they are strings UTF-8 can encode: one holding a lone surrogate
+        (from a ``\\ud800`` escape) is dropped, so the record can still be written.
         """
         source = data.get("source")
         source = source if isinstance(source, Mapping) else {}
         return cls(
             error.code,
-            f"{where}: {error.detail}",
+            # A file name can hold undecodable bytes as surrogates; escape them.
+            f"{where}: {error.detail}".encode("utf-8", "backslashreplace").decode("utf-8"),
             _text(data.get("id")),
             _text(source.get("trace_id")),
             _text(source.get("span_id")),
@@ -78,4 +80,10 @@ class Exclusion:
 
 
 def _text(value: object) -> str | None:
-    return value if isinstance(value, str) and value else None
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    return value
