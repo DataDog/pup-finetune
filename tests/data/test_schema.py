@@ -202,6 +202,15 @@ def test_arguments_must_be_a_json_object_string(arguments: str) -> None:
     assert code_of(data) == RowErrorCode.INVALID_ARGUMENTS_JSON
 
 
+def test_too_deeply_nested_arguments_are_a_row_error_not_a_crash() -> None:
+    depth = 100_000
+    arguments = '{"x": ' + "[" * depth + "]" * depth + "}"
+    data = row(USER, {"role": "assistant", "tool_calls": [call("c1", arguments=arguments)]})
+    with pytest.raises(RowError, match="nested too deeply") as excinfo:
+        validate_row(data)
+    assert excinfo.value.code == RowErrorCode.INVALID_ARGUMENTS_JSON
+
+
 # --- generic schema errors --------------------------------------------------------------
 
 

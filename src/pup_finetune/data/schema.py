@@ -150,6 +150,11 @@ class FunctionCall(BaseModel):
             raise RowError(
                 RowErrorCode.INVALID_ARGUMENTS_JSON, f"arguments are not valid JSON: {exc}"
             ) from exc
+        except RecursionError as exc:
+            # Not a ValueError, so pydantic would let it escape and abort the whole read.
+            raise RowError(
+                RowErrorCode.INVALID_ARGUMENTS_JSON, "arguments are nested too deeply to parse"
+            ) from exc
         if not isinstance(parsed, dict):
             raise RowError(
                 RowErrorCode.INVALID_ARGUMENTS_JSON, "arguments must encode a JSON object"
