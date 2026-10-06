@@ -155,8 +155,10 @@ class ForwardOutput:
 
     ``metrics`` are Fireworks' own, unchanged: a forward-backward pass reports ``loss:sum``,
     ``total_tokens:sum`` and ``response_tokens`` (the sum of the weights), a forward pass only
-    ``total_tokens:sum``. ``logprobs`` has, per example in the batch, the log probability of
-    each target token, whatever its weight; a forward pass's loss is computed from them.
+    ``total_tokens:sum``. ``logprobs`` has, for a forward pass, the log probability of each
+    target token of each example in the batch, whatever its weight; its loss is computed from
+    them. A forward-backward pass returns no logprobs (only a loss per example), so its
+    ``logprobs`` is empty.
     """
 
     metrics: Mapping[str, float]
@@ -573,6 +575,11 @@ def _metrics(raw: Any) -> dict[str, float]:
     }
 
 
+def _forward_backward_output(raw: Any) -> ForwardOutput:
+    """``raw`` read as a :class:`ForwardOutput`; the loss is in the metrics (``loss:sum``)."""
+    return ForwardOutput(metrics=_metrics(raw))
+
+
 def _forward_output(raw: Any, *, examples: int) -> ForwardOutput:
     """``raw`` read as a :class:`ForwardOutput` for a batch of ``examples``.
 
@@ -733,7 +740,7 @@ class _Run:
         what = "a Fireworks forward-backward pass"
         data = [to_tinker_datum(example) for example in batch]
         future = _call(what, lambda: self._client.forward_backward(data, _LOSS_FN))
-        return _Pending(what, future, lambda raw: _forward_output(raw, examples=len(data)))
+        return _Pending(what, future, _forward_backward_output)
 
     def forward(self, batch: Sequence[TokenizedExample]) -> PendingResult[ForwardOutput]:
         what = "a Fireworks forward pass"

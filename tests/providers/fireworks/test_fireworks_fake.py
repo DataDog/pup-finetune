@@ -64,7 +64,7 @@ def test_forward_backward_reports_fireworks_metrics(fw: FakeFireworksTrainingCli
     assert out.metrics["response_tokens"] == 4.0
     assert out.metrics["total_tokens:sum"] == 5.0
     assert out.metrics["loss:sum"] == pytest.approx(loss_at(0) * 4.0)
-    assert [len(lp) for lp in out.logprobs] == [3, 2]
+    assert out.logprobs == ()  # as live: a forward-backward pass returns no logprobs
 
 
 def test_forward_reports_only_tokens_and_logprobs(fw: FakeFireworksTrainingClient) -> None:

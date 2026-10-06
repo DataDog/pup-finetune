@@ -26,8 +26,9 @@ What it mimics:
 - A name longer than :data:`MAX_CHECKPOINT_NAME_LEN` saves fine and fails at promote time.
 - Closing a service ends its session; its sampler checkpoints can no longer be promoted,
   while its training checkpoints can still be resumed from in a new session.
-- ``forward_backward`` reports ``loss:sum``, ``total_tokens:sum`` and ``response_tokens``;
-  ``forward`` reports only ``total_tokens:sum``, with per-token logprobs per example. The
+- ``forward_backward`` reports ``loss:sum``, ``total_tokens:sum`` and ``response_tokens``,
+  and no logprobs; ``forward`` reports only ``total_tokens:sum``, with per-token logprobs per
+  example (both as checked against the live service). The
   per-token loss is ``loss_at(steps)``, which falls with each optimizer step that applied
   gradients, and is restored with the weights when a run resumes from a checkpoint.
 - Sampling returns :attr:`FakeFireworksTrainingClient.sample_tokens`.
@@ -193,7 +194,7 @@ class FakeRun:
             "total_tokens:sum": float(sum(len(example.input_tokens) for example in batch)),
             "response_tokens": weight,
         }
-        return _done(ForwardOutput(metrics, self._logprobs(batch, loss)))
+        return _done(ForwardOutput(metrics))
 
     def forward(self, batch: Sequence[TokenizedExample]) -> PendingResult[ForwardOutput]:
         failure = self._owner._pending_failure("forward", "a forward pass")

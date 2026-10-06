@@ -459,8 +459,16 @@ def forward_output(*logprobs: list[float], metrics: dict[str, Any] | None = None
 
 
 def test_a_run_converts_batches_and_results() -> None:
-    output = forward_output(
-        [-0.5, -1.0, -2.0],
+    t = tinker()
+    # The live shape: a forward-backward pass returns a loss per example, not logprobs.
+    output = t.ForwardBackwardOutput(
+        loss_fn_output_type="cross_entropy",
+        loss_fn_outputs=[
+            {
+                "loss": t.TensorData(data=[3.0], dtype="float32"),
+                "num_tokens": t.TensorData(data=[3], dtype="int64"),
+            }
+        ],
         metrics={"loss:sum": 3.0, "total_tokens:sum": 3.0, "response_tokens": 2.0},
     )
     sdk = StandInTrainingClient(
@@ -476,8 +484,7 @@ def test_a_run_converts_batches_and_results() -> None:
     assert run.run_id == "run-0123"
     result = run.forward_backward([EXAMPLE]).result()
     assert result == ForwardOutput(
-        {"loss:sum": 3.0, "total_tokens:sum": 3.0, "response_tokens": 2.0},
-        ((-0.5, -1.0, -2.0),),
+        {"loss:sum": 3.0, "total_tokens:sum": 3.0, "response_tokens": 2.0}
     )
     (_name, data, loss_fn) = sdk.calls[0]
     assert loss_fn == "cross_entropy"
