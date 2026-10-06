@@ -283,7 +283,7 @@ def test_importing_the_cli_imports_no_provider_module() -> None:
             "targets": targets,
             "loaded_targets": [name for name in targets if name in sys.modules],
             "sdks": sorted(
-                name for name in ("fireworks", "transformers", "truss")
+                name for name in ("baseten", "fireworks", "transformers", "truss")
                 if name in sys.modules
             ),
         }))

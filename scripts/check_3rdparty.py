@@ -13,7 +13,8 @@ Checked: the CSV header is exactly ``Component,Origin,License,Copyright``; every
 dependency in ``[project.dependencies]`` and every ``[project.optional-dependencies]`` group has
 a row (matched by normalized distribution name; self-references such as ``pup-finetune[hf]``
 are ignored); and every License value is an allowed SPDX identifier, or an ``OR`` expression
-composed only of allowed identifiers. Stdlib only.
+composed only of allowed identifiers. Packages in ``LICENSE_EXCEPTIONS`` may also use
+``NOASSERTION``. Stdlib only.
 """
 
 from __future__ import annotations
@@ -42,6 +43,11 @@ ALLOWED_LICENSES: frozenset[str] = frozenset(
         "MPL-2.0",
     }
 )
+
+# Normalized names allowed the SPDX value NOASSERTION, each with the reason.
+LICENSE_EXCEPTIONS: dict[str, str] = {
+    "baseten-loops": "publishes no license; Baseten asked to publish one",
+}
 
 _NAME = re.compile(r"\s*([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)")
 
@@ -95,8 +101,10 @@ def find_problems(pyproject_text: str, csv_text: str) -> list[str]:
             problems.append(f"line {line_no}: expected {len(CSV_HEADER)} columns, got {len(row)}")
             continue
         component, _origin, license_expr, _copyright = row
-        components.add(normalize(component.strip()))
-        if not license_allowed(license_expr):
+        name = normalize(component.strip())
+        components.add(name)
+        excepted = license_expr == "NOASSERTION" and name in LICENSE_EXCEPTIONS
+        if not excepted and not license_allowed(license_expr):
             problems.append(f"line {line_no}: {component}: license {license_expr!r} not allowed")
 
     pyproject = tomllib.loads(pyproject_text)

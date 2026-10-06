@@ -29,10 +29,11 @@ uv run pre-commit install            # run the hooks above on every commit
 uv run pup-finetune --help           # run the CLI from the checkout
 ```
 
-The `hf` extra (`transformers`, `jinja2`, `huggingface-hub`) backs the shared renderer; CI
-installs every extra. CI (`.github/workflows/ci.yml`) runs the lint, format, type, test, header
-and third-party license checks on Ubuntu and macOS with Python 3.12 and 3.13, and smoke-tests
-the built wheel. When you add a dependency, add its row to `LICENSE-3rdparty.csv`.
+The `hf` extra (`transformers`, `jinja2`, `huggingface-hub`) backs the shared renderer and each
+provider SDK has its own extra (`fireworks`, `baseten`); CI installs every extra. CI
+(`.github/workflows/ci.yml`) runs the lint, format, type, test, header and third-party license
+checks on Ubuntu and macOS with Python 3.12 and 3.13, and smoke-tests the built wheel. When you
+add a dependency, add its row to `LICENSE-3rdparty.csv`.
 
 To develop against pup, install the checkout as a pup extension. `bin/pup-finetune` is a small
 POSIX sh launcher that runs `uv run --project <checkout> pup-finetune` from any directory, and
@@ -466,7 +467,17 @@ Source lives under `src/pup_finetune/`.
   loading off and 0 to 1 replicas, polling every 15 s until `READY`, `DeploymentNotReady`
   for a bad state or timeout, the smoke test through the inference API retried while it
   scales from zero, idempotent delete; injectable clock and sleep), which
-  `FireworksProvider(deployer=...)` replaces in tests. See `docs/architecture.md`.
+  `FireworksProvider(deployer=...)` replaces in tests. `baseten/client.py` is the only module
+  that imports the Baseten Loops SDK (`baseten-loops`; the `baseten` extra), and only on first
+  use, after refusing the `LOOPS_*` environment overrides: `BasetenHTTP` (Baseten's REST
+  routes, among them the checkpoint deployment, instance types, models by name and model
+  deletion; `Bearer` auth, no redirects, a 4 MiB cap, fixed messages; 401/403 as
+  `ProviderAuthError`, 429 as `ProviderCapacityError`, a 4xx to a create as
+  `DeploymentRejected` with Baseten's reason, `TransientError` for a call safe to repeat, a
+  create accepted with an unreadable answer or a deployment whose outcome is unknown),
+  `loops_service` (a Loops session with the key, base URL and dedicated availability passed
+  explicitly) and `to_loops_datum`.
+  The Baseten backend and provider arrive later. See `docs/architecture.md`.
 
 Tests live under `tests/` and mirror `src/`. Shared fakes live in `tests/fakes/` (import them
 as `tests.fakes...`); `tests/fakes/pup.py` has `FakePup`, a fake pup runner that answers by
@@ -496,6 +507,10 @@ deployments use it (shape matching, deployments that report scripted states, inj
 failures), `FakeClock`, and `fake_deployer`, the provider's `deployer` factory on them and a
 `FakeChatApi` (see `tests/providers/fireworks/test_fireworks_deploy.py` and
 `tests/cli/test_deploy.py`).
+`tests/fakes/baseten.py` has `FakeLoops`, the Loops SDK in memory (sessions, runs, futures,
+deterministic losses and logprobs, `bt://loops:` checkpoints with the name limit, expiry,
+closed clients and deactivated runs, injectable failures), and `BasetenTransport`, Baseten's
+HTTP routes by `"METHOD /path"` (`FakeLoops.transport()` also serves its runs).
 `tests/fakes/keyring.py` has in-memory, failing and locked keyring backends; every test starts
 on the failing one, so none touches the real keychain.
 `tests/providers/contract/` has the `RendererContract`, `BackendContract` and
