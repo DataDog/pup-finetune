@@ -178,6 +178,26 @@ def test_a_conflicting_id_within_one_add_is_an_error(tmp_path: Path) -> None:
     assert not DatasetDir(target).is_dataset()
 
 
+@pytest.mark.parametrize("stored", [False, True], ids=["in-the-input", "already-stored"])
+@pytest.mark.parametrize("duplicate_first", [True, False], ids=["duplicate-first", "changed-first"])
+def test_an_id_reused_after_a_duplicate_conversation_is_an_error(
+    tmp_path: Path, stored: bool, duplicate_first: bool
+) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    original = make_row("a", "same")
+    duplicate, changed = make_row("b", "same"), make_row("b", "different")
+    rows = [duplicate, changed] if duplicate_first else [changed, duplicate]
+    if stored:
+        dataset.add([original], settings=IMPORT)
+    else:
+        rows.insert(0, original)
+    with pytest.raises(StateError, match="'b' appears more than once in the input"):
+        dataset.add(rows, settings=IMPORT)
+    assert dataset.is_dataset() == stored
+    if stored:
+        assert [row.id for row in dataset.rows()] == ["a"]
+
+
 def test_a_row_repeated_within_one_add_is_one_row(tmp_path: Path) -> None:
     dataset = DatasetDir(tmp_path / "ds")
     row = make_row("a", "one")

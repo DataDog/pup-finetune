@@ -345,6 +345,9 @@ def _merge(
         digest = row_content_hash(row)
         other = by_hash.get(digest)
         if other is not None:
+            # Claim the id even so: a later row reusing it with other content is the same id
+            # conflict whichever of the two comes first.
+            batch[row.id] = row
             detail = f"same conversation as row {other!r}"
             excluded.append(Exclusion.for_row(row, ExclusionCode.DUPLICATE_CONVERSATION, detail))
             continue
