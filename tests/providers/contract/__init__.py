@@ -50,7 +50,13 @@ from pup_finetune.providers.base import (
     TrainingBackend,
     TrainingSession,
 )
-from pup_finetune.rendering.base import ChatMessage, Renderer, RendererError, ToolSpec
+from pup_finetune.rendering.base import (
+    ChatMessage,
+    Renderer,
+    RendererError,
+    RendererErrorCode,
+    ToolSpec,
+)
 from pup_finetune.rendering.tokens import TokenizedExample
 
 __all__ = ["BackendContract", "Conversation", "ProviderContract", "RendererContract"]
@@ -165,6 +171,20 @@ def _completion_runs(
     return {turn: (start, end) for turn, start, end in zip(turns, starts, ends, strict=True)}
 
 
+def _full_render(
+    renderer: Renderer, messages: list[ChatMessage], tools: list[ToolSpec]
+) -> TokenizedExample | None:
+    """The row as one example, or ``None`` when the renderer renders it per turn."""
+    if not renderer.prefix_stable:
+        return None
+    try:
+        return renderer.supervised_example(messages, tools)
+    except RendererError as exc:
+        if exc.code is not RendererErrorCode.NOT_PREFIX_STABLE:
+            raise
+        return None
+
+
 class RendererContract:
     """What every :class:`~pup_finetune.rendering.base.Renderer` guarantees."""
 
@@ -185,15 +205,21 @@ class RendererContract:
 
     def _examples(
         self, renderer: Renderer, messages: list[ChatMessage], tools: list[ToolSpec]
-    ) -> list[tuple[list[ChatMessage], TokenizedExample]]:
-        """Each example with the messages it renders: one full render, or one per turn."""
-        if renderer.prefix_stable:
-            return [(messages, renderer.supervised_example(messages, tools))]
+    ) -> list[tuple[list[ChatMessage], TokenizedExample, bool]]:
+        """Each example with the messages it renders and whether it is a full render.
+
+        As training builds them: one full render when the renderer is prefix-stable and does
+        not refuse the row with ``not_prefix_stable``, else one per trainable turn.
+        """
+        full = _full_render(renderer, messages, tools)
+        if full is not None:
+            return [(messages, full, True)]
         turns = [turn for turn in _assistant_turns(messages) if _trainable(messages[turn])]
         examples = renderer.per_turn_examples(messages, tools)
         assert len(examples) == len(turns)
         return [
-            (messages[: turn + 1], example) for turn, example in zip(turns, examples, strict=True)
+            (messages[: turn + 1], example, False)
+            for turn, example in zip(turns, examples, strict=True)
         ]
 
     def test_names_itself(self, renderer: Renderer) -> None:
@@ -217,9 +243,8 @@ class RendererContract:
         for messages, tools in _CONVERSATIONS:
             examples = first.per_turn_examples(messages, tools)
             assert examples == second.per_turn_examples(messages, tools)
-            if first.prefix_stable:
-                full = first.supervised_example(messages, tools)
-                assert full == second.supervised_example(messages, tools)
+            full = _full_render(first, messages, tools)
+            assert full == _full_render(second, messages, tools)
             prompt = first.generation_prompt_tokens(messages, tools)
             assert prompt == second.generation_prompt_tokens(messages, tools)
             assert second.decode(prompt) == first.decode(prompt)
@@ -231,9 +256,9 @@ class RendererContract:
         self, renderer: Renderer, conversation: Conversation
     ) -> None:
         messages, tools = conversation
-        for rendered, example in self._examples(renderer, messages, tools):
+        for rendered, example, full in self._examples(renderer, messages, tools):
             tokens, _ = _unshifted(example)
-            turns = _assistant_turns(rendered) if renderer.prefix_stable else [len(rendered) - 1]
+            turns = _assistant_turns(rendered) if full else [len(rendered) - 1]
             for turn in turns:
                 prompt = renderer.generation_prompt_tokens(rendered[:turn], tools)
                 assert tokens[: len(prompt)] == prompt, f"turn {turn} is not a token prefix"
@@ -242,7 +267,7 @@ class RendererContract:
         self, renderer: Renderer, conversation: Conversation
     ) -> None:
         messages, tools = conversation
-        for rendered, example in self._examples(renderer, messages, tools):
+        for rendered, example, full in self._examples(renderer, messages, tools):
             tokens, weights = _unshifted(example)
             assert all(weight in (0.0, 1.0) for weight in weights)
             runs = _completion_runs(renderer, rendered, tools, tokens)
@@ -250,7 +275,7 @@ class RendererContract:
             assert not any(weights[:first_start]), "a token before the first completion is trained"
             trained_turns = (
                 [turn for turn in runs if _trainable(rendered[turn])]
-                if renderer.prefix_stable
+                if full
                 else [len(rendered) - 1]
             )
             for turn, (start, end) in runs.items():

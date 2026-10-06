@@ -13,7 +13,7 @@ OAuth login. The project is in early development: most commands arrive in later 
 ## Commands
 
 ```sh
-uv sync                              # create .venv and install the project + dev tools
+uv sync --all-extras                 # create .venv and install the project, extras + dev tools
 uv run pytest                        # tests (no network, no paid calls)
 uv run ruff check --fix              # lint
 uv run ruff format                   # format (check only: uv run ruff format --check)
@@ -24,9 +24,10 @@ uv run pre-commit install            # run the hooks above on every commit
 uv run pup-finetune --help           # run the CLI from the checkout
 ```
 
-CI (`.github/workflows/ci.yml`) runs the lint, format, type, test, header and third-party
-license checks on Ubuntu and macOS with Python 3.12 and 3.13, and smoke-tests the built wheel.
-When you add a dependency, add its row to `LICENSE-3rdparty.csv`.
+The `hf` extra (`transformers`, `jinja2`, `huggingface-hub`) backs the shared renderer; CI
+installs every extra. CI (`.github/workflows/ci.yml`) runs the lint, format, type, test, header
+and third-party license checks on Ubuntu and macOS with Python 3.12 and 3.13, and smoke-tests
+the built wheel. When you add a dependency, add its row to `LICENSE-3rdparty.csv`.
 
 To develop against pup, install the checkout as a pup extension. `bin/pup-finetune` is a small
 POSIX sh launcher that runs `uv run --project <checkout> pup-finetune` from any directory, and
@@ -88,7 +89,8 @@ Environment variables for development and unusual setups:
   `fake` provider (`--provider fake`).
 
 Opt-in test suites: `PUP_FINETUNE_LIVE=1` runs `live` tests (real external services);
-`PUP_FINETUNE_TOKENIZER_TESTS=1` runs `tokenizer` tests (downloads real tokenizers).
+`PUP_FINETUNE_TOKENIZER_TESTS=1` runs `tokenizer` tests (downloads real tokenizers, needs the
+`hf` extra): `PUP_FINETUNE_TOKENIZER_TESTS=1 uv run pytest -m tokenizer`.
 
 ## Layout
 
@@ -204,8 +206,17 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   `heartbeat_s`, `state.json` is also saved on a timer so its heartbeat stays fresh.
 - `rendering/` - chat rows to model tokens and completions back to messages. `tokens.py` has
   `TokenizedExample`, the provider-neutral, next-token-shifted token and weight arrays;
-  `base.py` has the `Renderer` protocol (built on Hugging Face chat templates) and
-  `RendererError`. Concrete renderers arrive later.
+  `base.py` has the `Renderer` protocol and `RendererError`. `hf.py` has
+  `HFChatTemplateRenderer`, the one renderer every provider shares: the model's Hugging Face
+  chat template and tokenizer at a pinned revision, one example per trainable assistant turn
+  (the prompt tokenized whole, then the completion through its stop token, re-encoded after
+  the prompt when a token merges across the boundary), and a per-row-checked one-example fast
+  path for families that pin `prefix_stable`. It also has the narrow `ChatTokenizer` seam
+  (tests inject `tests/fakes/tokenizer.py`) and the lazily imported `transformers` adapter
+  (the `hf` extra). `parsers.py` has the `ResponseParser`s (`Qwen3XmlToolParser`,
+  `JsonToolCallParser`) that turn sampled text back into a message; `families.py` is the
+  model-family table (`qwen3_8` for now), each entry a tokenizer, revision, parser and stop
+  tokens.
 - `evaluation/` - *later*. Replay cases, deterministic metrics, LLM judge and reporting.
 - `providers/` - the provider seam. `base.py` has the neutral types (`ModelProfile`,
   `TrainSpec`, `CheckpointRef`, `StepMetrics`, ...) and the `Provider`, `TrainingBackend`,
@@ -214,7 +225,6 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   first use. `fake.py` is the offline, deterministic, dev-only reference provider (registered
   with `dev_only=True`, so it needs `PUP_FINETUNE_DEV=1`) that the default tests train
   against. One package per real provider arrives later. See `docs/architecture.md`.
-- `_vendor/` - *later*. Minimal vendored third-party code, with its own license and attribution.
 
 Tests live under `tests/` and mirror `src/`. Shared fakes live in `tests/fakes/` (import them
 as `tests.fakes...`); `tests/fakes/pup.py` has `FakePup`, a fake pup runner that answers by
@@ -222,6 +232,8 @@ argument prefix (or computes the answer with a `handler`) and records every call
 `tests/fakes/llmobs.py` has `FakeExportApi`, the Export API search route served by cursor.
 `tests/fakes/datasets.py` has `FakeDatasetsApi`, in-memory projects, datasets and records
 behind the pup calls `LLMObsDatasets` makes, with failures to inject.
+`tests/fakes/tokenizer.py` has `FakeChatTokenizer`, a character-level chat tokenizer with a
+Qwen3.8-like Python template (optionally merging `\n\n` across the prompt boundary).
 `tests/fakes/keyring.py` has in-memory, failing and locked keyring backends; every test starts
 on the failing one, so none touches the real keychain.
 `tests/providers/contract/` has the `RendererContract`, `BackendContract` and
@@ -245,6 +257,7 @@ Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds can
   is never implied by `PUP_AUTO_APPROVE` or agent mode.
 - Honor `PUP_READ_ONLY`: reject every remote write when it is set.
 - Only `datadog/pup.py` spawns `pup`. Only `providers/<provider>/client.py` imports a provider SDK.
+  Only `rendering/hf.py` imports `transformers`, and only when a tokenizer is first loaded.
 - Secrets are never printed, logged or written to disk, and never accepted as a flag value.
 - Tests use fakes, not mocks. Default tests make no network or paid calls.
 - Fixtures are synthetic only: never commit real trace content or customer data.
