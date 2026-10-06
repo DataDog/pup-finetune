@@ -13,7 +13,9 @@
   even though the dataset is created.
 - Records are added with ``pup llm-obs datasets records-add --confirm``. Without ``--confirm``
   the endpoint only previews; callers run this after their own ``--confirm`` gate. They are
-  listed with ``pup llm-obs datasets records-all``, which pages through every record.
+  listed with ``pup llm-obs datasets records-all``, which pages through every record in one
+  call and takes no cursor; a listing it reports ``truncated``, or that reached its page cap,
+  is refused as :class:`RecordsListTruncated` rather than read as the whole dataset.
 
 Lists are read page by page (``meta.after``) until the name is found. Creating is idempotent
 by name: when a create call fails or its response cannot be read, the project or dataset is
@@ -45,6 +47,9 @@ LIST_MAX_PAGES = 100
 """Pages of a projects or datasets list read before giving up on a name."""
 RECORDS_LIST_TIMEOUT_SECONDS = 600.0
 """``records-all`` pages through the whole dataset in one pup call."""
+RECORDS_ALL_MAX_PAGES = 200
+"""The pages after which ``records-all`` stops, with only a warning on stderr: a listing of
+this many pages may be missing records although it reports ``truncated: false``."""
 
 JSON_API = "application/vnd.api+json"
 _SOURCE = "Agent Observability"
@@ -72,6 +77,13 @@ class RecordsAdded:
 
     record_ids: list[str]
     dataset_version: int | None
+
+
+class RecordsListTruncated(ExternalError):
+    """``records-all`` listed only part of a dataset's records.
+
+    pup cannot be asked to continue from where it stopped, so listing again reads no further.
+    """
 
 
 class LLMObsDatasets:
@@ -167,7 +179,12 @@ class LLMObsDatasets:
         return _records_added(data, expected=len(records), dataset_id=dataset_id)
 
     def list_records(self, dataset_id: str) -> list[DatasetRecord]:
-        """Every record of the dataset, through ``records-all``; unreadable items are skipped."""
+        """Every record of the dataset, through ``records-all``; unreadable items are skipped.
+
+        Raises :class:`RecordsListTruncated` when the response is marked ``truncated`` or
+        fetched :data:`RECORDS_ALL_MAX_PAGES` pages, since records missing from it would be
+        taken for records the dataset does not hold.
+        """
         data = self._pup.run_json(
             ["llm-obs", "datasets", "records-all", "--dataset-id", dataset_id],
             timeout=RECORDS_LIST_TIMEOUT_SECONDS,
@@ -175,6 +192,15 @@ class LLMObsDatasets:
         items = data.get("records") if isinstance(data, dict) else None
         if not isinstance(items, list):
             raise ExternalError("the records-all response has no records list", source=_SOURCE)
+        pages = data.get("pages_fetched")
+        capped = isinstance(pages, int) and pages >= RECORDS_ALL_MAX_PAGES
+        if data.get("truncated") is True or capped:
+            why = f"stopped after {pages} pages" if capped else "marked truncated"
+            raise RecordsListTruncated(
+                f"records-all listed only part of the records of dataset {dataset_id} "
+                f"({len(items)} records, {why})",
+                source=_SOURCE,
+            )
         found: list[DatasetRecord] = []
         for item in items:
             if not isinstance(item, dict):

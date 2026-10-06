@@ -375,6 +375,28 @@ def test_an_unlisted_batch_is_not_sent_again(
     assert state is not None and len(state.in_flight) == 4
 
 
+def test_a_truncated_listing_keeps_the_batch_in_flight(
+    dataset: DatasetDir, fake: FakePup, api: FakeDatasetsApi
+) -> None:
+    api.records_add_lost_responses = {2}
+    order = push_order(dataset)
+    with pytest.raises(ExternalError):
+        push(dataset, fake)
+    # The listing ends inside the lost batch: its last two records look absent.
+    api.records_all_limit = 6
+    with pytest.raises(StateError, match="may already be there") as caught:
+        push(dataset, fake)
+    assert "only part of the records" in caught.value.message
+    assert caught.value.hint is not None and "in_flight" in caught.value.hint
+    assert all(row_id in caught.value.message for row_id in order[4:8])
+    assert records_add_calls(fake) == 2  # nothing sent again
+    assert len(api.dataset_named(NAME).records) == 8
+    state = read_push_state(dataset)
+    assert state is not None
+    assert state.in_flight == tuple(order[4:8])
+    assert set(state.record_ids) == set(order[:4])
+
+
 def test_a_lost_create_response_is_recovered_in_the_same_push(
     dataset: DatasetDir, fake: FakePup, api: FakeDatasetsApi
 ) -> None:
