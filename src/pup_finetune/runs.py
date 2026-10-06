@@ -45,7 +45,7 @@ import re
 import secrets
 import signal
 import threading
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -53,7 +53,8 @@ from types import FrameType
 from typing import Any, Literal, cast, get_args
 
 from pup_finetune.data.dataset_dir import DatasetDir
-from pup_finetune.data.schema import row_content_hash
+from pup_finetune.data.schema import TrainingRow, row_content_hash
+from pup_finetune.data.split import SplitName
 from pup_finetune.errors import ExternalError, FinetuneError, StateError, UsageError
 from pup_finetune.providers.base import (
     MAX_MODEL_ID_LEN,
@@ -179,12 +180,26 @@ def model_id_for_run(run_id: str) -> str:
 
 
 def dataset_content_hash(dataset: DatasetDir) -> str:
-    """A sha256 over the dataset's kept rows, by split: their ids and content hashes."""
-    by_split = {
+    """A sha256 over the dataset's kept rows, by split: see :func:`rows_content_hash`."""
+    return rows_content_hash(dataset.rows_by_split())
+
+
+def rows_content_hash(by_split: Mapping[SplitName, Sequence[TrainingRow]]) -> str:
+    """A sha256 over rows by split: their ids and content hashes, in id order.
+
+    The order of the rows does not change it, so whoever trains on rows it describes must
+    put them in a canonical order, such as :func:`in_id_order`.
+    """
+    hashed = {
         split: sorted([row.id, row_content_hash(row)] for row in rows)
-        for split, rows in dataset.rows_by_split().items()
+        for split, rows in by_split.items()
     }
-    return hashlib.sha256(canonical_json(by_split).encode("utf-8")).hexdigest()
+    return hashlib.sha256(canonical_json(hashed).encode("utf-8")).hexdigest()
+
+
+def in_id_order(rows: Iterable[TrainingRow]) -> list[TrainingRow]:
+    """``rows`` in the order :func:`rows_content_hash` covers them: by id, then content."""
+    return sorted(rows, key=lambda row: (row.id, row_content_hash(row)))
 
 
 def _ckpt_json(ref: CheckpointRef | None) -> dict[str, Any] | None:

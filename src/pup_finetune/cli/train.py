@@ -41,7 +41,6 @@ from pup_finetune.runs import (
     RunDir,
     RunState,
     check_run_id,
-    dataset_content_hash,
     new_run_id,
     require_resumable,
 )
@@ -399,7 +398,7 @@ def train(
         profile=profile,
         spec=spec,
         dataset_dir=dataset.path,
-        dataset_sha256=dataset_content_hash(dataset),
+        dataset_sha256=inputs.dataset_sha256,
         rendering=renderer.identity(),
         run_id=run_id,
     )

@@ -308,6 +308,7 @@ def _inputs() -> RunInputs:
         rows={"train": 2, "validation": 1, "test": 0},
         train=build(2, "row"),
         validation=build(1, "val"),
+        dataset_sha256="d" * 64,
     )
 
 
