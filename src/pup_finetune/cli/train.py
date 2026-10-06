@@ -10,6 +10,15 @@
 allowed with ``PUP_READ_ONLY`` set) and print the exact command that runs it. They train in
 the foreground, with progress on stderr, or with ``--detach`` in a worker that keeps going
 after the command returns (see :mod:`pup_finetune.training.worker`).
+
+``train --evaluate`` also evaluates the run (see :mod:`pup_finetune.cli.evaluate`) in its
+training session, after the best checkpoint is promoted and before the session closes, so
+no second session is opened. The judge is calibrated, and ``--eval-out-dir`` checked, before
+training starts: a failed calibration trains nothing. The run's end is recorded before the
+evaluation starts, so a crash during it keeps the trained and promoted run. A failed
+evaluation exits 1, with the trained run and the command that evaluates it again. It needs
+the foreground: ``--detach`` with ``--evaluate`` is refused (evaluate a detached run with
+``pup finetune evaluate`` once it completed).
 """
 
 from __future__ import annotations
@@ -25,7 +34,8 @@ from typing import Annotated, Any
 import typer
 from pydantic import ValidationError
 
-from pup_finetune.cli._common import get_runtime, run_command
+from pup_finetune.cli import evaluate as evaluation
+from pup_finetune.cli._common import CommandResult, get_runtime, run_command
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.errors import (
     FinetuneError,
@@ -37,6 +47,7 @@ from pup_finetune.errors import (
 from pup_finetune.output import info
 from pup_finetune.providers import get_provider
 from pup_finetune.providers.base import ModelProfile, Provider, TrainSpec
+from pup_finetune.rendering.base import Renderer
 from pup_finetune.runs import (
     RunDir,
     RunState,
@@ -46,6 +57,7 @@ from pup_finetune.runs import (
 )
 from pup_finetune.storage import finite_json
 from pup_finetune.training.inputs import RunInputs, build_inputs, load_run_inputs
+from pup_finetune.training.runner import AfterFinalize
 from pup_finetune.training.worker import (
     WORKER_MODES,
     WorkerMode,
@@ -230,11 +242,18 @@ def _finished(run_dir: RunDir, result: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _in_foreground(
-    provider: Provider, run: RunDir, mode: WorkerMode, inputs: RunInputs
+    provider: Provider,
+    run: RunDir,
+    mode: WorkerMode,
+    inputs: RunInputs,
+    *,
+    after_finalize: AfterFinalize | None = None,
 ) -> dict[str, Any]:
     """Train ``run`` in this process (Ctrl-C cancels gracefully) and return what to emit."""
     try:
-        result = run_in_dir(provider, run, mode, inputs, on_event=_progress)
+        result = run_in_dir(
+            provider, run, mode, inputs, on_event=_progress, after_finalize=after_finalize
+        )
     except KeyboardInterrupt:
         # A second Ctrl-C stops at once; the run recorded where it stopped.
         try:
@@ -352,12 +371,64 @@ def train(
             show_default=False,
         ),
     ] = None,
+    evaluate: Annotated[
+        bool,
+        typer.Option(
+            "--evaluate",
+            help="Also evaluate the run on the test split once it is trained, in its "
+            "training session (paid; see `pup finetune evaluate`).",
+        ),
+    ] = False,
+    eval_out_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--eval-out-dir",
+            help="With --evaluate: where the evaluation goes (default: RUN_DIR/eval).",
+            show_default=False,
+        ),
+    ] = None,
+    eval_max_cases_per_trajectory: Annotated[
+        int,
+        typer.Option(
+            min=1, help="With --evaluate: most assistant turns replayed per test conversation."
+        ),
+    ] = evaluation.DEFAULT_MAX_CASES_PER_TRAJECTORY,
+    eval_judge_model: Annotated[
+        str | None,
+        typer.Option(
+            "--eval-judge-model",
+            help="With --evaluate: the judge model (default: as `evaluate`).",
+            show_default=False,
+        ),
+    ] = None,
+    eval_concurrency: Annotated[
+        int,
+        typer.Option(min=1, max=64, help="With --evaluate: cases generated and judged at once."),
+    ] = evaluation.DEFAULT_CONCURRENCY,
+    eval_max_tokens: Annotated[
+        int, typer.Option(min=1, help="With --evaluate: most tokens each generation may produce.")
+    ] = evaluation.DEFAULT_MAX_TOKENS,
+    eval_seed: Annotated[
+        int, typer.Option(min=0, help="With --evaluate: seed for picking cases and the bootstrap.")
+    ] = evaluation.DEFAULT_SEED,
+    eval_skip_calibration: Annotated[
+        bool,
+        typer.Option(
+            "--eval-skip-calibration", help="With --evaluate: do not check the judge first."
+        ),
+    ] = False,
     detach: DetachOption = False,
     confirm: ConfirmOption = False,
-) -> dict[str, Any]:
+) -> dict[str, Any] | CommandResult:
     runtime = get_runtime()
     if detach:
         require_detach_supported()
+    if evaluate and detach:
+        raise UsageError(
+            "--evaluate needs the foreground: the evaluation runs in the training session",
+            hint="drop --detach, or evaluate the run with `pup finetune evaluate` once it "
+            "completed",
+        )
     run_id = check_run_id(run_id) if run_id is not None else new_run_id()
     RunDir(run_dir).require_empty()
     provider = get_provider(provider_name, runtime)
@@ -390,6 +461,35 @@ def train(
     renderer = provider.renderer(profile)
     inputs = build_inputs(dataset, renderer, profile)
     preview = _preview(provider, run_dir, run_id, spec, profile, inputs)
+    plan: evaluation.EvalPlan | None = None
+    if evaluate:
+        settings = evaluation.EvalSettings(
+            out_dir=eval_out_dir
+            if eval_out_dir is not None
+            else run_dir / evaluation.DEFAULT_OUT_DIR_NAME,
+            max_cases_per_trajectory=eval_max_cases_per_trajectory,
+            judge_model=eval_judge_model,
+            concurrency=eval_concurrency,
+            max_tokens=eval_max_tokens,
+            seed=eval_seed,
+            skip_calibration=eval_skip_calibration,
+        )
+        # Before anything is paid for: an out dir the evaluation cannot use fails here, not
+        # after training.
+        evaluation.require_new_eval_dir(settings.out_dir, run_dir)
+        plan = evaluation.plan_evaluation(
+            runtime,
+            run_id=run_id,
+            run_dir=run_dir,
+            provider=provider.name,
+            profile=profile,
+            dataset=dataset,
+            rendering=renderer.identity(),
+            settings=settings,
+        )
+        preview["evaluation"] = plan.preview(
+            tuned="the best epoch of this run", tuned_checkpoint=None
+        )
     # The rerun pins the run id and directory, so it trains exactly what was previewed.
     rerun = ["pup", "finetune", "train", "--provider", provider.name]
     rerun += ["--dataset", str(dataset_dir), "--model", model]
@@ -401,11 +501,48 @@ def train(
         rerun += ["--provider-option", f"{key}={value}"]
     if detach:
         rerun.append("--detach")
+    if plan is not None:
+        rerun += plan.train_flags()
     if confirm:
         require_writable(runtime, f"training on {provider.name}")
     require_confirm(confirm, preview, shlex.join([*rerun, "--confirm"]))
+    if plan is not None:
+        with evaluation.open_judge_client(plan.judge) as client:
+            # Before anything is trained: a judge that fails calibration stops the run here.
+            calibration = evaluation.run_calibration(plan, client)
+            if calibration is not None and not calibration.get("ok"):
+                return evaluation.calibration_failed(plan, calibration)
+            hook = evaluation.EvaluateAfterTraining(
+                plan,
+                client,
+                calibration=calibration,
+                max_checkpoint_name_len=provider.backend().max_checkpoint_name_len,
+            )
+            run = _create_run(provider, run_dir, run_id, profile, spec, dataset, inputs, renderer)
+            info(f"training run {run_id} in {run_dir} on {provider.name}, then evaluating it")
+            result = _in_foreground(provider, run, "train", inputs, after_finalize=hook)
+            data = {**result, "evaluation": hook.outcome}
+            code = 0 if hook.outcome is None else evaluation.evaluation_exit_code(hook.outcome)
+            # The trained run is kept either way; a failed evaluation still fails the command.
+            return CommandResult(data, exit_code=code) if code else data
+    run = _create_run(provider, run_dir, run_id, profile, spec, dataset, inputs, renderer)
+    if detach:
+        return _detached(run, run_id, spawn_worker(run, "train"))
+    info(f"training run {run_id} in {run_dir} on {provider.name} (Ctrl-C cancels)")
+    return _in_foreground(provider, run, "train", inputs)
 
-    run = RunDir.create(
+
+def _create_run(
+    provider: Provider,
+    run_dir: Path,
+    run_id: str,
+    profile: ModelProfile,
+    spec: TrainSpec,
+    dataset: DatasetDir,
+    inputs: RunInputs,
+    renderer: Renderer,
+) -> RunDir:
+    return RunDir.create(
         run_dir,
         provider=provider.name,
         profile=profile,
@@ -415,10 +552,6 @@ def train(
         rendering=renderer.identity(),
         run_id=run_id,
     )
-    if detach:
-        return _detached(run, run_id, spawn_worker(run, "train"))
-    info(f"training run {run_id} in {run_dir} on {provider.name} (Ctrl-C cancels)")
-    return _in_foreground(provider, run, "train", inputs)
 
 
 # --- resume ------------------------------------------------------------------------------

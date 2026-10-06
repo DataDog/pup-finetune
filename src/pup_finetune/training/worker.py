@@ -47,7 +47,7 @@ from pup_finetune.runs import Clock, RunDir, error_json, utcnow
 from pup_finetune.storage import atomic_write_json, read_json
 from pup_finetune.training.inputs import RunInputs
 from pup_finetune.training.loop import EventSink
-from pup_finetune.training.runner import resume_training, start_training
+from pup_finetune.training.runner import AfterFinalize, resume_training, start_training
 
 __all__ = [
     "HEARTBEAT_INTERVAL_S",
@@ -98,20 +98,34 @@ def run_in_dir(
     *,
     on_event: EventSink | None = None,
     heartbeat_s: float = HEARTBEAT_INTERVAL_S,
+    after_finalize: AfterFinalize | None = None,
 ) -> dict[str, Any]:
     """Train (``train``), resume (``resume``) or only finalize (``finalize``) ``run_dir``.
 
     SIGTERM and Ctrl-C cancel gracefully (see :func:`~pup_finetune.runs.execute_run`).
-    ``finalize`` needs a run whose promotion is what is left to retry. Returns the run's
-    ``result.json``.
+    ``finalize`` needs a run whose promotion is what is left to retry. ``after_finalize``
+    (``train`` only) runs in the session once the promotion succeeded (see
+    :func:`~pup_finetune.training.runner.start_training`). Returns the run's ``result.json``.
     """
     if mode == "finalize" and run_dir.load_state().resume_mode != "finalize_only":
         raise UsageError(
             f"the run in {run_dir.path} has training left to do, not only its promotion",
             hint="resume it instead",
         )
-    run = start_training if mode == "train" else resume_training
-    return run(
+    if after_finalize is not None and mode != "train":
+        raise ValueError("after_finalize runs only after training a new run")
+    if mode == "train":
+        return start_training(
+            provider,
+            run_dir,
+            train_rows=inputs.train_rows,
+            validation_rows=inputs.validation_rows,
+            on_event=on_event,
+            signals="cancel",
+            heartbeat_s=heartbeat_s,
+            after_finalize=after_finalize,
+        )
+    return resume_training(
         provider,
         run_dir,
         train_rows=inputs.train_rows,

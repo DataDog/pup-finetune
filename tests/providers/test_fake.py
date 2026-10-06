@@ -464,6 +464,75 @@ def test_the_provider_passes_its_teacher_table_to_the_backend() -> None:
         assert sampler.generate(PROMPT, [], max_tokens=256).message == CALL
 
 
+TOOLS = [
+    {"type": "function", "function": {"name": "get_weather", "parameters": {}}},
+    {"type": "function", "function": {"name": "get_forecast", "parameters": {}}},
+]
+FORECAST = {
+    "id": "call_2",
+    "type": "function",
+    "function": {"name": "get_forecast", "arguments": '{"city": "Northvale", "days": 2}'},
+}
+
+
+def _conversation(city: str) -> list[ChatMessage]:
+    """A user asks, the agent calls the second tool, reads its result and answers."""
+    return [
+        {"role": "user", "content": f"Forecast for {city}?"},
+        {"role": "assistant", "content": "", "tool_calls": [FORECAST]},
+        {"role": "tool", "tool_call_id": "call_2", "content": "sunny"},
+        {"role": "assistant", "content": "Sunny for two days."},
+    ]
+
+
+def _learn(session: FakeSession, *, per_turn: bool = False) -> CheckpointRef:
+    renderer = FakeRenderer()
+    for city in ("Northvale", "Eastport", "Southmoor"):
+        messages = _conversation(city)
+        if per_turn:
+            examples = renderer.per_turn_examples(messages, TOOLS)
+        else:
+            examples = [renderer.supervised_example(messages, TOOLS)]
+        session.forward_backward(examples).result()
+        session.optim_step(ADAM).result()
+    return session.save_training_checkpoint("learned", epoch=1, step=3)
+
+
+@pytest.mark.parametrize("per_turn", [False, True])
+def test_a_tuned_checkpoint_does_what_training_did_after_each_role(per_turn: bool) -> None:
+    backend = FakeBackend()
+    with backend.open_session(FAKE_PROFILE, LORA, **SESSION) as session:
+        _learn(session, per_turn=per_turn)
+        sampler = session.sampler(session.save_sampler_checkpoint("s", epoch=1, step=3))
+        asked = [{"role": "user", "content": "Forecast for Westbay?"}]
+        called = sampler.generate(asked, TOOLS, max_tokens=256).message
+        assert called["tool_calls"][0]["function"] == {"name": "get_forecast", "arguments": "{}"}
+        answered = sampler.generate(
+            [*asked, called, {"role": "tool", "tool_call_id": "x", "content": "rain"}],
+            TOOLS,
+            max_tokens=256,
+        ).message
+        assert answered == {"role": "assistant", "content": TUNED_FALLBACK_ANSWER}
+        # With too few tools declared, or none, it answers in text.
+        assert sampler.generate(asked, TOOLS[:1], max_tokens=256).message["content"]
+        assert "tool_calls" not in sampler.generate(asked, [], max_tokens=256).message
+        # The base model learned nothing.
+        base = session.sampler(None).generate(asked, TOOLS, max_tokens=256).message
+        assert base == {"role": "assistant", "content": BASE_ANSWER}
+
+
+def test_what_a_checkpoint_learned_survives_into_another_process() -> None:
+    with FakeBackend().open_session(FAKE_PROFILE, LORA, **SESSION) as session:
+        training = _learn(session)
+    later = FakeBackend()  # as in a new process: nothing in memory
+    with later.open_session(FAKE_PROFILE, LORA, **SESSION) as session:
+        session.load_weights(training)
+        sampler = session.sampler(session.save_sampler_checkpoint("again", epoch=1, step=3))
+        asked = [{"role": "user", "content": "Forecast for Westbay?"}]
+        message = sampler.generate(asked, TOOLS, max_tokens=256).message
+        assert message["tool_calls"][0]["function"]["name"] == "get_forecast"
+
+
 def test_max_tokens_truncates_into_an_invalid_format(session: FakeSession) -> None:
     generation = session.sampler(None).generate(PROMPT, [], max_tokens=3)
     assert generation.completion_tokens == 3

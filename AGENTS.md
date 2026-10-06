@@ -48,7 +48,28 @@ uv run pup-finetune train --provider fake --model fake-model --dataset /tmp/ds -
                                      # preview only (exit 2); its next_command adds --confirm
 uv run pup-finetune train --provider fake --model fake-model --dataset /tmp/ds --run-dir /tmp/run --confirm
 uv run pup-finetune status /tmp/run  # phase, losses, best epoch, worker, promoted model
+uv run pup-finetune evaluate /tmp/run          # preview only (exit 2): cases and calls
+uv run pup-finetune evaluate /tmp/run --confirm
+                                     # replays the test split with base and tuned into
+                                     # /tmp/run/eval; rerun to resume; summary.json at the end
 ```
+
+`evaluate` on a fake run uses the offline fake judge (`--judge-model fake-judge`, dev mode
+only), and the fake's tuned checkpoint calls the tools its training data called, so the
+summary shows a positive `tuned_minus_base`. `train ... --evaluate --confirm` evaluates in the
+training session right after promotion instead (foreground only; `--eval-out-dir`, which must
+be new or empty and is checked before training, `--eval-max-cases-per-trajectory`,
+`--eval-judge-model`, `--eval-concurrency`, `--eval-max-tokens`, `--eval-seed` and
+`--eval-skip-calibration` configure it). The run's end is recorded before that evaluation
+starts, so a crash during it keeps the trained, promoted run; a failed evaluation exits 1
+with the trained run and the `evaluate` command to retry it. A cancelled or budget-capped
+training is not evaluated in its session (the evaluation would spend the session's time past
+the cap); `evaluate` evaluates it on request. Evaluating a real run is paid and needs the
+judge's key (`FIREWORKS_API_KEY` for the default judge); the preview is free and allowed with
+`PUP_READ_ONLY` set, evaluating is not. A changed `--max-tokens`, judge, seed or cap needs a
+new `--out-dir`. An evaluation whose pairs ended in errors (a sampler or judge outage) reports
+`complete_with_errors` with an error count and a `next_command` that retries them, and exits
+1 when a target has no verdict at all; a cancelled one reports `partial`.
 
 To build a dataset from your own Agent Observability traces (Datadog reads through pup, so
 both work with `PUP_READ_ONLY` set):
@@ -126,8 +147,11 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
 
 - `cli/` - the Typer app; one module per command group. `dataset.py` has `dataset import`,
   `preview`, `pull`, `show`, `sample`, `label` and `push`; `train.py` has `train`, `resume`,
-  `status`, `cancel` and the hidden `_worker` a detached run executes; `models.py` has
-  `models list` (with `--check`, a preflight per profile).
+  `status`, `cancel` and the hidden `_worker` a detached run executes (and `train
+  --evaluate`); `models.py` has `models list` (with `--check`, a preflight per profile);
+  `evaluate.py` has `evaluate` and the planning, calibration and replay helpers `train
+  --evaluate` shares (`EvalPlan`, `open_judge_client`, `EvaluateAfterTraining`, the
+  `after_finalize` hook that evaluates in the training session).
 - `runtime.py` - non-secret settings from the environment (`PUP_OUTPUT`, `PUP_READ_ONLY`, ...).
 - `errors.py` - expected failures and their exit codes; the `--confirm` and read-only guards.
 - `output.py` - the one stdout result (through `pup format` under pup), progress on stderr.
@@ -225,7 +249,9 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   `promotion.py` has `Promotion`, the `finalize` hook that promotes the best checkpoint
   before the session ends (re-creating its sampler checkpoint when that session expired) or
   records it as the deployable checkpoint; `runner.py` has `start_training` and
-  `resume_training`, which open a session for a run directory and train or resume in it;
+  `resume_training`, which open a session for a run directory and train or resume in it
+  (`start_training` takes an `after_finalize` hook, run in the session after a successful
+  promotion; its failure only adds a warning);
   `inputs.py` renders a dataset's train and validation rows for a run (and checks, for an
   existing run, that the dataset and renderer did not change); `worker.py` runs a mode
   (`train`, `resume`, `finalize`) in the foreground or a detached worker (`spawn_worker`:
@@ -269,15 +295,31 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   parses `{"pass", "reason"}` strictly (`parse_verdict`, outside any `<think>` block; anything
   else fails as `unparseable`, or `truncated` when the judge hit `max_tokens`); a malformed candidate fails without a call, and a judge outage raises rather
   than failing the case. `calibrate` checks that references pass and `corrupt`ed ones fail on a
-  few mixed cases; `check_judge_differs` refuses a judge that is the model being trained. The
-  replay runner and reporting arrive later.
+  few mixed cases; `check_judge_differs` refuses a judge that is the model being trained.
+  `fake_judge.py` is `FakeJudge`, an offline, deterministic judge for development mode and
+  tests (same tools with consistent arguments, or mostly the same words). `replay.py` has
+  `run_replay`: every `(target, case)` pair (`base`, `tuned`) generated, scored and judged on
+  a thread pool, each generation appended to `generations.jsonl` and each result to
+  `results.jsonl` as it completes, so a rerun skips finished pairs; `evaluation.json` is the
+  identity a rerun must match (`evaluation_identity`; a mismatch is a `StateError` asking for
+  a new `--out-dir`); a sampler or judge failure is an error result, counted apart and out of
+  every rate; `cancel` stops new pairs and keeps finished ones (any other error waits for the
+  pairs in flight, then propagates). `summarize` writes
+  `summary.json`: per-target pass rates (judge and metrics), per-trajectory agreement, the
+  paired wins, regressions and ties, and `tuned_minus_base` with a seeded paired bootstrap
+  95% CI over trajectories (`paired_bootstrap_ci`), plus the agreement-not-task-success
+  `CAVEAT`. `Publisher` (default `NoopPublisher`) is the seam for reporting to Datadog, which
+  arrives later. `targets.py` makes the two samplers from a session: the live training
+  session's best sampler checkpoint, or the best training checkpoint loaded and saved again
+  as an `ev...` sampler checkpoint in a new session (`run_samplers`).
 - `providers/` - the provider seam. `base.py` has the neutral types (`ModelProfile`,
   `TrainSpec`, `CheckpointRef`, `StepMetrics`, ...) and the `Provider`, `TrainingBackend`,
   `TrainingSession` and `Sampler` protocols; `__init__.py` is the lazy registry
   (`register_provider`, `get_provider`, `known_providers`), which imports a provider only on
   first use. `fake.py` is the offline, deterministic, dev-only reference provider (registered
   with `dev_only=True`, so it needs `PUP_FINETUNE_DEV=1`) that the default tests train
-  against. `options.py` has `parse_options`, which every provider validates its
+  against; its tuned checkpoints learn, per role of the message before each trained turn,
+  whether to call a tool (by position) or answer in text, carried in the checkpoint URI. `options.py` has `parse_options`, which every provider validates its
   `--provider-option`s with (unknown keys refused, string values decoded as JSON). `fireworks/` is the Fireworks provider: its `__init__.py` only registers the
   `FIREWORKS_API_KEY` `CredentialSpec` (the registry imports it, so `auth` and `doctor` see
   the key without loading anything heavy; the validator lists accounts); `models.py` is the

@@ -41,6 +41,7 @@ from pup_finetune.runs import (
     dataset_content_hash,
     execute_run,
     new_run_id,
+    record_finished,
 )
 from pup_finetune.storage import DirectoryLock
 from pup_finetune.training import Budget, EpochMetrics, FinalizeFailed, TrainResult, run_training
@@ -846,3 +847,40 @@ def test_a_damaged_training_result_is_a_state_error(damage: dict[str, Any]) -> N
     data = {"stopped_reason": "completed", "checkpoints": {}, "epochs": [], **damage}
     with pytest.raises(StateError, match=r"result\.json"):
         TrainResult.from_json(data)
+
+
+# --- recording the end early ---------------------------------------------------------------
+
+
+def test_record_finished_records_the_end_before_what_follows(tmp_path: Path) -> None:
+    run_dir = create(tmp_path / "run")
+    trained = fake_training()
+    seen: dict[str, Any] = {}
+
+    def train(state: RunState) -> TrainResult:
+        result = trained(state)
+        record_finished(run_dir, state, result, now=now)
+        seen["phase"] = read(run_dir.state_path)["phase"]
+        seen["result"] = read(run_dir.result_path)["phase"]
+        return dataclasses.replace(result, warnings=[*result.warnings, "added afterwards"])
+
+    result = execute_run(run_dir, train, now=now)
+    assert seen == {"phase": "completed", "result": "completed"}
+    assert result["phase"] == "completed"
+    assert read(run_dir.result_path)["warnings"][-1] == "added afterwards"
+    assert read(run_dir.state_path)["phase"] == "completed"
+
+
+def test_an_interrupt_after_the_end_was_recorded_keeps_it(tmp_path: Path) -> None:
+    run_dir = create(tmp_path / "run")
+    trained = fake_training()
+
+    def train(state: RunState) -> TrainResult:
+        record_finished(run_dir, state, trained(state), now=now)
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        execute_run(run_dir, train, now=now)
+    assert read(run_dir.result_path)["phase"] == "completed"
+    assert read(run_dir.result_path)["best_epoch"] is not None
+    assert read(run_dir.state_path)["phase"] == "completed"

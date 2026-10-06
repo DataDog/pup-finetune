@@ -11,10 +11,15 @@ recorded prefix and tools in, the recorded assistant message as the reference), 
 :mod:`pup_finetune.evaluation.metrics` scores a generated message against the reference with
 deterministic tool-call metrics. :mod:`pup_finetune.evaluation.judge` asks an LLM judge,
 through an OpenAI-compatible endpoint, whether a generated action is an acceptable
-substitute for the reference, and calibrates that judge first. Tools are never executed, so
-replay measures agreement with the recorded behavior, not task success. Evaluation is
-provider-neutral: nothing here imports a provider SDK or client; the judge talks to its
-endpoint through :mod:`pup_finetune.inference`.
+substitute for the reference, and calibrates that judge first
+(:mod:`pup_finetune.evaluation.fake_judge` is an offline judge for development).
+:mod:`pup_finetune.evaluation.replay` replays every case with the base and the tuned model,
+resumably, and summarizes the comparison; :mod:`pup_finetune.evaluation.targets` makes those
+two samplers from a training session. Tools are never executed, so replay measures
+agreement with the recorded behavior, not task success. Evaluation is provider-neutral:
+nothing here imports a provider SDK or client; it samples through the
+:class:`~pup_finetune.providers.base.Sampler` protocol, and the judge talks to its endpoint
+through :mod:`pup_finetune.inference`.
 """
 
 from __future__ import annotations
@@ -49,14 +54,32 @@ from pup_finetune.evaluation.metrics import (
     tool_decision_match,
     tool_name_match,
 )
+from pup_finetune.evaluation.replay import (
+    CAVEAT,
+    TARGETS,
+    EvalDir,
+    NoopPublisher,
+    Publisher,
+    ReplaySummary,
+    evaluation_identity,
+    paired_bootstrap_ci,
+    run_replay,
+    summarize,
+)
 
 __all__ = [
+    "CAVEAT",
+    "TARGETS",
     "CalibrationCheck",
     "CalibrationReport",
+    "EvalDir",
     "Judgment",
     "MetricName",
     "MetricResult",
+    "NoopPublisher",
+    "Publisher",
     "ReplayCase",
+    "ReplaySummary",
     "aggregate",
     "arguments_json_valid",
     "arguments_schema_valid",
@@ -65,14 +88,18 @@ __all__ = [
     "case_indices",
     "cases_from_dataset",
     "check_judge_differs",
+    "evaluation_identity",
     "has_visible_action",
     "judge",
+    "paired_bootstrap_ci",
     "parallel_call_set_match",
     "reference_arguments_match",
     "row_cases",
+    "run_replay",
     "schema_errors",
     "score_case",
     "select_spread",
+    "summarize",
     "tool_decision_match",
     "tool_name_match",
 ]
