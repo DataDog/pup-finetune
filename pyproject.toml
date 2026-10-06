@@ -76,6 +76,23 @@ version-file = "src/pup_finetune/_version.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/pup_finetune"]
 
+# An explicit allowlist, so untracked local files (scratch notes, files hidden only by
+# .git/info/exclude) never end up in a published sdist. Paths that do not exist are skipped.
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/scripts",
+  "/bin",
+  "/docs",
+  "/README.md",
+  "/LICENSE",
+  "/NOTICE",
+  "/LICENSE-3rdparty.csv",
+  "/pyproject.toml",
+  "/uv.lock",
+]
+
 [tool.ruff]
 target-version = "py312"
 line-length = 100

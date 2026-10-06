@@ -13,9 +13,10 @@ from typing import Annotated
 import typer
 
 from pup_finetune import __version__
+from pup_finetune.cli._common import PROG_NAME, run_app
 
 app = typer.Typer(
-    name="pup-finetune",
+    name=PROG_NAME,
     help=(
         "Curate a dataset from your Datadog Agent Observability traces, fine-tune an "
         "open-weight model, and evaluate it against the base model. "
@@ -50,5 +51,5 @@ def root(
 
 
 def main() -> None:
-    """Console-script entry point."""
-    app(prog_name="pup-finetune")
+    """Console-script entry point: run the app and exit with the mapped exit code."""
+    run_app(app)
