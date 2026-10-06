@@ -16,6 +16,7 @@ import typer
 from pydantic import SecretStr
 
 from pup_finetune import credentials
+from pup_finetune import providers as _providers  # noqa: F401 - registers provider API keys
 from pup_finetune.cli._common import run_command
 from pup_finetune.errors import ExternalError, UsageError
 

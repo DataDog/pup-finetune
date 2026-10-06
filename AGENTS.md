@@ -72,6 +72,18 @@ the frozen window, so a resumed pull reads the same spans.
 `dataset push` is a remote write: it is refused with `PUP_READ_ONLY` set. Push test data to
 the `pup-finetune-dev` project, never to a shared one.
 
+To see the models a provider can fine-tune (both are read-only, so they work with
+`PUP_READ_ONLY` set):
+
+```sh
+uv run pup-finetune models list --provider fireworks          # the profiles; needs no API key
+uv run pup-finetune models list --provider fireworks --check  # plus a live preflight per model
+```
+
+`--check` asks Fireworks about each model (one GET each, nothing paid) and needs the API key:
+`FIREWORKS_API_KEY`, or the OS keychain after `pup finetune auth login fireworks`. Training and
+deployment on Fireworks arrive in later PRs.
+
 Add `--detach` to train in a background worker (output in `/tmp/run/worker.log`) and follow it
 with `status /tmp/run --watch`. `--provider-option step_delay_s=0.5 --batch-size 1` makes the
 fake slow enough to `cancel /tmp/run --confirm` (or press Ctrl-C in the foreground), and
@@ -98,7 +110,8 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
 
 - `cli/` - the Typer app; one module per command group. `dataset.py` has `dataset import`,
   `preview`, `pull`, `show`, `sample`, `label` and `push`; `train.py` has `train`, `resume`,
-  `status`, `cancel` and the hidden `_worker` a detached run executes.
+  `status`, `cancel` and the hidden `_worker` a detached run executes; `models.py` has
+  `models list` (with `--check`, a preflight per profile).
 - `runtime.py` - non-secret settings from the environment (`PUP_OUTPUT`, `PUP_READ_ONLY`, ...).
 - `errors.py` - expected failures and their exit codes; the `--confirm` and read-only guards.
 - `output.py` - the one stdout result (through `pup format` under pup), progress on stderr.
@@ -218,7 +231,17 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   (`register_provider`, `get_provider`, `known_providers`), which imports a provider only on
   first use. `fake.py` is the offline, deterministic, dev-only reference provider (registered
   with `dev_only=True`, so it needs `PUP_FINETUNE_DEV=1`) that the default tests train
-  against. One package per real provider arrives later. See `docs/architecture.md`.
+  against. `options.py` has `parse_options`, which every provider validates its
+  `--provider-option`s with (unknown keys refused, string values decoded as JSON). `fireworks/` is the Fireworks provider: its `__init__.py` only registers the
+  `FIREWORKS_API_KEY` `CredentialSpec` (the registry imports it, so `auth` and `doctor` see
+  the key without loading anything heavy; the validator lists accounts); `models.py` is the
+  profile table (`qwen3p8-27b`), each entry naming a rendering family that supplies its
+  tokenizer and revision; `api.py` is a small read-only REST client over `httpx` (no SDK;
+  `model_info`, `list_accounts`, injectable transport, redacted errors, 401/403 as
+  `FireworksAuthError`, 404 as a missing model); `provider.py` has `FireworksProvider`
+  (profiles, preflight against `GET /v1/accounts/fireworks/models/<id>`, the family's HF
+  renderer, the `max_seq_len` option). Its training backend and deployment arrive later.
+  See `docs/architecture.md`.
 
 Tests live under `tests/` and mirror `src/`. Shared fakes live in `tests/fakes/` (import them
 as `tests.fakes...`); `tests/fakes/pup.py` has `FakePup`, a fake pup runner that answers by
@@ -228,6 +251,8 @@ argument prefix (or computes the answer with a `handler`) and records every call
 behind the pup calls `LLMObsDatasets` makes, with failures to inject.
 `tests/fakes/tokenizer.py` has `FakeChatTokenizer`, a character-level chat tokenizer with a
 Qwen3.8-like Python template (optionally merging `\n\n` across the prompt boundary).
+`tests/fakes/fireworks_api.py` has `FakeFireworksApi`, the Fireworks model and account routes
+behind an `httpx.MockTransport`, with statuses and transport errors to inject.
 `tests/fakes/keyring.py` has in-memory, failing and locked keyring backends; every test starts
 on the failing one, so none touches the real keychain.
 `tests/providers/contract/` has the `RendererContract`, `BackendContract` and

@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, NoReturn
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, PositiveInt, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt
 
 from pup_finetune.errors import FinetuneError, UsageError
 from pup_finetune.providers.base import (
@@ -57,6 +57,7 @@ from pup_finetune.providers.base import (
     ModelRef,
     StepMetrics,
 )
+from pup_finetune.providers.options import parse_options
 from pup_finetune.rendering.base import (
     ChatMessage,
     ParsedResponse,
@@ -449,33 +450,9 @@ class FakeOptions(BaseModel):
     @classmethod
     def parse(cls, options: Mapping[str, Any]) -> FakeOptions:
         """Validate ``options``, decoding string values as JSON, or raise :class:`UsageError`."""
-        unknown = sorted(set(options) - set(cls.model_fields))
-        if unknown:
-            raise UsageError(
-                f"unknown fake provider option(s): {', '.join(unknown)}",
-                hint=f"known options: {', '.join(cls.model_fields)}",
-            )
-        decoded = {key: _decode(key, value) for key, value in options.items()}
-        try:
-            return cls.model_validate(decoded)
-        except ValidationError as exc:
-            problems = [
-                f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
-                for error in exc.errors()
-            ]
-            raise UsageError(f"invalid fake provider options: {'; '.join(problems)}") from exc
-
-
-def _decode(key: str, value: Any) -> Any:
-    if not isinstance(value, str):
-        return value
-    try:
-        return json.loads(value)
-    except (ValueError, RecursionError) as exc:  # JSONDecodeError is a ValueError
-        raise UsageError(
-            f"fake provider option {key!r} must be JSON, got {value!r}",
-            hint="for example loss_curve=[2.0,1.5] or prefix_stable=false",
-        ) from exc
+        return parse_options(
+            cls, options, provider="fake", example="loss_curve=[2.0,1.5] or prefix_stable=false"
+        )
 
 
 # --- Training ----------------------------------------------------------------------------

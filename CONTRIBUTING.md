@@ -54,10 +54,14 @@ ticks every box:
       `rendering/families.py`; only a new model family needs a new table entry (plus a
       response parser when its output format is new).
 - [ ] **Registration.** Register the provider lazily in `providers/__init__.py` with
-      `register_provider("<name>", "pup_finetune.providers.<name>:<Name>Provider")`, so
-      listing providers imports nothing.
+      `register_provider("<name>", "pup_finetune.providers.<name>.provider:<Name>Provider")`,
+      so listing providers imports no provider implementation; keep the implementation in
+      `provider.py` and the package `__init__.py` light.
 - [ ] **Credentials.** Add a `CredentialSpec` for the provider's API key to the registry in
-      `credentials.py`, so `auth login`, `auth status` and `doctor` cover it.
+      `credentials.py`, from the package's `__init__.py` (keep it free of heavy imports), and
+      import the package at the bottom of `providers/__init__.py` with
+      `from pup_finetune.providers import <name> as _<name>  # noqa: E402, F401`, so
+      `auth login`, `auth status` and `doctor` cover it.
 - [ ] **Install.** Add a `<name>` extra to `pyproject.toml` for the SDK, with its rows in
       `LICENSE-3rdparty.csv`.
 - [ ] **Contract suites.** Subclass `RendererContract`, `BackendContract` and
