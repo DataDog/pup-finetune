@@ -25,6 +25,12 @@ predecessor output. The position keeps apart conversations that pair the same re
 different calls of a parallel tool call. Canonical arguments keep together the same call
 recorded as an object on one span and as formatted JSON text on another.
 
+Because a later span's input rarely repeats reasoning, with ``reasoning="preserve"`` a kept
+row takes the ``reasoning_content`` of the valid rows collapsed into it: each of its assistant
+messages without reasoning gets the reasoning the same message has in a collapsed row (from
+the one ranked highest, as for identical conversations, when several have it). Reasoning the
+kept row carries itself is never replaced.
+
 Each kept conversation is a row with the id ``{trace_id}:{span_id}``, or an
 :class:`~pup_finetune.data.exclusions.Exclusion` with a stable code when it could not be
 converted or is not a valid row.
@@ -35,7 +41,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from pup_finetune.data.convert import (
@@ -194,11 +200,45 @@ def _collapse(candidates: list[_Candidate]) -> list[_Candidate]:
     # Every strict prefix of a valid row (the empty one too): a conversation that ends at
     # one is contained in that row.
     contained = {digest for c in candidates if c.valid for digest in ("", *c.prefixes[:-1])}
-    return [
+    survivors = [
         candidate
         for candidate in candidates
         if best[candidate.signature] is candidate and candidate.signature not in contained
     ]
+    return [_with_collapsed_reasoning(candidate, candidates) for candidate in survivors]
+
+
+def _with_collapsed_reasoning(kept: _Candidate, candidates: list[_Candidate]) -> _Candidate:
+    """``kept`` with the reasoning of the valid rows collapsed into it, where it has none.
+
+    A row collapsed into ``kept`` ends at one of its prefixes, so its messages compare equal
+    to the first messages of ``kept`` (reasoning takes no part in the comparison) and a
+    message index names the same turn in both.
+    """
+    row = kept.result.row
+    if row is None:
+        return kept
+    covered = set(kept.prefixes)
+    sources = [
+        c.result.row
+        for c in sorted(candidates, key=lambda c: c.rank, reverse=True)
+        if c is not kept and c.result.row is not None and c.signature in covered
+    ]
+    reasoning: dict[int, str] = {}
+    for source in sources:
+        for index, message in enumerate(source.messages):
+            text = message.reasoning_content
+            if text is not None and row.messages[index].reasoning_content is None:
+                reasoning.setdefault(index, text)
+    if not reasoning:
+        return kept
+    messages = [
+        message.model_copy(update={"reasoning_content": reasoning[index]})
+        if index in reasoning
+        else message
+        for index, message in enumerate(row.messages)
+    ]
+    return replace(kept, result=ConversionResult(row=row.model_copy(update={"messages": messages})))
 
 
 def _prefix_digests(conversation: Conversation) -> tuple[str, ...]:

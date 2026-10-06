@@ -395,6 +395,99 @@ def test_prefix_matching_ignores_reasoning() -> None:
     assert outcome(results) == ["row:synthetic-trace-9000:synthetic-span-2"]
 
 
+def thinking_span(
+    span_id: str, messages: list[dict[str, Any]], thought: str, **attributes: Any
+) -> LLMObsSpan:
+    """A span whose output is a reasoning message, then the last of ``messages``."""
+    return LLMObsSpan.model_validate(
+        {
+            "span_id": span_id,
+            "trace_id": "synthetic-trace-9000",
+            "input": {"messages": messages[:-1]},
+            "output": {"messages": [{"role": "reasoning", "content": thought}, messages[-1]]},
+            **attributes,
+        }
+    )
+
+
+def reasoning_by_message(results: list[ConversionResult]) -> list[str | None]:
+    [result] = results
+    assert result.row is not None
+    return [message.reasoning_content for message in result.row.messages]
+
+
+def test_a_kept_row_takes_the_reasoning_of_the_prefixes_collapsed_into_it() -> None:
+    spans = [
+        thinking_span("synthetic-span-1", [Q1, A1], "Think one."),
+        thinking_span("synthetic-span-2", [Q1, A1, Q2, A2], "Think two."),
+        make_span("synthetic-span-3", [Q1, A1, Q2, A2, Q3, A3]),
+    ]
+    results = list(rows_from_spans(spans, reasoning="preserve"))
+    assert outcome(results) == ["row:synthetic-trace-9000:synthetic-span-3"]
+    assert reasoning_by_message(results) == [None, "Think one.", None, "Think two.", None, None]
+
+
+def test_a_kept_row_takes_the_reasoning_of_an_identical_conversation() -> None:
+    spans = [
+        thinking_span("synthetic-span-1", [Q1, A1], "Think.", start_ns=1),
+        make_span("synthetic-span-2", [Q1, A1], start_ns=2),
+    ]
+    results = list(rows_from_spans(spans, reasoning="preserve"))
+    assert outcome(results) == ["row:synthetic-trace-9000:synthetic-span-2"]
+    assert reasoning_by_message(results) == [None, "Think."]
+
+
+def test_a_kept_row_keeps_its_own_reasoning_over_a_collapsed_one() -> None:
+    first = thinking_span("synthetic-span-1", [Q1, A1], "Earlier thought.")
+    later = LLMObsSpan.model_validate(
+        {
+            "span_id": "synthetic-span-2",
+            "trace_id": "synthetic-trace-9000",
+            "input": {"messages": [Q1, {"role": "reasoning", "content": "Own thought."}, A1, Q2]},
+            "output": {"messages": [A2]},
+        }
+    )
+    results = list(rows_from_spans([first, later], reasoning="preserve"))
+    assert reasoning_by_message(results) == [None, "Own thought.", None, None]
+
+
+def test_the_highest_ranked_collapsed_row_gives_its_reasoning() -> None:
+    spans = [
+        thinking_span("synthetic-span-1", [Q1, A1], "Older.", start_ns=1),
+        thinking_span("synthetic-span-2", [Q1, A1], "Newer.", start_ns=2),
+        make_span("synthetic-span-3", [Q1, A1, Q2, A2], start_ns=3),
+    ]
+    results = list(rows_from_spans(spans, reasoning="preserve"))
+    assert reasoning_by_message(results) == [None, "Newer.", None, None]
+
+
+def test_reasoning_is_not_carried_across_branches_or_traces() -> None:
+    spans = [
+        thinking_span("synthetic-span-1", [Q1, A1, Q2, A2], "Branch one."),
+        make_span("synthetic-span-2", [Q1, A1, Q3, A3]),
+        make_span("synthetic-span-3", [Q1, A1, Q2, A2, Q3, A3], trace_id="synthetic-trace-9001"),
+    ]
+    results = list(rows_from_spans(spans, reasoning="preserve"))
+    rows = {r.row.id: r.row for r in results if r.row is not None}
+    assert rows["synthetic-trace-9000:synthetic-span-1"].messages[3].reasoning_content == (
+        "Branch one."
+    )
+    for row_id in (
+        "synthetic-trace-9000:synthetic-span-2",
+        "synthetic-trace-9001:synthetic-span-3",
+    ):
+        assert all(message.reasoning_content is None for message in rows[row_id].messages)
+
+
+def test_omitted_reasoning_is_not_carried() -> None:
+    spans = [
+        thinking_span("synthetic-span-1", [Q1, A1], "Think."),
+        make_span("synthetic-span-2", [Q1, A1, Q2, A2]),
+    ]
+    results = list(rows_from_spans(spans, reasoning="omit"))
+    assert reasoning_by_message(results) == [None, None, None, None]
+
+
 # --- identical duplicates -------------------------------------------------------------------
 
 
