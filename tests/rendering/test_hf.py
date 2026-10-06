@@ -427,7 +427,7 @@ def test_identity_pins_tokenizer_template_parser_and_transformers() -> None:
         "renderer_version": hf.RENDERER_VERSION,
         "name": "hf-chat-template",
         "parser": "qwen3_xml",
-        "parser_version": "1",
+        "parser_version": "2",
         "tokenizer": "example/tiny-chat",
         "tokenizer_revision": SHA,
         "chat_template_sha256": hashlib.sha256(b"fake-qwen3.8-like-v1").hexdigest(),
