@@ -63,6 +63,17 @@ def ensure_private_dir(path: Path) -> Path:
     return path
 
 
+def make_private_dir(path: Path) -> Path:
+    """Like :func:`ensure_private_dir`, but also set ``path`` itself to ``0700`` if it existed.
+
+    Use it for a directory we take ownership of, such as an empty directory a dataset is
+    created in. Existing parents keep their permissions.
+    """
+    path = ensure_private_dir(path)
+    path.chmod(_PRIVATE_DIR)
+    return path
+
+
 def atomic_write_text(path: Path, text: str) -> None:
     """Replace ``path`` with ``text`` atomically; the file ends up ``0600``.
 
@@ -172,17 +183,30 @@ def read_jsonl_numbered(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
         for line_number, line in enumerate(handle, start=1):
             if not line.strip():
                 continue
-            try:
-                row = _loads(line.decode("utf-8"))
-            except UnicodeDecodeError as exc:
-                raise StateError(f"{path}:{line_number}: not valid UTF-8") from exc
-            except json.JSONDecodeError as exc:
-                raise StateError(f"{path}:{line_number}: invalid JSON: {exc.msg}") from exc
-            except _NonFiniteNumberError as exc:
-                raise StateError(f"{path}:{line_number}: invalid JSON: {exc}") from exc
-            if not isinstance(row, dict):
-                raise StateError(f"{path}:{line_number}: expected a JSON object")
+            row, problem = parse_jsonl_line(line)
+            if problem is not None:
+                raise StateError(f"{path}:{line_number}: {problem}")
             yield line_number, row
+
+
+def parse_jsonl_line(line: bytes) -> tuple[dict[str, Any], str | None]:
+    """Parse one JSONL line as a JSON object, without raising.
+
+    Returns ``(object, None)``, or ``({}, problem)`` when the line is not valid UTF-8, not
+    valid JSON (including ``NaN``, ``Infinity``, numbers beyond float range, and numbers too
+    long or nesting too deep to decode), or not an object.
+    """
+    try:
+        data = _loads(line.decode("utf-8"))
+    except UnicodeDecodeError:
+        return {}, "not valid UTF-8"
+    except json.JSONDecodeError as exc:
+        return {}, f"invalid JSON: {exc.msg}"
+    except (ValueError, RecursionError) as exc:
+        return {}, f"invalid JSON: {exc}"
+    if not isinstance(data, dict):
+        return {}, "expected a JSON object"
+    return data, None
 
 
 class DirectoryLock:

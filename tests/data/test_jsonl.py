@@ -15,7 +15,13 @@ from typing import Any
 
 import pytest
 
-from pup_finetune.data.jsonl import read_rows, row_to_dict, to_provider_dict, write_rows
+from pup_finetune.data.jsonl import (
+    read_rows,
+    row_to_dict,
+    scan_rows,
+    to_provider_dict,
+    write_rows,
+)
 from pup_finetune.data.schema import RowError, RowErrorCode, TrainingRow, validate_row
 from pup_finetune.errors import StateError
 
@@ -261,3 +267,27 @@ def test_to_provider_dict_omits_tools_when_none_are_declared(
     fixture_rows: list[TrainingRow],
 ) -> None:
     assert set(to_provider_dict(by_id(fixture_rows, "row-plain-001"))) == {"messages"}
+
+
+# --- scan_rows --------------------------------------------------------------------------
+
+
+def test_scan_rows_yields_every_line_with_its_row_or_error(tmp_path: Path) -> None:
+    valid = TOOL_USE.read_text().splitlines()[0]
+    invalid = (ROWS_DIR / "invalid.jsonl").read_text().splitlines()[0]
+    path = tmp_path / "rows.jsonl"
+    path.write_text("\n".join([valid, "", "{oops", invalid]) + "\n")
+    results = list(scan_rows(path))
+    assert [line for line, _, _, _ in results] == [1, 3, 4]
+    assert [raw for _, _, _, raw in results] == [
+        f"{text}\n".encode() for text in (valid, "{oops", invalid)
+    ]
+    (_, data, row, _), (_, bad_data, bad_json, _), (_, invalid_data, invalid_row, _) = results
+    assert isinstance(row, TrainingRow)
+    assert data["id"] == row.id
+    assert bad_data == {}
+    assert isinstance(bad_json, RowError)
+    assert (bad_json.code, bad_json.path, bad_json.line) == (RowErrorCode.INVALID_ROW, str(path), 3)
+    assert isinstance(invalid_row, RowError)
+    assert invalid_row.code == RowErrorCode.NO_ASSISTANT_MESSAGE
+    assert (invalid_row.line, invalid_data["id"]) == (4, "bad-no-assistant")

@@ -69,8 +69,12 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   `ExternalError`. Span export, datasets and experiments arrive later.
 - `data/` - training data. `schema.py` is the canonical row every provider consumes (OpenAI
   chat format plus its source) and the stable `RowErrorCode` reasons a row is rejected for;
-  `jsonl.py` reads and writes rows and converts them to the provider form. Conversion from
-  spans, checks, splits and dataset directories arrive later.
+  `jsonl.py` reads and writes rows and converts them to the provider form; `exclusions.py`
+  records why a row was left out (`excluded.jsonl`), with dataset-level `ExclusionCode`s;
+  `split.py` assigns deterministic, persisted train/validation/test splits per trace;
+  `dataset_dir.py` is the dataset directory (`settings.json`, `rows.jsonl`, `excluded.jsonl`,
+  `splits.json`, `summary.json`) behind `dataset import` and `dataset show`. Conversion from
+  spans and the exclusion checks arrive later.
 - `curation/` - *later*. Keep/drop labels and judge-based triage.
 - `training/` - *later*. The shared, provider-neutral SFT loop, run state and detached worker.
 - `rendering/` - *later*. The `Renderer` protocol that turns chat rows into model tokens.

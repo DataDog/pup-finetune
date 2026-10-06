@@ -26,6 +26,8 @@ from pup_finetune.storage import (
     atomic_write_json,
     atomic_write_text,
     ensure_private_dir,
+    make_private_dir,
+    parse_jsonl_line,
     read_json,
     read_jsonl,
     read_jsonl_numbered,
@@ -140,6 +142,16 @@ def test_read_json_invalid_utf8_raises_state_error(tmp_path: Path) -> None:
         read_json(target)
 
 
+@pytest.mark.parametrize(
+    "line", ['{"a": ' + "9" * 5000 + "}", "[" * 100_000 + "]" * 100_000], ids=["huge-int", "deep"]
+)
+def test_read_jsonl_undecodable_json_is_a_state_error(tmp_path: Path, line: str) -> None:
+    target = tmp_path / "rows.jsonl"
+    target.write_text('{"a": 1}\n' + line + "\n")
+    with pytest.raises(StateError, match=r"rows\.jsonl:2: invalid JSON"):
+        list(read_jsonl(target))
+
+
 def test_read_jsonl_rejects_non_objects(tmp_path: Path) -> None:
     target = tmp_path / "rows.jsonl"
     target.write_text("[1, 2]\n")
@@ -175,6 +187,14 @@ def test_read_jsonl_rejects_non_finite_numbers_naming_the_line(tmp_path: Path, n
         list(rows)
 
 
+@pytest.mark.parametrize("number", NON_FINITE_NUMBERS)
+def test_parse_jsonl_line_reports_non_finite_numbers(number: str) -> None:
+    data, problem = parse_jsonl_line(f'{{"loss": {number}}}\n'.encode())
+    assert data == {}
+    assert problem is not None
+    assert problem.startswith(f"invalid JSON: {number} ")
+
+
 def test_read_json_missing_raises_file_not_found(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         read_json(tmp_path / "missing.json")
@@ -197,6 +217,19 @@ def test_ensure_private_dir_leaves_existing_dirs_alone(tmp_path: Path) -> None:
     ensure_private_dir(existing / "new")
     assert mode(existing) == 0o755
     assert mode(existing / "new") == 0o700
+
+
+def test_make_private_dir_tightens_the_directory_but_not_its_parents(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    parent.chmod(0o755)
+    existing = parent / "existing"
+    existing.mkdir()
+    existing.chmod(0o755)
+    assert make_private_dir(existing) == existing
+    assert mode(existing) == 0o700
+    assert mode(parent) == 0o755
+    assert mode(make_private_dir(parent / "new")) == 0o700
 
 
 def test_ensure_private_dir_rejects_a_file(tmp_path: Path) -> None:
