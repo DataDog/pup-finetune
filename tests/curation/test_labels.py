@@ -21,7 +21,7 @@ from pup_finetune.curation.labels import Label, apply_labels, parse_labels, read
 from pup_finetune.curation.samples import describe_row, render_assistant, sample_rows, truncate
 from pup_finetune.data.dataset_dir import DatasetDir, DatasetSettings
 from pup_finetune.data.schema import Message, TrainingRow, validate_row
-from pup_finetune.data.split import SplitParams
+from pup_finetune.data.split import SplitAssignments, SplitParams
 from pup_finetune.errors import StateError, UsageError
 from pup_finetune.providers.fake import FAKE_PROFILE, FakeRenderer
 from pup_finetune.storage import DirectoryLock
@@ -375,6 +375,26 @@ def test_a_sample_leaves_out_dropped_rows_unless_asked(tmp_path: Path) -> None:
     rows, eligible = sample_rows(dataset, include_dropped=True)
     assert eligible == 3
     assert {row["id"]: row["label"] for row in rows} == {"a": "drop", "b": "keep", "c": "none"}
+
+
+class AddedToAfterSplits(DatasetDir):
+    """A dataset another process adds a row to right after its splits are read."""
+
+    added = False
+
+    def splits(self) -> SplitAssignments:
+        splits = super().splits()
+        if not self.added:
+            self.added = True
+            self.add([make_row("late")], settings=ALL_TRAIN)
+        return splits
+
+
+def test_a_sample_during_an_add_sees_every_row_with_its_split(tmp_path: Path) -> None:
+    make_dataset(tmp_path / "ds", ["a", "b"])
+    rows, eligible = sample_rows(AddedToAfterSplits(tmp_path / "ds"))
+    assert eligible == 2
+    assert {row["id"]: row["split"] for row in rows} == {"a": "train", "b": "train"}
 
 
 def test_a_sample_describes_a_row_in_brief(tmp_path: Path) -> None:

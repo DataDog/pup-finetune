@@ -48,10 +48,13 @@ def sample_rows(
     """
     if split != "all" and split not in SPLITS:
         raise ValueError(f"unknown split: {split!r}")
+    # Rows first: an add saves the split assignments before the rows, so assignments read
+    # after the rows cover every row read.
+    rows = dataset.rows()
     splits = dataset.splits()
     labels = dataset.labels()
     eligible: list[tuple[TrainingRow, SplitName | None]] = []
-    for row in dataset.rows():
+    for row in rows:
         row_split = splits.get(split_key(row))
         label = labels.get(row.id)
         if split != "all" and row_split != split:
