@@ -164,10 +164,11 @@ def test_the_last_label_of_an_id_wins(tmp_path: Path) -> None:
     report = apply_labels(dataset, [drop("a"), keep("a"), keep("b"), drop("b")])
     assert (report.kept, report.dropped) == (1, 1)
     assert kept_ids(dataset) == ["a"]
+    assert read_labels(dataset.labels_path) == [keep("a"), drop("b")]
     # A later batch overrides an earlier one, and the log keeps both.
     apply_labels(dataset, [keep("b"), drop("a")])
     assert kept_ids(dataset) == ["b"]
-    assert len(read_labels(dataset.labels_path)) == 6
+    assert len(read_labels(dataset.labels_path)) == 4
     assert dataset.labels()["a"] == drop("a")
 
 
@@ -179,6 +180,18 @@ def test_applying_the_same_labels_again_changes_nothing(tmp_path: Path) -> None:
     report = apply_labels(dataset, later)
     assert (report.applied, report.unchanged, report.dropped) == (0, 1, 1)
     assert dataset.labels_path.read_bytes() == before
+
+
+def test_applying_a_file_that_changes_its_mind_again_changes_nothing(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path / "ds", ["a", "b"])
+    batch = [drop("a"), keep("a"), keep("b"), drop("b", "wrong tool"), drop("b")]
+    first = apply_labels(dataset, batch)
+    assert (first.applied, first.unchanged, first.kept, first.dropped) == (2, 3, 1, 1)
+    before = dataset.labels_path.read_bytes()
+    report = apply_labels(dataset, batch)
+    assert (report.applied, report.unchanged, report.kept, report.dropped) == (0, 5, 1, 1)
+    assert dataset.labels_path.read_bytes() == before
+    assert read_labels(dataset.labels_path) == [keep("a"), drop("b")]
 
 
 def test_a_new_source_or_reason_for_the_same_decision_is_recorded(tmp_path: Path) -> None:
