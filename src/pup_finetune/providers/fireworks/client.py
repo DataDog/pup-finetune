@@ -84,6 +84,7 @@ __all__ = [
     "ForwardOutput",
     "OptimStepOutput",
     "SampledTokens",
+    "StopTokenDecoder",
     "TokenSampler",
     "TrainingRun",
     "TrainingService",
@@ -293,6 +294,15 @@ class TrainingRun(Protocol):
         ...
 
 
+class StopTokenDecoder(Protocol):
+    """What the SDK's sampler is given as its tokenizer.
+
+    On the token-prompt path the SDK only decodes each stop token id to a string with it.
+    """
+
+    def decode(self, token_ids: Sequence[int], skip_special_tokens: bool = False) -> str: ...
+
+
 class TokenSampler(Protocol):
     """Samples completions from a session's base model or one of its sampler checkpoints."""
 
@@ -345,13 +355,17 @@ class TrainingService(Protocol):
         ...
 
     def create_sampling_client(
-        self, *, tokenizer: object, base_model: str | None = None, model_path: str | None = None
+        self,
+        *,
+        tokenizer: StopTokenDecoder,
+        base_model: str | None = None,
+        model_path: str | None = None,
     ) -> TokenSampler:
         """A sampler for the sampler checkpoint at ``model_path``, or for the base model.
 
         Pass ``base_model`` (and no ``model_path``) for the base model: the session serves its
-        own base weights, whatever ``base_model`` names. ``tokenizer`` is the profile's Hugging
-        Face tokenizer.
+        own base weights, whatever ``base_model`` names. The SDK uses ``tokenizer`` only to
+        decode the stop token ids it is given.
         """
         ...
 
@@ -838,7 +852,11 @@ class _Service:
         )
 
     def create_sampling_client(
-        self, *, tokenizer: object, base_model: str | None = None, model_path: str | None = None
+        self,
+        *,
+        tokenizer: StopTokenDecoder,
+        base_model: str | None = None,
+        model_path: str | None = None,
     ) -> TokenSampler:
         if (base_model is None) == (model_path is None):
             raise UsageError("a Fireworks sampler needs exactly one of base_model and model_path")

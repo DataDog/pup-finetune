@@ -209,6 +209,11 @@ class TransientError(ExternalError):
     """
 
 
+def is_transient(exc: BaseException) -> bool:
+    """Whether ``exc`` is worth retrying for an idempotent call such as ``forward``."""
+    return isinstance(exc, TransientError | TimeoutError | ConnectionError)
+
+
 class ProviderCapacityError(ExternalError):
     """The provider has no capacity or quota for the request right now (e.g. HTTP 429).
 
@@ -254,7 +259,12 @@ digits and dashes, starting with a letter and not ending with a dash."""
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModelRef:
-    """A promoted model: a checkpoint turned into a model the provider can deploy."""
+    """A promoted model: a checkpoint turned into a model the provider can deploy.
+
+    ``model_id`` is the provider-local id it was promoted as (the ``model_id`` passed to
+    :meth:`TrainingSession.promote`); ``uri`` is the provider's fully qualified name for it,
+    e.g. ``accounts/<account>/models/<model_id>`` on Fireworks.
+    """
 
     provider: str
     model_id: str
@@ -398,7 +408,8 @@ class TrainingSession(Protocol):
         Only on a backend with :attr:`TrainingBackend.supports_promotion`. ``model_id``
         fully matches :data:`MODEL_ID_PATTERN` (lowercase letters, digits and dashes, starting
         with a letter, at most :data:`MAX_MODEL_ID_LEN` characters), which every provider
-        accepts.
+        accepts. The returned :class:`ModelRef` carries ``model_id`` as given and the
+        provider's fully qualified name for the model as ``uri``.
         """
         ...
 
@@ -486,6 +497,15 @@ class Provider(Protocol):
 
     def renderer(self, profile: ModelProfile) -> Renderer:
         """The renderer for ``profile``, with its tokenizer pinned to the profile's revision."""
+        ...
+
+    def training_profile(self, profile: ModelProfile) -> ModelProfile:
+        """``profile`` as a run trains it under the validated provider options.
+
+        ``profile`` itself unless an option narrows it (e.g. caps its context). Call it after
+        :meth:`validate_options`: rows are rendered against, and a run records, the profile
+        it returns. Raises :class:`UsageError` when an option does not fit ``profile``.
+        """
         ...
 
     def backend(self) -> TrainingBackend:

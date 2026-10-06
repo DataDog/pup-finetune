@@ -81,11 +81,24 @@ uv run pup-finetune models list --provider fireworks --check  # plus a live pref
 ```
 
 `--check` asks Fireworks about each model (one GET each, nothing paid) and needs the API key:
-`FIREWORKS_API_KEY`, or the OS keychain after `pup finetune auth login fireworks`. Training and
-deployment on Fireworks arrive in later PRs; the Training SDK they use comes with the
-`fireworks` extra (`uv sync --extra fireworks`, or `--all-extras`). Training runs in the key's
-own account (Fireworks refuses a key that sees several accounts); `FIREWORKS_ACCOUNT_ID` only
-overrides the account lookup, i.e. the account id pup-finetune records.
+`FIREWORKS_API_KEY`, or the OS keychain after `pup finetune auth login fireworks`.
+
+Training on Fireworks is paid: it needs the API key and the Training SDK, which comes with the
+`fireworks` extra (`uv sync --extra fireworks`, or `--all-extras`). Train only on synthetic
+rows while developing:
+
+```sh
+uv run pup-finetune train --provider fireworks --model qwen3p8-27b --dataset /tmp/ds \
+  --run-dir /tmp/fw-run --max-epochs 1   # preview only (exit 2); add --confirm to train
+```
+
+The best epoch is promoted to a Fireworks model (named after the run id) before the session
+ends, and `result.json` records it as `promoted_model`; deployment on Fireworks arrives in a
+later PR. `--provider-option max_seq_len=<n>` cuts the profile's context to `n` tokens: the
+run records the cut profile, and the preview already leaves longer rows out (`exceeds_context`).
+Training runs in the key's own account (Fireworks refuses a key that sees several accounts);
+`FIREWORKS_ACCOUNT_ID` only overrides the account lookup, i.e. the account id pup-finetune
+records.
 
 Add `--detach` to train in a background worker (output in `/tmp/run/worker.log`) and follow it
 with `status /tmp/run --watch`. `--provider-option step_delay_s=0.5 --batch-size 1` makes the
@@ -251,8 +264,17 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   (training runs in the key's own account; the recorded account id is `FIREWORKS_ACCOUNT_ID`,
   else the key's first account), converts to
   `tinker.Datum` and `tinker.AdamParams`, and maps every SDK failure with `fireworks_error`
-  (`ProviderCapacityError`, `ProviderAuthError`, `TransientError`, redacted). Its training
-  backend and deployment arrive later. See `docs/architecture.md`.
+  (`ProviderCapacityError`, `ProviderAuthError`, `TransientError`, redacted). `backend.py`
+  has `FireworksBackend` (`provider.backend()`, built lazily with a client factory, so the
+  SDK loads only when a session opens): one serverless session per `open_session`, always
+  ended on exit (in-flight results drained, or abandoned on an error), resume through
+  `create_training_client_from_state_with_optimizer`; `FireworksSession` (the validation loss
+  computed from `forward`'s per-token logprobs, checkpoint names checked against the
+  17-character limit before saving, `promote` picking the newest promotable sampler row
+  carrying the checkpoint's name (`promotable_row`), sampler checkpoints of an ended session
+  refused with a hint); and `FireworksSampler` (render, sample greedily to the renderer's stop
+  tokens, parse; only sampling is retried, a bounded number of times). Deployment arrives
+  later. See `docs/architecture.md`.
 
 Tests live under `tests/` and mirror `src/`. Shared fakes live in `tests/fakes/` (import them
 as `tests.fakes...`); `tests/fakes/pup.py` has `FakePup`, a fake pup runner that answers by
@@ -267,12 +289,14 @@ behind an `httpx.MockTransport`, with statuses and transport errors to inject.
 `tests/fakes/fireworks.py` has `FakeFireworksTrainingClient`, the Fireworks Training API
 behind the `client.py` interface in memory (sessions, server-renamed checkpoints, promotion
 that fails once a session has expired, deterministic losses, canned samples, injectable
-capacity, auth, 5xx and connection failures).
+capacity, auth, 5xx and connection failures); `FireworksProvider(training_client=...)` trains
+against it (see `tests/providers/fireworks/test_fireworks_backend.py` and
+`tests/cli/test_train_fireworks.py`).
 `tests/fakes/keyring.py` has in-memory, failing and locked keyring backends; every test starts
 on the failing one, so none touches the real keychain.
 `tests/providers/contract/` has the `RendererContract`, `BackendContract` and
 `ProviderContract` suites every provider subclasses (`tests/providers/test_fake_contract.py`
-runs them against the fake provider).
+runs them against the fake provider; `tests/providers/fireworks/` against Fireworks on its fakes).
 Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds canonical rows and
 `llmobs/` raw Export API pages.
 

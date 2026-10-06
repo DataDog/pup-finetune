@@ -19,11 +19,12 @@ from typing import Any
 
 import keyring.core
 import pytest
+from pydantic import SecretStr
 
 from pup_finetune import redaction
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.providers import get_provider, known_providers
-from pup_finetune.providers.base import Endpoint, ModelRef, Provider
+from pup_finetune.providers.base import Endpoint, LoraConfig, ModelRef, Provider
 from pup_finetune.providers.fake import FAKE_PROFILE
 from pup_finetune.providers.fireworks.api import FireworksAuthError
 from pup_finetune.providers.fireworks.models import PROFILES
@@ -34,6 +35,7 @@ from pup_finetune.providers.fireworks.provider import (
 )
 from pup_finetune.rendering.hf import INSTALL_HINT, HFChatTemplateRenderer
 from pup_finetune.runtime import Runtime
+from tests.fakes.fireworks import FakeFireworksTrainingClient
 from tests.fakes.fireworks_api import API_KEY, FakeFireworksApi
 from tests.fakes.keyring import LockedKeyring, MemoryKeyring
 from tests.fakes.tokenizer import FakeChatTokenizer
@@ -56,13 +58,24 @@ def fake() -> FakeFireworksApi:
 
 
 def provider_for(
-    fake: FakeFireworksApi | None = None, env: dict[str, str] | None = None
+    fake: FakeFireworksApi | None = None,
+    env: dict[str, str] | None = None,
+    training: FakeFireworksTrainingClient | None = None,
+    keys: list[SecretStr] | None = None,
 ) -> FireworksProvider:
+    fw = training or FakeFireworksTrainingClient()
+
+    def training_client(key: SecretStr) -> FakeFireworksTrainingClient:
+        if keys is not None:
+            keys.append(key)
+        return fw
+
     return FireworksProvider(
         Runtime(),
         env=ENV if env is None else env,
         transport=fake.transport if fake is not None else None,
         tokenizer=FakeChatTokenizer(),
+        training_client=training_client,
     )
 
 
@@ -74,12 +87,7 @@ class TestFireworksProviderContract(ProviderContract):
     def provider(self) -> Provider:
         return provider_for(FakeFireworksApi())
 
-    # Training and deployment land in a later release; until then both refuse clearly.
-
-    def test_backend_is_a_training_backend(self, provider: Provider) -> None:
-        with pytest.raises(UsageError, match=r"training on Fireworks .* later release") as caught:
-            provider.backend()
-        assert "PR" not in caught.value.message
+    # Deployment lands in a later release; until then it refuses clearly.
 
     def test_deploy_and_undeploy(
         self, provider: Provider, model_ref: ModelRef, deploy_options: dict[str, Any]
@@ -91,6 +99,71 @@ class TestFireworksProviderContract(ProviderContract):
         )
         with pytest.raises(UsageError, match="later release"):
             provider.undeploy(endpoint)
+
+
+# --- training ----------------------------------------------------------------------------
+
+
+def test_the_backend_trains_with_the_resolved_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FIREWORKS_API_KEY", raising=False)
+    keys: list[SecretStr] = []
+    fw = FakeFireworksTrainingClient()
+    backend = provider_for(training=fw, keys=keys).backend()
+    assert keys == []  # building the backend resolves nothing
+    with backend.open_session(PROFILE, LoraConfig(rank=8), seed=1, max_seq_len=1024) as session:
+        assert session.session_id in fw.sessions
+    assert [key.get_secret_value() for key in keys] == [API_KEY]
+    assert "FIREWORKS_API_KEY" not in os.environ
+
+
+def test_opening_a_session_without_a_key_asks_for_one() -> None:
+    fw = FakeFireworksTrainingClient()
+    backend = provider_for(env={}, training=fw).backend()
+    with (
+        pytest.raises(UsageError, match="no fireworks API key"),
+        backend.open_session(PROFILE, LoraConfig(rank=8), seed=1, max_seq_len=1024),
+    ):
+        pass
+    assert fw.calls == []
+
+
+def test_the_max_seq_len_option_caps_the_backend() -> None:
+    provider = provider_for()
+    provider.validate_options({"max_seq_len": "512"})
+    backend = provider.backend()
+    with (
+        pytest.raises(UsageError, match="over the max_seq_len provider option of 512"),
+        backend.open_session(PROFILE, LoraConfig(rank=8), seed=1, max_seq_len=513),
+    ):
+        pass
+    with backend.open_session(PROFILE, LoraConfig(rank=8), seed=1, max_seq_len=512):
+        pass
+
+
+def test_the_max_seq_len_option_cuts_the_training_profile() -> None:
+    provider = provider_for()
+    assert provider.training_profile(PROFILE) is PROFILE  # no option: unchanged
+    provider.validate_options({"max_seq_len": "512"})
+    capped = provider.training_profile(PROFILE)
+    assert capped == dataclasses.replace(PROFILE, max_seq_len=512)
+    assert provider.training_profile(capped) == capped  # a resumed run's profile stays put
+    provider.validate_options({"max_seq_len": str(PROFILE.max_seq_len)})
+    assert provider.training_profile(PROFILE) is PROFILE
+
+
+def test_a_max_seq_len_option_over_the_profile_cannot_cut_it() -> None:
+    provider = provider_for()
+    provider.validate_options({"max_seq_len": "4096"})
+    small = dataclasses.replace(PROFILE, max_seq_len=2048)
+    with pytest.raises(UsageError, match="option of 4096 is over the 2048-token context"):
+        provider.training_profile(small)
+
+
+def test_the_training_profile_of_another_provider_is_refused() -> None:
+    from pup_finetune.providers.fake import FAKE_PROFILE
+
+    with pytest.raises(UsageError, match="does not serve"):
+        provider_for().training_profile(FAKE_PROFILE)
 
 
 # --- the registry ------------------------------------------------------------------------
@@ -358,6 +431,33 @@ def test_building_the_provider_and_renderer_imports_nothing_heavy() -> None:
         except UsageError:  # no hf extra here: the imports are what this checks
             pass
         heavy = {"transformers", "fireworks", "tinker", "httpx"}
+        print(json.dumps(sorted({name.partition(".")[0] for name in sys.modules} & heavy)))
+        """
+    )
+    completed = subprocess.run(  # noqa: S603 - this interpreter, a fixed script
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/nonexistent",
+            "PYTHON_KEYRING_BACKEND": "keyring.backends.fail.Keyring",
+        },
+    )
+    assert json.loads(completed.stdout) == []
+
+
+def test_building_the_backend_loads_no_sdk() -> None:
+    code = textwrap.dedent(
+        """
+        import json, sys
+        from pup_finetune.providers import get_provider
+        from pup_finetune.runtime import Runtime
+
+        backend = get_provider("fireworks", Runtime()).backend()
+        assert backend.supports_resume and backend.supports_promotion
+        heavy = {"transformers", "fireworks", "tinker"}
         print(json.dumps(sorted({name.partition(".")[0] for name in sys.modules} & heavy)))
         """
     )

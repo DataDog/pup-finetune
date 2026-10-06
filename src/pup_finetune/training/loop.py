@@ -54,7 +54,7 @@ from pup_finetune.providers.base import (
     StepMetrics,
     TrainingSession,
     TrainSpec,
-    TransientError,
+    is_transient,
 )
 from pup_finetune.redaction import redact
 from pup_finetune.storage import finite_json
@@ -168,11 +168,6 @@ def checked_checkpoint_name(
             "steps, or name checkpoints more briefly",
         )
     return name
-
-
-def is_transient(exc: BaseException) -> bool:
-    """Whether ``exc`` is worth retrying for an idempotent call such as ``forward``."""
-    return isinstance(exc, TransientError | TimeoutError | ConnectionError)
 
 
 def run_training(

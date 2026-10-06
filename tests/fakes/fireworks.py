@@ -36,7 +36,9 @@ What it mimics:
 Failures are injected per operation with :meth:`FakeFireworksTrainingClient.fail`, as raw
 SDK-shaped errors mapped by the real :func:`fireworks_error`, so they arrive as the wrapper
 raises them (``ProviderCapacityError``, ``ProviderAuthError``, ``TransientError``, ...).
-Every call is recorded in :attr:`FakeFireworksTrainingClient.calls`.
+:meth:`FakeFireworksTrainingClient.stall` makes a training call return a result that never
+resolves, to exercise the session's bounded drain. Every call is recorded in
+:attr:`FakeFireworksTrainingClient.calls`.
 """
 
 from __future__ import annotations
@@ -93,9 +95,16 @@ OPERATIONS: frozenset[str] = frozenset(
         "save_weights_for_sampler",
         "load_state",
         "sample",
+        "close_sampler",
+        "close_service",
+        "close",
     }
 )
-"""The operations :meth:`FakeFireworksTrainingClient.fail` can fail."""
+"""The operations :meth:`FakeFireworksTrainingClient.fail` can fail. A failed
+``close_service`` leaves its session running; a failed ``close_sampler`` or ``close`` (the
+client) still closes it."""
+STALLABLE: frozenset[str] = frozenset({"forward_backward", "forward", "optim_step"})
+"""The operations :meth:`FakeFireworksTrainingClient.stall` can stall."""
 
 _START = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -145,6 +154,20 @@ def _failed[T](error: BaseException) -> Future[T]:
     return future
 
 
+class StalledResult:
+    """A result that never resolves: each wait records its timeout, calls ``on_wait`` with it
+    (to advance a fake clock) and raises :class:`TimeoutError`."""
+
+    def __init__(self, on_wait: Callable[[float | None], None]) -> None:
+        self._on_wait = on_wait
+        self.timeouts: list[float | None] = []
+
+    def result(self, timeout: float | None = None) -> Any:
+        self.timeouts.append(timeout)
+        self._on_wait(timeout)
+        raise TimeoutError
+
+
 @dataclass
 class FakeCheckpoint:
     """A saved checkpoint: what the server stores and lists."""
@@ -182,6 +205,9 @@ class FakeRun:
         self.adam: list[AdamConfig] = []
 
     def forward_backward(self, batch: Sequence[TokenizedExample]) -> PendingResult[ForwardOutput]:
+        stalled = self._owner._stalled_result("forward_backward")
+        if stalled is not None:
+            return stalled
         failure = self._owner._pending_failure("forward_backward", "a forward-backward pass")
         if failure is not None:
             return _failed(failure)
@@ -197,6 +223,9 @@ class FakeRun:
         return _done(ForwardOutput(metrics))
 
     def forward(self, batch: Sequence[TokenizedExample]) -> PendingResult[ForwardOutput]:
+        stalled = self._owner._stalled_result("forward")
+        if stalled is not None:
+            return stalled
         failure = self._owner._pending_failure("forward", "a forward pass")
         if failure is not None:
             return _failed(failure)
@@ -205,6 +234,9 @@ class FakeRun:
         return _done(ForwardOutput(metrics, self._logprobs(batch, loss_at(self.steps))))
 
     def optim_step(self, adam: AdamConfig) -> PendingResult[OptimStepOutput]:
+        stalled = self._owner._stalled_result("optim_step")
+        if stalled is not None:
+            return stalled
         failure = self._owner._pending_failure("optim_step", "an optimizer step")
         if failure is not None:
             return _failed(failure)
@@ -253,13 +285,16 @@ class FakeRun:
 
 
 class FakeSampler:
-    """Returns the owner's canned tokens for every prompt."""
+    """Returns the owner's canned tokens for every prompt; records how it was asked."""
 
-    def __init__(self, owner: FakeFireworksTrainingClient, model: str) -> None:
+    def __init__(self, owner: FakeFireworksTrainingClient, model: str, tokenizer: Any) -> None:
         self._owner = owner
         self.model = model
+        self.tokenizer = tokenizer
         self.closed = False
         self.prompts: list[tuple[int, ...]] = []
+        self.temperatures: list[float] = []
+        self.stops: list[tuple[int, ...]] = []
 
     def sample(
         self,
@@ -276,6 +311,8 @@ class FakeSampler:
         if self.closed:
             raise ExternalError("the sampler is closed", source=SOURCE)
         self.prompts.append(tuple(prompt))
+        self.temperatures.append(temperature)
+        self.stops.append(tuple(stop))
         tokens = list(self._owner.sample_tokens)
         stop_reason = "length"
         for index, token in enumerate(tokens):
@@ -288,6 +325,9 @@ class FakeSampler:
 
     def close(self) -> None:
         self.closed = True
+        failure = self._owner._pending_failure("close_sampler", "closing a sampler")
+        if failure is not None:
+            raise failure
 
 
 class FakeService:
@@ -342,13 +382,16 @@ class FakeService:
             raise failure
         if model_path is not None:
             self._owner._checkpoint(model_path, kind="sampler")
-        sampler = FakeSampler(self._owner, model_path or self.session_name)
+        sampler = FakeSampler(self._owner, model_path or self.session_name, tokenizer)
         self.samplers.append(sampler)
         return sampler
 
     def close(self) -> None:
         if self._session.alive:
             self._owner.calls.append(("close_service", self.session_id))
+            failure = self._owner._pending_failure("close_service", "ending a training session")
+            if failure is not None:
+                raise failure  # the session is still running
             self._session.alive = False
 
     def _start(self, operation: str, what: str) -> None:
@@ -378,6 +421,8 @@ class FakeFireworksTrainingClient:
         self.calls: list[tuple[Any, ...]] = []
         self.closed = False
         self._failures: dict[str, list[FailureKind]] = {}
+        self._stalls: dict[str, list[Callable[[float | None], None]]] = {}
+        self.stalled: list[StalledResult] = []
         self._clock = 0
 
     @property
@@ -391,6 +436,19 @@ class FakeFireworksTrainingClient:
         if kind not in _FAILURES:
             raise ValueError(f"unknown failure kind {kind!r}")
         self._failures.setdefault(operation, []).extend([kind] * times)
+
+    def stall(
+        self,
+        operation: str,
+        *,
+        on_wait: Callable[[float | None], None] = lambda _timeout: None,
+        times: int = 1,
+    ) -> None:
+        """Make the next ``times`` calls of ``operation`` (one of :data:`STALLABLE`) return a
+        :class:`StalledResult`, collected in :attr:`stalled`."""
+        if operation not in STALLABLE:
+            raise ValueError(f"cannot stall {operation!r}; stallable: {sorted(STALLABLE)}")
+        self._stalls.setdefault(operation, []).extend([on_wait] * times)
 
     def service(self) -> TrainingService:
         self.calls.append(("service",))
@@ -455,8 +513,19 @@ class FakeFireworksTrainingClient:
 
     def close(self) -> None:
         self.closed = True
+        failure = self._pending_failure("close", "closing the Fireworks client")
+        if failure is not None:
+            raise failure
 
     # Internals shared with the fake runs and services.
+
+    def _stalled_result(self, operation: str) -> StalledResult | None:
+        queue = self._stalls.get(operation)
+        if not queue:
+            return None
+        stalled = StalledResult(queue.pop(0))
+        self.stalled.append(stalled)
+        return stalled
 
     def _pending_failure(self, operation: str, what: str) -> Exception | None:
         queue = self._failures.get(operation)
