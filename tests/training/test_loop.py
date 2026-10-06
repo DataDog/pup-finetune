@@ -508,7 +508,10 @@ def test_a_token_budget_below_one_step_trains_nothing() -> None:
 
 def test_the_spend_budget_stops_between_steps() -> None:
     clock = Clock()
-    budget = Budget(max_spend_usd=1.0, hourly_rate_usd=3600.0, clock=clock)  # one second
+    # One second in all; training stops at half a second, keeping the rest in reserve.
+    budget = Budget(
+        max_spend_usd=1.0, hourly_rate_usd=3600.0, spend_reserve_fraction=0.5, clock=clock
+    )
 
     def tick(event: dict[str, Any]) -> None:
         if event["type"] == "step":
@@ -521,8 +524,170 @@ def test_the_spend_budget_stops_between_steps() -> None:
             session, spec, rows=row_examples(8), state=state, budget=budget, on_event=tick
         )
     assert result.stopped_reason == "budget_exhausted"
-    assert len(state.steps) == 3
-    assert "reached max_spend_usd 1.0" in result.warnings[0]
+    assert len(state.steps) == 2
+    assert "reached 0.50 USD, max_spend_usd 1.0 less the 50% kept" in result.warnings[0]
+    # The reserve pays for the checkpoint of the steps trained.
+    assert [(ref.kind, ref.step) for ref in session.saved] == [("training", 2)]
+
+
+class PricedSession(RecordingSession):
+    """Advances ``clock`` by ``cost`` seconds on every paid call, and records the time."""
+
+    PAID = ("forward_backward", "optim_step", "forward", "save_training_checkpoint")
+
+    def __init__(self, inner: TrainingSession, clock: Clock, cost: float) -> None:
+        super().__init__(inner)
+        self.clock = clock
+        self.cost = cost
+        self.paid_at: list[tuple[str, float]] = []
+
+    def _pay(self, call: str) -> None:
+        self.paid_at.append((call, self.clock.now))
+        self.clock.now += self.cost
+
+    def forward_backward(self, batch: Sequence[Any]) -> Any:
+        self._pay("forward_backward")
+        return super().forward_backward(batch)
+
+    def optim_step(self, adam: Any) -> Any:
+        self._pay("optim_step")
+        return super().optim_step(adam)
+
+    def forward(self, batch: Sequence[Any]) -> Any:
+        self._pay("forward")
+        return super().forward(batch)
+
+    def save_training_checkpoint(self, name: str, *, epoch: int, step: int) -> Any:
+        self._pay("save_training_checkpoint")
+        return super().save_training_checkpoint(name, epoch=epoch, step=step)
+
+    def save_sampler_checkpoint(self, name: str, *, epoch: int, step: int) -> Any:
+        self._pay("save_sampler_checkpoint")
+        return super().save_sampler_checkpoint(name, epoch=epoch, step=step)
+
+
+@contextmanager
+def priced(
+    clock: Clock, cost: float, options: FakeOptions | None = None
+) -> Iterator[PricedSession]:
+    with FakeBackend(options).open_session(FAKE_PROFILE, LORA) as inner:
+        yield PricedSession(inner, clock, cost)
+
+
+VALIDATION_2 = row_examples(4, prefix="val")
+"""Two validation microbatches at ``batch_size=2``."""
+
+
+def spend_budget(clock: Clock, *, seconds: float, reserve: float) -> Budget:
+    """A spend cap of ``seconds`` of wall-clock time."""
+    return Budget(
+        max_spend_usd=seconds, hourly_rate_usd=3600.0, spend_reserve_fraction=reserve, clock=clock
+    )
+
+
+@pytest.mark.parametrize("cap", [3.5, 5.5, 7.5, 9.5, 11.5, 13.5])
+def test_no_paid_call_starts_past_the_spend_cap(cap: float) -> None:
+    clock = Clock()
+    budget = spend_budget(clock, seconds=cap, reserve=0.2)
+    spec = make_spec(max_epochs=3, batch_size=1, pipeline_depth=1)
+    with priced(clock, 1.0) as session:
+        result = train(session, spec, rows=row_examples(3), budget=budget)
+    assert result.stopped_reason == "budget_exhausted"
+    stop_at = cap * 0.8
+    final = session.paid_at[-1]
+    # Every call but the final checkpoint starts before the reserve; that one before the cap.
+    assert all(at < stop_at for _, at in session.paid_at[:-1])
+    if final[0] == "save_training_checkpoint" and final[1] >= stop_at:
+        assert final[1] < cap
+    else:
+        assert final[1] < stop_at
+
+
+def test_a_step_refused_part_way_is_neither_applied_nor_counted() -> None:
+    clock = Clock()
+    budget = spend_budget(clock, seconds=10.0, reserve=0.5)  # stops at 5 s
+    # Two microbatches a step: forward_backward, forward_backward, optim_step = 3 s a step.
+    spec = make_spec(max_epochs=1, batch_size=2, pipeline_depth=1)
+    rows = row_examples(6)
+    spec = spec.model_copy(update={"microbatch_token_budget": rows[0].num_tokens})
+    state = MemoryState()
+    with priced(clock, 1.0) as session:
+        result = train(session, spec, rows=rows, state=state, budget=budget)
+    assert result.stopped_reason == "budget_exhausted"
+    assert session.calls == [
+        "forward_backward",
+        "forward_backward",
+        "optim_step",
+        "forward_backward",
+        "forward_backward",
+        "save_training_checkpoint",
+    ]
+    assert state.steps == [(1, 1)]
+    assert budget.tokens_used == 2 * rows[0].num_tokens
+    assert session.outstanding == []
+    assert result.last_training_ckpt is not None
+    assert result.last_training_ckpt.step == 1
+    assert "stopped during step 2" in result.warnings[0]
+
+
+def test_a_stop_during_validation_keeps_the_best_epoch_already_saved() -> None:
+    clock = Clock()
+    # Every call takes 1 s. Epoch 1: 2 steps of 2 calls, 2 validation forwards, a training
+    # and a sampler checkpoint: 8 s. Epoch 2's steps end at 12 s and its first validation
+    # forward at 13 s, past the 12.6 s at which training stops.
+    budget = spend_budget(clock, seconds=14.0, reserve=0.1)
+    spec = make_spec(max_epochs=3, batch_size=2, pipeline_depth=1)
+    state = MemoryState()
+    with priced(clock, 1.0, curve(2.0, 1.0)) as session:
+        result = train(
+            session, spec, rows=row_examples(4), validation=VALIDATION_2, state=state, budget=budget
+        )
+    assert result.stopped_reason == "budget_exhausted"
+    assert [e.epoch for e in result.epochs] == [1]
+    assert state.epochs == result.epochs
+    assert result.best_epoch == 1
+    assert result.best_sampler_ckpt == result.epochs[0].sampler_ckpt
+    assert "stopped before finishing the validation of epoch 2" in result.warnings[0]
+    # The steps of epoch 2 are kept in a resumable training checkpoint, paid from the reserve.
+    assert result.last_training_ckpt is not None
+    assert (result.last_training_ckpt.epoch, result.last_training_ckpt.step) == (2, 4)
+    assert [(ref.kind, ref.epoch) for ref in session.saved] == [
+        ("training", 1),
+        ("sampler", 1),
+        ("training", 2),
+    ]
+
+
+def test_a_stop_before_the_sampler_checkpoint_leaves_the_epoch_unrecorded() -> None:
+    clock = Clock()
+    # One step of 2 calls, 2 validation forwards and the training checkpoint: 5 s.
+    budget = spend_budget(clock, seconds=5.0, reserve=0.0)
+    spec = make_spec(max_epochs=2, batch_size=2, pipeline_depth=1)
+    with priced(clock, 1.0) as session:
+        result = train(session, spec, rows=row_examples(2), validation=VALIDATION_2, budget=budget)
+    assert result.stopped_reason == "budget_exhausted"
+    assert (result.epochs, result.best_epoch, result.best_sampler_ckpt) == ([], None, None)
+    assert [ref.kind for ref in session.saved] == ["training"]
+    assert result.last_training_ckpt == session.saved[0]
+    assert "stopped before the sampler checkpoint of epoch 1" in result.warnings[0]
+
+
+def test_no_final_checkpoint_is_saved_once_the_reserve_is_spent() -> None:
+    clock = Clock()
+    budget = spend_budget(clock, seconds=1.0, reserve=0.1)
+
+    def slow_steps(event: dict[str, Any]) -> None:
+        if event["type"] == "step":
+            clock.now += 2.0  # a step that ran past the whole cap
+
+    spec = make_spec(max_epochs=1, batch_size=1, pipeline_depth=1)
+    with recording() as session:
+        result = train(session, spec, rows=row_examples(4), budget=budget, on_event=slow_steps)
+    assert result.stopped_reason == "budget_exhausted"
+    assert session.saved == []
+    assert result.last_training_ckpt is None
+    assert "did not save a training checkpoint of the 1 step(s)" in result.warnings[-1]
+    assert "reached max_spend_usd 1.0" in result.warnings[-1]
 
 
 def test_cancellation_mid_epoch_saves_a_training_checkpoint() -> None:

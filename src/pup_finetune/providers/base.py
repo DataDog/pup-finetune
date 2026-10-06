@@ -125,6 +125,10 @@ class AdamConfig:
             raise ValueError("weight_decay and grad_clip_norm must not be negative")
 
 
+DEFAULT_SPEND_RESERVE_FRACTION = 0.1
+"""The share of ``max_spend_usd`` kept back for the checkpoint saved when training stops."""
+
+
 class TrainSpec(BaseModel):
     """How to train: the provider-neutral settings of one run, frozen into the run directory.
 
@@ -136,10 +140,12 @@ class TrainSpec(BaseModel):
     into microbatches of at most that many tokens (gradients accumulate over them); ``None``
     sends each step as one microbatch. ``max_spend_usd`` and ``hourly_rate_usd`` (both or
     neither) stop cleanly once the elapsed time at that rate would cost more than the cap;
-    they measure wall-clock time, not the provider's bill. ``provider_options`` are checked by
-    :meth:`Provider.validate_options`; the spec is frozen but that dict is not, so consumers
-    use the normalized copy ``validate_options`` returns and never mutate ``provider_options``
-    in place.
+    they measure wall-clock time, not the provider's bill. Training stops once the spend
+    reaches ``max_spend_usd`` less ``spend_reserve_fraction`` of it, keeping that reserve for
+    the calls in flight and the checkpoint saved at the stop. ``provider_options`` are
+    checked by :meth:`Provider.validate_options`; the spec is frozen but that dict is not, so
+    consumers use the normalized copy ``validate_options`` returns and never mutate
+    ``provider_options`` in place.
 
     Build one from user input with :meth:`parse`, which raises :class:`UsageError` naming
     the offending fields; mapping fields to command-line flags is the command's job.
@@ -161,6 +167,9 @@ class TrainSpec(BaseModel):
     microbatch_token_budget: PositiveInt | None = None
     max_spend_usd: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     hourly_rate_usd: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    spend_reserve_fraction: float = Field(
+        default=DEFAULT_SPEND_RESERVE_FRACTION, ge=0, lt=1, allow_inf_nan=False
+    )
     provider_options: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")

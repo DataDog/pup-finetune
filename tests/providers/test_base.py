@@ -55,6 +55,7 @@ def test_train_spec_defaults() -> None:
     assert spec.microbatch_token_budget is None
     assert spec.max_spend_usd is None
     assert spec.hourly_rate_usd is None
+    assert spec.spend_reserve_fraction == 0.1
     assert spec.provider_options == {}
 
 
@@ -75,9 +76,11 @@ def test_train_spec_accepts_valid_settings() -> None:
             "microbatch_token_budget": 8192,
             "max_spend_usd": 25.0,
             "hourly_rate_usd": 12.5,
+            "spend_reserve_fraction": 0.0,
             "provider_options": {"region": "us"},
         }
     )
+    assert spec.spend_reserve_fraction == 0.0
     assert spec.lora_rank == 16
     assert spec.microbatch_token_budget == 8192
     assert (spec.max_spend_usd, spec.hourly_rate_usd) == (25.0, 12.5)
@@ -108,6 +111,9 @@ def test_train_spec_accepts_an_integer_learning_rate_and_interval() -> None:
         ("checkpoint_every_minutes", 0),
         ("microbatch_token_budget", 0),
         ("microbatch_token_budget", 1.5),
+        ("spend_reserve_fraction", 1.0),
+        ("spend_reserve_fraction", -0.01),
+        ("spend_reserve_fraction", math.nan),
         ("batch_size", True),
         ("batch_size", "32"),
         ("batch_size", 1.5),

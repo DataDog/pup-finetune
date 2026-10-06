@@ -19,8 +19,13 @@ checkpoint, plus a sampler checkpoint on a new best.
 Losses are token means: ``sum(loss_sum) / sum(weight)`` over the step, epoch or validation
 set. Between steps the loop stops cleanly when :meth:`LoopState.cancel_requested` says so or
 the :class:`~pup_finetune.training.budget.Budget` is exhausted; it then saves a training
-checkpoint of the steps since the last one. ``finalize`` runs last, while the session is
-still open (the place to promote the best checkpoint before the session ends).
+checkpoint of the steps since the last one. The spend guard is also asked before every other
+paid call: each ``forward_backward`` and ``optim_step`` (a step refused part-way is never
+applied or counted), each validation microbatch and each checkpoint save. A stop during an
+epoch's validation or checkpoints leaves that epoch unrecorded, so it never becomes the
+best on a partial validation. Only the checkpoint saved at a stop may use the budget's spend
+reserve. ``finalize`` runs last, while the session is still open (the place to promote the
+best checkpoint before the session ends).
 """
 
 from __future__ import annotations
@@ -216,13 +221,34 @@ class _Pipeline:
         self._on_done = on_done
         self._queue: deque[_InFlight] = deque()
 
-    def submit(self, epoch: int, step: int, microbatches: Step, tokens: int) -> None:
+    def submit(
+        self,
+        epoch: int,
+        step: int,
+        microbatches: Step,
+        tokens: int,
+        *,
+        guard: Callable[[], str | None],
+    ) -> str | None:
+        """Send one optimizer step, asking ``guard`` before each call; ``None`` once sent.
+
+        When ``guard`` refuses a call, the step stops there and its reason is returned. What
+        it already sent is still resolved, but the step is never counted, and its gradients
+        are never applied (there is no ``optim_step`` for them).
+        """
         # Queued before anything is sent, so a failure part-way still resolves what was sent.
         flight = _InFlight(epoch, step, tokens)
         self._queue.append(flight)
         for microbatch in microbatches:
+            refused = guard()
+            if refused is not None:
+                return refused
             flight.results.append(self._session.forward_backward(microbatch))
+        refused = guard()
+        if refused is not None:
+            return refused
         flight.optim = self._session.optim_step(self._adam)
+        return None
 
     def make_room(self) -> None:
         """Resolve the oldest steps until another one may be submitted."""
@@ -266,7 +292,8 @@ class _Pipeline:
                 errors.append((f"step {flight.step} also failed", exc))
         if errors:
             raise _primary(errors)
-        self._on_done(flight, metrics)
+        if flight.optim is not None:  # a step refused part-way is not a finished step
+            self._on_done(flight, metrics)
 
 
 def _primary(errors: Sequence[tuple[str, BaseException]]) -> BaseException:
@@ -292,6 +319,10 @@ def _token_mean(metrics: Sequence[StepMetrics], what: str) -> float:
             source="training",
         )
     return loss_sum / weight
+
+
+class _BudgetStop(Exception):
+    """The spend guard refused a paid call at an epoch's end; the message says why."""
 
 
 class _Loop:
@@ -357,12 +388,16 @@ class _Loop:
         stale_epochs = 0
         for epoch in range(1, spec.max_epochs + 1):
             stop = self._train_epoch(epoch)
+            if stop is None:
+                try:
+                    metric = self._end_epoch(epoch)
+                except _BudgetStop as exc:
+                    stop = self._budget_stop(str(exc))
             if stop is not None:
                 stopped = stop
                 if self._steps_since_checkpoint:
-                    self._save_training(epoch)
+                    self._save_stop_checkpoint(epoch)
                 break
-            metric = self._end_epoch(epoch)
             # The best is strictly lower; patience counts epochs without a min_delta gain.
             if metric < patience_loss - spec.min_delta:
                 patience_loss, stale_epochs = metric, 0
@@ -404,9 +439,14 @@ class _Loop:
                 stop = self._stop_reason(step)
                 if stop is not None:
                     break
-                self._step += 1
                 tokens = step_tokens(step)
-                pipeline.submit(epoch, self._step, step, tokens)
+                refused = pipeline.submit(
+                    epoch, self._step + 1, step, tokens, guard=self._budget.spend_exhausted
+                )
+                if refused is not None:
+                    stop = self._budget_stop(f"stopped during step {self._step + 1}: {refused}")
+                    break
+                self._step += 1
                 self._budget.record(tokens)
             pipeline.drain()
         except BaseException as exc:
@@ -423,10 +463,20 @@ class _Loop:
             return "cancelled"
         why = self._budget.exhausted(step_tokens(step))
         if why is not None:
-            self._warn(f"stopped before step {self._step + 1}: {why}")
-            self._emit({"type": "stopped", "reason": "budget_exhausted", "detail": why})
-            return "budget_exhausted"
+            return self._budget_stop(f"stopped before step {self._step + 1}: {why}")
         return None
+
+    def _budget_stop(self, why: str) -> StoppedReason:
+        """Record that the budget stopped training, and why."""
+        self._warn(why)
+        self._emit({"type": "stopped", "reason": "budget_exhausted", "detail": why})
+        return "budget_exhausted"
+
+    def _require_spend(self, before: str) -> None:
+        """Raise :class:`_BudgetStop` if the spend guard refuses the next paid call."""
+        why = self._budget.spend_exhausted()
+        if why is not None:
+            raise _BudgetStop(f"stopped before {before}: {why}")
 
     def _step_done(self, flight: _InFlight, metrics: list[StepMetrics]) -> None:
         loss = _token_mean(metrics, f"training step {flight.step}")
@@ -449,13 +499,21 @@ class _Loop:
     # --- epoch end --------------------------------------------------------------------
 
     def _end_epoch(self, epoch: int) -> float:
-        """Validate, select and checkpoint epoch ``epoch``; returns its selection loss."""
+        """Validate, select and checkpoint epoch ``epoch``; returns its selection loss.
+
+        Raises :class:`_BudgetStop`, before recording the epoch, when the spend guard refuses
+        a validation microbatch or a checkpoint.
+        """
         train_loss = _token_mean(self._epoch_metrics, f"training of epoch {epoch}")
-        val_loss = self._validation_loss() if self._validation else None
+        val_loss = self._validation_loss(epoch) if self._validation else None
         metric = train_loss if val_loss is None else val_loss
         new_best = self._best is None or metric < self._best_metric
+        self._require_spend(f"the training checkpoint of epoch {epoch}")
         training_ckpt = self._save_training(epoch)
-        sampler_ckpt = self._save_sampler(epoch) if new_best else None
+        sampler_ckpt = None
+        if new_best:
+            self._require_spend(f"the sampler checkpoint of epoch {epoch}")
+            sampler_ckpt = self._save_sampler(epoch)
         record = EpochMetrics(
             epoch=epoch,
             steps=self._epoch_steps,
@@ -475,8 +533,11 @@ class _Loop:
         )
         return metric
 
-    def _validation_loss(self) -> float:
-        metrics = [self._forward(microbatch) for microbatch in self._validation]
+    def _validation_loss(self, epoch: int) -> float:
+        metrics = []
+        for microbatch in self._validation:
+            self._require_spend(f"finishing the validation of epoch {epoch}")
+            metrics.append(self._forward(microbatch))
         return _token_mean(metrics, "validation")
 
     def _forward(self, microbatch: Microbatch) -> StepMetrics:
@@ -523,6 +584,17 @@ class _Loop:
         self._steps_since_checkpoint = 0
         self._recorded(ref)
         return ref
+
+    def _save_stop_checkpoint(self, epoch: int) -> None:
+        """Save the steps since the last checkpoint after a stop; it may use the reserve."""
+        why = self._budget.spend_exhausted(use_reserve=True)
+        if why is not None:
+            self._warn(
+                f"did not save a training checkpoint of the {self._steps_since_checkpoint} "
+                f"step(s) since the last one: {why}"
+            )
+            return
+        self._save_training(epoch)
 
     def _save_sampler(self, epoch: int) -> CheckpointRef:
         name = self._name("sampler", epoch, self._step)
