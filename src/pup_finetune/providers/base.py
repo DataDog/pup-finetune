@@ -231,6 +231,14 @@ class CheckpointRef:
     created_in_session: str
 
 
+MAX_MODEL_ID_LEN = 63
+"""The longest model id :meth:`TrainingSession.promote` is given; every provider accepts it."""
+
+MODEL_ID_PATTERN = re.compile(rf"[a-z](?:[a-z0-9-]{{0,{MAX_MODEL_ID_LEN - 2}}}[a-z0-9])?")
+"""What a model id given to :meth:`TrainingSession.promote` fully matches: lowercase letters,
+digits and dashes, starting with a letter and not ending with a dash."""
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModelRef:
     """A promoted model: a checkpoint turned into a model the provider can deploy."""
@@ -372,7 +380,13 @@ class TrainingSession(Protocol):
         ...
 
     def promote(self, ckpt: CheckpointRef, model_id: str) -> ModelRef:
-        """Turn a sampler checkpoint into a deployable model named ``model_id``."""
+        """Turn a sampler checkpoint into a deployable model named ``model_id``.
+
+        Only on a backend with :attr:`TrainingBackend.supports_promotion`. ``model_id``
+        fully matches :data:`MODEL_ID_PATTERN` (lowercase letters, digits and dashes, starting
+        with a letter, at most :data:`MAX_MODEL_ID_LEN` characters), which every provider
+        accepts.
+        """
         ...
 
     def sampler(self, ckpt: CheckpointRef | None) -> Sampler:
@@ -381,20 +395,46 @@ class TrainingSession(Protocol):
 
 
 class TrainingBackend(Protocol):
-    """Opens training sessions on one provider."""
+    """Opens training sessions on one provider.
+
+    Two capabilities are optional, and the loop asks before relying on them:
+    :attr:`supports_resume` (``open_session(resume_from=)`` continues from a training
+    checkpoint) and :attr:`supports_promotion` (:meth:`TrainingSession.promote` turns a sampler
+    checkpoint into a deployable model; without it, the best sampler checkpoint is itself the
+    deployable artifact).
+    """
 
     @property
     def max_checkpoint_name_len(self) -> int:
         """The longest checkpoint name the provider accepts, enforced before saving."""
         ...
 
+    @property
+    def supports_resume(self) -> bool:
+        """Whether ``open_session(resume_from=)`` continues from a training checkpoint."""
+        ...
+
+    @property
+    def supports_promotion(self) -> bool:
+        """Whether :meth:`TrainingSession.promote` works on this provider."""
+        ...
+
     def open_session(
-        self, profile: ModelProfile, lora: LoraConfig, *, resume_from: CheckpointRef | None = None
+        self,
+        profile: ModelProfile,
+        lora: LoraConfig,
+        *,
+        resume_from: CheckpointRef | None = None,
+        seed: int,
+        max_seq_len: int,
     ) -> AbstractContextManager[TrainingSession]:
         """A session for ``profile``, fresh or resumed from a training checkpoint.
 
-        Leaving the context ends the session and releases what it holds on the provider,
-        whether training finished, stopped early or failed.
+        ``seed`` is the run's seed and ``max_seq_len`` the longest example (in tokens) the
+        session will train on, at most ``profile.max_seq_len``; a provider may size its
+        trainer from them. Resuming needs :attr:`supports_resume`. Leaving the context ends
+        the session and releases what it holds on the provider, whether training finished,
+        stopped early or failed.
         """
         ...
 

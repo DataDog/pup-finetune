@@ -43,15 +43,27 @@ It owns everything that decides *how* training goes:
 - the `max_train_tokens` budget and the `max_spend_usd` / `hourly_rate_usd` wall-clock spend
   guard, which stop cleanly and still promote the best checkpoint; the spend guard is asked
   before every paid call and stops training `spend_reserve_fraction` short of the cap, so the
-  checkpoint saved at the stop fits under it;
+  checkpoint saved at the stop and the promotion fit under it, and the time spent carries
+  over a resume;
 - resume: the data order is deterministic, so resuming at step *k* of an epoch replays exactly
-  the rest of that epoch.
+  the rest of that epoch. Each training checkpoint records its epoch, step, the steps already
+  trained in the epoch and the epoch's loss so far, so a resumed run ends with the same epoch
+  metrics, best epoch and patience counter as an uninterrupted one;
+- promote-before-exit: however training stops, the best sampler checkpoint is promoted while
+  the session is still open. After a resume it may come from an ended session, so it is saved
+  again from the best training checkpoint first. Without promotion, the best sampler
+  checkpoint is recorded as the deployable artifact. A failed promotion keeps the training
+  result and leaves the run resumable for the promotion alone.
 
 **Training backends** (`TrainingBackend`, `TrainingSession`, `Sampler`) own the provider's
 side of a session:
 
-- opening a session for a `ModelProfile` and `LoraConfig`, fresh or resumed from a training
-  checkpoint, and releasing it when the context exits, however the run ended;
+- opening a session for a `ModelProfile` and `LoraConfig` (sized by the run's `seed` and
+  `max_seq_len`, the longest example it trains on, at most the profile's context limit),
+  fresh or resumed from a training checkpoint, and releasing it when the context exits,
+  however the run ended;
+- declaring the optional capabilities `supports_resume` and `supports_promotion`, which the
+  loop checks before relying on them;
 - converting each `TokenizedExample` to the SDK's own datum type;
 - `forward_backward`, `forward` and `optim_step`, returning `PendingResult`s. A backend whose
   forward-only call returns per-token logprobs instead of a loss computes the loss itself, as
@@ -59,8 +71,8 @@ side of a session:
 - saving training checkpoints (weights and optimizer state, resumable) and sampler checkpoints
   (weights only), within the provider's checkpoint-name limit
   (`max_checkpoint_name_len`);
-- promoting a sampler checkpoint to a deployable model, and sampling from the base model or a
-  checkpoint.
+- promoting a sampler checkpoint to a deployable model (where supported), loading a
+  checkpoint's weights, and sampling from the base model or a checkpoint.
 
 **Renderers** (`Renderer`) own tokenization and response parsing. They are provider-neutral:
 each model family has one renderer built on its Hugging Face chat template and tokenizer,
@@ -148,8 +160,9 @@ Using Baseten as the example:
 2. **Backend.** Implement `TrainingBackend` with the Baseten Loops SDK. `open_session` returns
    a context manager that deactivates the session on exit, whether training finished,
    stopped early or failed. Convert each `TokenizedExample` to the SDK's datum type, map
-   `AdamConfig` onto its optimizer parameters, and set `max_checkpoint_name_len` to the
-   provider's limit.
+   `AdamConfig` onto its optimizer parameters, size the trainer from the `seed` and
+   `max_seq_len` passed to `open_session`, set `max_checkpoint_name_len` to the provider's
+   limit, and declare `supports_resume` and `supports_promotion`.
 3. **Renderer.** Reuse the Hugging Face chat-template renderer for the model family: the same
    model renders the same way on every provider. A new family needs a new renderer, plus a
    prefix-stability test against its real template.

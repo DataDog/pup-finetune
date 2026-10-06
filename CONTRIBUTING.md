@@ -69,8 +69,10 @@ Take Baseten as the worked example. `providers/baseten/client.py` is the only mo
 imports the Baseten Loops SDK. The backend's `open_session` returns a context manager that
 deactivates the Loops session on exit, whether training finished, stopped early or failed, so
 an interrupted run never leaves a session billing. It converts each `TokenizedExample` to the
-SDK's datum type, maps `AdamConfig` onto the SDK's optimizer parameters, and reports the
-provider's checkpoint-name limit as `max_checkpoint_name_len`. The models Baseten serves use
+SDK's datum type, maps `AdamConfig` onto the SDK's optimizer parameters, sizes the trainer
+from the `seed` and `max_seq_len` it is opened with, and reports the provider's
+checkpoint-name limit as `max_checkpoint_name_len` and its capabilities as
+`supports_resume` and `supports_promotion`. The models Baseten serves use
 the same renderers as on any other provider. `BASETEN_API_KEY` gets a `CredentialSpec`, the SDK
 goes in a `baseten` extra, and the three contract suites run against a fake Loops client in
 the default suite and against Baseten itself under `PUP_FINETUNE_LIVE=1`.

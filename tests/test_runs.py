@@ -8,22 +8,29 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import os
 import re
 import signal
 import stat
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from pup_finetune.data.dataset_dir import DatasetDir, DatasetSettings
 from pup_finetune.data.schema import TrainingRow, validate_row
 from pup_finetune.data.split import SplitParams
-from pup_finetune.errors import StateError, UsageError
+from pup_finetune.errors import ExternalError, StateError, UsageError
 from pup_finetune.providers.base import LoraConfig, TrainSpec
-from pup_finetune.providers.fake import FAKE_PROFILE, FakeBackend, FakeOptions, FakeRenderer
+from pup_finetune.providers.fake import (
+    FAKE_PROFILE,
+    FakeBackend,
+    FakeCrash,
+    FakeOptions,
+    FakeRenderer,
+)
 from pup_finetune.runs import (
     RunDir,
     RunState,
@@ -35,8 +42,8 @@ from pup_finetune.runs import (
     new_run_id,
 )
 from pup_finetune.storage import DirectoryLock
-from pup_finetune.training import Budget, TrainResult, run_training
-from tests.fakes.training import row_examples
+from pup_finetune.training import Budget, EpochMetrics, FinalizeFailed, TrainResult, run_training
+from tests.fakes.training import SESSION, RecordingSession, row_examples
 
 NOW = datetime(2026, 10, 6, 12, 30, 45, tzinfo=UTC)
 SPEC = TrainSpec(max_epochs=4, batch_size=2, patience=1)
@@ -71,7 +78,7 @@ def fake_training(
 
     def train(state: RunState) -> TrainResult:
         backend = FakeBackend(options)
-        with backend.open_session(FAKE_PROFILE, LoraConfig(rank=8)) as session:
+        with backend.open_session(FAKE_PROFILE, LoraConfig(rank=8), **SESSION) as session:
             return run_training(
                 session,
                 train_rows=row_examples(4),
@@ -285,7 +292,7 @@ def test_a_completed_run_writes_state_epochs_and_result(tmp_path: Path) -> None:
         ("training", 3),
     ]
     assert state["best"]["epoch"] == 2
-    assert state["best"]["sampler_ckpt"] == result["best_sampler_ckpt"]
+    assert state["best"]["sampler_ckpt"] == result["checkpoints"]["best_sampler"]
     for name in ("state.json", "epochs.json", "result.json"):
         assert stat.S_IMODE((run_dir.path / name).stat().st_mode) == 0o600
 
@@ -320,22 +327,24 @@ def test_a_cancelled_run_ends_cancelled(tmp_path: Path) -> None:
     assert run_dir.load_state().phase == "cancelled"
 
 
-def test_a_failed_run_records_the_error_and_reraises(tmp_path: Path) -> None:
+def test_a_crash_interrupts_the_run_and_records_the_error(tmp_path: Path) -> None:
     run_dir = create(tmp_path / "run")
-    with pytest.raises(Exception, match="fail_at_step"):
+    with pytest.raises(FakeCrash, match="fail_at_step"):
         execute_run(run_dir, fake_training(FakeOptions(fail_at_step=3)))
     result = read(run_dir.result_path)
-    assert result["phase"] == "failed"
+    assert result["phase"] == "interrupted"
     assert result["stopped_reason"] is None
     assert result["error"]["type"] == "FakeCrash"
     assert "fail_at_step" in result["error"]["message"]
+    assert (result["promoted_model"], result["finalize_error"]) == (None, None)
     # Epoch 1 finished before the crash, so its checkpoints are reported.
     assert result["best_epoch"] == 1
-    assert result["last_training_ckpt"]["epoch"] == 1
+    assert result["checkpoints"]["last_training"]["epoch"] == 1
     assert [e["epoch"] for e in result["epochs"]] == [1]
     state = read(run_dir.state_path)
-    assert state["phase"] == "failed"
+    assert state["phase"] == "interrupted"
     assert state["error"] == result["error"]
+    assert state["resume_point"]["checkpoint"] == result["checkpoints"]["last_training"]
 
 
 def test_result_json_is_written_on_keyboard_interrupt(tmp_path: Path) -> None:
@@ -349,7 +358,7 @@ def test_result_json_is_written_on_keyboard_interrupt(tmp_path: Path) -> None:
     result = read(run_dir.result_path)
     assert result["phase"] == "interrupted"
     assert result["error"]["type"] == "KeyboardInterrupt"
-    assert (result["best_epoch"], result["last_training_ckpt"], result["epochs"]) == (
+    assert (result["best_epoch"], result["checkpoints"]["last_training"], result["epochs"]) == (
         None,
         None,
         [],
@@ -402,20 +411,22 @@ def test_a_failed_result_write_is_noted_on_the_training_error(tmp_path: Path) ->
     def train(state: RunState) -> TrainResult:
         raise RuntimeError("training broke")
 
-    with pytest.raises(RuntimeError, match="training broke") as info:
+    with pytest.raises(ExternalError, match="RuntimeError: training broke") as info:
         execute_run(run_dir, train)
-    assert "could not record the run's result: disk full" in info.value.__notes__
+    assert isinstance(info.value.__cause__, RuntimeError)
+    assert "could not record the run's result: disk full" in info.value.__cause__.__notes__
     assert not run_dir.result_path.exists()
     state = run_dir.load_state()
-    assert state.phase == "failed"
+    assert state.phase == "interrupted"
     assert state.error is not None and state.error["message"] == "training broke"
 
 
 def test_a_failed_result_write_after_training_fails_the_run(tmp_path: Path) -> None:
     run_dir = create(tmp_path / "run")
     _failing_write(run_dir)
-    with pytest.raises(OSError, match="disk full"):
+    with pytest.raises(StateError, match="disk full") as info:
         execute_run(run_dir, fake_training())
+    assert isinstance(info.value.__cause__, OSError)
     state = run_dir.load_state()
     assert state.phase == "failed"
     assert state.error is not None and state.error["type"] == "OSError"
@@ -428,12 +439,12 @@ def test_an_unreadable_epochs_file_does_not_stop_the_result(tmp_path: Path) -> N
         run_dir.epochs_path.write_text('"not a list"')
         raise RuntimeError("training broke")
 
-    with pytest.raises(RuntimeError, match="training broke"):
+    with pytest.raises(ExternalError, match="training broke"):
         execute_run(run_dir, train)
     result = read(run_dir.result_path)
     assert result["epochs"] == []
     assert any("could not read epochs.json" in warning for warning in result["warnings"])
-    assert run_dir.load_state().phase == "failed"
+    assert run_dir.load_state().phase == "interrupted"
 
 
 def test_signals_are_ignored_while_the_result_is_written(tmp_path: Path) -> None:
@@ -472,3 +483,211 @@ def test_status_summarizes_the_run(tmp_path: Path) -> None:
     assert status["best"]["epoch"] == 2
     assert status["pid"] == os.getpid()
     assert status["error"] is None
+
+
+# --- resuming and finite numbers -----------------------------------------------------------
+
+
+def test_only_interrupted_failed_or_cancelled_runs_resume(tmp_path: Path) -> None:
+    for phase in ("interrupted", "failed", "cancelled"):
+        state = create(tmp_path / phase).load_state()
+        state.start()
+        state.transition(phase)  # type: ignore[arg-type]
+        state.resume()
+        assert (state.phase, state.error) == ("training", None)
+    fresh = create(tmp_path / "fresh").load_state()
+    with pytest.raises(UsageError, match="it is created"):
+        fresh.resume()
+    fresh.start()
+    with pytest.raises(UsageError, match="it is training"):
+        fresh.resume()
+
+
+def test_a_run_that_was_interrupted_must_resume_not_start(tmp_path: Path) -> None:
+    run_dir = create(tmp_path / "run")
+    with pytest.raises(FakeCrash):
+        execute_run(run_dir, fake_training(FakeOptions(fail_at_step=3)))
+    with pytest.raises(StateError, match="from interrupted to training") as info:
+        execute_run(run_dir, fake_training())
+    assert info.value.hint is not None and "resume" in info.value.hint
+    with pytest.raises(UsageError, match="it is created"):
+        execute_run(create(tmp_path / "new"), fake_training(), resume=True)
+
+
+def test_non_finite_losses_are_stored_as_null(tmp_path: Path) -> None:
+    run_dir = create(tmp_path / "run")
+    nan_epoch = EpochMetrics(
+        epoch=1,
+        steps=2,
+        train_loss=math.nan,
+        val_loss=math.inf,
+        train_tokens=10,
+        new_best=True,
+        training_ckpt=None,
+        sampler_ckpt=None,
+    )
+
+    def train(state: RunState) -> TrainResult:
+        state.record_epoch(nan_epoch, best=nan_epoch)
+        return TrainResult(
+            best_epoch=1,
+            best_val_loss=math.nan,
+            stopped_reason="completed",
+            epochs=[nan_epoch],
+            best_sampler_ckpt=None,
+            best_training_ckpt=None,
+            last_training_ckpt=None,
+            warnings=[],
+        )
+
+    result = execute_run(run_dir, train)
+    on_disk = read(run_dir.result_path)
+    assert on_disk == result
+    assert on_disk["best_val_loss"] is None
+    assert (on_disk["epochs"][0]["train_loss"], on_disk["epochs"][0]["val_loss"]) == (None, None)
+    assert read(run_dir.epochs_path)[0]["val_loss"] is None
+    assert read(run_dir.state_path)["best"]["val_loss"] is None
+
+
+def test_a_finalize_failure_keeps_the_result_and_marks_finalize_only(tmp_path: Path) -> None:
+    run_dir = create(tmp_path / "run")
+    inner = fake_training()
+
+    def train(state: RunState) -> TrainResult:
+        raise FinalizeFailed(inner(state), RuntimeError("promotion broke"))
+
+    with pytest.raises(FinalizeFailed):
+        execute_run(run_dir, train)
+    result = read(run_dir.result_path)
+    assert (result["phase"], result["stopped_reason"]) == ("failed", "completed")
+    assert result["finalize_error"]["message"] == "promotion broke"
+    assert result["error"] is None
+    state = run_dir.load_state()
+    assert (state.phase, state.resume_mode) == ("failed", "finalize_only")
+    recovered = TrainResult.from_json(result)
+    assert recovered.best_epoch == result["best_epoch"]
+    assert [e.epoch for e in recovered.epochs] == [e["epoch"] for e in result["epochs"]]
+    assert dataclasses.asdict(recovered.best_sampler_ckpt) == result["checkpoints"]["best_sampler"]  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("interrupt", "raised"),
+    [(KeyboardInterrupt, KeyboardInterrupt), (TerminationRequested, TrainingTerminated)],
+)
+def test_an_interrupted_finalize_is_reported_as_the_interrupt(
+    tmp_path: Path, interrupt: type[BaseException], raised: type[BaseException]
+) -> None:
+    run_dir = create(tmp_path / "run")
+    inner = fake_training()
+
+    def train(state: RunState) -> TrainResult:
+        result = inner(state)
+        try:
+            raise interrupt
+        except BaseException as exc:
+            raise FinalizeFailed(result, exc) from exc
+
+    with pytest.raises(raised):
+        execute_run(run_dir, train)
+    state = run_dir.load_state()
+    assert (state.phase, state.resume_mode) == ("interrupted", "finalize_only")
+    assert read(run_dir.result_path)["finalize_error"]["type"] == interrupt.__name__
+
+
+def test_a_finalize_failure_that_cannot_be_recorded_resumes_by_training(tmp_path: Path) -> None:
+    run_dir = create(tmp_path / "run")
+    _failing_write(run_dir)
+    inner = fake_training()
+
+    def train(state: RunState) -> TrainResult:
+        raise FinalizeFailed(inner(state), RuntimeError("promotion broke"))
+
+    with pytest.raises(FinalizeFailed) as info:
+        execute_run(run_dir, train)
+    assert info.value.hint is not None and "last training checkpoint" in info.value.hint
+    assert not run_dir.result_path.exists()
+    state = run_dir.load_state()
+    assert (state.phase, state.resume_mode) == ("failed", "train")
+
+
+def _finalize_only(run_dir: RunDir) -> dict[str, Any]:
+    """Leave ``run_dir`` failed after training, with only the promotion to retry."""
+    inner = fake_training()
+
+    def train(state: RunState) -> TrainResult:
+        raise FinalizeFailed(inner(state), RuntimeError("promotion broke"))
+
+    with pytest.raises(FinalizeFailed):
+        execute_run(run_dir, train)
+    assert run_dir.load_state().resume_mode == "finalize_only"
+    return cast(dict[str, Any], read(run_dir.result_path))
+
+
+def test_a_retry_that_stops_before_promoting_keeps_the_result_to_retry(tmp_path: Path) -> None:
+    run_dir = create(tmp_path / "run")
+    before = _finalize_only(run_dir)
+
+    def retry(state: RunState) -> TrainResult:
+        raise KeyboardInterrupt  # e.g. while reading result.json
+
+    with pytest.raises(KeyboardInterrupt):
+        execute_run(run_dir, retry, resume=True)
+    assert read(run_dir.result_path) == before
+    state = run_dir.load_state()
+    assert (state.phase, state.resume_mode) == ("interrupted", "finalize_only")
+    assert state.error is not None and state.error["type"] == "KeyboardInterrupt"
+
+
+def test_a_retry_from_a_damaged_result_falls_back_to_training(tmp_path: Path) -> None:
+    run_dir = create(tmp_path / "run")
+    _finalize_only(run_dir)
+    run_dir.result_path.write_text('{"stopped_reason": "completed", "best_epoch": "two"}')
+
+    def retry(state: RunState) -> TrainResult:
+        return TrainResult.from_json(run_dir.read_result() or {})
+
+    with pytest.raises(StateError, match=r"result\.json"):
+        execute_run(run_dir, retry, resume=True)
+    state = run_dir.load_state()
+    assert (state.phase, state.resume_mode) == ("interrupted", "train")
+
+
+def test_a_dropped_connection_is_an_external_error(tmp_path: Path) -> None:
+    run_dir = create(tmp_path / "run")
+
+    def train(state: RunState) -> TrainResult:
+        backend = FakeBackend()
+        with backend.open_session(FAKE_PROFILE, LoraConfig(rank=8), **SESSION) as inner:
+            session = RecordingSession(
+                inner, forward_backward_errors={3: ConnectionError("connection reset")}
+            )
+            return run_training(
+                session,
+                train_rows=row_examples(4),
+                validation_rows=row_examples(2, prefix="val"),
+                spec=SPEC,
+                state=state,
+                budget=Budget(),
+                checkpoint_namer=checkpoint_namer("ft-test-run"),
+                max_checkpoint_name_len=backend.max_checkpoint_name_len,
+            )
+
+    with pytest.raises(ExternalError, match="ConnectionError: connection reset") as info:
+        execute_run(run_dir, train)
+    assert not isinstance(info.value, StateError)
+    assert run_dir.load_state().phase == "interrupted"
+
+
+def test_train_result_from_json_needs_a_finished_training(tmp_path: Path) -> None:
+    with pytest.raises(StateError, match="did not end"):
+        TrainResult.from_json({"stopped_reason": None})
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [{"best_epoch": "two"}, {"best_val_loss": [1]}, {"epochs": [{"epoch": 1}]}, {"epochs": [3]}],
+)
+def test_a_damaged_training_result_is_a_state_error(damage: dict[str, Any]) -> None:
+    data = {"stopped_reason": "completed", "checkpoints": {}, "epochs": [], **damage}
+    with pytest.raises(StateError, match=r"result\.json"):
+        TrainResult.from_json(data)

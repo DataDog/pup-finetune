@@ -22,7 +22,7 @@ import tempfile
 from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from types import TracebackType
-from typing import Any, NoReturn, Self
+from typing import Any, NoReturn, Self, overload
 
 from pup_finetune.errors import StateError
 
@@ -262,6 +262,27 @@ def canonical_json(value: Any) -> str:
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
     )
+
+
+@overload
+def finite_json(value: Mapping[str, Any]) -> dict[str, Any]: ...
+@overload
+def finite_json(value: list[Any] | tuple[Any, ...]) -> list[Any]: ...
+def finite_json(value: Any) -> Any:
+    """``value`` with every non-finite float (NaN, infinity) replaced by ``None``.
+
+    For JSON that records measurements, such as losses: our serializers refuse non-finite
+    numbers, and a missing measurement reads better as ``null`` than as a failed write.
+    Recurses into dicts, lists and tuples (tuples become lists); other values pass through.
+    Takes a JSON object or array; the overloads keep the return type.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, Mapping):
+        return {key: finite_json(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [finite_json(item) for item in value]
+    return value
 
 
 def settings_hash(settings: Mapping[str, Any]) -> str:

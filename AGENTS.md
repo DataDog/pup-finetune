@@ -83,11 +83,21 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   exceed the context or train on nothing; `batching.py` shuffles rows per epoch and packs
   optimizer steps into microbatches; `budget.py` caps trained tokens and wall-clock spend;
   `loop.py` has `run_training` (pipelined steps, validation loss, early stopping, best epoch,
-  checkpoints, cancellation). Resume and the detached worker arrive later.
+  epoch-end and time-based checkpoints, cancellation, deterministic resume at an epoch and
+  step, and the `finalize` hook, whose failure raises `FinalizeFailed` carrying the result);
+  `records.py` has its records (`EpochMetrics`, `TrainResult`, `ResumePoint`, `Resume`);
+  `promotion.py` has `Promotion`, the `finalize` hook that promotes the best checkpoint
+  before the session ends (re-creating its sampler checkpoint when that session expired) or
+  records it as the deployable checkpoint; `runner.py` has `start_training` and
+  `resume_training`, which open a session for a run directory and train or resume in it.
+  The detached worker arrives later.
 - `runs.py` - the run directory (`run.json`, `state.json`, `epochs.json`, `result.json`),
   `RunState`, which the loop reports into, and `execute_run`, which holds the directory lock
   while training and always writes `result.json`, also on Ctrl-C or SIGTERM (reported as
-  `TrainingTerminated`, a `FinetuneError`).
+  `TrainingTerminated`, a `FinetuneError`). Any error during training leaves the run
+  `interrupted`, resumable from its last training checkpoint; a failed promotion leaves it
+  `failed` with `resume_mode` `finalize_only`, so a resume only retries the promotion.
+  `result.json` records `promoted_model`, `deployable_checkpoint` and `finalize_error`.
 - `rendering/` - chat rows to model tokens and completions back to messages. `tokens.py` has
   `TokenizedExample`, the provider-neutral, next-token-shifted token and weight arrays;
   `base.py` has the `Renderer` protocol (built on Hugging Face chat templates) and

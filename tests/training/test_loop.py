@@ -10,14 +10,15 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from typing import Any
 
 import pytest
 
-from pup_finetune.errors import ExternalError, UsageError
+from pup_finetune.errors import ExternalError, StateError, UsageError
 from pup_finetune.providers.base import (
+    CheckpointRef,
     LoraConfig,
     StepMetrics,
     TrainingSession,
@@ -36,6 +37,10 @@ from pup_finetune.training import (
     NO_VALIDATION_WARNING,
     VALIDATION_RETRIES,
     Budget,
+    EpochMetrics,
+    FinalizeFailed,
+    Resume,
+    ResumePoint,
     RowExamples,
     TrainResult,
     build_examples,
@@ -43,7 +48,7 @@ from pup_finetune.training import (
     plan_batches,
     run_training,
 )
-from tests.fakes.training import MemoryState, RecordingSession, chat_rows, row_examples
+from tests.fakes.training import SESSION, MemoryState, RecordingSession, chat_rows, row_examples
 
 LORA = LoraConfig(rank=8)
 VALIDATION = row_examples(2, prefix="val")
@@ -59,7 +64,7 @@ class Clock:
 
 @contextmanager
 def recording(options: FakeOptions | None = None, **injected: Any) -> Iterator[RecordingSession]:
-    with FakeBackend(options).open_session(FAKE_PROFILE, LORA) as inner:
+    with FakeBackend(options).open_session(FAKE_PROFILE, LORA, **SESSION) as inner:
         yield RecordingSession(inner, **injected)
 
 
@@ -203,7 +208,9 @@ def test_the_step_loss_is_a_token_mean_over_its_microbatches() -> None:
 
 
 @pytest.mark.parametrize(
-    "metrics", [StepMetrics(1.0, 0.0, 5), StepMetrics(math.nan, 1.0, 5)], ids=["zero", "nan"]
+    "metrics",
+    [StepMetrics(1.0, 0.0, 5), StepMetrics(math.nan, 1.0, 5), StepMetrics(1e308, 1e-10, 5)],
+    ids=["zero", "nan", "overflowing-mean"],
 )
 def test_an_unusable_training_loss_fails(metrics: StepMetrics) -> None:
     with recording(train_metrics=[metrics]) as session, pytest.raises(ExternalError):
@@ -570,7 +577,7 @@ class PricedSession(RecordingSession):
 def priced(
     clock: Clock, cost: float, options: FakeOptions | None = None
 ) -> Iterator[PricedSession]:
-    with FakeBackend(options).open_session(FAKE_PROFILE, LORA) as inner:
+    with FakeBackend(options).open_session(FAKE_PROFILE, LORA, **SESSION) as inner:
         yield PricedSession(inner, clock, cost)
 
 
@@ -658,6 +665,40 @@ def test_a_stop_during_validation_keeps_the_best_epoch_already_saved() -> None:
     ]
 
 
+def test_a_run_stopped_during_validation_resumes_like_an_unbroken_one() -> None:
+    clock = Clock()
+    budget = spend_budget(clock, seconds=14.0, reserve=0.1)  # as in the test above
+    spec = make_spec(max_epochs=3, batch_size=2, pipeline_depth=1)
+    options = curve(2.0, 1.0, 0.5)
+    rows = row_examples(4)
+    first = MemoryState()
+    with priced(clock, 1.0, options) as session:
+        stopped = train(
+            session, spec, rows=rows, validation=VALIDATION_2, state=first, budget=budget
+        )
+    assert stopped.stopped_reason == "budget_exhausted"
+    point = first.resume_points[-1]
+    assert (point.epoch, point.step, point.steps_in_epoch) == (2, 4, 2)
+    with FakeBackend(options).open_session(
+        FAKE_PROFILE, LORA, resume_from=point.checkpoint, **SESSION
+    ) as inner:
+        resumed = RecordingSession(inner)
+        result = train(
+            resumed,
+            spec,
+            rows=rows,
+            validation=VALIDATION_2,
+            resume=Resume(point=point, epochs=first.epochs, warnings=first.warnings),
+        )
+    with recording(options) as unbroken_session:
+        unbroken = train(unbroken_session, spec, rows=rows, validation=VALIDATION_2)
+    assert _metrics(result) == _metrics(unbroken)
+    assert result.stopped_reason == "completed"
+    # Epoch 2 is validated and recorded with the stop's checkpoint; only epoch 3 trains.
+    assert resumed.train_batches == unbroken_session.train_batches[4:]
+    assert result.epochs[1].training_ckpt == point.checkpoint
+
+
 def test_a_stop_before_the_sampler_checkpoint_leaves_the_epoch_unrecorded() -> None:
     clock = Clock()
     # One step of 2 calls, 2 validation forwards and the training checkpoint: 5 s.
@@ -725,3 +766,453 @@ def test_cancellation_at_an_epoch_boundary_keeps_the_epochs_checkpoint() -> None
     assert [e.epoch for e in result.epochs] == [1]
     assert result.last_training_ckpt == result.epochs[0].training_ckpt
     assert [ref.kind for ref in session.saved] == ["training", "sampler"]
+
+
+# --- time-based checkpoints and resume ---------------------------------------------------
+
+
+def ticking(clock: Clock, minutes: float) -> Any:
+    """An event sink that advances ``clock`` by ``minutes`` per finished step."""
+
+    def tick(event: dict[str, Any]) -> None:
+        if event["type"] == "step":
+            clock.now += minutes * 60
+
+    return tick
+
+
+def test_time_based_checkpoints_land_on_the_first_step_after_the_interval() -> None:
+    clock = Clock()
+    events: list[dict[str, Any]] = []
+
+    def sink(event: dict[str, Any]) -> None:
+        ticking(clock, 4)(event)
+        events.append(event)
+
+    state = MemoryState()
+    spec = make_spec(max_epochs=2, batch_size=1, pipeline_depth=1, checkpoint_every_minutes=10)
+    with recording() as session:
+        train(session, spec, rows=row_examples(4), state=state, clock=clock, on_event=sink)
+    training = [(ref.epoch, ref.step) for ref in session.saved if ref.kind == "training"]
+    # Steps take 4 minutes: 12 minutes after the start (step 3) and after epoch 1 (step 7).
+    assert training == [(1, 3), (1, 4), (2, 7), (2, 8)]
+    reasons = [e["reason"] for e in events if e["type"] == "checkpoint" and e["kind"] == "training"]
+    assert reasons == ["time", "epoch", "time", "epoch"]
+    points = [(p.epoch, p.step, p.steps_in_epoch) for p in state.resume_points]
+    assert points == [(1, 3, 3), (1, 4, 4), (2, 7, 3), (2, 8, 4)]
+    assert [p.checkpoint for p in state.resume_points] == [
+        ref for ref in session.saved if ref.kind == "training"
+    ]
+
+
+class CancelOnCheckpoint(MemoryState):
+    """Asks for cancellation as soon as a checkpoint is recorded."""
+
+    def record_checkpoint(self, ref: CheckpointRef, *, resume_point: ResumePoint | None) -> None:
+        super().record_checkpoint(ref, resume_point=resume_point)
+        self.cancel_after_steps = 0
+
+
+def test_a_cancel_during_a_timed_checkpoint_stops_before_the_next_step() -> None:
+    clock = Clock()
+    state = CancelOnCheckpoint()
+    spec = make_spec(max_epochs=1, batch_size=1, pipeline_depth=1, checkpoint_every_minutes=10)
+    with recording() as session:
+        result = train(
+            session,
+            spec,
+            rows=row_examples(6),
+            state=state,
+            clock=clock,
+            on_event=ticking(clock, 4),
+        )
+    assert result.stopped_reason == "cancelled"
+    # The checkpoint before step 4 was being saved when the cancel came: step 4 never ran.
+    assert state.steps == [(1, 1), (1, 2), (1, 3)]
+    assert session.calls.count("optim_step") == 3
+    assert [(ref.kind, ref.step) for ref in session.saved] == [("training", 3)]
+
+
+def test_a_spend_cap_reached_while_draining_for_a_timed_checkpoint_stops_there() -> None:
+    clock = Clock()
+    # 1 USD a minute: training stops at 14 USD (20 less the 30% reserve).
+    budget = Budget(
+        max_spend_usd=20.0, hourly_rate_usd=60.0, spend_reserve_fraction=0.3, clock=clock
+    )
+    events: list[dict[str, Any]] = []
+
+    def sink(event: dict[str, Any]) -> None:
+        ticking(clock, 4)(event)
+        events.append(event)
+
+    spec = make_spec(max_epochs=1, batch_size=1, pipeline_depth=2, checkpoint_every_minutes=10)
+    with recording() as session:
+        result = train(
+            session, spec, rows=row_examples(8), budget=budget, clock=clock, on_event=sink
+        )
+    assert result.stopped_reason == "budget_exhausted"
+    # At 12 minutes the checkpoint is due; draining step 4 takes the run to 16 minutes.
+    assert "stopped before a timed checkpoint" in result.warnings[-1]
+    assert session.calls.count("optim_step") == 4
+    reasons = [(e["reason"], e["step"]) for e in events if e["type"] == "checkpoint"]
+    assert reasons == [("stop", 4)]
+
+
+def test_a_checkpoint_due_at_the_epochs_end_is_saved_before_validation() -> None:
+    clock = Clock()
+    state = MemoryState()
+    events: list[dict[str, Any]] = []
+
+    def sink(event: dict[str, Any]) -> None:
+        ticking(clock, 4)(event)
+        events.append(event)
+
+    spec = make_spec(max_epochs=1, batch_size=1, pipeline_depth=1, checkpoint_every_minutes=10)
+    broken = ExternalError("validation is down", source="fake")
+    with recording(forward_errors=[broken]) as session, pytest.raises(ExternalError):
+        train(session, spec, rows=row_examples(3), state=state, clock=clock, on_event=sink)
+    # The third step ended 12 minutes in: its checkpoint is kept although validation failed.
+    assert [(ref.kind, ref.step) for ref in session.saved] == [("training", 3)]
+    assert [(p.step, p.steps_in_epoch) for p in state.resume_points] == [(3, 3)]
+    assert [e["reason"] for e in events if e["type"] == "checkpoint"] == ["time"]
+
+
+def test_a_checkpoint_saved_before_validation_is_the_epochs_checkpoint() -> None:
+    clock = Clock()
+    spec = make_spec(max_epochs=1, batch_size=1, pipeline_depth=1, checkpoint_every_minutes=10)
+    with recording() as session:
+        result = train(session, spec, rows=row_examples(3), clock=clock, on_event=ticking(clock, 4))
+    assert [(ref.kind, ref.step) for ref in session.saved] == [("training", 3), ("sampler", 3)]
+    assert result.epochs[0].training_ckpt == session.saved[0]
+
+
+def test_a_time_based_checkpoint_waits_for_the_steps_in_flight() -> None:
+    clock = Clock()
+    state = MemoryState()
+    spec = make_spec(max_epochs=1, batch_size=1, pipeline_depth=3, checkpoint_every_minutes=1)
+    with recording() as session:
+        train(
+            session,
+            spec,
+            rows=row_examples(6),
+            state=state,
+            clock=clock,
+            on_event=ticking(clock, 2),
+        )
+    assert session.outstanding == []
+    # Every checkpoint holds exactly the steps resolved before it.
+    for point in state.resume_points:
+        assert point.steps_in_epoch == point.step
+        assert point.checkpoint.step == point.step
+    assert [p.step for p in state.resume_points][-1] == 6
+
+
+def _interrupted_then_resumed(
+    spec: TrainSpec,
+    options: FakeOptions,
+    *,
+    rows: int = 4,
+    minutes: float = 4,
+    budget: Callable[[], Budget] = Budget,
+) -> tuple[TrainResult, TrainResult, MemoryState]:
+    """Train until ``options.fail_at_step`` crashes, then resume in a new backend.
+
+    Each of the three runs (crashed, resumed, uninterrupted) gets a new ``budget()``.
+    """
+    clock = Clock()
+    first = MemoryState()
+    backend = FakeBackend(options)
+    with (
+        pytest.raises(Exception, match="fail_at_step"),
+        backend.open_session(FAKE_PROFILE, LORA, **SESSION) as session,
+    ):
+        train(
+            session,
+            spec,
+            rows=row_examples(rows),
+            state=first,
+            budget=budget(),
+            clock=clock,
+            on_event=ticking(clock, minutes),
+        )
+    point = first.resume_points[-1]
+    resume = Resume(point=point, epochs=first.epochs, warnings=first.warnings)
+    second = MemoryState()
+    elsewhere = FakeBackend(options)
+    with elsewhere.open_session(
+        FAKE_PROFILE, LORA, resume_from=point.checkpoint, **SESSION
+    ) as resumed:
+        result = train(
+            resumed,
+            spec,
+            rows=row_examples(rows),
+            state=second,
+            budget=budget(),
+            clock=clock,
+            on_event=ticking(clock, minutes),
+            resume=resume,
+        )
+    with FakeBackend(options.model_copy(update={"fail_at_step": None})).open_session(
+        FAKE_PROFILE, LORA, **SESSION
+    ) as session:
+        unbroken = train(session, spec, rows=row_examples(rows), budget=budget(), clock=clock)
+    return result, unbroken, second
+
+
+def _metrics(result: TrainResult) -> list[tuple[Any, ...]]:
+    return [
+        (e.epoch, e.steps, e.train_loss, e.val_loss, e.train_tokens, e.new_best)
+        for e in result.epochs
+    ]
+
+
+def test_resuming_mid_epoch_ends_with_the_same_epoch_metrics() -> None:
+    spec = make_spec(max_epochs=3, batch_size=1, pipeline_depth=1, checkpoint_every_minutes=10)
+    options = FakeOptions(loss_curve=[2.0, 1.5, 1.2], val_curve=[2.1, 1.7, 1.4], fail_at_step=6)
+    result, unbroken, second = _interrupted_then_resumed(spec, options)
+    assert _metrics(result) == _metrics(unbroken)
+    assert result.stopped_reason == unbroken.stopped_reason == "completed"
+    # The crash came at step 6, so the run resumed from epoch 1's checkpoint (step 4) and
+    # trained steps 5 to 12 only.
+    assert second.steps[0] == (2, 5)
+    assert second.steps[-1] == (3, 12)
+    assert result.best_epoch == 3
+
+
+def test_resuming_after_a_time_based_checkpoint_skips_exactly_the_trained_steps() -> None:
+    spec = make_spec(max_epochs=2, batch_size=1, pipeline_depth=1, checkpoint_every_minutes=10)
+    options = FakeOptions(fail_at_step=8)
+    rows = row_examples(4)
+    clock = Clock()
+    first = MemoryState()
+    with (
+        pytest.raises(Exception, match="fail_at_step"),
+        FakeBackend(options).open_session(FAKE_PROFILE, LORA, **SESSION) as inner,
+    ):
+        train(inner, spec, rows=rows, state=first, clock=clock, on_event=ticking(clock, 4))
+    point = first.resume_points[-1]
+    assert (point.epoch, point.step, point.steps_in_epoch) == (2, 7, 3)
+    with recording() as unbroken_session:
+        train(unbroken_session, spec, rows=rows)
+    with FakeBackend(options).open_session(
+        FAKE_PROFILE, LORA, resume_from=point.checkpoint, **SESSION
+    ) as inner:
+        resumed = RecordingSession(inner)
+        train(
+            resumed,
+            spec,
+            rows=rows,
+            resume=Resume(point=point, epochs=first.epochs),
+        )
+    # Only the last step of epoch 2 is trained again, on the same batch as uninterrupted.
+    assert resumed.train_batches == unbroken_session.train_batches[-1:]
+
+
+def test_resuming_keeps_the_best_epoch_and_the_patience_counter() -> None:
+    # Epoch 1 is best; epoch 2 is stale (patience 2 left one), the crash is in epoch 3.
+    spec = make_spec(max_epochs=4, batch_size=1, pipeline_depth=1, patience=2)
+    options = FakeOptions(val_curve=[1.0, 1.5, 1.6, 0.5], fail_at_step=9)
+    result, unbroken, _ = _interrupted_then_resumed(spec, options)
+    assert result.stopped_reason == unbroken.stopped_reason == "early_stopped"
+    assert [e.epoch for e in result.epochs] == [1, 2, 3]
+    assert result.best_epoch == unbroken.best_epoch == 1
+    assert result.best_training_ckpt == result.epochs[0].training_ckpt
+
+
+def test_resuming_between_an_epochs_checkpoint_and_its_record_trains_nothing_again() -> None:
+    # Epoch 1's training checkpoint is saved, then its sampler checkpoint fails: the run
+    # resumes from a checkpoint that holds the whole epoch, but no record of it.
+    spec = make_spec(max_epochs=3, batch_size=1, pipeline_depth=1)
+    rows = row_examples(4)
+    first = MemoryState()
+    with (
+        recording(fail_save_sampler_at=1) as broken,
+        pytest.raises(RuntimeError, match="injected save failure"),
+    ):
+        train(broken, spec, rows=rows, state=first)
+    point = first.resume_points[-1]
+    assert (point.epoch, point.step, point.steps_in_epoch) == (1, 4, 4)
+    assert first.epochs == []
+    with recording() as unbroken_session:
+        unbroken = train(unbroken_session, spec, rows=rows)
+    with FakeBackend().open_session(
+        FAKE_PROFILE, LORA, resume_from=point.checkpoint, **SESSION
+    ) as inner:
+        resumed = RecordingSession(inner)
+        result = train(resumed, spec, rows=rows, resume=Resume(point=point, epochs=first.epochs))
+    assert _metrics(result) == _metrics(unbroken)
+    # Epoch 1 is validated and recorded with the checkpoint it already has; only the steps
+    # of epochs 2 and 3 are sent.
+    assert resumed.train_batches == unbroken_session.train_batches[4:]
+    assert result.epochs[0].training_ckpt == point.checkpoint
+    saved = [ref.name for ref in resumed.saved]
+    assert point.checkpoint.name not in saved
+    assert len(saved) == len(set(saved))
+
+
+def test_the_token_budget_carries_over_a_resume() -> None:
+    spec = make_spec(max_epochs=3, batch_size=1, pipeline_depth=1, checkpoint_every_minutes=10)
+    step = row_examples(4)[0].num_tokens
+    cap = 6 * step + step // 2  # stops before step 7, in epoch 2
+    options = FakeOptions(fail_at_step=6)  # crashes before the cap, after epoch 1's checkpoint
+    budgets: list[Budget] = []
+
+    def budget() -> Budget:
+        budgets.append(Budget(max_train_tokens=cap))
+        return budgets[-1]
+
+    result, unbroken, second = _interrupted_then_resumed(spec, options, budget=budget)
+    assert result.stopped_reason == unbroken.stopped_reason == "budget_exhausted"
+    assert second.steps == [(2, 5), (2, 6)]
+    _, resumed_budget, unbroken_budget = budgets
+    assert resumed_budget.tokens_used == unbroken_budget.tokens_used == 6 * step
+    assert result.warnings == unbroken.warnings
+    assert "stopped before step 7" in result.warnings[-1]
+
+
+def test_the_spend_budget_carries_over_a_resume() -> None:
+    # 60 USD/h is 1 USD a minute; steps take 4 minutes. Training stops at 24 USD (30 less
+    # the 20% reserve), before step 7, whether or not the run crashed and resumed.
+    spec = make_spec(max_epochs=3, batch_size=1, pipeline_depth=1, checkpoint_every_minutes=10)
+    options = FakeOptions(fail_at_step=6)  # after epoch 1's checkpoint, at 16 minutes
+    rows = row_examples(4)
+
+    def budget(clock: Clock) -> Budget:
+        return Budget(
+            max_spend_usd=30.0, hourly_rate_usd=60.0, spend_reserve_fraction=0.2, clock=clock
+        )
+
+    clock = Clock()
+    first = MemoryState()
+    with (
+        pytest.raises(Exception, match="fail_at_step"),
+        FakeBackend(options).open_session(FAKE_PROFILE, LORA, **SESSION) as session,
+    ):
+        train(
+            session,
+            spec,
+            rows=rows,
+            state=first,
+            budget=budget(clock),
+            clock=clock,
+            on_event=ticking(clock, 4),
+        )
+    point = first.resume_points[-1]
+    assert (point.step, point.elapsed_seconds) == (4, 16 * 60)
+
+    later = Clock()  # a new process: its clock does not know the first attempt's time
+    second = MemoryState()
+    resumed_budget = budget(later)
+    with FakeBackend(options).open_session(
+        FAKE_PROFILE, LORA, resume_from=point.checkpoint, **SESSION
+    ) as session:
+        result = train(
+            session,
+            spec,
+            rows=rows,
+            state=second,
+            budget=resumed_budget,
+            clock=later,
+            on_event=ticking(later, 4),
+            resume=Resume(point=point, epochs=first.epochs, warnings=first.warnings),
+        )
+    assert result.stopped_reason == "budget_exhausted"
+    assert second.steps == [(2, 5), (2, 6)]
+    assert resumed_budget.elapsed_seconds == 24 * 60
+    assert "stopped before step 7" in result.warnings[-1]
+    assert second.resume_points[-1].elapsed_seconds == 24 * 60
+
+
+def test_resuming_after_the_epoch_that_stops_early_stops_at_once() -> None:
+    spec = make_spec(max_epochs=3, batch_size=1, pipeline_depth=1, patience=1)
+    with recording(curve(1.0, 2.0)) as session:
+        first = MemoryState()
+        done = train(session, spec, rows=row_examples(2), state=first)
+    assert done.stopped_reason == "early_stopped"
+    resume = Resume(point=first.resume_points[-1], epochs=first.epochs)
+    with recording(curve(1.0, 2.0)) as session:
+        result = train(session, spec, rows=row_examples(2), resume=resume)
+    assert result.stopped_reason == "early_stopped"
+    assert session.calls == []
+    assert _metrics(result) == _metrics(done)
+
+
+def test_resuming_with_other_rows_is_refused() -> None:
+    spec = make_spec(max_epochs=2, batch_size=1, pipeline_depth=1)
+    state = MemoryState(cancel_after_steps=3)
+    with recording() as session:
+        train(session, spec, rows=row_examples(4), state=state)
+    resume = Resume(point=state.resume_points[-1], epochs=[])
+    with recording() as session, pytest.raises(StateError, match="an epoch has 2") as info:
+        train(session, spec, rows=row_examples(2), resume=resume)
+    assert info.value.hint is not None and "same training rows" in info.value.hint
+    assert session.calls == []
+
+
+def test_a_resume_point_that_does_not_follow_the_epochs_is_refused() -> None:
+    spec = make_spec(max_epochs=3, batch_size=1, pipeline_depth=1)
+    state = MemoryState()
+    with recording() as session:
+        train(session, spec, rows=row_examples(2), state=state)
+    early = state.resume_points[0]  # epoch 1, but three epochs finished
+    with recording() as session, pytest.raises(StateError, match="does not follow"):
+        train(session, spec, rows=row_examples(2), resume=Resume(point=early, epochs=state.epochs))
+
+
+def test_warnings_are_not_repeated_on_resume() -> None:
+    spec = make_spec(max_epochs=2, batch_size=1, pipeline_depth=1)
+    state = MemoryState(cancel_after_steps=1)
+    with recording() as session:
+        first = train(session, spec, rows=row_examples(2), validation=[], state=state)
+    resume = Resume(point=state.resume_points[-1], epochs=[], warnings=first.warnings)
+    again = MemoryState()
+    with recording() as session:
+        result = train(
+            session, spec, rows=row_examples(2), validation=[], state=again, resume=resume
+        )
+    assert result.warnings == [NO_VALIDATION_WARNING]
+    assert again.warnings == []
+
+
+# --- finalize, and finite numbers --------------------------------------------------------
+
+
+def test_a_failing_finalize_keeps_the_training_result() -> None:
+    def finalize(session: TrainingSession, result: TrainResult) -> TrainResult:
+        raise RuntimeError("promotion broke")
+
+    with recording() as session, pytest.raises(FinalizeFailed, match="promotion broke") as info:
+        train(session, make_spec(max_epochs=1), finalize=finalize)
+    assert info.value.result.stopped_reason == "completed"
+    assert info.value.result.best_epoch == 1
+    assert isinstance(info.value.__cause__, RuntimeError)
+    assert not info.value.interrupted
+    assert info.value.hint is not None and "resume" in info.value.hint
+
+
+def test_an_interrupted_finalize_is_marked_as_such() -> None:
+    def finalize(session: TrainingSession, result: TrainResult) -> TrainResult:
+        raise KeyboardInterrupt
+
+    with recording() as session, pytest.raises(FinalizeFailed) as info:
+        train(session, make_spec(max_epochs=1), finalize=finalize)
+    assert info.value.interrupted
+
+
+def test_non_finite_numbers_become_null_in_json_and_events() -> None:
+    record = EpochMetrics(
+        epoch=1,
+        steps=1,
+        train_loss=math.nan,
+        val_loss=math.inf,
+        train_tokens=3,
+        new_best=True,
+        training_ckpt=None,
+        sampler_ckpt=None,
+    )
+    assert (record.to_json()["train_loss"], record.to_json()["val_loss"]) == (None, None)
+    assert math.isnan(EpochMetrics.from_json(record.to_json()).train_loss)
+    events: list[dict[str, Any]] = []
+    with recording() as session:
+        train(session, make_spec(max_epochs=1), clock=lambda: math.nan, on_event=events.append)
+    assert all(e["elapsed_s"] is None for e in events if "elapsed_s" in e)

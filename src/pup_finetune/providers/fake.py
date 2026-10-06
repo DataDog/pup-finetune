@@ -17,7 +17,9 @@ provider follows. ``tests/providers/contract`` holds the suites it passes.
   an id derived from the word itself. Assistant completions carry weight 1.
 - :class:`FakeBackend` and :class:`FakeSession` report losses from configurable per-epoch
   curves, enforce the 17-character checkpoint-name limit and the session-expiry rules of a
-  real provider, record what was saved, promoted and sampled, and can simulate a crash.
+  real provider, record what was saved, promoted and sampled, and can simulate a crash or a
+  failed promotion. Both optional capabilities (resume and promotion) are on by default and
+  can be turned off, to exercise the paths of providers without them.
 - :class:`FakeSampler` answers a fixed generic reply from the base model and the reference
   answer (looked up in an optional teacher table) from a tuned checkpoint.
 - :class:`FakeProvider` ties them together under the name ``fake``.
@@ -44,6 +46,7 @@ from pydantic import BaseModel, ConfigDict, Field, PositiveInt, ValidationError
 
 from pup_finetune.errors import FinetuneError, UsageError
 from pup_finetune.providers.base import (
+    MODEL_ID_PATTERN,
     AdamConfig,
     Check,
     CheckpointRef,
@@ -549,6 +552,13 @@ class FakeBackend:
     one. A sampler checkpoint is promotable and samplable only while the session that saved it
     is open in this backend, as on a provider whose sessions expire when the process exits.
     ``options`` is read when a session opens.
+
+    ``supports_resume`` and ``supports_promotion`` turn those capabilities off: resuming or
+    promoting then fails. ``fail_promotions`` makes that many next ``promote`` calls fail with
+    ``promotion_error`` (by default a :class:`FakeCrash`), and ``fail_session_ends`` that many
+    next session exits (after the session closed) with a :class:`FakeCrash`, as when a
+    provider's call to release the session fails. Both attributes count down, and tests may
+    set them later.
     """
 
     def __init__(
@@ -556,10 +566,20 @@ class FakeBackend:
         options: FakeOptions | None = None,
         *,
         teacher: Mapping[str, ChatMessage] | None = None,
+        supports_resume: bool = True,
+        supports_promotion: bool = True,
+        fail_promotions: int = 0,
+        fail_session_ends: int = 0,
     ) -> None:
         self.options = options or FakeOptions()
         self.teacher: dict[str, ChatMessage] = dict(teacher or {})
+        self.fail_promotions = fail_promotions
+        self.promotion_error: BaseException | None = None
+        self.fail_session_ends = fail_session_ends
+        self._supports_resume = supports_resume
+        self._supports_promotion = supports_promotion
         self.opened: list[str] = []
+        self.session_settings: list[dict[str, Any]] = []
         self.closed: list[str] = []
         self.saved: list[CheckpointRef] = []
         self.promoted: list[ModelRef] = []
@@ -571,14 +591,37 @@ class FakeBackend:
     def max_checkpoint_name_len(self) -> int:
         return MAX_CHECKPOINT_NAME_LEN
 
+    @property
+    def supports_resume(self) -> bool:
+        return self._supports_resume
+
+    @property
+    def supports_promotion(self) -> bool:
+        return self._supports_promotion
+
     @contextmanager
     def open_session(
-        self, profile: ModelProfile, lora: LoraConfig, *, resume_from: CheckpointRef | None = None
+        self,
+        profile: ModelProfile,
+        lora: LoraConfig,
+        *,
+        resume_from: CheckpointRef | None = None,
+        seed: int,
+        max_seq_len: int,
     ) -> Iterator[FakeSession]:
         if profile.provider != PROVIDER_NAME:
             raise UsageError(f"the fake provider cannot train {profile.provider}/{profile.alias}")
+        if not 0 < max_seq_len <= profile.max_seq_len:
+            raise UsageError(
+                f"max_seq_len must be 1 to {profile.max_seq_len} for {profile.alias}, "
+                f"got {max_seq_len}"
+            )
+        if seed < 0:
+            raise UsageError(f"the seed must not be negative, got {seed}")
         state = _State()
         if resume_from is not None:
+            if not self._supports_resume:
+                raise UsageError("this fake backend is configured without resume")
             if resume_from.kind != "training":
                 raise UsageError("resume from a training checkpoint, not a sampler checkpoint")
             state = _State.from_ref(resume_from)
@@ -587,6 +630,9 @@ class FakeBackend:
             self, profile, lora, session_id, state, resumed=resume_from is not None
         )
         self.opened.append(session.session_id)
+        self.session_settings.append(
+            {"seed": seed, "max_seq_len": max_seq_len, "resume_from": resume_from}
+        )
         self._live.add(session.session_id)
         try:
             yield session
@@ -594,6 +640,9 @@ class FakeBackend:
             session.close()
             self._live.discard(session.session_id)
             self.closed.append(session.session_id)
+            if self.fail_session_ends > 0:
+                self.fail_session_ends -= 1
+                raise FakeCrash(f"simulated failure ending session {session.session_id}")
 
     def is_live(self, session_id: str) -> bool:
         """Whether the session ``session_id`` is open in this backend."""
@@ -679,9 +728,19 @@ class FakeSession:
 
     def promote(self, ckpt: CheckpointRef, model_id: str) -> ModelRef:
         self._require_open()
+        if not self._backend.supports_promotion:
+            raise UsageError("this fake backend is configured without promotion")
         self._require_live_sampler(ckpt, "promote")
-        if not model_id:
-            raise UsageError("a promoted model needs a model id")
+        if not MODEL_ID_PATTERN.fullmatch(model_id):
+            raise UsageError(
+                f"invalid model id {model_id!r}",
+                hint="use 1 to 63 lowercase letters, digits and dashes, starting with a letter "
+                "and not ending with a dash",
+            )
+        if self._backend.fail_promotions > 0:
+            self._backend.fail_promotions -= 1
+            error = self._backend.promotion_error
+            raise error or FakeCrash(f"simulated failure promoting {ckpt.name!r} (fail_promotions)")
         model = ModelRef(provider=PROVIDER_NAME, model_id=model_id, uri=f"fake://models/{model_id}")
         self._backend.promoted.append(model)
         return model
@@ -814,15 +873,26 @@ class FakeProvider:
 
     :meth:`validate_options` also makes the validated options this provider's configuration,
     since nothing else carries ``provider_options`` to the renderer and backend: later
-    :meth:`renderer` calls and newly opened sessions use them.
+    :meth:`renderer` calls and newly opened sessions use them. ``supports_resume`` and
+    ``supports_promotion`` configure the backend (see :class:`FakeBackend`).
     """
 
     def __init__(
-        self, runtime: Runtime, *, teacher: Mapping[str, ChatMessage] | None = None
+        self,
+        runtime: Runtime,
+        *,
+        teacher: Mapping[str, ChatMessage] | None = None,
+        supports_resume: bool = True,
+        supports_promotion: bool = True,
     ) -> None:
         self.runtime = runtime
         self.options = FakeOptions()
-        self._backend = FakeBackend(self.options, teacher=teacher)
+        self._backend = FakeBackend(
+            self.options,
+            teacher=teacher,
+            supports_resume=supports_resume,
+            supports_promotion=supports_promotion,
+        )
         self.deployments: dict[str, Endpoint] = {}
         self.deploy_calls: list[tuple[ModelRef, dict[str, Any]]] = []
         self.undeployed: list[Endpoint] = []

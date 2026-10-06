@@ -10,10 +10,12 @@
 (or any session) and records every call, tracks which pending results are still
 unresolved, and injects failures::
 
-    with FakeBackend(FakeOptions(val_curve=[2.0, 1.5])).open_session(FAKE_PROFILE, LORA) as s:
+    backend = FakeBackend(FakeOptions(val_curve=[2.0, 1.5]))
+    with backend.open_session(FAKE_PROFILE, LORA, **SESSION) as s:
         session = RecordingSession(s, fail_forward_backward_at=3)
 
-:func:`chat_rows` and :func:`row_examples` build synthetic rows.
+:func:`chat_rows` and :func:`row_examples` build synthetic rows; :data:`SESSION` holds the
+``seed`` and ``max_seq_len`` to open fake sessions with.
 
 :class:`MemoryState` is a :class:`~pup_finetune.training.loop.LoopState` that keeps the
 loop's reports in lists and can ask for cancellation after a number of steps.
@@ -33,10 +35,13 @@ from pup_finetune.providers.base import (
     StepMetrics,
     TrainingSession,
 )
-from pup_finetune.providers.fake import FakeRenderer
+from pup_finetune.providers.fake import FAKE_PROFILE, FakeRenderer
 from pup_finetune.rendering.tokens import TokenizedExample
+from pup_finetune.training import EpochMetrics, ResumePoint
 from pup_finetune.training.datums import RowExamples, build_examples
-from pup_finetune.training.loop import EpochMetrics
+
+SESSION: dict[str, Any] = {"seed": 42, "max_seq_len": FAKE_PROFILE.max_seq_len}
+"""The keyword arguments to open a fake session with."""
 
 
 def chat_rows(count: int, *, turns: int = 1, prefix: str = "row") -> list[dict[str, Any]]:
@@ -100,6 +105,8 @@ class RecordingSession:
       result that raises the given error.
     - ``raise_forward_backward_at``: the n-th ``forward_backward`` call itself raises.
     - ``forward_errors``: the next ``forward`` calls fail with these, in order.
+    - ``fail_save_sampler_at``: the n-th ``save_sampler_checkpoint`` (1-based) raises
+      ``save_sampler_error``.
     - ``train_metrics``: scripted metrics for successive ``forward_backward`` results.
     - ``forward_metrics``: scripted metrics for successive ``forward`` results.
     """
@@ -115,8 +122,13 @@ class RecordingSession:
         forward_errors: Sequence[BaseException] = (),
         train_metrics: Sequence[StepMetrics] = (),
         forward_metrics: Sequence[StepMetrics] = (),
+        fail_save_sampler_at: int | None = None,
+        save_sampler_error: BaseException | None = None,
     ) -> None:
         self.inner = inner
+        self.fail_save_sampler_at = fail_save_sampler_at
+        self.save_sampler_error = save_sampler_error or RuntimeError("injected save failure")
+        self.sampler_saves = 0
         self.fail_forward_backward_at = fail_forward_backward_at
         self.forward_backward_error = forward_backward_error or RuntimeError("injected failure")
         self.raise_forward_backward_at = raise_forward_backward_at
@@ -172,6 +184,9 @@ class RecordingSession:
 
     def save_sampler_checkpoint(self, name: str, *, epoch: int, step: int) -> CheckpointRef:
         self.calls.append("save_sampler_checkpoint")
+        self.sampler_saves += 1
+        if self.sampler_saves == self.fail_save_sampler_at:
+            raise self.save_sampler_error
         ref = self.inner.save_sampler_checkpoint(name, epoch=epoch, step=step)
         self.saved.append(ref)
         return ref
@@ -196,6 +211,7 @@ class MemoryState:
         self.cancel_after_steps = cancel_after_steps
         self.steps: list[tuple[int, int]] = []
         self.checkpoints: list[CheckpointRef] = []
+        self.resume_points: list[ResumePoint] = []
         self.epochs: list[EpochMetrics] = []
         self.bests: list[int | None] = []
         self.warnings: list[str] = []
@@ -209,8 +225,10 @@ class MemoryState:
     def record_step(self, *, epoch: int, step: int) -> None:
         self.steps.append((epoch, step))
 
-    def record_checkpoint(self, ref: CheckpointRef) -> None:
+    def record_checkpoint(self, ref: CheckpointRef, *, resume_point: ResumePoint | None) -> None:
         self.checkpoints.append(ref)
+        if resume_point is not None:
+            self.resume_points.append(resume_point)
 
     def record_warning(self, message: str) -> None:
         self.warnings.append(message)
