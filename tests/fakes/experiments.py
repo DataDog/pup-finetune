@@ -12,6 +12,7 @@ It answers the calls :class:`~pup_finetune.datadog.experiments.LLMObsExperiments
     pup = api.install(FakePup()).client()
     api.create_answer = "fail_after_create"  # create the experiment, then exit 1
     api.create_answer = "no_id"  # create it, then answer without its id
+    api.create_answer = "crash_after_create"  # create it, then the process dies (ProcessDied)
     api.events_failures = {2}  # the 2nd events POST exits 1, storing nothing
     api.events_lost_responses = {3}  # the 3rd stores its events, then exits 1
     api.index_after_lists = 2  # events show in `events list` from its 3rd call on
@@ -35,8 +36,16 @@ from typing import Any, Literal
 
 from tests.fakes.pup import FakePup, Handler, PupCall, PupExit, PupStdout
 
-CreateAnswer = Literal["ok", "unreadable", "no_id", "fail_after_create", "fail"]
+CreateAnswer = Literal[
+    "ok", "unreadable", "no_id", "fail_after_create", "crash_after_create", "fail"
+]
 EventsListAnswer = Literal["ok", "enveloped", "fail", "no_total"]
+
+
+class ProcessDied(BaseException):
+    """Raised by a ``crash_after_create`` create: the process died once the create went
+    through (SIGKILL, a closed terminal), so nothing after it runs. A ``BaseException``, so
+    no ``except Exception`` on the way out catches it."""
 
 
 @dataclass
@@ -112,6 +121,8 @@ class FakeExperimentsApi:
         self.experiments[experiment.id] = experiment
         if self.create_answer == "fail_after_create":
             return PupExit(stderr="Error: request timed out")
+        if self.create_answer == "crash_after_create":
+            raise ProcessDied
         if self.create_answer == "unreadable":
             return PupStdout("Error: failed to deserialize the response\n")
         if self.create_answer == "no_id":

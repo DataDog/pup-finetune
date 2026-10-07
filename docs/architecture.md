@@ -313,7 +313,10 @@ provider, and talks to models only through the `Sampler` protocol.
   than a day old), and a request carries at most 100 spans. Span ids are uuid5 of the
   evaluation's identity, the target and the row or case, the experiments are recorded in
   `experiments.json` and the spans sent in `published.json`, so a rerun creates and sends
-  nothing twice. A span is recorded once its request is answered, so a batch whose
+  nothing twice. Each create is recorded as pending first, with a random nonce that goes in
+  the experiment's description, so a rerun after a crash between the create and the save
+  finds that experiment and adopts it (another `--out-dir` has its own nonce, and never
+  does). A span is recorded once its request is answered, so a batch whose
   response was lost is sent again by the rerun, with the same deterministic span ids. A
   span already published keeps the result it was sent with: a retried error updates only
   the local results, and the experiments keep the error (the result's hint says so, and a

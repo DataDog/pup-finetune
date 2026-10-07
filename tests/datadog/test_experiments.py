@@ -36,7 +36,12 @@ from pup_finetune.errors import ReadOnlyError
 from pup_finetune.evaluation.cases import ReplayCase
 from pup_finetune.evaluation.replay import METRICS_VERSION, TARGETS
 from pup_finetune.runtime import Runtime
-from tests.fakes.experiments import CreateAnswer, EventsListAnswer, FakeExperimentsApi
+from tests.fakes.experiments import (
+    CreateAnswer,
+    EventsListAnswer,
+    FakeExperimentsApi,
+    ProcessDied,
+)
 from tests.fakes.pup import FakePup
 
 START = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
@@ -308,6 +313,97 @@ def test_a_lost_create_response_adopts_the_experiment_it_created(
     assert {entry["experiment_id"] for entry in stored.values()} == ids
 
 
+def test_a_crash_between_create_and_save_adopts_the_experiment_on_rerun(
+    fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
+) -> None:
+    evaluation = Evaluation()
+    out = tmp_path / "eval"
+    api.create_answer = "crash_after_create"
+    with pytest.raises(ProcessDied):
+        publish(fake, evaluation, out, clock)
+    (orphan,) = api.experiments.values()
+    pending = json.loads((out / EXPERIMENTS_FILE).read_text())["base"]
+    assert pending["dataset_id"] == "synthetic-dataset-0001"
+    assert "experiment_id" not in pending
+    nonce = pending["pending_nonce"]
+    assert f"synthetic-eval-key-base-{nonce}" in orphan.attributes["description"]
+    api.create_answer = "ok"
+    report = publish(fake, evaluation, out, clock)
+    assert report["status"] == "published"
+    assert report["experiments"]["base"]["experiment_id"] == orphan.id
+    assert len(api.experiments) == 2  # the base experiment was adopted, not created again
+    assert [body["data"]["attributes"]["config"]["target"] for body in api.create_bodies] == [
+        "base",
+        "tuned",
+    ]
+    stored = json.loads((out / EXPERIMENTS_FILE).read_text())
+    assert stored["base"]["experiment_id"] == orphan.id
+    assert "pending_nonce" not in stored["base"]
+    assert report["experiments"]["base"]["submitted"] == 6
+
+
+def test_a_pending_create_not_found_is_made_again_with_its_nonce(
+    fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
+) -> None:
+    evaluation = Evaluation()
+    out = tmp_path / "eval"
+    api.create_answer = "fail"
+    publish(fake, evaluation, out, clock)  # the create never went through
+    nonce = json.loads((out / EXPERIMENTS_FILE).read_text())["base"]["pending_nonce"]
+    api.create_answer = "ok"
+    report = publish(fake, evaluation, out, clock)
+    assert report["status"] == "published"
+    assert len(api.experiments) == 2
+    base = api.experiments[report["experiments"]["base"]["experiment_id"]]
+    assert f"synthetic-eval-key-base-{nonce}" in base.attributes["description"]
+
+
+def test_another_out_dir_never_adopts_a_pending_create_of_the_same_evaluation(
+    fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
+) -> None:
+    evaluation = Evaluation()
+    api.create_answer = "crash_after_create"
+    with pytest.raises(ProcessDied):
+        publish(fake, evaluation, tmp_path / "crashed", clock)
+    (orphan,) = api.experiments.values()
+    api.create_answer = "ok"
+    fresh = publish(fake, evaluation, tmp_path / "fresh", clock)
+    assert fresh["status"] == "published"
+    assert orphan.id not in {entry["experiment_id"] for entry in fresh["experiments"].values()}
+    assert len(api.experiments) == 3
+    # The crashed directory still adopts its own.
+    resumed = publish(fake, evaluation, tmp_path / "crashed", clock)
+    assert resumed["experiments"]["base"]["experiment_id"] == orphan.id
+    assert len(api.experiments) == 4  # only its tuned experiment was new
+
+
+def test_a_pending_create_on_another_dataset_is_replaced_with_a_warning(
+    fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
+) -> None:
+    evaluation = Evaluation()
+    out = tmp_path / "eval"
+    api.create_answer = "crash_after_create"
+    with pytest.raises(ProcessDied):
+        publish(fake, evaluation, out, clock)
+    (orphan,) = api.experiments.values()
+    api.create_answer = "ok"
+    repushed = evaluation.settings()
+    repushed = dataclasses.replace(
+        repushed, push=dataclasses.replace(repushed.push, dataset_id="synthetic-dataset-0002")
+    )
+    report = publisher(fake, evaluation, out, clock, settings=repushed).publish(
+        cases=evaluation.cases,
+        generations=evaluation.generations,
+        results=evaluation.results,
+        summary={},
+    )
+    assert report["status"] == "published"
+    assert report["experiments"]["base"]["experiment_id"] != orphan.id
+    (warning,) = report["warnings"]
+    assert "base experiment create on the dataset 'synthetic-dataset-0001'" in warning
+    assert "pushed again" in warning
+
+
 def test_a_create_not_found_afterwards_says_it_may_have_gone_through(
     fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
 ) -> None:
@@ -329,7 +425,10 @@ def test_a_failed_create_is_reported_not_raised(
     assert "500" in report["error"]["message"]
     assert "may have gone through" in report["hint"]
     assert report["error"]["hint"] == report["hint"]
-    assert not (tmp_path / "eval" / EXPERIMENTS_FILE).exists()
+    # Only the pending create is recorded, so a rerun looks for it before creating.
+    stored = json.loads((tmp_path / "eval" / EXPERIMENTS_FILE).read_text())
+    assert set(stored) == {"base"}
+    assert set(stored["base"]) == {"pending_nonce", "dataset_id", "requested_at"}
 
 
 def test_a_failure_keeps_the_hint_of_its_error(

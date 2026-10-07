@@ -33,7 +33,11 @@ evaluation directory keeps, both ``0600``:
 - ``experiments.json`` - the experiment of each target (``experiment_id``, ``name``), saved
   as soon as it is created and reused afterwards, so a rerun never creates another (an entry
   for another dataset, after the dataset was pushed again, or one that cannot be read is
-  replaced by a new experiment, with a warning);
+  replaced by a new experiment, with a warning). Before the create, the target's entry is a
+  pending one (``pending_nonce``, ``dataset_id``): the nonce, random, goes in the
+  experiment's description marker, so a rerun after a crash between the create and the save
+  looks for that experiment and adopts it, or creates it with the same nonce. The nonce
+  keeps another evaluation directory of the same evaluation from adopting it;
 - ``published.json`` - the spans submitted to each experiment (span id to a digest of what was
   sent), saved after every request, so a rerun sends only the spans not sent yet. A span sent
   with an earlier result (an error since retried) is not sent again; it is reported instead.
@@ -57,6 +61,7 @@ conversations already pushed to the dataset, and nothing else.
 from __future__ import annotations
 
 import hashlib
+import secrets
 import threading
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -241,6 +246,12 @@ def _lost_create_hint(name: str) -> str:
     )
 
 
+def _pending_nonce(entry: Mapping[str, Any]) -> str | None:
+    """The nonce of a pending ``experiments.json`` entry (a create not known to be done)."""
+    nonce = entry.get("pending_nonce")
+    return nonce if isinstance(nonce, str) and nonce else None
+
+
 def _events_path(experiment_id: str) -> str:
     return f"v2/llm-obs/v1/experiments/{quote(experiment_id, safe='')}/events"
 
@@ -285,19 +296,23 @@ class PublishSettings:
     def tags(self, target: str) -> list[str]:
         return [SOURCE_TAG, f"target:{target}", f"run_id:{self.run_id}"]
 
-    def marker(self, target: str) -> str:
-        """What the description of ``target``'s experiment carries, to find it again."""
-        return f"Evaluation key: {self.eval_key}-{target}."
+    def marker(self, target: str, nonce: str) -> str:
+        """What the description of ``target``'s experiment carries, to find it again.
 
-    def experiment_attributes(self, target: str) -> dict[str, Any]:
-        """The body attributes of ``target``'s experiment create."""
+        ``nonce`` is the one the evaluation directory recorded for the create, so another
+        directory evaluating the same run never finds this directory's experiment.
+        """
+        return f"Evaluation key: {self.eval_key}-{target}-{nonce}."
+
+    def experiment_attributes(self, target: str, nonce: str) -> dict[str, Any]:
+        """The body attributes of ``target``'s experiment create, marked with ``nonce``."""
         model = self.base_model if target == "base" else f"{self.base_model}, tuned"
         attributes: dict[str, Any] = {
             "name": experiment_name(target, self.run_id),
             "description": (
                 f"Replay evaluation by pup-finetune of run {self.run_id}: the {target} model "
                 f"({model}) redoes each recorded assistant action of the test split. "
-                f"{self.marker(target)}"
+                f"{self.marker(target, nonce)}"
             ),
             "dataset_id": self.dataset_id,
             "project_id": self.push.project_id,
@@ -710,12 +725,30 @@ class ExperimentsPublisher:
         return dict(data)
 
     def _experiment(self, target: str, warnings: list[str]) -> CreatedExperiment:
-        """The experiment of ``target``: the one ``experiments.json`` records, or a new one."""
+        """The experiment of ``target``: the one ``experiments.json`` records, or a new one.
+
+        A pending entry on the pushed dataset is a create that may have gone through before
+        the process died: its experiment is looked up by the entry's nonce and adopted, or
+        created with that nonce when it is not found.
+        """
         self._check_cancel()
         stored = self._read_experiments()
         entry = stored.get(target)
         dataset_id = self.settings.dataset_id
-        if entry is not None:
+        nonce: str | None = None
+        pending = _pending_nonce(entry) if isinstance(entry, dict) else None
+        if isinstance(entry, dict) and pending is not None:
+            if entry.get("dataset_id") == dataset_id:
+                nonce = pending
+            else:
+                warnings.append(
+                    f"{EXPERIMENTS_FILE} records a {target} experiment create on the dataset "
+                    f"{entry.get('dataset_id')!r}, not the pushed dataset {dataset_id!r} (the "
+                    f"dataset was pushed again), that may have gone through; a new {target} "
+                    "experiment is created and recorded in its place, and one that create "
+                    "made, if any, is left as it is"
+                )
+        elif entry is not None:
             identifier = entry.get("experiment_id") if isinstance(entry, dict) else None
             readable = isinstance(identifier, str) and bool(identifier)
             if readable and isinstance(entry, dict) and entry.get("dataset_id") == dataset_id:
@@ -736,17 +769,33 @@ class ExperimentsPublisher:
                 + f" that is not reused, as {why}; a new {target} experiment is created and "
                 "recorded in its place, and the old one is left as it is"
             )
-        attributes = self.settings.experiment_attributes(target)
-        self.progress(f"creating the {target} experiment {attributes['name']!r}")
-        created = self.api.create(attributes, marker=self.settings.marker(target))
+        created: CreatedExperiment | None = None
+        if nonce is not None:
+            self.progress(f"looking for the {target} experiment an earlier run may have created")
+            created = self.api.find(dataset_id, self.settings.marker(target, nonce))
+        else:
+            nonce = secrets.token_hex(8)
+            stored[target] = {
+                "pending_nonce": nonce,
+                "dataset_id": dataset_id,
+                "requested_at": self._now(),
+            }
+            atomic_write_json(self.experiments_path, stored)
+        if created is None:
+            attributes = self.settings.experiment_attributes(target, nonce)
+            self.progress(f"creating the {target} experiment {attributes['name']!r}")
+            created = self.api.create(attributes, marker=self.settings.marker(target, nonce))
         stored[target] = {
             "experiment_id": created.id,
             "name": created.name,
             "dataset_id": dataset_id,
-            "created_at": self.clock().astimezone(UTC).isoformat(timespec="seconds"),
+            "created_at": self._now(),
         }
         atomic_write_json(self.experiments_path, stored)
         return created
+
+    def _now(self) -> str:
+        return self.clock().astimezone(UTC).isoformat(timespec="seconds")
 
     # --- events ---------------------------------------------------------------------------
 
