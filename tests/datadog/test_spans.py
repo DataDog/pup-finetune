@@ -112,7 +112,8 @@ def test_request_goes_through_pup_api_with_the_json_api_body() -> None:
                     "span_kind": "llm",
                     "ml_app": "synthetic-app",
                     "span_name": "chat",
-                    "query": "@status:ok",
+                    "query": '@ml_app:"synthetic-app" @meta.span.kind:"llm" @name:"chat" '
+                    'env:"synthetic" version:"1" (@status:ok)',
                     "tags": {"env": "synthetic", "version": "1"},
                     "from": "now-7d",
                     "to": "now",
@@ -124,6 +125,14 @@ def test_request_goes_through_pup_api_with_the_json_api_body() -> None:
         }
     }
     assert api.requests[1]["data"]["attributes"]["page"] == {"limit": 2, "cursor": "cursor-2"}
+
+
+def test_a_query_carries_the_other_filters_since_the_api_ignores_them_then() -> None:
+    query = SpanQuery(ml_app='app "x"', query="@meta.input.value:*db*")
+    sent = query.request_body()["data"]["attributes"]["filter"]
+    assert sent["query"] == '@ml_app:"app \\"x\\"" @meta.span.kind:"llm" (@meta.input.value:*db*)'
+    assert query.settings()["filter"]["query"] == "@meta.input.value:*db*"
+    assert "query" not in SpanQuery(ml_app="app").request_body()["data"]["attributes"]["filter"]
 
 
 def test_filter_leaves_out_unset_fields() -> None:
