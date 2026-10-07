@@ -207,6 +207,17 @@ def test_a_resolved_query_sends_epoch_ms() -> None:
     assert pinned.resolved(0) == pinned
 
 
+def test_a_request_sends_epoch_ms_bounds_as_strings() -> None:
+    resolved = SpanQuery(ml_app="synthetic-app", from_="now-3d", to="now").resolved(NOW_MS)
+    sent = resolved.request_body()["data"]["attributes"]["filter"]
+    assert sent["from"] == str(NOW_MS - 3 * 24 * 60 * 60 * 1000)
+    assert sent["to"] == str(NOW_MS)
+    # The identity of the query keeps the numbers, so frozen settings and caches still match.
+    assert resolved.settings()["filter"]["from"] == NOW_MS - 3 * 24 * 60 * 60 * 1000
+    iso = SpanQuery(from_="2026-10-04T02:01:00.267Z", to="1791079260267")
+    assert iso.request_body()["data"]["attributes"]["filter"] == iso.to_filter()
+
+
 def test_epoch_ms_reads_the_clock_in_milliseconds() -> None:
     assert epoch_ms(lambda: 1767225600.1234) == 1767225600123
 

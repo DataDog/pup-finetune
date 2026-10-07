@@ -19,9 +19,11 @@ pup is logged in to (``pup auth status``), so it is never reused for another acc
 :func:`iter_span_pages` yields the same spans a page at a time, so a caller can stop between
 pages without fetching the next one.
 
-A query's ``from_`` and ``to`` are sent as they are. A relative time such as ``now-7d`` is
-resolved by Datadog when each page is fetched; :meth:`SpanQuery.resolved` turns it into epoch
-milliseconds first, so every page of an export reads the same window.
+A query's ``from_`` and ``to`` are sent as they are, epoch milliseconds as a decimal string:
+the Export API accepts a time bound only as a string and rejects a JSON number. A relative
+time such as ``now-7d`` is resolved by Datadog when each page is fetched;
+:meth:`SpanQuery.resolved` turns it into epoch milliseconds first, so every page of an export
+reads the same window.
 """
 
 from __future__ import annotations
@@ -309,7 +311,11 @@ class SpanQuery:
         )
 
     def to_filter(self) -> dict[str, Any]:
-        """The Export API ``filter``; unset fields are left out."""
+        """The ``filter`` as it identifies the query; unset fields are left out.
+
+        Epoch milliseconds stay numbers here, as frozen settings and cache identities hold
+        them; :meth:`request_body` sends them as strings.
+        """
         candidates: dict[str, Any] = {
             "span_kind": self.span_kind,
             "ml_app": self.ml_app,
@@ -338,13 +344,21 @@ class SpanQuery:
             "data": {
                 "type": "spans",
                 "attributes": {
-                    "filter": self.to_filter(),
+                    "filter": _wire_filter(self.to_filter()),
                     "page": page,
                     "sort": "timestamp",
                     "options": {"include_attachments": True},
                 },
             }
         }
+
+
+def _wire_filter(filter_: dict[str, Any]) -> dict[str, Any]:
+    """``filter_`` as the Export API reads it: an epoch-ms ``from`` or ``to`` as a string."""
+    return {
+        key: str(value) if key in ("from", "to") and isinstance(value, int) else value
+        for key, value in filter_.items()
+    }
 
 
 # --- the export -----------------------------------------------------------------------------

@@ -676,8 +676,14 @@ def at(now_ms: int) -> Any:
 
 
 def windows(api: FakeExportApi) -> list[tuple[object, object]]:
+    """The window of each request, epoch ms read back from the strings the export sends."""
     filters = [body["data"]["attributes"]["filter"] for body in api.requests]
-    return [(f.get("from"), f.get("to")) for f in filters]
+    return [(_bound(f.get("from")), _bound(f.get("to"))) for f in filters]
+
+
+def _bound(value: object) -> object:
+    assert not isinstance(value, int), "the Export API takes a time bound only as a string"
+    return int(value) if isinstance(value, str) and value.isdigit() else value
 
 
 def relative_options(**options: Any) -> PullOptions:

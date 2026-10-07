@@ -152,7 +152,9 @@ def test_preview_reports_counts_samples_and_the_pull_command(api: FakeExportApi)
         "from_utc": "2025-12-25T00:00:00.000Z",
         "to_utc": "2026-01-01T00:00:00.000Z",
     }
-    assert data["query"]["filter"] == api.requests[0]["data"]["attributes"]["filter"]
+    # The export sends the same filter, with the epoch-ms bounds as the strings it accepts.
+    sent = api.requests[0]["data"]["attributes"]["filter"]
+    assert sent == {**data["query"]["filter"], "from": str(WEEK_AGO_MS), "to": str(NOW_MS)}
     assert (data["query"]["reasoning"], data["query"]["include_errors"]) == ("omit", False)
     assert data["limits"] == {"target_count": 200, "max_candidates": 5000}
     assert (data["matched_spans"], data["traces"]) == (10, 6)
@@ -617,9 +619,15 @@ def test_a_non_ascii_digit_time_is_passed_through_as_text(api: FakeExportApi) ->
 
 
 def sent_windows(api: FakeExportApi) -> list[tuple[object, object]]:
-    """The ``from`` and ``to`` of every request sent to the Export API."""
+    """The ``from`` and ``to`` of every request sent to the Export API, epoch ms read back
+    from the strings it is sent as."""
     filters = [body["data"]["attributes"]["filter"] for body in api.requests]
-    return [(f.get("from"), f.get("to")) for f in filters]
+    return [(_sent_bound(f.get("from")), _sent_bound(f.get("to"))) for f in filters]
+
+
+def _sent_bound(value: object) -> object:
+    assert not isinstance(value, int), "the Export API takes a time bound only as a string"
+    return int(value) if isinstance(value, str) and value.isdigit() else value
 
 
 def test_a_pull_freezes_the_resolved_window_and_the_expressions(
