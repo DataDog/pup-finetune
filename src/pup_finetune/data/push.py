@@ -30,10 +30,17 @@ is an error. The dataset's description carries the receipt's ``push_id``, so a p
 stopped before it learned the dataset id adopts only the dataset it created, never another
 of the same name. Rows the receipt lists that are no longer kept (labeled drop after the
 push) are reported as stale records; they are not deleted from the remote dataset.
+
+The receipt also keeps a digest of the record pushed for each row (``record_digests``), so a
+kept row that changed after it was pushed, such as one a resumed ``--reasoning preserve``
+pull filled reasoning in for under the same id, is reported as a changed record: a push only
+adds records, so its remote record keeps the content pushed before. A row without a digest
+(pushed by a receipt that predates them) is never reported as changed.
 """
 
 from __future__ import annotations
 
+import hashlib
 import secrets
 import shlex
 import signal
@@ -57,7 +64,13 @@ from pup_finetune.datadog.datasets import (
 )
 from pup_finetune.datadog.pup import Pup
 from pup_finetune.errors import ExternalError, FinetuneError, StateError, UsageError
-from pup_finetune.storage import DirectoryLock, atomic_write_json, read_json, settings_hash
+from pup_finetune.storage import (
+    DirectoryLock,
+    atomic_write_json,
+    canonical_json,
+    read_json,
+    settings_hash,
+)
 
 PUSH_FILE = "push.json"
 SOURCE_TAG = "source:pup-finetune"
@@ -117,6 +130,11 @@ def dataset_record(row: TrainingRow, split: SplitName) -> dict[str, Any]:
     }
 
 
+def record_digest(record: Mapping[str, Any]) -> str:
+    """The sha256 hex digest of ``record`` (a :func:`dataset_record`) as canonical JSON."""
+    return hashlib.sha256(canonical_json(record).encode("utf-8")).hexdigest()
+
+
 def dataset_description(push_id: str) -> str:
     """The description of the dataset a receipt with ``push_id`` creates."""
     return f"{DATASET_DESCRIPTION} Push id: {push_id}."
@@ -138,6 +156,9 @@ class PushState:
     """The dataset version the last ``records-add`` reported; ``None`` when unknown."""
     record_ids: Mapping[str, str] = field(default_factory=dict)
     """The record id per row id, for every row pushed."""
+    record_digests: Mapping[str, str] = field(default_factory=dict)
+    """The :func:`record_digest` of the record pushed per row id; a row pushed by a receipt
+    that predates digests has none."""
     in_flight: tuple[str, ...] = ()
     """Row ids of a batch sent whose record ids are not known yet; empty between batches."""
     in_flight_at: datetime | None = None
@@ -155,6 +176,7 @@ class PushState:
             "dataset_version": self.dataset_version,
             "push_id": self.push_id,
             "record_ids": dict(self.record_ids),
+            "record_digests": dict(self.record_digests),
             "in_flight": list(self.in_flight),
             "in_flight_at": (
                 None
@@ -187,6 +209,12 @@ class PushState:
             isinstance(key, str) and isinstance(value, str) for key, value in record_ids.items()
         ):
             raise StateError(f"{where}: record_ids must map row ids to record ids")
+        # Missing in a receipt written before digests were recorded: every row's is unknown.
+        record_digests = data.get("record_digests", {})
+        if not isinstance(record_digests, dict) or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in record_digests.items()
+        ):
+            raise StateError(f"{where}: record_digests must map row ids to record digests")
         in_flight = data.get("in_flight", [])
         if not isinstance(in_flight, list) or not all(isinstance(i, str) for i in in_flight):
             raise StateError(f"{where}: in_flight must be a list of row ids")
@@ -206,6 +234,7 @@ class PushState:
             dataset_id=optional("dataset_id"),
             dataset_version=version,
             record_ids=dict(record_ids),
+            record_digests=dict(record_digests),
             in_flight=tuple(in_flight),
             in_flight_at=sent_at,
             pushed_at=optional("pushed_at"),
@@ -248,6 +277,9 @@ class PushReceipt:
     """Kept rows the remote dataset holds, per split."""
     stale_records: dict[str, str]
     """Rows pushed earlier that are no longer kept: row id to record id."""
+    changed_records: dict[str, str]
+    """Kept rows that changed after they were pushed, whose remote records keep the content
+    pushed before: row id to record id."""
 
     def to_json(self) -> dict[str, Any]:
         state = self.state
@@ -263,6 +295,7 @@ class PushReceipt:
             "records": len(state.record_ids),
             "records_by_split": self.records_by_split,
             "stale_records": self.stale_records,
+            "changed_records": self.changed_records,
         }
 
 
@@ -282,6 +315,9 @@ class PushPlan:
     kept_by_split: dict[SplitName, int]
     stale_records: dict[str, str]
     """Rows the receipt lists that are no longer kept: row id to record id."""
+    changed_records: dict[str, str]
+    """Kept rows the receipt lists whose record differs from the one pushed (by its digest):
+    row id to record id. They are not sent again: a push only adds records."""
     settings_hash: str
 
     @property
@@ -329,6 +365,7 @@ class PushPlan:
             already_pushed=self.already_pushed,
             records_by_split=dict(self.kept_by_split),
             stale_records=self.stale_records,
+            changed_records=self.changed_records,
         )
 
 
@@ -347,13 +384,18 @@ def plan_push(dataset: DatasetDir, *, project: str, name: str) -> PushPlan:
     by_split = dataset.rows_by_split()
     check_isolation(by_split)
     pushed = state.record_ids if state is not None else {}
+    digests = state.record_digests if state is not None else {}
     kept = {row.id for split in SPLITS for row in by_split[split]}
-    pending = [
-        PendingRecord(row.id, split, dataset_record(row, split))
-        for split in SPLITS
-        for row in by_split[split]
-        if row.id not in pushed
-    ]
+    pending: list[PendingRecord] = []
+    changed: dict[str, str] = {}
+    for split in SPLITS:
+        for row in by_split[split]:
+            if row.id not in pushed:
+                pending.append(PendingRecord(row.id, split, dataset_record(row, split)))
+            elif (sent := digests.get(row.id)) is not None and sent != record_digest(
+                dataset_record(row, split)
+            ):
+                changed[row.id] = pushed[row.id]
     return PushPlan(
         directory=dataset.path,
         project=project,
@@ -365,6 +407,7 @@ def plan_push(dataset: DatasetDir, *, project: str, name: str) -> PushPlan:
         stale_records={
             row_id: record_id for row_id, record_id in pushed.items() if row_id not in kept
         },
+        changed_records=changed,
         settings_hash=digest,
     )
 
@@ -401,7 +444,8 @@ def push_dataset(
             return plan.receipt()
         api = LLMObsDatasets(pup)
         if plan.state is not None and plan.state.in_flight:
-            _reconcile(dataset, plan.state, api, report, clock)
+            local = {item.row_id: item.record for item in plan.pending}
+            _reconcile(dataset, plan.state, local, api, report, clock)
             plan = plan_push(dataset, project=project, name=name)
             if not plan.pending:
                 return plan.receipt()
@@ -487,9 +531,12 @@ def _add_records(
             ) from exc
         record_ids = dict(state.record_ids)
         record_ids.update(zip(row_ids, added.record_ids, strict=True))
+        record_digests = dict(state.record_digests)
+        record_digests.update((item.row_id, record_digest(item.record)) for item in batch)
         state = replace(
             state,
             record_ids=record_ids,
+            record_digests=record_digests,
             in_flight=(),
             in_flight_at=None,
             dataset_version=added.dataset_version,
@@ -501,9 +548,17 @@ def _add_records(
 
 
 def _reconcile(
-    dataset: DatasetDir, state: PushState, api: LLMObsDatasets, report: Progress, clock: Clock
+    dataset: DatasetDir,
+    state: PushState,
+    local: Mapping[str, Mapping[str, Any]],
+    api: LLMObsDatasets,
+    report: Progress,
+    clock: Clock,
 ) -> PushState:
     """Adopt the records of an interrupted batch (``in_flight``) that reached the dataset.
+
+    ``local`` holds the record of each kept row not pushed yet; a record adopted gets the
+    digest of its row's record, and none when the row is no longer kept.
 
     Raises :class:`StateError` when rows of it are missing within :data:`IN_FLIGHT_SETTLE` of
     when it was sent, after adopting those found: the rest may still be being added.
@@ -544,6 +599,10 @@ def _reconcile(
     state = replace(
         state,
         record_ids={**state.record_ids, **found},
+        record_digests={
+            **state.record_digests,
+            **{row_id: record_digest(local[row_id]) for row_id in found if row_id in local},
+        },
         # Until the batch has settled its missing rows stay in flight, so none is sent twice.
         in_flight=missing if unsettled else (),
         in_flight_at=sent_at if unsettled else None,

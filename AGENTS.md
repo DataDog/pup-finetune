@@ -164,7 +164,9 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   items it cannot read, `RecordsListing.unreadable`, keeps the batch `in_flight` and stops;
   so do rows of it not found within `IN_FLIGHT_SETTLE`, 10 minutes, of `in_flight_at`, since
   a timed-out write may still land); rows dropped after a push are reported as
-  `stale_records`, not deleted.
+  `stale_records`, not deleted, and kept rows whose record no longer matches the digest
+  `push.json` saved for it (`record_digests`; none in older receipts) as `changed_records`,
+  not updated: a push only adds records.
 - `curation/` - deciding which accepted rows to train on. `labels.py` has `apply_labels`
   (every id an accepted row, last label per id wins, repeats skipped, appended through
   `DatasetDir.append_labels`); `samples.py` picks a seeded, readable sample of rows for

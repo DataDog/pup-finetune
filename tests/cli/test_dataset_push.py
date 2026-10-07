@@ -183,6 +183,47 @@ def test_nothing_left_to_push_reports_the_receipt_without_confirm(
     assert output_json(push(dataset, "--confirm")) == data
 
 
+def test_rows_changed_after_a_push_are_reported_with_a_warning(
+    dataset: Path, api: FakeDatasetsApi, fake: FakePup, tmp_path: Path
+) -> None:
+    assert push(dataset, "--confirm").exit_code == 0
+    remote = api.dataset_named(NAME)
+    # Reasoning filled in for a stored row under the same id, as a resumed pull can.
+    rows = dataset / "rows.jsonl"
+    lines = rows.read_text().splitlines()
+    row = json.loads(lines[0])
+    row["messages"][-1]["reasoning_content"] = "Check the units first."
+    rows.write_text("\n".join([json.dumps(row), *lines[1:]]) + "\n")
+    calls = len(fake.calls)
+    result = push(dataset)
+    assert result.exit_code == 0, result.stderr
+    data = output_json(result)
+    assert data["changed_records"] == {row["id"]: record_id_of(remote, row["id"])}
+    assert (data["pushed"], data["already_pushed"]) == (0, len(ROW_IDS))
+    (warning,) = data["warnings"]
+    assert "not updated" in warning and PUSH_FILE in warning and "--name" in warning
+    assert len(fake.calls) == calls
+    # With rows to push, the preview reports them too.
+    more = tmp_path / "more.jsonl"
+    more.write_text(
+        json.dumps(
+            {
+                "id": "row-synthetic-extra",
+                "messages": [
+                    {"role": "user", "content": "Synthetic question?"},
+                    {"role": "assistant", "content": "Synthetic answer."},
+                ],
+                "source": {"trace_id": "synthetic-trace-extra"},
+            }
+        )
+        + "\n"
+    )
+    assert invoke("import", str(dataset), "--file", str(more)).exit_code == 0
+    preview = output_json(push(dataset))["preview"]
+    assert preview["changed_records"] == data["changed_records"]
+    assert any("changed after they were pushed" in w for w in preview["warnings"])
+
+
 def test_the_preview_after_more_rows_were_added_shows_only_those(
     tmp_path: Path, api: FakeDatasetsApi
 ) -> None:

@@ -32,6 +32,7 @@ from pup_finetune.data.push import (
     plan_push,
     push_dataset,
     read_push_state,
+    record_digest,
 )
 from pup_finetune.data.schema import TrainingRow, validate_row
 from pup_finetune.data.split import SPLITS
@@ -111,6 +112,23 @@ def push_order(dataset: DatasetDir) -> list[str]:
 
 def remote_row_ids(api: FakeDatasetsApi) -> list[str]:
     return [record["metadata"]["row_id"] for record in api.dataset_named(NAME).records]
+
+
+def with_reasoning(row: TrainingRow, text: str) -> TrainingRow:
+    """``row`` with ``text`` as the reasoning of its last (assistant) message."""
+    *before, last = row.messages
+    thought = last.model_copy(update={"reasoning_content": text})
+    return row.model_copy(update={"messages": [*before, thought]})
+
+
+def local_digests(dataset: DatasetDir) -> dict[str, str]:
+    """The :func:`record_digest` of every kept row's record as the directory holds it now."""
+    by_split = dataset.rows_by_split()
+    return {
+        row.id: record_digest(dataset_record(row, split))
+        for split in SPLITS
+        for row in by_split[split]
+    }
 
 
 def synthetic_rows(count: int) -> list[TrainingRow]:
@@ -267,6 +285,7 @@ def test_push_json_is_private_and_holds_the_receipt(dataset: DatasetDir, fake: F
         "dataset_version",
         "push_id",
         "record_ids",
+        "record_digests",
         "in_flight",
         "in_flight_at",
         "pushed_at",
@@ -302,7 +321,9 @@ def test_pushing_an_unchanged_dataset_again_is_a_no_op(
     again = push(dataset, fake)
     assert len(fake.calls) == calls  # not even a lookup
     assert (again.pushed, again.already_pushed) == (0, FIRST)
+    assert again.changed_records == {}
     assert again.state == first.state
+    assert first.state.record_digests == local_digests(dataset)
     assert len(api.dataset_named(NAME).records) == FIRST
 
 
@@ -438,6 +459,7 @@ def test_a_batch_whose_response_was_lost_is_not_added_twice(
     assert receipt.state.record_ids == dict(zip(order, remote.record_ids, strict=True))
     assert receipt.state.in_flight == ()
     assert receipt.state.dataset_version == remote.version
+    assert receipt.state.record_digests == local_digests(dataset)  # adopted ones too
     assert records_add_calls(fake) == 3  # two, then only the third batch: none sent twice
     assert any("4 of the 4 records were already in the dataset" in m for m in messages)
 
@@ -615,6 +637,66 @@ def test_rows_dropped_after_a_push_are_stale_and_kept_remotely(
     assert len(api.dataset_named(NAME).records) == FIRST
 
 
+def test_rows_changed_after_a_push_are_reported_and_not_sent_again(
+    dataset: DatasetDir, fake: FakePup, api: FakeDatasetsApi
+) -> None:
+    first = push(dataset, fake)
+    remote = api.dataset_named(NAME)
+    before = json.loads(json.dumps(remote.records))
+    # A resumed `--reasoning preserve` pull fills reasoning in for a stored row, same id.
+    row = ALL_ROWS[3]
+    dataset.add([], settings=IMPORT, updated=[with_reasoning(row, "Check the units first.")])
+    changed = {row.id: first.state.record_ids[row.id]}
+    plan = plan_push(dataset, project=PROJECT, name=NAME)
+    assert (plan.changed_records, plan.pending, plan.needs_remote) == (changed, [], False)
+    calls = len(fake.calls)
+    receipt = push(dataset, fake)
+    assert (receipt.changed_records, receipt.pushed, receipt.already_pushed) == (
+        changed,
+        0,
+        FIRST,
+    )
+    assert receipt.to_json()["changed_records"] == changed
+    assert len(fake.calls) == calls  # nothing reached Datadog
+    assert remote.records == before  # the remote record keeps what was pushed
+    assert receipt.state.record_digests == first.state.record_digests
+    # Rows added later are pushed; the changed row is still reported.
+    dataset.add(ALL_ROWS[FIRST:], settings=IMPORT)
+    more = push(dataset, fake)
+    assert (more.pushed, more.changed_records) == (len(ALL_ROWS) - FIRST, changed)
+
+
+def test_a_dropped_row_that_changed_is_stale_not_changed(
+    dataset: DatasetDir, fake: FakePup
+) -> None:
+    first = push(dataset, fake)
+    row = ALL_ROWS[3]
+    dataset.add([], settings=IMPORT, updated=[with_reasoning(row, "Think.")])
+    drop(dataset, row.id)
+    plan = plan_push(dataset, project=PROJECT, name=NAME)
+    assert plan.changed_records == {}
+    assert plan.stale_records == {row.id: first.state.record_ids[row.id]}
+
+
+def test_a_receipt_without_record_digests_reports_no_changed_rows(
+    dataset: DatasetDir, fake: FakePup
+) -> None:
+    push(dataset, fake)
+    path = dataset.path / PUSH_FILE
+    data = json.loads(path.read_text())
+    del data["record_digests"]  # written before they were recorded
+    path.write_text(json.dumps(data))
+    row = ALL_ROWS[3]
+    dataset.add([], settings=IMPORT, updated=[with_reasoning(row, "Think.")])
+    plan = plan_push(dataset, project=PROJECT, name=NAME)
+    assert (plan.changed_records, plan.already_pushed) == ({}, FIRST)
+    # Rows pushed from then on get digests; the earlier ones stay unknown.
+    dataset.add(ALL_ROWS[FIRST:], settings=IMPORT)
+    receipt = push(dataset, fake)
+    assert set(receipt.state.record_digests) == {row.id for row in ALL_ROWS[FIRST:]}
+    assert receipt.changed_records == {}
+
+
 @pytest.mark.parametrize(
     ("name", "project"), [("another-name", PROJECT), (NAME, "another-project")]
 )
@@ -645,6 +727,8 @@ def test_a_receipt_of_other_settings_is_a_state_error(dataset: DatasetDir, fake:
     "change",
     [
         {"record_ids": ["not", "a", "mapping"]},
+        {"record_digests": ["not", "a", "mapping"]},
+        {"record_digests": {"row-1": 7}},
         {"project_id": ""},
         {"dataset_version": "3"},
         {"dataset_id": 7},

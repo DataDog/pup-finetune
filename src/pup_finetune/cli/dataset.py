@@ -11,7 +11,7 @@ from __future__ import annotations
 import shlex
 import time
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -41,6 +41,7 @@ from pup_finetune.data.pull import (
 )
 from pup_finetune.data.push import (
     IN_FLIGHT_SETTLE,
+    PUSH_FILE,
     PushPlan,
     plan_push,
     push_dataset,
@@ -268,7 +269,9 @@ def show(directory: DirArgument) -> dict[str, Any]:
         "batch, so pushing again sends only rows not yet pushed, and an interrupted push "
         "resumes without adding a row twice. A directory pushes to one dataset: another --name or --project is an "
         "error. Rows labeled drop after they were pushed are reported as stale_records and "
-        "are not deleted from the dataset. A remote write: refused when PUP_READ_ONLY is set."
+        "are not deleted from the dataset; kept rows that changed after they were pushed "
+        "are reported as changed_records and their records are not updated. A remote "
+        "write: refused when PUP_READ_ONLY is set."
     ),
 )
 @run_command
@@ -302,8 +305,8 @@ def push(
         receipt = plan.receipt()
     result: dict[str, Any] = {"dataset_dir": str(dataset.path.resolve()), **receipt.to_json()}
     result["receipt_file"] = str(push_path(dataset).resolve())
-    if receipt.stale_records:
-        result["warnings"] = [_stale_warning(len(receipt.stale_records))]
+    if warnings := _receipt_warnings(receipt.stale_records, receipt.changed_records):
+        result["warnings"] = warnings
     result["next_command"] = f"pup finetune train --dataset {_quoted(directory)} ..."
     return result
 
@@ -333,9 +336,10 @@ def _push_preview(plan: PushPlan) -> dict[str, Any]:
         "already_pushed": plan.already_pushed,
         "kept_by_split": plan.kept_by_split,
         "stale_records": plan.stale_records,
+        "changed_records": plan.changed_records,
         "sample_record": plan.pending[0].record if plan.pending else None,
     }
-    warnings = []
+    warnings: list[str] = []
     if plan.in_flight:
         settle = int(IN_FLIGHT_SETTLE.total_seconds() // 60)
         warnings.append(
@@ -343,18 +347,27 @@ def _push_preview(plan: PushPlan) -> dict[str, Any]:
             "they were added; the push lists the dataset's records first and sends only those "
             f"it does not find, and none until {settle} minutes after the batch was sent"
         )
-    if plan.stale_records:
-        warnings.append(_stale_warning(len(plan.stale_records)))
+    warnings += _receipt_warnings(plan.stale_records, plan.changed_records)
     if warnings:
         preview["warnings"] = warnings
     return preview
 
 
-def _stale_warning(count: int) -> str:
-    return (
-        f"{count} records pushed earlier are of rows no longer kept (see stale_records); "
-        "they are not deleted from the remote dataset, so remove them there if needed"
-    )
+def _receipt_warnings(stale: Mapping[str, str], changed: Mapping[str, str]) -> list[str]:
+    warnings: list[str] = []
+    if stale:
+        warnings.append(
+            f"{len(stale)} records pushed earlier are of rows no longer kept (see "
+            "stale_records); they are not deleted from the remote dataset, so remove them "
+            "there if needed"
+        )
+    if changed:
+        warnings.append(
+            f"{len(changed)} kept rows changed after they were pushed (see changed_records); "
+            "a push only adds records, so their remote records were not updated. To push "
+            f"the rows as they are now, move {PUSH_FILE} aside and push to a new --name"
+        )
+    return warnings
 
 
 @dataset_app.command(
