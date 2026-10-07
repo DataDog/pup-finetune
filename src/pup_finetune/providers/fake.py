@@ -1121,6 +1121,7 @@ class FakeProvider:
             on_created(endpoint, "CREATING")
         self.deployments[endpoint.deployment_id] = endpoint
         self.requests[endpoint.deployment_id] = request
+        self._undeployed_ids.discard(endpoint.deployment_id)
         return endpoint
 
     def deployment_name(self, deployment_id: str) -> str:

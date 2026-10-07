@@ -657,6 +657,17 @@ def test_deployments_are_recorded() -> None:
         provider.deploy(dataclasses.replace(model, provider="other"), options)
 
 
+def test_a_redeployed_id_can_be_undeployed_again() -> None:
+    provider = FakeProvider(Runtime())
+    model = ModelRef(provider="fake", model_id="run-1", uri="fake://models/run-1")
+    options = DeployOptions(deployment_id="run-1-deployment")
+    assert provider.undeploy(provider.deploy(model, options)) is True
+    endpoint = provider.deploy(model, options)
+    assert provider.undeploy(endpoint) is True
+    assert provider.deployments == {}
+    assert provider.undeploy(endpoint) is False
+
+
 def test_owns_deployment_compares_the_request() -> None:
     provider = FakeProvider(Runtime())
     model = ModelRef(provider="fake", model_id="run-1", uri="fake://models/run-1")
