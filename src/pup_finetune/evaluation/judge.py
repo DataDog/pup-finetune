@@ -27,7 +27,7 @@ outage is not a verdict, so the caller decides whether to stop or retry later.
 
 :func:`calibrate` checks a judge before anything is paid for: on a few cases the reference
 must pass and one corrupted version of it must fail. :func:`check_judge_differs` refuses a
-judge that is the model being trained.
+judge that is the model being trained, or the run's tuned model.
 """
 
 from __future__ import annotations
@@ -284,19 +284,31 @@ def judge(
     return Judgment(passed=passed, reason=reason, raw=raw)
 
 
-def check_judge_differs(config: JudgeConfig, base_model: str) -> None:
-    """Raise :class:`UsageError` when the judge model is ``base_model``, the model being trained.
+def check_judge_differs(
+    config: JudgeConfig, base_model: str, tuned_models: Iterable[str] = ()
+) -> None:
+    """Raise :class:`UsageError` when the judge model is ``base_model``, the model being
+    trained, or one of ``tuned_models``, the names of the run's tuned model (its model id,
+    and the provider's name for it once promoted), which the evaluation grades too.
 
     Names compare without case; a bare id (``qwen3p8-27b``) matches a full resource name
     (``accounts/<account>/models/qwen3p8-27b``) with that last segment.
     """
-    judge_model = config.model.strip().lower()
-    base = base_model.strip().lower()
-    if judge_model == base or judge_model.rsplit("/", 1)[-1] == base.rsplit("/", 1)[-1]:
-        raise UsageError(
-            f"the judge model {config.model!r} is the model being trained",
-            hint="pick a different --judge-model: a model should not grade its own outputs",
-        )
+    hint = "pick a different --judge-model: a model should not grade its own outputs"
+    if _same_model(config.model, base_model):
+        raise UsageError(f"the judge model {config.model!r} is the model being trained", hint=hint)
+    for tuned in tuned_models:
+        if _same_model(config.model, tuned):
+            raise UsageError(
+                f"the judge model {config.model!r} is this run's tuned model, which the "
+                "evaluation grades",
+                hint=hint,
+            )
+
+
+def _same_model(first: str, second: str) -> bool:
+    one, other = first.strip().lower(), second.strip().lower()
+    return bool(other) and (one == other or one.rsplit("/", 1)[-1] == other.rsplit("/", 1)[-1])
 
 
 # --- calibration --------------------------------------------------------------------------

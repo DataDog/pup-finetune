@@ -54,11 +54,12 @@ from pup_finetune.providers.base import (
     CheckpointRef,
     Generation,
     ModelProfile,
+    ModelRef,
     Provider,
     Sampler,
     TrainingSession,
 )
-from pup_finetune.runs import Phase, RunDir, dataset_content_hash, error_json
+from pup_finetune.runs import Phase, RunDir, dataset_content_hash, error_json, model_id_for_run
 from pup_finetune.runs import cancel_on_signals as _cancel_on_signals
 from pup_finetune.runtime import Runtime
 from pup_finetune.storage import LOCK_FILE_NAME, canonical_json, finite_json
@@ -448,17 +449,22 @@ def plan_evaluation(
     dataset: DatasetDir,
     rendering: Mapping[str, Any],
     settings: EvalSettings,
+    promoted: ModelRef | None = None,
 ) -> EvalPlan:
     """The evaluation of the run ``run_id`` on ``dataset``'s test split.
 
     Raises :class:`UsageError` when the test split has no case, or the judge is the model
-    being trained.
+    being trained or the run's tuned model: the model id the run promotes to
+    (:func:`~pup_finetune.runs.model_id_for_run`) or, once known, the ``promoted`` model.
     """
     from pup_finetune.evaluation.cases import cases_from_dataset
     from pup_finetune.evaluation.judge import check_judge_differs
 
     judge_config = resolve_judge(settings.judge_model, provider=provider, runtime=runtime)
-    check_judge_differs(judge_config, profile.base_model)
+    tuned = [model_id_for_run(run_id)]
+    if promoted is not None:
+        tuned += [promoted.model_id, promoted.uri]
+    check_judge_differs(judge_config, profile.base_model, tuned)
     cases = cases_from_dataset(
         dataset,
         split="test",
@@ -1000,6 +1006,7 @@ def plan_standalone(
         dataset=dataset,
         rendering=manifest.get("rendering") or {},
         settings=settings,
+        promoted=result.promoted_model,
     )
     return StandaloneEvaluation(
         plan=plan, provider=provider, run=run, result=result, training=training

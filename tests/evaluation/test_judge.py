@@ -358,6 +358,17 @@ def test_the_judge_must_not_be_the_model_being_trained(base_model: str) -> None:
     assert "--judge-model" in (info.value.hint or "")
 
 
+@pytest.mark.parametrize(
+    "tuned",
+    ["synthetic-judge", "accounts/my-team/models/SYNTHETIC-JUDGE", "fake://models/synthetic-judge"],
+)
+def test_the_judge_must_not_be_the_tuned_model(tuned: str) -> None:
+    with pytest.raises(UsageError, match="this run's tuned model") as info:
+        check_judge_differs(CONFIG, "qwen3p8-27b", ["ft-other", tuned])
+    assert "--judge-model" in (info.value.hint or "")
+    check_judge_differs(CONFIG, "qwen3p8-27b", ["ft-other", ""])
+
+
 @pytest.mark.parametrize("base_model", ["qwen3p8-27b", "accounts/fireworks/models/qwen3p8-27b"])
 def test_a_different_judge_is_accepted(base_model: str) -> None:
     check_judge_differs(CONFIG, base_model)

@@ -318,7 +318,8 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   parses `{"pass", "reason"}` strictly (`parse_verdict`, outside any `<think>` block; anything
   else fails as `unparseable`, or `truncated` when the judge hit `max_tokens`); a malformed candidate fails without a call, and a judge outage raises rather
   than failing the case. `calibrate` checks that references pass and `corrupt`ed ones fail on a
-  few mixed cases; `check_judge_differs` refuses a judge that is the model being trained.
+  few mixed cases; `check_judge_differs` refuses a judge that is the model being trained or the run's
+  tuned model (`model_id_for_run`, and the promoted model once there is one).
   `fake_judge.py` is `FakeJudge`, an offline, deterministic judge for development mode and
   tests (same tools with consistent arguments, or mostly the same words). `replay.py` has
   `run_replay`: every `(target, case)` pair (`base`, `tuned`) generated, scored and judged on

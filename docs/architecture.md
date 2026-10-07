@@ -254,7 +254,7 @@ provider, and talks to models only through the `Sampler` protocol.
   reference. The recorded data is untrusted and travels JSON-encoded in tagged blocks.
   Before anything is generated, a calibration checks that references pass and corrupted
   versions of them fail; a judge that fails it is not used. The judge must not be the model
-  being trained.
+  being trained, nor the run's tuned model (its model id, or the promoted model).
 - **Targets** ([`targets.py`](../src/pup_finetune/evaluation/targets.py)). Two samplers from
   one session: `base` (no checkpoint) and `tuned`, the best epoch. `train --evaluate` runs in
   the training session through the runner's `after_finalize` hook, after promotion and

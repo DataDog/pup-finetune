@@ -37,7 +37,7 @@ from pup_finetune.evaluation import targets as targets_module
 from pup_finetune.evaluation.fake_judge import FAKE_JUDGE_MODEL, FakeJudge
 from pup_finetune.inference import ChatCompleter, ChatCompletion, JudgeConfig
 from pup_finetune.providers.fake import FakeRenderer
-from pup_finetune.runs import RunDir, RunState
+from pup_finetune.runs import RunDir, RunState, model_id_for_run
 from pup_finetune.runtime import Runtime
 from pup_finetune.storage import append_jsonl
 from pup_finetune.training.budget import Budget
@@ -206,6 +206,15 @@ def test_the_judge_must_not_be_the_model_being_trained(run_dir: Path) -> None:
         result = invoke("evaluate", str(run_dir), "--judge-model", model)
         assert result.exit_code == 2
         assert "being trained" in result.stderr
+
+
+def test_the_judge_must_not_be_the_run_s_tuned_model(run_dir: Path) -> None:
+    promoted = json.loads((run_dir / "result.json").read_text())["promoted_model"]
+    for model in (promoted["model_id"], promoted["uri"], promoted["model_id"].upper()):
+        result = invoke("evaluate", str(run_dir), "--judge-model", model)
+        assert result.exit_code == 2, result.stderr
+        assert "this run's tuned model" in result.stderr
+    assert not (run_dir / "eval").exists()
 
 
 def test_read_only_allows_the_preview_but_not_the_evaluation(
@@ -513,6 +522,19 @@ def test_train_evaluate_evaluates_in_the_training_session(dataset: Path, tmp_pat
     # A standalone evaluate finds it done.
     again = output(invoke("evaluate", str(run)))["preview"]
     assert again["generation_calls"] == 0
+
+
+def test_train_evaluate_refuses_the_run_s_tuned_model_as_judge(
+    dataset: Path, tmp_path: Path
+) -> None:
+    run = tmp_path / "run"
+    run_id = "ft-20261006123045-abcdef"
+    judge = f"accounts/synthetic-team/models/{model_id_for_run(run_id)}"
+    args = train_args(dataset, run, "--run-id", run_id, "--evaluate")
+    result = invoke(*args, "--eval-judge-model", judge, "--confirm")
+    assert result.exit_code == 2, result.stderr
+    assert "this run's tuned model" in result.stderr
+    assert not run.exists()
 
 
 def test_train_evaluate_needs_the_foreground(dataset: Path, tmp_path: Path) -> None:
