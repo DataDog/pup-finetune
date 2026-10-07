@@ -380,12 +380,24 @@ def repeat_retirements(
     stored row conversion now finds repeating another stored row is retired as a duplicate
     instead. One repeating a row new to the dataset is left to the dataset, which keeps the
     stored row and excludes the new one when the two hash the same.
+
+    The two are compared as the dataset will hold them, each stored row with the reasoning
+    this conversion fills in (as :func:`reasoning_updates` does), since stored reasoning is
+    never replaced: a re-run that reads less reasoning can yield two rows that repeat each
+    other while the stored ones still differ, and neither is retired then.
     """
     stored = {row.id: row for row in stored_rows}
+    current = {row.id: row for row in collection.rows}
     retired: list[Exclusion] = []
     for row, other in collection.duplicates:
-        known = stored.get(row.id)
-        if known is not None and other in stored:
+        known, repeated = stored.get(row.id), stored.get(other)
+        if known is None or repeated is None:
+            continue
+        mine = _fill_reasoning(known, row) or known
+        theirs = repeated
+        if (yielded := current.get(other)) is not None:
+            theirs = _fill_reasoning(repeated, yielded) or repeated
+        if row_content_hash(mine) == row_content_hash(theirs):
             detail = f"same conversation as row {other!r}, read by a later pull"
             retired.append(Exclusion.for_row(known, ExclusionCode.DUPLICATE_CONVERSATION, detail))
     return retired

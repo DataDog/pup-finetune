@@ -700,6 +700,54 @@ def test_reasoning_that_makes_two_stored_rows_one_conversation_retires_the_repea
         assert [row.id for row in dataset.rows()] == [a]
 
 
+def test_a_re_run_reading_less_reasoning_keeps_two_stored_rows_that_still_differ(
+    tmp_path: Path,
+) -> None:
+    def in_trace(trace_id: str, entry: dict[str, Any]) -> dict[str, Any]:
+        entry["attributes"]["trace_id"] = trace_id
+        return entry
+
+    # Two traces of the same text. Trace A reads its reasoning only on page 2 and trace B has
+    # none, so a full pull stores A with reasoning and B without.
+    pages = [
+        page(
+            [
+                item("synthetic-span-a2", [SYSTEM, Q1, A1, Q2, A2], trace_id="synthetic-trace-a"),
+                item("synthetic-span-b2", [SYSTEM, Q1, A1, Q2, A2], trace_id="synthetic-trace-b"),
+            ],
+            after="cursor-2",
+        ),
+        page(
+            [
+                in_trace(
+                    "synthetic-trace-a", thinking_item("synthetic-span-a1", [SYSTEM, Q1, A1], "Hm.")
+                )
+            ]
+        ),
+    ]
+
+    def run(**options: Any) -> Any:
+        pup = FakeExportApi(pages).install(FakePup()).client()
+        query = SpanQuery(ml_app="synthetic")
+        return pull(
+            pup, PullOptions(query, reasoning="preserve", **options), dataset, SplitParams()
+        )
+
+    dataset = DatasetDir(tmp_path / "ds")
+    a, b = "synthetic-trace-a:synthetic-span-a2", "synthetic-trace-b:synthetic-span-b2"
+    _, first = run()
+    assert first.added == 2
+
+    # Stopping before page 2 yields A without its reasoning, so B repeats it in this
+    # conversion, but stored A keeps its reasoning: the stored rows differ and both stay.
+    collection, again = run(target_count=1)
+    assert [(row.id, other) for row, other in collection.duplicates] == [(b, a)]
+    assert (again.added, again.updated, again.retired) == (0, 0, 0)
+    assert sorted(row.id for row in dataset.rows()) == [a, b]
+    reasoning = {row.id: row.messages[2].reasoning_content for row in dataset.rows()}
+    assert reasoning == {a: "Hm.", b: None}
+
+
 def test_reasoning_updates_fill_in_reasoning_and_never_replace_it() -> None:
     [row] = collected([page([item("synthetic-span-1", [SYSTEM, Q1, A1, Q2, A2])])])[0].rows
 
