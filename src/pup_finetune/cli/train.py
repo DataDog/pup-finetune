@@ -19,7 +19,9 @@ evaluation starts, so a crash during it keeps the trained and promoted run. A fa
 evaluation exits 1, with the trained run and the command that evaluates it again. It needs
 the foreground: ``--detach`` with ``--evaluate`` is refused (evaluate a detached run with
 ``pup finetune evaluate`` once it completed). Like ``evaluate``, a complete evaluation is
-published as experiments when the dataset was pushed, unless ``--eval-no-publish``.
+published as experiments when the dataset was pushed, unless ``--eval-no-publish``. The
+session's time still counts against ``--max-spend-usd``, so the evaluation is skipped when
+the cap is reached already and stops, partial, once it is.
 """
 
 from __future__ import annotations
@@ -345,7 +347,10 @@ def train(
     ] = None,
     max_spend_usd: Annotated[
         float | None,
-        typer.Option(help="Stop before the elapsed time costs more; needs --hourly-rate-usd."),
+        typer.Option(
+            help="Stop before the elapsed time costs more; needs --hourly-rate-usd. With "
+            "--evaluate, the evaluation in the training session stops at it too."
+        ),
     ] = None,
     hourly_rate_usd: Annotated[
         float | None,
@@ -377,7 +382,7 @@ def train(
         typer.Option(
             "--evaluate",
             help="Also evaluate the run on the test split once it is trained, in its "
-            "training session (paid; see `pup finetune evaluate`).",
+            "training session (paid; see `pup finetune evaluate`), within --max-spend-usd.",
         ),
     ] = False,
     eval_out_dir: Annotated[

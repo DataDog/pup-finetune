@@ -32,7 +32,7 @@ import dataclasses
 import hashlib
 import shlex
 import threading
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -79,6 +79,7 @@ __all__ = [
     "DEFAULT_SEED",
     "EVALUATED_STOPS",
     "FINISHED_PHASES",
+    "SPEND_POLL_S",
     "EvalPlan",
     "EvalSettings",
     "EvaluateAfterTraining",
@@ -115,6 +116,11 @@ cap, which the training session's time counts against: evaluating in that sessio
 spend past it. Both are skipped with the ``evaluate`` command to run instead, which
 evaluates any finished run (:data:`FINISHED_PHASES`: a budget-capped or cancelled one too)
 with a best epoch in a session of its own, on request.
+
+A run that stopped otherwise is evaluated in its session still under ``--max-spend-usd``
+(its reserve included): it is skipped the same way when the cap is already reached, and an
+evaluation that reaches it stops as if cancelled, partial, with the ``evaluate`` command to
+continue it.
 """
 
 FINISHED_PHASES: Final[frozenset[Phase]] = frozenset({"completed", "cancelled"})
@@ -735,11 +741,18 @@ def evaluation_exit_code(result: Mapping[str, Any]) -> int:
     return 1 if any(int(target["completed"]) == 0 for target in targets) else 0
 
 
+SPEND_POLL_S: Final = 0.5
+"""How often :class:`EvaluateAfterTraining` checks the spend cap (and a cancel) while it
+evaluates."""
+
+
 class EvaluateAfterTraining:
     """The ``after_finalize`` hook of ``train --evaluate``: replay in the training session.
 
     ``outcome`` is what to report: the evaluation's result, or why it was skipped or failed.
-    A failure is also raised, for the run's warnings.
+    A failure is also raised, for the run's warnings. With the run's spend guard (see
+    :data:`~pup_finetune.training.runner.AfterFinalize`), the evaluation is skipped when the
+    cap is already reached, and stopped like a cancel, every ``poll_s``, once it is.
     """
 
     def __init__(
@@ -749,25 +762,32 @@ class EvaluateAfterTraining:
         *,
         calibration: Mapping[str, Any] | None,
         max_checkpoint_name_len: int,
+        poll_s: float | None = None,
     ) -> None:
         self.plan = plan
         self.client = client
         self.calibration = calibration
         self.max_checkpoint_name_len = max_checkpoint_name_len
+        self.poll_s = SPEND_POLL_S if poll_s is None else poll_s
         self.outcome: dict[str, Any] | None = None
 
     def __call__(
-        self, session: TrainingSession, result: TrainResult, cancel: threading.Event
+        self,
+        session: TrainingSession,
+        result: TrainResult,
+        cancel: threading.Event,
+        spend_guard: Callable[[], str | None] | None = None,
     ) -> None:
-        from pup_finetune.evaluation.targets import best_training_checkpoint, session_samplers
-
         next_command = shlex.join(self.plan.evaluate_command())
-        if result.stopped_reason not in EVALUATED_STOPS:
+        spent = None if spend_guard is None else spend_guard()
+        if result.stopped_reason not in EVALUATED_STOPS or spent is not None:
             why = {
                 "cancelled": "it was cancelled",
                 "budget_exhausted": "it reached its spend cap, which evaluating in its session "
                 "would spend past",
             }.get(result.stopped_reason, f"it stopped: {result.stopped_reason}")
+            if result.stopped_reason in EVALUATED_STOPS:
+                why = f"its spend cap is reached ({spent})"
             self.outcome = {
                 "status": "skipped",
                 "reason": f"the run was not evaluated because {why}; next_command evaluates "
@@ -776,21 +796,15 @@ class EvaluateAfterTraining:
             }
             return
         try:
-            training = best_training_checkpoint(result)
-            report = prepare_eval_dir(
-                self.plan, training, self.client, calibration=self.calibration
-            )
-            info(f"evaluating the run {self.plan.run_id} in its training session")
-            with session_samplers(
-                session,
-                result,
-                run_id=self.plan.run_id,
-                max_checkpoint_name_len=self.max_checkpoint_name_len,
-            ) as targets:
-                outcome = replay(self.plan, targets.samplers, self.client, training, cancel=cancel)
-            self.outcome = replay_result(
-                self.plan, outcome, calibration=report, tuned_sampler=targets.tuned_checkpoint
-            )
+            with self._capped(cancel, spend_guard) as (stop, spend_stop):
+                self._evaluate(session, result, stop)
+            if spend_stop and self.outcome is not None and self.outcome["status"] == "partial":
+                reason = (
+                    f"the evaluation stopped at the run's spend cap ({spend_stop[0]}); "
+                    "next_command continues it in a session of its own"
+                )
+                self.outcome["reason"] = reason
+                self.outcome["warnings"] = [*self.outcome.get("warnings", []), reason]
         except BaseException as exc:
             self.outcome = {
                 "status": "failed",
@@ -799,6 +813,58 @@ class EvaluateAfterTraining:
                 "next_command": next_command,
             }
             raise
+
+    def _evaluate(
+        self, session: TrainingSession, result: TrainResult, stop: threading.Event
+    ) -> None:
+        from pup_finetune.evaluation.targets import best_training_checkpoint, session_samplers
+
+        training = best_training_checkpoint(result)
+        report = prepare_eval_dir(self.plan, training, self.client, calibration=self.calibration)
+        info(f"evaluating the run {self.plan.run_id} in its training session")
+        with session_samplers(
+            session,
+            result,
+            run_id=self.plan.run_id,
+            max_checkpoint_name_len=self.max_checkpoint_name_len,
+        ) as targets:
+            outcome = replay(self.plan, targets.samplers, self.client, training, cancel=stop)
+        self.outcome = replay_result(
+            self.plan, outcome, calibration=report, tuned_sampler=targets.tuned_checkpoint
+        )
+
+    @contextmanager
+    def _capped(
+        self, cancel: threading.Event, spend_guard: Callable[[], str | None] | None
+    ) -> Iterator[tuple[threading.Event, list[str]]]:
+        """An event set on ``cancel`` or once ``spend_guard`` says the cap is reached, and
+        the guard's reason (in a list, empty until it fires)."""
+        if spend_guard is None:
+            yield cancel, []
+            return
+        stop = threading.Event()
+        done = threading.Event()
+        reasons: list[str] = []
+
+        def watch() -> None:
+            while not done.wait(self.poll_s):
+                if cancel.is_set():
+                    stop.set()
+                    return
+                why = spend_guard()
+                if why is not None:
+                    reasons.append(why)
+                    info(f"stopping the evaluation at the run's spend cap: {why}")
+                    stop.set()
+                    return
+
+        watcher = threading.Thread(target=watch, name="eval-spend-cap", daemon=True)
+        watcher.start()
+        try:
+            yield stop, reasons
+        finally:
+            done.set()
+            watcher.join()
 
 
 # --- evaluate -----------------------------------------------------------------------------

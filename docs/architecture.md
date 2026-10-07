@@ -262,7 +262,9 @@ provider, and talks to models only through the `Sampler` protocol.
   records the run's end (`result.json`, phase `completed`) before the hook runs, so a process
   killed during the evaluation leaves a finished run, not one a resume would train again. A
   cancelled or budget-capped training is not evaluated in its session, since the evaluation
-  would spend the session's time past the cap.
+  would spend the session's time past the cap. Any other is evaluated under the cap too: the
+  hook gets the run's spend guard (its reserve included), skips the evaluation when the cap
+  is already reached and stops it, partial, once it is, for `evaluate` to continue.
   A standalone `evaluate`, of a completed or cancelled run with a best epoch, opens a new
   session, loads the best *training* checkpoint and saves it again as a sampler checkpoint,
   since a sampler checkpoint may not outlive the session that saved it.

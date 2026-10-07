@@ -274,7 +274,7 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   records it as the deployable checkpoint; `runner.py` has `start_training` and
   `resume_training`, which open a session for a run directory and train or resume in it
   (`start_training` takes an `after_finalize` hook, run in the session after a successful
-  promotion; its failure only adds a warning);
+  promotion with the run's spend guard; its failure only adds a warning);
   `inputs.py` renders a dataset's train and validation rows for a run (and checks, for an
   existing run, that the dataset and renderer did not change); `worker.py` runs a mode
   (`train`, `resume`, `finalize`) in the foreground or a detached worker (`spawn_worker`:
@@ -337,7 +337,8 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   whether the dataset's push receipt allows publishing), calibration (`prepare_eval_dir`
   stores a passing one), `replay` with the plan's publisher, `replay_result` and
   `evaluation_exit_code`, `plan_standalone` and `StandaloneEvaluation` for `evaluate`, and
-  `EvaluateAfterTraining`, the `after_finalize` hook that evaluates in the training session.
+  `EvaluateAfterTraining`, the `after_finalize` hook that evaluates in the training session
+  and stops, partial, at the run's `--max-spend-usd`.
   The package exports its names lazily, so importing the runner (the CLI does, for every
   command) loads no judge client. `targets.py` makes the two samplers from a session: the live training
   session's best sampler checkpoint, or the best training checkpoint loaded and saved again

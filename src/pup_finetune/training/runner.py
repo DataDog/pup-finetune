@@ -22,8 +22,9 @@ training and promotion are done, a
 failure to end the session only adds a warning: the result, and the promoted model, are
 kept. :func:`start_training` takes an ``after_finalize`` hook (``train --evaluate`` passes
 one) that runs once the promotion succeeded, with the session still open, so work that needs
-the trained weights can use it before it closes; the hook's failure, or an interrupt during
-it, only adds a warning too. Before the hook runs, the run's end is recorded
+the trained weights can use it before it closes, under the run's spend cap (the hook is
+given the guard, reserve included); the hook's failure, or an interrupt during it, only adds
+a warning too. Before the hook runs, the run's end is recorded
 (:func:`~pup_finetune.runs.record_finished`: ``result.json`` written, phase ``completed``),
 so a process killed during the hook leaves a finished run with its promoted model, not one
 to resume; the warnings the hook adds are recorded once it returns.
@@ -80,11 +81,18 @@ from pup_finetune.training.loop import EventSink, FinalizeFailed, run_training
 from pup_finetune.training.promotion import Promotion
 from pup_finetune.training.records import EpochMetrics, Resume, TrainResult
 
-__all__ = ["AfterFinalize", "resume_training", "start_training"]
+__all__ = ["AfterFinalize", "SpendGuard", "resume_training", "start_training"]
 
-AfterFinalize = Callable[[TrainingSession, TrainResult, threading.Event], None]
+SpendGuard = Callable[[], str | None]
+"""Why the run's spend cap is reached (see :meth:`Budget.spend_exhausted`); ``None`` while
+it is not."""
+
+AfterFinalize = Callable[[TrainingSession, TrainResult, threading.Event, SpendGuard | None], None]
 """Runs after training and a successful promotion, in the still-open session: the session,
-the final result and the event that a graceful cancel (Ctrl-C, SIGTERM) sets."""
+the final result, the event that a graceful cancel (Ctrl-C, SIGTERM) sets, and the run's
+spend guard (``None`` without ``max_spend_usd``). The session's time still counts against
+the cap, its reserve included, so a hook that keeps the session busy stops once the guard
+says so."""
 
 
 def start_training(
@@ -264,12 +272,24 @@ class _Run:
                 finalize=promotion,
                 resume=resume,
             )
-            return self._after(session, result, state)
+            guard = None
+            if budget.max_spend_usd is not None:
+
+                def guard() -> str | None:
+                    return budget.spend_exhausted(use_reserve=True)
+
+            return self._after(session, result, state, guard)
 
         return self._in_session(None if point is None else point.checkpoint, train_in)
 
-    def _after(self, session: TrainingSession, result: TrainResult, state: RunState) -> TrainResult:
-        """Record the run's end, then run :attr:`after_finalize`.
+    def _after(
+        self,
+        session: TrainingSession,
+        result: TrainResult,
+        state: RunState,
+        spend_guard: SpendGuard | None,
+    ) -> TrainResult:
+        """Record the run's end, then run :attr:`after_finalize` with ``spend_guard``.
 
         Its failure (or a Ctrl-C) is a warning on ``result``, as is a failure to record the
         end early (it is recorded again when training returns).
@@ -285,7 +305,7 @@ class _Run:
                 f"training: {_describe(exc)}"
             )
         try:
-            self.after_finalize(session, result, state.cancel_event)
+            self.after_finalize(session, result, state.cancel_event, spend_guard)
         except (Exception, KeyboardInterrupt) as exc:
             warnings.append(f"the step after training failed: {_describe(exc)}")
         if not warnings:

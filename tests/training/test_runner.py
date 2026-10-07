@@ -677,7 +677,7 @@ def test_after_finalize_runs_in_the_open_session_once_promoted(tmp_path: Path) -
     fake = provider()
     seen: list[dict[str, Any]] = []
 
-    def after(session: Any, result: Any, cancel: Any) -> None:
+    def after(session: Any, result: Any, cancel: Any, spend_guard: Any) -> None:
         backend = fake.backend()
         seen.append(
             {
@@ -702,11 +702,41 @@ def test_after_finalize_runs_in_the_open_session_once_promoted(tmp_path: Path) -
     assert result["warnings"] == []
 
 
+@pytest.mark.parametrize("capped", [False, True])
+def test_after_finalize_gets_the_run_s_spend_guard(tmp_path: Path, capped: bool) -> None:
+    spend = {"max_spend_usd": 10.0, "hourly_rate_usd": 1.0} if capped else {}
+    run_dir = new_run(tmp_path / "run", **spend)
+    clock = Clock()
+    seen: list[Any] = []
+
+    def after(session: Any, result: Any, cancel: Any, spend_guard: Any) -> None:
+        seen.append(None if spend_guard is None else spend_guard())
+        if spend_guard is not None:
+            clock.now += 10 * 3600  # the session's time still counts, reserve included
+            seen.append(spend_guard())
+
+    result = start_training(
+        provider(),
+        run_dir,
+        train_rows=TRAIN,
+        validation_rows=VALIDATION,
+        clock=clock,
+        on_event=clock.on_event,
+        after_finalize=after,
+    )
+    assert result["phase"] == "completed"
+    if not capped:
+        assert seen == [None]
+        return
+    assert seen[0] is None
+    assert "max_spend_usd 10.0" in seen[1]
+
+
 @pytest.mark.parametrize("error", [RuntimeError("replay broke"), KeyboardInterrupt()])
 def test_a_failing_after_finalize_only_warns(tmp_path: Path, error: BaseException) -> None:
     run_dir = new_run(tmp_path / "run")
 
-    def after(session: Any, result: Any, cancel: Any) -> None:
+    def after(session: Any, result: Any, cancel: Any, spend_guard: Any) -> None:
         raise error
 
     clock = Clock()
@@ -730,7 +760,7 @@ def test_the_run_is_recorded_finished_before_after_finalize_runs(tmp_path: Path)
     run_dir = new_run(tmp_path / "run")
     seen: list[dict[str, Any]] = []
 
-    def after(session: Any, result: Any, cancel: Any) -> None:
+    def after(session: Any, result: Any, cancel: Any, spend_guard: Any) -> None:
         stored = run_dir.read_result() or {}
         seen.append(
             {

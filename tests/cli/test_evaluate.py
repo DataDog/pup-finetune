@@ -21,7 +21,7 @@ import signal
 import subprocess
 import sys
 import threading
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -40,6 +40,7 @@ from pup_finetune.providers.fake import FakeRenderer
 from pup_finetune.runs import RunDir, RunState
 from pup_finetune.runtime import Runtime
 from pup_finetune.storage import append_jsonl
+from pup_finetune.training.budget import Budget
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
 
@@ -585,6 +586,71 @@ def test_train_evaluate_skips_a_budget_capped_run(dataset: Path, tmp_path: Path)
     assert "spend cap" in evaluation["reason"]
     assert shlex.split(evaluation["next_command"])[:3] == ["pup", "finetune", "evaluate"]
     assert not (run / "eval" / "results.jsonl").exists()
+
+
+SPEND = ("--max-spend-usd", "1000", "--hourly-rate-usd", "1")
+
+
+def spend_cap_reached(monkeypatch: pytest.MonkeyPatch, reached: Callable[[], bool]) -> None:
+    """Training never reaches the cap; the whole cap, reserve included (what the step after
+    training is held to), is reached once ``reached()`` says so."""
+
+    def spend_exhausted(self: Budget, *, use_reserve: bool = False) -> str | None:
+        return "synthetic spend reached max_spend_usd" if use_reserve and reached() else None
+
+    monkeypatch.setattr(Budget, "spend_exhausted", spend_exhausted)
+
+
+def test_train_evaluate_skips_a_run_whose_spend_cap_is_reached(
+    dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spend_cap_reached(monkeypatch, lambda: True)
+    run = tmp_path / "run"
+    result = invoke(*train_args(dataset, run, *SPEND, "--evaluate", "--confirm"))
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["stopped_reason"] == "completed"
+    evaluation = data["evaluation"]
+    assert evaluation["status"] == "skipped"
+    assert "spend cap" in evaluation["reason"]
+    assert shlex.split(evaluation["next_command"])[:3] == ["pup", "finetune", "evaluate"]
+    assert not (run / "eval" / "results.jsonl").exists()
+
+
+class SlowAfterFirst(FakeJudge):
+    """The offline judge; its first verdict marks the spend cap reached and takes a while,
+    so the cap's watcher stops the evaluation before the next pair starts."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.judged = threading.Event()
+
+    def complete(self, messages: Sequence[Mapping[str, Any]], **kwargs: Any) -> ChatCompletion:
+        if not self.judged.is_set():
+            self.judged.set()
+            threading.Event().wait(0.3)
+        return super().complete(messages, **kwargs)
+
+
+def test_train_evaluate_stops_at_the_spend_cap(
+    dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    judge = SlowAfterFirst()
+    use_judge(monkeypatch, judge)
+    spend_cap_reached(monkeypatch, judge.judged.is_set)
+    monkeypatch.setattr(runner_module, "SPEND_POLL_S", 0.01)
+    run = tmp_path / "run"
+    args = train_args(dataset, run, *SPEND, "--evaluate", "--eval-skip-calibration")
+    result = invoke(*args, "--eval-concurrency", "1", "--confirm")
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["phase"] == "completed"
+    evaluation = data["evaluation"]
+    assert evaluation["status"] == "partial"
+    assert evaluation["pending"] > 0
+    assert "spend cap" in evaluation["reason"]
+    assert any("spend cap" in warning for warning in evaluation["warnings"])
+    assert shlex.split(evaluation["next_command"])[:3] == ["pup", "finetune", "evaluate"]
 
 
 def test_train_evaluate_skips_a_cancelled_run_that_evaluate_then_evaluates(
