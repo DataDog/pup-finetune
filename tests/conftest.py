@@ -15,7 +15,7 @@ from collections.abc import Iterator
 import keyring.core
 import pytest
 
-from pup_finetune import credentials
+from pup_finetune import credentials, judge_credentials
 from tests.fakes.keyring import OS_KEYCHAIN_FAKES, FailKeyring
 
 pytest_plugins = ["pytester"]
@@ -61,6 +61,29 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 def _clean_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in _RUNTIME_ENV:
         monkeypatch.delenv(name, raising=False)
+
+
+# What the Anthropic SDK signs in with on its own; tests start without any of it.
+_ANTHROPIC_SDK_ENV: tuple[str, ...] = (
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_PROFILE",
+    "ANTHROPIC_CONFIG_DIR",
+    "ANTHROPIC_FEDERATION_RULE_ID",
+    "ANTHROPIC_ORGANIZATION_ID",
+    "ANTHROPIC_IDENTITY_TOKEN",
+    "ANTHROPIC_IDENTITY_TOKEN_FILE",
+)
+
+
+@pytest.fixture(autouse=True)
+def _no_anthropic_sdk_login(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """Hide the developer's own Anthropic SDK login (env and ``ant auth login`` profiles)."""
+    for name in _ANTHROPIC_SDK_ENV:
+        monkeypatch.delenv(name, raising=False)
+    empty = tmp_path_factory.mktemp("anthropic-config")
+    monkeypatch.setattr(judge_credentials, "_sdk_config_dir", lambda env: empty)
 
 
 @pytest.fixture(autouse=True)

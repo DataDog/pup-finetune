@@ -274,9 +274,12 @@ provider, and talks to models only through the `Sampler` protocol.
   from the sampler. Arguments compare as JSON values, and `reasoning_content` is never
   compared. `aggregate` reports `{rate, passed, n}` per metric over the cases it applies to,
   with `rate` `null` when `n` is `0`.
-- **Judge** ([`judge.py`](../src/pup_finetune/evaluation/judge.py)). An LLM, through an
-  OpenAI-compatible endpoint, says whether the candidate is an acceptable substitute for the
-  reference. The recorded data is untrusted and travels JSON-encoded in tagged blocks.
+- **Judge** ([`judge.py`](../src/pup_finetune/evaluation/judge.py)). An LLM on any judge
+  provider (see [Judges](#judges)) says whether the candidate is an acceptable substitute for
+  the reference. The recorded data is untrusted and travels JSON-encoded in tagged blocks.
+  The answer is parsed strictly whichever provider gave it; an answer the provider refused
+  (`finish_reason` `refusal`) is a failed judgment with error `refused`, like an unparseable
+  one.
   Before anything is generated, a calibration checks that references pass and corrupted
   versions of them fail; a judge that fails it is not used. The judge must not be the model
   being trained, nor the run's tuned model (its model id, or the promoted model).
@@ -404,11 +407,49 @@ Fireworks' own CLI refuses to create deployments when an AI agent runs it; pup-f
 the API and relies on `--confirm`, so an agent confirms only with the user's explicit
 authorization.
 
+## Judges
+
+LLM judges (the replay judge and the triage council) run on Fireworks, Anthropic or OpenAI.
+[`judges.py`](../src/pup_finetune/judges.py) is provider-neutral and imports no SDK:
+`parse_judge` reads a judge spec by prefix (`anthropic/<model>` or `openai/<model>`; any
+other spec is a Fireworks model id such as `accounts/fireworks/models/<model>`, as before)
+into a `JudgeConfig` with the provider's defaults (endpoint, credential,
+whether a temperature is sent, the token limit). `JudgeConfig.provider` is part of the
+judge's identity, so a judge on another provider never reuses earlier judgments or votes, and
+`JudgeConfig.spec` writes the judge back the one way commands pin it. `open_client` builds
+the client for a judge, and `open_clients` one client per provider for a council that mixes
+them; every client answers the one `ChatCompleter.complete` call, which takes an optional
+`response_schema` for a JSON answer.
+
+- **Fireworks** and **OpenAI** share the `httpx` `ChatClient`
+  ([`inference.py`](../src/pup_finetune/inference.py)), with a per-provider `RequestPolicy`:
+  OpenAI's token limit goes in `max_completion_tokens`, no `temperature` is sent (its current
+  models reason), a JSON answer is asked for with `response_format` `json_object`, an
+  answer with a `refusal` (or `finish_reason` `content_filter`) is reported as a refusal, and
+  each attempt may take up to 10 minutes, as a reasoning model's answer arrives only once it
+  is complete.
+- **Anthropic** uses the official SDK (the `anthropic` extra) in
+  [`anthropic_client.py`](../src/pup_finetune/anthropic_client.py), the only module that
+  imports it: the leading system message becomes `system`, no sampling parameter is sent,
+  `output_config.format` carries the verdict's JSON schema on models with structured outputs,
+  `output_config.effort` is `low` on models with effort levels, and the models with
+  server-side refusal fallbacks are called through the beta API with `fallbacks="default"`.
+  Its typed errors map to the same error classes as `ChatClient`'s; a failed SDK sign-in
+  (`CredentialsError`, `WorkloadIdentityError`) is a rejected key, which stops a triage.
+
+The keys are `CredentialSpec`s like Fireworks' ([`judge_credentials.py`](../src/pup_finetune/judge_credentials.py),
+registered when the providers package is imported): `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`,
+or the keychain accounts `anthropic` and `openai`. Without an Anthropic key, the SDK may sign in
+on its own (`ANTHROPIC_AUTH_TOKEN`, an `ant auth login` profile whose file exists); `auth
+status` and `doctor` report that as the source `anthropic-sdk`, and the tokens it would use
+are registered for redaction before the client is built. Every preview names each provider and endpoint the
+data is sent to.
+
 ## Triage
 
 [`curation/triage.py`](../src/pup_finetune/curation/triage.py) is `dataset triage`, the paid
 alternative to agent or human labels: a council of judge models (two Fireworks serverless
-models by default, through the same OpenAI-compatible client as the replay judge) votes keep
+models by default; any [judge provider](#judges), mixed as the user likes) votes keep
 or drop on each **whole** row against a rubric or rules, since training imitates every
 assistant turn of a kept row. The prompt follows the replay judge's conventions: the system
 message holds the rubric and says that everything recorded is untrusted data, and the row
@@ -416,10 +457,12 @@ travels JSON-encoded in tagged blocks it cannot close. The answer is parsed stri
 `{"keep": bool, "reason": str}`.
 
 A row is kept only on a strict majority of keep votes; a tie drops it; a row missing a vote
-is undecided and left unlabeled. A failed call, or an answer without a vote, is not a vote:
+is undecided and left unlabeled. A failed call, an answer without a vote, or one the
+provider refused, is not a vote:
 it is reported and retried by the next run. Votes are appended to `judgments.jsonl` as they
 arrive, and count only for the row content, rubric and judge they were cast for, so an
-interrupted triage resumes. The rubric's hash and the judges are frozen in `triage.json`
+interrupted triage resumes. The rubric's hash and the judges (as provider-qualified specs)
+are frozen in `triage.json`
 once votes exist (`--reset-triage` discards them). Decisions are recorded as labels with
 `by: judge` through `apply_labels`; rows the agent or a person labeled are not reviewed. A
 label cannot be withdrawn, so a judge label the current votes do not back (cast under a

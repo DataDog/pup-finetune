@@ -134,7 +134,25 @@ withdrawn, so judge labels the current votes do not back (after a reset with `--
 on undecided rows) are reported as `stale_judge_labels`, and the triage stays `incomplete`
 until a run over every row replaces them. It is paid, so
 it needs `--confirm`, but it writes nothing to Datadog, so `PUP_READ_ONLY` does not block it.
-Tests replace the judges' client (`cli/triage.py`'s `open_client`) with a fake.
+Tests replace the judges' clients (`cli/triage.py`'s `open_clients`) with a fake.
+
+Judges can run on Anthropic or OpenAI too: `--judge-model`, `--eval-judge-model` and each
+`--judges` entry take `anthropic/<model>` (`ANTHROPIC_API_KEY`, or the Anthropic SDK's own
+login), `openai/<model>` (`OPENAI_API_KEY`), or otherwise a Fireworks model id such as
+`accounts/fireworks/models/<model>`, and a triage council can mix them. Anthropic
+judges need the `anthropic` extra (`uv sync --extra anthropic`, or `--all-extras`):
+
+```sh
+uv run pup-finetune auth login anthropic       # or openai; hidden prompt, OS keychain
+uv run pup-finetune auth status                # anthropic-sdk when the SDK signs in itself
+uv run pup-finetune evaluate /tmp/run --judge-model anthropic/claude-opus-5-5
+                                     # preview names the judge's provider and endpoint
+```
+
+Tests never call them: `tests/test_anthropic_client.py` drives the client with a fake SDK
+client (and the real SDK over a mock `httpx2` transport), and the OpenAI request policy is
+checked over `httpx.MockTransport`. `PUP_FINETUNE_LIVE=1` with `ANTHROPIC_API_KEY` or
+`OPENAI_API_KEY` set runs `tests/test_judges_live.py`, one paid judge call per provider.
 
 To see the models a provider can fine-tune (both are read-only, so they work with
 `PUP_READ_ONLY` set):
@@ -226,7 +244,7 @@ Source lives under `src/pup_finetune/`.
   `evaluate.py` has `evaluate`, which only parses its flags and emits what
   `evaluation/runner.py` returns; `deploy.py` has `deploy` and `undeploy` (over
   `deployment.py`); `triage.py` has `dataset triage` (over `curation/triage.py`; its
-  `open_client` builds the judges' chat client); `skill.py` has `skill show` and `skill
+  `open_clients` builds one chat client per judge provider); `skill.py` has `skill show` and `skill
   install` (its `find_npx` and `run_npx` are what tests replace).
 - `skill.py` - the bundled agent skill: `bundled_skills_dir` (the package's `_skills/`, else
   the repository's `skills/`), `npx_argv`, `npx_env` (the environment without
@@ -263,8 +281,23 @@ Source lives under `src/pup_finetune/`.
   over `httpx` (no SDK): bounded retries with backoff and jitter on 408, 429, 5xx and connection
   errors (honoring a capped `Retry-After`), no retry on other 4xx, 401/403 as
   `ProviderAuthError` with a login hint, 429 after retries as `ProviderCapacityError`, the rest
-  as `TransientError` or `ExternalError`; `ChatCompleter` is its protocol. `JudgeConfig` is the
-  judge's model, endpoint, credential and sampling settings (`identity()` for resume checks).
+  as `TransientError` or `ExternalError`; `ChatCompleter` is its protocol (with an optional
+  `response_schema`). `RequestPolicy` is what an endpoint takes (`OPENAI_POLICY`:
+  `max_completion_tokens`, no temperature, JSON mode). `JudgeConfig` is the judge's provider,
+  model, endpoint, credential and sampling settings (`identity()` for resume checks, `spec`
+  for the command line).
+- `judges.py` - judges on any provider, no SDK import: `parse_judge` reads a spec by prefix
+  (`anthropic/` or `openai/`; anything else is a Fireworks model id) with the
+  provider's defaults (`PROVIDERS`), `check_available` refuses a missing extra up front,
+  `open_client` and `open_clients` (one per provider) build the clients.
+- `anthropic_client.py` - `AnthropicChatClient`, the Anthropic judge client over the official
+  SDK (the `anthropic` extra), the only module that imports `anthropic` (and its `httpx2`):
+  `system` from the leading system message, no sampling parameters, `output_config` format
+  and effort, `fallbacks="default"` through the beta API on the models that have it, `stop_reason`
+  mapped to `finish_reason`, typed SDK errors mapped to ours. Tests pass a fake SDK client.
+- `judge_credentials.py` - registers the `anthropic` and `openai` `CredentialSpec`s (imported
+  by the providers package); `anthropic_sdk_login` detects the Anthropic SDK's own login,
+  reported as the source `anthropic-sdk`.
 - `datadog/` - Datadog access via `pup`. `pup.py` is the client every Datadog call goes
   through: `pup --no-agent --output json ...`, a scrubbed environment, timeouts, and failures as
   `ExternalError`. `spans.py` exports LLM spans through the Export API
@@ -408,7 +441,8 @@ Source lives under `src/pup_finetune/`.
   judge: `judge` asks whether a candidate action is an acceptable substitute for the reference
   (the recorded data JSON-encoded in tagged blocks marked untrusted, reasoning never shown) and
   parses `{"pass", "reason"}` strictly (`parse_verdict`, outside any `<think>` block; anything
-  else fails as `unparseable`, or `truncated` when the judge hit `max_tokens`); a malformed candidate fails without a call, and a judge outage raises rather
+  else fails as `unparseable`, or `truncated` when the judge hit `max_tokens`, and a refused
+  answer as `refused`); a malformed candidate fails without a call, and a judge outage raises rather
   than failing the case. `calibrate` checks that references pass and `corrupt`ed ones fail on a
   few mixed cases; `check_judge_differs` refuses a judge that is the model being trained or the run's
   tuned model (`model_id_for_run`, and the promoted model once there is one).
@@ -566,7 +600,8 @@ Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds can
 - Paid or remote-changing actions preview by default and run only with `--confirm`. `--confirm`
   is never implied by `PUP_AUTO_APPROVE` or agent mode.
 - Honor `PUP_READ_ONLY`: reject every remote write when it is set.
-- Only `datadog/pup.py` spawns `pup`. Only `providers/<provider>/client.py` imports a provider SDK.
+- Only `datadog/pup.py` spawns `pup`. Only `providers/<provider>/client.py` imports a training
+  provider's SDK, and only `anthropic_client.py` imports `anthropic` (and `httpx2`).
   Only `rendering/hf.py` imports `transformers`, and only when a tokenizer is first loaded.
 - Secrets are never printed, logged or written to disk, and never accepted as a flag value.
 - Tests use fakes, not mocks. Default tests make no network or paid calls.

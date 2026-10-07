@@ -51,7 +51,7 @@ pup finetune auth login [OPTIONS] PROVIDER
 
 | Argument | Description |
 | --- | --- |
-| `PROVIDER` | The provider, e.g. `fireworks`. |
+| `PROVIDER` | The provider: `fireworks`, `anthropic` or `openai`. |
 
 | Option | Value | Default | Description |
 | --- | --- | --- | --- |
@@ -59,7 +59,7 @@ pup finetune auth login [OPTIONS] PROVIDER
 
 ## `pup finetune auth status`
 
-Report, per provider, whether an API key is configured and where it comes from (env, keychain or provider-config). Never prints the key. Writes only to the local OS keychain (login may make one read-only call to the provider to check the key), so it is allowed with PUP_READ_ONLY set. Datadog credentials are never involved: pup handles those.
+Report, per provider, whether an API key is configured and where it comes from (env, keychain or provider-config; anthropic-sdk when no Anthropic key is set but the Anthropic SDK can sign in on its own, e.g. after `ant auth login`). Never prints the key. Writes only to the local OS keychain (login may make one read-only call to the provider to check the key), so it is allowed with PUP_READ_ONLY set. Datadog credentials are never involved: pup handles those.
 
 ```
 pup finetune auth status [PROVIDER]
@@ -79,7 +79,7 @@ pup finetune auth logout PROVIDER
 
 | Argument | Description |
 | --- | --- |
-| `PROVIDER` | The provider, e.g. `fireworks`. |
+| `PROVIDER` | The provider: `fireworks`, `anthropic` or `openai`. |
 
 ## `pup finetune models list`
 
@@ -215,7 +215,7 @@ pup finetune dataset label [OPTIONS] DIR
 
 ## `pup finetune dataset triage`
 
-Have each judge model review each whole row of DIR (every turn and its tools, since training imitates every assistant turn) against --rubric FILE and/or --rule TEXT, and vote keep or drop. A row is kept only on a strict majority of keep votes; a tie drops it; a row missing a vote (a failed call) stays undecided and unlabeled. Decisions are recorded as labels by judge; rows the agent or a person labeled are not reviewed. Votes are appended to DIR/judgments.jsonl as they arrive, so rerunning the same command resumes and retries only failed calls. The rubric and the judges are frozen in DIR/triage.json once votes exist: change them in a new directory or with --reset-triage. Row content is sent to the judges' inference API (Fireworks serverless, with the Fireworks API key). Without --confirm, previews the calls. Paid, but no Datadog write: allowed with PUP_READ_ONLY set. Start with --max-rows 20 to calibrate the rubric. --print-template prints a rubric template.
+Have each judge model review each whole row of DIR (every turn and its tools, since training imitates every assistant turn) against --rubric FILE and/or --rule TEXT, and vote keep or drop. A row is kept only on a strict majority of keep votes; a tie drops it; a row missing a vote (a failed call) stays undecided and unlabeled. Decisions are recorded as labels by judge; rows the agent or a person labeled are not reviewed. Votes are appended to DIR/judgments.jsonl as they arrive, so rerunning the same command resumes and retries only failed calls. The rubric and the judges are frozen in DIR/triage.json once votes exist: change them in a new directory or with --reset-triage. Row content is sent to each judge's provider: Fireworks serverless (the default judges), Anthropic or OpenAI, with that provider's API key; the preview names every one. Without --confirm, previews the calls. Paid, but no Datadog write: allowed with PUP_READ_ONLY set. Start with --max-rows 20 to calibrate the rubric. --print-template prints a rubric template.
 
 ```
 pup finetune dataset triage [OPTIONS] [DIR]
@@ -229,7 +229,7 @@ pup finetune dataset triage [OPTIONS] [DIR]
 | --- | --- | --- | --- |
 | `--rubric` | `FILE` |  | A rubric file (Markdown; see --print-template). |
 | `--rule` | `TEXT, repeatable` |  | A rule to judge by; repeat for more. |
-| `--judges` | `M1,M2` |  | Comma-separated judge models (default: accounts/fireworks/models/deepseek-v4p1-flash,accounts/fireworks/models/glm-5p3-flash). |
+| `--judges` | `M1,M2` |  | Comma-separated judge models, each anthropic/&lt;model&gt; (ANTHROPIC_API_KEY), openai/&lt;model&gt; (OPENAI_API_KEY), or otherwise a Fireworks model id such as accounts/fireworks/models/&lt;model&gt; (FIREWORKS_API_KEY); providers can be mixed (default: accounts/fireworks/models/deepseek-v4p1-flash,accounts/fireworks/models/glm-5p3-flash). |
 | `--concurrency` | `INTEGER (1<=x<=64)` | `4` | Judge calls made at once. |
 | `--max-rows` | `INTEGER (x>=1)` |  | Review at most this many rows (a fixed sample, e.g. 20 to calibrate the rubric first; a larger run later reuses its votes). |
 | `--reset-triage` |  |  | Discard every vote (even an unreadable judgments.jsonl) and the frozen rubric and judges first. |
@@ -287,7 +287,7 @@ pup finetune train [OPTIONS]
 | `--evaluate` |  |  | Also evaluate the run on the test split once it is trained, in its training session (paid; see `pup finetune evaluate`), within --max-spend-usd. |
 | `--eval-out-dir` | `PATH` |  | With --evaluate: where the evaluation goes (default: RUN_DIR/eval). |
 | `--eval-max-cases-per-trajectory` | `INTEGER (x>=1)` | `2` | With --evaluate: most assistant turns replayed per test conversation. |
-| `--eval-judge-model` | `TEXT` |  | With --evaluate: the judge model (default: as `evaluate`). |
+| `--eval-judge-model` | `TEXT` |  | With --evaluate: the judge model, anthropic/&lt;model&gt;, openai/&lt;model&gt; or a Fireworks model (default and keys: as `evaluate --judge-model`). |
 | `--eval-concurrency` | `INTEGER (1<=x<=64)` | `4` | With --evaluate: cases generated and judged at once. |
 | `--eval-max-tokens` | `INTEGER (x>=1)` | `1024` | With --evaluate: most tokens each generation may produce. |
 | `--eval-seed` | `INTEGER (x>=0)` | `0` | With --evaluate: seed for picking cases and the bootstrap. |
@@ -362,7 +362,7 @@ pup finetune evaluate [OPTIONS] RUN_DIR
 | --- | --- | --- | --- |
 | `--out-dir` | `PATH` |  | Where the evaluation is written and resumed from (default: RUN_DIR/eval). |
 | `--max-cases-per-trajectory` | `INTEGER (x>=1)` | `2` | Most assistant turns replayed per test conversation. |
-| `--judge-model` | `TEXT` |  | The judge model (default: a Fireworks serverless model; the offline fake judge for a fake run). |
+| `--judge-model` | `TEXT` |  | The judge model: anthropic/&lt;model&gt; (ANTHROPIC_API_KEY, or the Anthropic SDK's own login), openai/&lt;model&gt; (OPENAI_API_KEY), or otherwise a Fireworks model id such as accounts/fireworks/models/&lt;model&gt; (FIREWORKS_API_KEY). Default: a Fireworks serverless model; the offline fake judge for a fake run. |
 | `--concurrency` | `INTEGER (1<=x<=64)` | `4` | Cases generated and judged at once. |
 | `--max-tokens` | `INTEGER (x>=1)` | `1024` | Most tokens each generation may produce. |
 | `--seed` | `INTEGER (x>=0)` | `0` | Seed for picking cases and the bootstrap. |

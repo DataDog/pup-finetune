@@ -7,16 +7,17 @@
 """`pup finetune dataset triage`: a judge council labels a dataset's rows against a rubric.
 
 Judging is paid (one call per row and judge), so without ``--confirm`` it only previews the
-calls. It reads and writes local files and calls a serverless inference API, with no
-Datadog or other remote write, so ``PUP_READ_ONLY`` does not block it; ``--confirm`` is
-still required, and never implied by ``PUP_AUTO_APPROVE``. The council, the votes file and
-the labels live in :mod:`pup_finetune.curation.triage`.
+calls. It reads and writes local files and calls the judges' inference APIs (Fireworks,
+Anthropic or OpenAI, by each judge's prefix), with no Datadog or other remote write, so
+``PUP_READ_ONLY`` does not block it; ``--confirm`` is still required, and never implied by
+``PUP_AUTO_APPROVE``. The council, the votes file and the labels live in
+:mod:`pup_finetune.curation.triage`.
 """
 
 from __future__ import annotations
 
 import shlex
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -30,26 +31,28 @@ from pup_finetune.errors import UsageError, require_confirm
 from pup_finetune.output import info
 
 if TYPE_CHECKING:
-    from pup_finetune.inference import ChatCompleter
-
-
-def judges_base_url() -> str:
-    """Where the judges are served: the default judge endpoint (Fireworks serverless)."""
-    from pup_finetune.inference import JudgeConfig
-
-    return JudgeConfig().base_url
+    from pup_finetune.inference import ChatCompleter, JudgeProvider
 
 
 @contextmanager
-def open_client() -> Iterator[ChatCompleter]:
-    """The judges' chat client: Fireworks serverless inference with the Fireworks key.
+def open_clients(judges: Sequence[str]) -> Iterator[Mapping[JudgeProvider, ChatCompleter]]:
+    """One chat client per provider of ``judges``, each with its provider's key, opened up
+    front and closed together (:func:`pup_finetune.judges.open_clients`).
 
     Tests replace it with a fake.
     """
-    from pup_finetune.inference import ChatClient, JudgeConfig
+    from pup_finetune.judges import open_clients as open_judge_clients
 
-    with ChatClient.for_judge(JudgeConfig(base_url=judges_base_url())) as client:
-        yield client
+    with open_judge_clients(triage.judge_config(spec) for spec in judges) as clients:
+        yield clients
+
+
+def _check_available(judges: Sequence[str]) -> None:
+    """A :class:`UsageError` before the preview when a judge needs a missing package."""
+    from pup_finetune.judges import check_available
+
+    for spec in judges:
+        check_available(triage.judge_config(spec))
 
 
 def _q(value: object) -> str:
@@ -87,7 +90,10 @@ def triage_rows(
         typer.Option(
             "--judges",
             metavar="M1,M2",
-            help=f"Comma-separated judge models (default: {','.join(triage.DEFAULT_JUDGES)}).",
+            help="Comma-separated judge models, each anthropic/<model> (ANTHROPIC_API_KEY), "
+            "openai/<model> (OPENAI_API_KEY), or otherwise a Fireworks model id such as "
+            "accounts/fireworks/models/<model> (FIREWORKS_API_KEY); providers can be mixed "
+            f"(default: {','.join(triage.DEFAULT_JUDGES)}).",
             show_default=False,
         ),
     ] = None,
@@ -133,6 +139,7 @@ def triage_rows(
         rubric.read_text(encoding="utf-8") if rubric is not None else None, rules
     )
     council = triage.parse_judges(judges)
+    _check_available(council)
     dataset = DatasetDir(directory)
     plan = triage.plan_triage(dataset, criteria, council, max_rows=max_rows, reset=reset_triage)
     args = ["pup", "finetune", "dataset", "triage", str(directory)]
@@ -148,14 +155,14 @@ def triage_rows(
     if max_rows is not None:
         args += ["--max-rows", str(max_rows)]
     rerun = [*args, "--reset-triage"] if reset_triage else args
-    preview = plan.preview(base_url=judges_base_url())
+    preview = plan.preview()
     require_confirm(confirm, preview, shlex.join([*rerun, "--confirm"]))
     info(
         f"triage: {len(plan.pending)} judge calls for {len(plan.rows)} rows "
         f"({plan.calls - len(plan.pending)} votes reused)"
     )
-    with open_client() as client:
-        report = triage.run_triage(plan, client, concurrency=concurrency, progress=info)
+    with open_clients(plan.judges) as clients:
+        report = triage.run_triage(plan, clients, concurrency=concurrency, progress=info)
     counts = report.counts()
     summary = dataset.summary()
     complete = report.complete
@@ -237,8 +244,9 @@ def register(dataset_app: typer.Typer) -> None:
             "DIR/judgments.jsonl as they arrive, so rerunning the same command resumes and "
             "retries only failed calls. The rubric and the judges are frozen in "
             "DIR/triage.json once votes exist: change them in a new directory or with "
-            "--reset-triage. Row content is sent to the judges' inference API (Fireworks "
-            "serverless, with the Fireworks API key). Without --confirm, previews the calls. "
+            "--reset-triage. Row content is sent to each judge's provider: Fireworks "
+            "serverless (the default judges), Anthropic or OpenAI, with that provider's API "
+            "key; the preview names every one. Without --confirm, previews the calls. "
             "Paid, but no Datadog write: allowed with PUP_READ_ONLY set. Start with "
             "--max-rows 20 to calibrate the rubric. --print-template prints a rubric "
             "template."

@@ -403,7 +403,8 @@ def train(
         str | None,
         typer.Option(
             "--eval-judge-model",
-            help="With --evaluate: the judge model (default: as `evaluate`).",
+            help="With --evaluate: the judge model, anthropic/<model>, openai/<model> or a "
+            "Fireworks model (default and keys: as `evaluate --judge-model`).",
             show_default=False,
         ),
     ] = None,

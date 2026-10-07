@@ -17,17 +17,25 @@ is the user's, and goes in the system message.
 
 **Votes and decisions.** A row is kept only on a strict majority of keep votes: a tie drops
 it. A row missing a judge's vote is undecided. A call that fails (after the client's
-retries) or whose answer holds no vote is not a vote: it is reported, and retried on the
-next run. Votes are appended to ``judgments.jsonl`` in the dataset directory (``0600``) as
-they arrive, so an interrupted triage resumes where it stopped; a vote counts only for the
-row content, rubric and judge it was cast for.
+retries), whose answer holds no vote, or that the judge's provider refused to answer is not
+a vote: it is reported, and retried on the next run. Votes are appended to
+``judgments.jsonl`` in the dataset directory (``0600``) as they arrive, so an interrupted
+triage resumes where it stopped; a vote counts only for the row content, rubric and judge it
+was cast for.
 
-**Frozen settings.** The rubric's hash and the judges are recorded in ``triage.json`` when a
-triage first runs. Once votes exist, other ones are an error, unless ``reset`` discards the
-votes (and the recorded settings) first; ``reset`` also discards a ``judgments.jsonl`` that
-cannot be read. The check is made when planning and again under the dataset's lock before
-anything is written, so a triage planned while another one ran stops instead of mixing the
-votes of two rubrics.
+**Judges.** Each judge is a spec naming its provider
+(:func:`pup_finetune.judges.parse_judge`: ``anthropic/<model>``, ``openai/<model>``, or a
+Fireworks model), so one council can mix providers: :func:`run_triage` takes one client per
+provider and sends each judge's calls to its own. A Fireworks judge answers with
+:data:`JUDGE_MAX_TOKENS` at :data:`JUDGE_TEMPERATURE`; an Anthropic or OpenAI one with its
+provider's defaults (it thinks, and takes no temperature).
+
+**Frozen settings.** The rubric's hash and the judges (their specs, which name the provider)
+are recorded in ``triage.json`` when a triage first runs. Once votes exist, other ones are
+an error, unless ``reset`` discards the votes (and the recorded settings) first; ``reset``
+also discards a ``judgments.jsonl`` that cannot be read. The check is made when planning and
+again under the dataset's lock before anything is written, so a triage planned while another
+one ran stops instead of mixing the votes of two rubrics.
 
 **Labels.** Decided rows are labeled through :func:`~pup_finetune.curation.labels.apply_labels`
 with ``by="judge"``, under the same lock as the voting. Rows whose decision in force came
@@ -71,7 +79,7 @@ from pup_finetune.storage import (
 )
 
 if TYPE_CHECKING:
-    from pup_finetune.inference import ChatCompleter
+    from pup_finetune.inference import ChatCompleter, JudgeConfig, JudgeProvider
 
 __all__ = [
     "DEFAULT_CONCURRENCY",
@@ -88,6 +96,7 @@ __all__ = [
     "build_messages",
     "decide",
     "failures_shown",
+    "judge_config",
     "parse_judges",
     "parse_vote",
     "plan_triage",
@@ -176,13 +185,33 @@ class Criteria:
 
 
 def parse_judges(value: str | None) -> tuple[str, ...]:
-    """``--judges m1,m2``: the model names, in order, without repeats; the defaults for None."""
+    """``--judges m1,m2``: the judge specs, in order, without repeats; the defaults for None.
+
+    Each is checked and written the one way :attr:`~pup_finetune.inference.JudgeConfig.spec`
+    writes it, so the same judge is never two. Raises :class:`UsageError` for an empty model
+    after a provider prefix.
+    """
+    from pup_finetune.judges import parse_judge
+
     if value is None:
         return DEFAULT_JUDGES
-    judges = tuple(dict.fromkeys(part.strip() for part in value.split(",") if part.strip()))
+    specs = (parse_judge(part).spec for part in value.split(",") if part.strip())
+    judges = tuple(dict.fromkeys(specs))
     if not judges:
         raise UsageError("--judges must name at least one model, e.g. --judges m1,m2")
     return judges
+
+
+def judge_config(spec: str) -> JudgeConfig:
+    """How the judge ``spec`` is called in a triage (see the module docstring)."""
+    from pup_finetune.judges import parse_judge
+
+    config = parse_judge(spec)
+    if config.provider == "fireworks":
+        return config.model_copy(
+            update={"max_tokens": JUDGE_MAX_TOKENS, "temperature": JUDGE_TEMPERATURE}
+        )
+    return config
 
 
 # --- the prompt ---------------------------------------------------------------------------
@@ -380,9 +409,24 @@ class TriagePlan:
                 stale.append(row_id)
         return stale
 
-    def preview(self, *, base_url: str) -> dict[str, Any]:
-        """What :func:`run_triage` would do; ``base_url`` is where the judges are served."""
-        host = base_url.split("//", 1)[-1].split("/", 1)[0]
+    def preview(self) -> dict[str, Any]:
+        """What :func:`run_triage` would do, and every provider the rows are sent to."""
+        from pup_finetune.judges import destination
+
+        endpoints: dict[str, dict[str, Any]] = {}
+        for spec in self.judges:
+            config = judge_config(spec)
+            entry = endpoints.setdefault(
+                config.provider,
+                {
+                    "provider": config.provider,
+                    "endpoint": config.base_url,
+                    "credential": config.credential,
+                    "judges": [],
+                },
+            )
+            entry["judges"].append(spec)
+        places = [destination(judge_config(entry["judges"][0])) for entry in endpoints.values()]
         preview: dict[str, Any] = {
             "dataset_dir": str(self.dataset.path),
             "rows_to_review": len(self.rows),
@@ -393,8 +437,9 @@ class TriagePlan:
             "votes_reused": self.calls - len(self.pending),
             "criteria": self.criteria.source,
             "rubric_sha256": self.criteria.sha256,
-            "data_destination": f"each row's full content is sent to {host} for judging "
-            "(paid, per token)",
+            "judge_endpoints": list(endpoints.values()),
+            "data_destination": f"each row's full content is sent to {_and(places)} for "
+            "judging (paid, per token)",
         }
         stale = len(self.stale_labels())
         if stale:
@@ -413,14 +458,31 @@ class TriagePlan:
         return preview
 
 
+def _and(items: Sequence[str]) -> str:
+    if len(items) <= 2:
+        return " and ".join(items)
+    return f"{', '.join(items[:-1])} and {items[-1]}"
+
+
 def _settings(criteria: Criteria, judges: Sequence[str]) -> dict[str, Any]:
-    return {
+    settings: dict[str, Any] = {
         "rubric_sha256": criteria.sha256,
         "judges": list(judges),
         "prompt_version": PROMPT_VERSION,
         "max_tokens": JUDGE_MAX_TOKENS,
         "temperature": JUDGE_TEMPERATURE,
     }
+    # Judges called with other settings than the ones above (Anthropic, OpenAI) record
+    # theirs, so a change to them is a settings change too. A Fireworks-only council records
+    # exactly what it always did.
+    others = {
+        spec: {"max_tokens": config.max_tokens, "temperature": config.temperature}
+        for spec in judges
+        if (config := judge_config(spec)).provider != "fireworks"
+    }
+    if others:
+        settings["judge_settings"] = others
+    return settings
 
 
 def plan_triage(
@@ -434,8 +496,11 @@ def plan_triage(
     """Plan a triage of ``dataset``'s accepted rows; reads only local files.
 
     Raises :class:`StateError` when votes exist under another rubric or other judges (see the
-    module docstring) and ``reset`` is false.
+    module docstring) and ``reset`` is false, and :class:`UsageError` for a judge spec with
+    an empty model after its provider prefix.
     """
+    for spec in judges:
+        judge_config(spec)
     dataset.settings()  # A UsageError when this is not a dataset directory.
     settings = _settings(criteria, judges)
     votes_path = dataset.path / JUDGMENTS_FILE
@@ -581,18 +646,25 @@ _Answer = tuple[bool, str] | str
 """A vote, or why the call produced none."""
 
 
-def _ask(client: ChatCompleter, row: TrainingRow, judge: str, criteria: Criteria) -> _Answer:
+def _ask(
+    client: ChatCompleter, row: TrainingRow, judge: JudgeConfig, criteria: Criteria
+) -> _Answer:
+    from pup_finetune.evaluation.judge import verdict_schema
+
     try:
         completion = client.complete(
             build_messages(row, criteria),
-            model=judge,
-            temperature=JUDGE_TEMPERATURE,
-            max_tokens=JUDGE_MAX_TOKENS,
+            model=judge.model,
+            temperature=judge.temperature,
+            max_tokens=judge.max_tokens,
+            response_schema=verdict_schema("keep"),
         )
     except ProviderAuthError:
         raise
     except ExternalError as exc:
         return f"call_failed: {redact(str(exc))}"
+    if completion.finish_reason == "refusal":
+        return "refused"
     content = completion.message.get("content")
     vote = parse_vote(content if isinstance(content, str) else None)
     if vote is None:
@@ -600,15 +672,36 @@ def _ask(client: ChatCompleter, row: TrainingRow, judge: str, criteria: Criteria
     return vote
 
 
+def _routes(
+    clients: ChatCompleter | Mapping[JudgeProvider, ChatCompleter], judges: Sequence[str]
+) -> dict[str, tuple[ChatCompleter, JudgeConfig]]:
+    """Each judge's client and settings, by spec. A single client serves every judge; a
+    mapping must hold a client for every judge's provider (:class:`ValueError` otherwise)."""
+    routes: dict[str, tuple[ChatCompleter, JudgeConfig]] = {}
+    for spec in judges:
+        config = judge_config(spec)
+        if isinstance(clients, Mapping):
+            client = clients.get(config.provider)
+            if client is None:
+                raise ValueError(f"no client was given for the {config.provider} judge {spec!r}")
+        else:
+            client = clients
+        routes[spec] = (client, config)
+    return routes
+
+
 def run_triage(
     plan: TriagePlan,
-    client: ChatCompleter,
+    client: ChatCompleter | Mapping[JudgeProvider, ChatCompleter],
     *,
     concurrency: int = DEFAULT_CONCURRENCY,
     progress: Callable[[str], None] | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> TriageReport:
     """Make every pending judge call of ``plan`` and label the decided rows.
+
+    ``client`` serves every judge, or is one client per provider (by provider name), which
+    each judge's calls go to (see the module docstring).
 
     Holds the dataset's directory lock while voting and labeling; each vote is appended to
     ``judgments.jsonl`` as it arrives. Under the lock, before anything is written, the rows
@@ -632,6 +725,12 @@ def run_triage(
     failures: list[Failure] = []
     cast = 0
     pending = plan.pending
+    routes = _routes(client, plan.judges)
+
+    def ask(row: TrainingRow, judge: str) -> _Answer:
+        judge_client, config = routes[judge]
+        return _ask(judge_client, row, config, plan.criteria)
+
     with DirectoryLock(dataset.path):
         _check_rows_unchanged(plan)
         if plan.reset:
@@ -646,7 +745,7 @@ def run_triage(
         try:
             queue = iter(pending)
             for row, judge in _take(queue, concurrency * 2):
-                futures[pool.submit(_ask, client, row, judge, plan.criteria)] = (row, judge)
+                futures[pool.submit(ask, row, judge)] = (row, judge)
             while futures:
                 done, _ = wait(futures, return_when=FIRST_COMPLETED)
                 for future in done:
@@ -668,7 +767,7 @@ def run_triage(
                         plan.votes.setdefault(row.id, {})[judge] = vote
                         cast += 1
                     for row_next, judge_next in _take(queue, 1):
-                        submitted = pool.submit(_ask, client, row_next, judge_next, plan.criteria)
+                        submitted = pool.submit(ask, row_next, judge_next)
                         futures[submitted] = (row_next, judge_next)
                 if progress is not None:
                     progress(f"triage: {cast + len(failures)} of {len(pending)} judge calls done")

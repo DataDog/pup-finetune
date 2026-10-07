@@ -48,6 +48,7 @@ OTHER_TOOL_FLAGS = {
     "--local",
     "--link",
     "--all-extras",
+    "--extra",
 }
 
 _FENCE = re.compile(r"^```[^\n]*\n(.*?)^```", re.MULTILINE | re.DOTALL)

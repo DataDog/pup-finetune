@@ -23,9 +23,11 @@ from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.evaluation.cases import ReplayCase
 from pup_finetune.evaluation.judge import (
     MALFORMED_REASON,
+    REFUSED,
     SYSTEM_PROMPT,
     TRUNCATED,
     UNPARSEABLE,
+    VERDICT_SCHEMA,
     Judgment,
     build_messages,
     calibrate,
@@ -35,7 +37,7 @@ from pup_finetune.evaluation.judge import (
     parse_verdict,
     select_calibration_cases,
 )
-from pup_finetune.inference import ChatClient, JudgeConfig
+from pup_finetune.inference import ChatClient, ChatCompletion, JudgeConfig
 from tests.fakes.chat_api import (
     API_KEY,
     BASE_URL,
@@ -374,6 +376,77 @@ def test_an_answer_cut_off_at_max_tokens_is_truncated() -> None:
     assert result == Judgment(passed=False, reason="", raw=answer, error=TRUNCATED)
 
 
+class Answering:
+    """A chat client that answers every call with ``completion`` and records the calls."""
+
+    def __init__(self, completion: ChatCompletion) -> None:
+        self.completion = completion
+        self.calls: list[dict[str, Any]] = []
+
+    def complete(self, messages: Any, **options: Any) -> ChatCompletion:
+        self.calls.append(options)
+        return self.completion
+
+
+@pytest.mark.parametrize("content", ['{"pass": true, "reason": "same"}', "", None])
+def test_a_refused_answer_fails_as_refused_even_with_a_verdict(content: str | None) -> None:
+    refused = ChatCompletion(
+        message={"role": "assistant", "content": content}, finish_reason="refusal"
+    )
+    result = judge(text_case(), {"content": "x"}, Answering(refused), CONFIG, format_valid=True)
+    assert result == Judgment(passed=False, reason="", raw=content, error=REFUSED)
+
+
+@pytest.mark.parametrize(
+    ("message", "finish_reason"),
+    [
+        ({"role": "assistant", "content": None, "refusal": "I can't help with that."}, "stop"),
+        ({"role": "assistant", "content": '{"pass": true, "reason": "ok"}'}, "content_filter"),
+    ],
+)
+def test_an_openai_refusal_on_the_wire_fails_as_refused(
+    message: dict[str, Any], finish_reason: str
+) -> None:
+    fake = FakeChatApi()
+    fake.script.append(
+        httpx.Response(
+            200,
+            json={
+                "model": "gpt-x",
+                "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+            },
+        )
+    )
+    with chat_client(fake) as client:
+        result = judge(text_case(), {"content": "x"}, client, CONFIG, format_valid=True)
+    assert result.passed is False
+    assert result.error == REFUSED
+
+
+def test_the_judge_asks_for_the_verdict_schema() -> None:
+    client = Answering(
+        ChatCompletion(message={"role": "assistant", "content": '{"pass": true, "reason": "ok"}'})
+    )
+    assert judge(text_case(), {"content": "x"}, client, CONFIG, format_valid=True).passed
+    assert client.calls[0]["response_schema"] == VERDICT_SCHEMA
+    assert VERDICT_SCHEMA == {
+        "type": "object",
+        "properties": {"pass": {"type": "boolean"}, "reason": {"type": "string"}},
+        "required": ["pass", "reason"],
+        "additionalProperties": False,
+    }
+
+
+def test_a_judge_without_a_temperature_sends_none() -> None:
+    client = Answering(
+        ChatCompletion(message={"role": "assistant", "content": '{"pass": true, "reason": "ok"}'})
+    )
+    config = JudgeConfig(provider="anthropic", model="claude-opus-5-5", temperature=None)
+    judge(text_case(), {"content": "x"}, client, config, format_valid=True)
+    assert client.calls[0]["temperature"] is None
+    assert client.calls[0]["model"] == "claude-opus-5-5"
+
+
 def test_a_malformed_candidate_fails_without_a_judge_call() -> None:
     fake = FakeChatApi()
     with chat_client(fake) as client:
@@ -430,6 +503,16 @@ def test_the_judge_must_not_be_the_tuned_model(tuned: str) -> None:
         check_judge_differs(CONFIG, "qwen3p8-27b", ["ft-other", tuned])
     assert "--judge-model" in (info.value.hint or "")
     check_judge_differs(CONFIG, "qwen3p8-27b", ["ft-other", ""])
+
+
+def test_only_the_judge_s_model_id_counts_not_its_provider() -> None:
+    config = JudgeConfig(provider="anthropic", model="synthetic-judge")
+    with pytest.raises(UsageError, match="'anthropic/synthetic-judge' is the model being trained"):
+        check_judge_differs(config, "accounts/fireworks/models/synthetic-judge")
+    check_judge_differs(
+        JudgeConfig(provider="anthropic", model="claude-opus-5-5"),
+        "accounts/fireworks/models/qwen3p8-27b",
+    )
 
 
 @pytest.mark.parametrize("base_model", ["qwen3p8-27b", "accounts/fireworks/models/qwen3p8-27b"])

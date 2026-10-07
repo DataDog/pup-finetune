@@ -52,6 +52,27 @@ The key is never accepted as a command-line flag, never printed, and never writt
 Without an OS keychain, `auth login` refuses to store the key and you use the environment
 variable instead.
 
+LLM judges (for `evaluate`, `train --evaluate` and `dataset triage`) run on Fireworks by
+default, with the same key. To judge on Anthropic or OpenAI instead, name the judge with its
+provider's prefix, `anthropic/<model>` or `openai/<model>` (a bare
+`accounts/<account>/models/<model>` stays Fireworks), and configure that provider's key the
+same way:
+
+```sh
+pup finetune auth login anthropic    # or set ANTHROPIC_API_KEY
+pup finetune auth login openai       # or set OPENAI_API_KEY
+pup finetune evaluate ./run --judge-model anthropic/claude-opus-5-5
+pup finetune dataset triage ./ds --rubric rubric.md \
+  --judges accounts/fireworks/models/deepseek-v4p1-flash,openai/gpt-6-astra
+```
+
+Anthropic judges use the official Anthropic SDK, an optional extra: install it with
+`uv sync --extra anthropic` in a checkout, or `pip install 'pup-finetune[anthropic]'`. Without
+an `ANTHROPIC_API_KEY` or a stored key, they sign in the way the Anthropic SDK does on its own
+(`ANTHROPIC_AUTH_TOKEN`, or a profile from `ant auth login`), which `auth status` and `doctor`
+report as the source `anthropic-sdk`. Every preview names each provider the rows or
+conversations are sent to.
+
 ## Quickstart
 
 Check your setup:

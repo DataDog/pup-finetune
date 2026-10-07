@@ -22,10 +22,14 @@ open another. It is ASCII-encoded too, so a lone surrogate (a tool argument hold
 The judge's answer is parsed strictly (:func:`parse_verdict`): the first top-level JSON
 object with a boolean ``pass``, outside any ``<think>`` block. Anything else is a failed
 judgment with ``error`` ``"unparseable"`` (``"truncated"`` when the judge hit
-``max_tokens``). A candidate the sampler could not parse (``format_valid=False``) fails
-without a judge call. A judge call that still fails after the client's retries raises (an
-:class:`~pup_finetune.errors.ExternalError`) instead of counting as a failed judgment: an
-outage is not a verdict, so the caller decides whether to stop or retry later.
+``max_tokens``), and an answer the judge's provider declined to give (``finish_reason``
+``refusal``) is one with ``error`` ``"refused"``, whatever its text. The judge is asked for
+:data:`VERDICT_SCHEMA`, which a client may enforce (Anthropic's structured outputs), but the
+answer is parsed as strictly whichever provider gave it. A candidate the sampler could not
+parse (``format_valid=False``) fails without a judge call. A judge call that still fails
+after the client's retries raises (an :class:`~pup_finetune.errors.ExternalError`) instead
+of counting as a failed judgment: an outage is not a verdict, so the caller decides whether
+to stop or retry later.
 
 :func:`calibrate` checks a judge before anything is paid for: on a few cases the reference
 must pass and one corrupted version of it must fail. :func:`check_judge_differs` refuses a
@@ -47,9 +51,11 @@ from pup_finetune.inference import ChatCompleter, JudgeConfig
 
 __all__ = [
     "MALFORMED_REASON",
+    "REFUSED",
     "SYSTEM_PROMPT",
     "TRUNCATED",
     "UNPARSEABLE",
+    "VERDICT_SCHEMA",
     "CalibrationCheck",
     "CalibrationReport",
     "Corruption",
@@ -62,13 +68,32 @@ __all__ = [
     "judge",
     "parse_verdict",
     "select_calibration_cases",
+    "verdict_schema",
 ]
 
 UNPARSEABLE: Final = "unparseable"
 """``Judgment.error`` when the judge's answer holds no verdict."""
 TRUNCATED: Final = "truncated"
 """``Judgment.error`` when the judge's answer holds no verdict and was cut off at ``max_tokens``."""
+REFUSED: Final = "refused"
+"""``Judgment.error`` when the judge's provider declined to answer (``finish_reason``
+``refusal``)."""
 MALFORMED_REASON: Final = "candidate output was malformed"
+
+
+def verdict_schema(key: str) -> dict[str, Any]:
+    """The JSON Schema of a verdict whose boolean is ``key``: ``{key: bool, "reason": str}``,
+    both required and nothing else."""
+    return {
+        "type": "object",
+        "properties": {key: {"type": "boolean"}, "reason": {"type": "string"}},
+        "required": [key, "reason"],
+        "additionalProperties": False,
+    }
+
+
+VERDICT_SCHEMA: Final = verdict_schema("pass")
+"""What the replay judge is asked to answer, as a JSON Schema."""
 
 _REASON_LIMIT: Final = 500
 
@@ -126,9 +151,10 @@ _UNSUPPORTED_CLAIMS: Final = (
 class Judgment:
     """One verdict: ``passed``, the judge's one-sentence ``reason``, and its ``raw`` answer.
 
-    ``error`` is ``None`` for a real verdict, and :data:`UNPARSEABLE` (or :data:`TRUNCATED`,
-    when the judge was cut off at ``max_tokens``) when the answer held none (``passed`` is
-    then ``False``). ``raw`` is ``None`` when no judge was called.
+    ``error`` is ``None`` for a real verdict, :data:`UNPARSEABLE` (or :data:`TRUNCATED`,
+    when the judge was cut off at ``max_tokens``) when the answer held none, and
+    :data:`REFUSED` when the judge's provider declined to answer (``passed`` is then
+    ``False``). ``raw`` is ``None`` when no judge was called.
     """
 
     passed: bool
@@ -294,8 +320,9 @@ def judge(
     ``format_valid`` comes from the sampler: when it is ``False`` the candidate fails with
     :data:`MALFORMED_REASON` and no judge is called. An answer without a verdict
     fails with ``error`` :data:`UNPARSEABLE`, or :data:`TRUNCATED` when the judge stopped at
-    ``max_tokens`` (``finish_reason`` ``length``). A judge call that fails after the client's
-    retries raises its :class:`~pup_finetune.errors.ExternalError` (see the module
+    ``max_tokens`` (``finish_reason`` ``length``); a refused one (``finish_reason``
+    ``refusal``) fails with :data:`REFUSED`, even when its text holds a verdict. A judge call
+    that fails after the client's retries raises its :class:`~pup_finetune.errors.ExternalError` (see the module
     docstring).
     """
     if not format_valid:
@@ -305,10 +332,13 @@ def judge(
         model=config.model,
         temperature=config.temperature,
         max_tokens=config.max_tokens,
+        response_schema=VERDICT_SCHEMA,
     )
     content = completion.message.get("content")
     # Escaped like the reason, so the answer kept with a verdict can always be written.
     raw = _encodable(content) if isinstance(content, str) else None
+    if completion.finish_reason == "refusal":
+        return Judgment(passed=False, reason="", raw=raw, error=REFUSED)
     verdict = parse_verdict(raw)
     if verdict is None:
         error = TRUNCATED if completion.finish_reason == "length" else UNPARSEABLE
@@ -324,16 +354,17 @@ def check_judge_differs(
     trained, or one of ``tuned_models``, the names of the run's tuned model (its model id,
     and the provider's name for it once promoted), which the evaluation grades too.
 
-    Names compare without case; a bare id (``qwen3p8-27b``) matches a full resource name
+    Only the judge's model id counts, not its provider prefix. Names compare without case;
+    a bare id (``qwen3p8-27b``) matches a full resource name
     (``accounts/<account>/models/qwen3p8-27b``) with that last segment.
     """
     hint = "pick a different --judge-model: a model should not grade its own outputs"
     if _same_model(config.model, base_model):
-        raise UsageError(f"the judge model {config.model!r} is the model being trained", hint=hint)
+        raise UsageError(f"the judge model {config.spec!r} is the model being trained", hint=hint)
     for tuned in tuned_models:
         if _same_model(config.model, tuned):
             raise UsageError(
-                f"the judge model {config.model!r} is this run's tuned model, which the "
+                f"the judge model {config.spec!r} is this run's tuned model, which the "
                 "evaluation grades",
                 hint=hint,
             )

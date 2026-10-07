@@ -1,12 +1,18 @@
 Component,Origin,License,Copyright
+anthropic,https://pypi.org/project/anthropic/,MIT,"Anthropic, PBC"
 baseten-loops,https://pypi.org/project/baseten-loops/,NOASSERTION,Baseten
+docstring-parser,https://pypi.org/project/docstring-parser/,MIT,Marcin Kurczewski
 fireworks-ai,https://pypi.org/project/fireworks-ai/,Apache-2.0,"Fireworks AI, Inc."
+httpcore2,https://pypi.org/project/httpcore2/,BSD-3-Clause,Pydantic Services Inc. and individual contributors; Encode OSS Ltd
 httpx,https://pypi.org/project/httpx/,BSD-3-Clause,Encode OSS Ltd
+httpx2,https://pypi.org/project/httpx2/,BSD-3-Clause,Pydantic Services Inc. and individual contributors; Encode OSS Ltd
 huggingface-hub,https://pypi.org/project/huggingface-hub/,Apache-2.0,Hugging Face Inc.
 jinja2,https://pypi.org/project/Jinja2/,BSD-3-Clause,Pallets
+jiter,https://pypi.org/project/jiter/,MIT,Samuel Colvin
 keyring,https://pypi.org/project/keyring/,MIT,Kang Zhang and Jason R. Coombs
 pydantic,https://pypi.org/project/pydantic/,MIT,Pydantic Services Inc. and individual contributors
 rich,https://pypi.org/project/rich/,MIT,Will McGugan
 tinker,https://pypi.org/project/tinker/,Apache-2.0,Thinking Machines Lab
 transformers,https://pypi.org/project/transformers/,Apache-2.0,The Hugging Face team
+truststore,https://pypi.org/project/truststore/,MIT,Seth Michael Larson
 typer,https://pypi.org/project/typer/,MIT,Sebastián Ramírez

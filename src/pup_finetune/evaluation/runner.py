@@ -299,7 +299,7 @@ class EvalPlan:
         words = ["pup", "finetune", "evaluate", str(self.run_dir)]
         words += ["--out-dir", str(settings.out_dir)]
         words += ["--max-cases-per-trajectory", str(settings.max_cases_per_trajectory)]
-        words += ["--judge-model", self.judge.model]
+        words += ["--judge-model", self.judge.spec]
         words += ["--concurrency", str(settings.concurrency)]
         words += ["--max-tokens", str(settings.max_tokens), "--seed", str(settings.seed)]
         if settings.skip_calibration:
@@ -313,7 +313,7 @@ class EvalPlan:
         settings = self.settings
         words = ["--evaluate", "--eval-out-dir", str(settings.out_dir)]
         words += ["--eval-max-cases-per-trajectory", str(settings.max_cases_per_trajectory)]
-        words += ["--eval-judge-model", self.judge.model]
+        words += ["--eval-judge-model", self.judge.spec]
         words += ["--eval-concurrency", str(settings.concurrency)]
         words += ["--eval-max-tokens", str(settings.max_tokens)]
         words += ["--eval-seed", str(settings.seed)]
@@ -342,7 +342,7 @@ class EvalPlan:
             provider=self.provider,
             base_model=self.profile.base_model,
             tuned_checkpoint=tuned_checkpoint.uri,
-            judge_model=self.judge.model,
+            judge_model=self.judge.spec,
             max_tokens=self.settings.max_tokens,
             push=publishing.push,
             records=publishing.records,
@@ -379,10 +379,17 @@ class EvalPlan:
                     f"{self.out_dir} holds an evaluation with other settings: "
                     "--confirm will refuse; pass a new --out-dir"
                 )
+        from pup_finetune.judges import destination as judge_destination
+
         trajectories = len({case.row_id for case in self.cases})
+        judged_at = (
+            "the offline fake judge (nothing is sent)"
+            if self.judge.provider == "fake"
+            else judge_destination(self.judge)
+        )
         destination = (
             f"the test split's conversations are sent to {self.provider} to generate and "
-            f"to {self.judge.base_url} to judge"
+            f"to {judged_at} to judge"
         )
         publish = self.publishing.status()
         if publish["status"] == "skipped":
@@ -400,7 +407,8 @@ class EvalPlan:
             "cases": len(self.cases),
             "trajectories": trajectories,
             "targets": {"base": self.profile.base_model, "tuned": tuned},
-            "judge_model": self.judge.model,
+            "judge_model": self.judge.spec,
+            "judge_provider": self.judge.provider,
             "judge_endpoint": self.judge.base_url,
             "already_done": remaining["done"],
             "generation_calls": remaining["generate"],
@@ -419,13 +427,16 @@ class EvalPlan:
 
 
 def resolve_judge(judge_model: str | None, *, provider: str, runtime: Runtime) -> JudgeConfig:
-    """The judge for ``--judge-model``: the default judge, or for a ``fake`` run the fake one.
+    """The judge for ``--judge-model``: the default judge, or for a ``fake`` run the fake one,
+    or the judge the spec names (:func:`pup_finetune.judges.parse_judge`).
 
     :data:`~pup_finetune.evaluation.fake_judge.FAKE_JUDGE_MODEL` is the offline judge, for
-    development mode only.
+    development mode only. Raises :class:`UsageError` for a spec that names no known
+    provider, and when a package the judge needs is not installed.
     """
     from pup_finetune.evaluation.fake_judge import FAKE_JUDGE_MODEL, fake_judge_config
     from pup_finetune.inference import JudgeConfig
+    from pup_finetune.judges import check_available, parse_judge
 
     if judge_model is None and provider == "fake":
         judge_model = FAKE_JUDGE_MODEL
@@ -436,7 +447,9 @@ def resolve_judge(judge_model: str | None, *, provider: str, runtime: Runtime) -
                 hint="set PUP_FINETUNE_DEV=1, or pass another --judge-model",
             )
         return fake_judge_config()
-    return JudgeConfig() if judge_model is None else JudgeConfig(model=judge_model)
+    config = JudgeConfig() if judge_model is None else parse_judge(judge_model)
+    check_available(config)
+    return config
 
 
 def plan_evaluation(
@@ -497,15 +510,16 @@ def plan_evaluation(
 
 @contextmanager
 def open_judge_client(config: JudgeConfig) -> Iterator[ChatCompleter]:
-    """The client for ``config``'s judge: the offline fake judge, or an OpenAI-compatible
-    endpoint with the key of its credential. Closed on exit."""
-    from pup_finetune.evaluation.fake_judge import FAKE_JUDGE_MODEL, FakeJudge
-    from pup_finetune.inference import ChatClient
+    """The client for ``config``'s judge: the offline fake judge, or the provider's client
+    (:func:`pup_finetune.judges.open_client`) with the key of its credential. Closed on
+    exit."""
+    from pup_finetune.evaluation.fake_judge import FakeJudge
+    from pup_finetune.judges import open_client
 
-    if config.model == FAKE_JUDGE_MODEL:
+    if config.provider == "fake":
         yield FakeJudge()
         return
-    with ChatClient.for_judge(config) as client:
+    with open_client(config) as client:
         yield client
 
 
@@ -515,7 +529,7 @@ def run_calibration(plan: EvalPlan, client: ChatCompleter) -> dict[str, Any] | N
 
     if plan.settings.skip_calibration:
         return None
-    info(f"calibrating the judge {plan.judge.model} on {plan.calibration_calls() // 2} cases")
+    info(f"calibrating the judge {plan.judge.spec} on {plan.calibration_calls() // 2} cases")
     report = calibrate(plan.cases, client, plan.judge, n=CALIBRATION_CASES).to_json()
     return {**report, "judge": plan.judge.identity()}
 
@@ -527,7 +541,7 @@ def calibration_failed(plan: EvalPlan, report: Mapping[str, Any]) -> dict[str, A
         "status": "calibration_failed",
         "run_id": plan.run_id,
         "out_dir": str(plan.out_dir),
-        "judge_model": plan.judge.model,
+        "judge_model": plan.judge.spec,
         "calibration": dict(report),
         "hint": "the judge passed a corrupted action or failed a recorded one, so its "
         "verdicts cannot be trusted; pick another --judge-model (or rerun with "
@@ -691,8 +705,9 @@ def replay_result(
     no_verdict = sum(int(target["judge_no_verdict"]) for target in summary["targets"].values())
     if no_verdict:
         warnings.append(
-            f"{no_verdict} judge answer(s) held no verdict (unparseable, or cut off at the "
-            "judge's max_tokens) and count as failures; see judge_no_verdict per target"
+            f"{no_verdict} judge answer(s) held no verdict (unparseable, cut off at the "
+            "judge's max_tokens, or refused by the judge's provider) and count as failures; "
+            "see judge_no_verdict per target"
         )
     warnings.extend(str(warning) for warning in publication.get("warnings") or [])
     if publication["status"] == "skipped":

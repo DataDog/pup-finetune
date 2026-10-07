@@ -48,7 +48,9 @@ _MIN_OVERLAP: Final = 0.5
 
 def fake_judge_config() -> JudgeConfig:
     """The :class:`~pup_finetune.inference.JudgeConfig` that names :class:`FakeJudge`."""
-    return JudgeConfig(model=FAKE_JUDGE_MODEL, base_url="offline://fake-judge", credential="none")
+    return JudgeConfig(
+        provider="fake", model=FAKE_JUDGE_MODEL, base_url="offline://fake-judge", credential="none"
+    )
 
 
 class FakeJudge:
@@ -66,6 +68,7 @@ class FakeJudge:
         tools: Sequence[Mapping[str, Any]] | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        response_schema: Mapping[str, Any] | None = None,
     ) -> ChatCompletion:
         with self._lock:
             self.calls += 1

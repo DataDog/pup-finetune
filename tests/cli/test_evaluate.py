@@ -116,6 +116,7 @@ class AlwaysPass:
         tools: Sequence[Mapping[str, Any]] | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        response_schema: Mapping[str, Any] | None = None,
     ) -> ChatCompletion:
         self.calls += 1
         return ChatCompletion(
@@ -137,6 +138,7 @@ class Outage:
         tools: Sequence[Mapping[str, Any]] | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        response_schema: Mapping[str, Any] | None = None,
     ) -> ChatCompletion:
         self.calls += 1
         raise ExternalError("the judge endpoint is unreachable", source="judge")
@@ -195,6 +197,39 @@ def test_the_preview_exits_2_with_the_calls_and_pins_the_rerun(run_dir: Path) ->
     assert words[words.index("--judge-model") + 1] == FAKE_JUDGE_MODEL
 
 
+def test_the_preview_names_the_judge_s_provider_and_pins_its_spec(run_dir: Path) -> None:
+    result = invoke("evaluate", str(run_dir), "--judge-model", "anthropic/claude-opus-5-5")
+    assert result.exit_code == 2, result.stderr
+    data = output(result)
+    preview = data["preview"]
+    assert preview["judge_model"] == "anthropic/claude-opus-5-5"
+    assert preview["judge_provider"] == "anthropic"
+    assert preview["judge_endpoint"] == "https://api.anthropic.com"
+    assert "to Anthropic (api.anthropic.com) to judge" in preview["data_destination"]
+    words = shlex.split(data["next_command"])
+    assert words[words.index("--judge-model") + 1] == "anthropic/claude-opus-5-5"
+
+
+def test_the_fake_judge_preview_sends_nothing_to_judge(run_dir: Path) -> None:
+    preview = output(invoke("evaluate", str(run_dir)))["preview"]
+    assert "offline fake judge" in preview["data_destination"]
+
+
+def test_an_anthropic_judge_without_the_extra_fails_with_the_install_hint(
+    run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(sys.modules, "anthropic", None)
+    result = invoke("evaluate", str(run_dir), "--judge-model", "anthropic/claude-opus-5-5")
+    assert result.exit_code == 2
+    assert "uv sync --extra anthropic" in result.stderr
+
+
+def test_a_judge_with_no_model_is_a_usage_error(run_dir: Path) -> None:
+    result = invoke("evaluate", str(run_dir), "--judge-model", "openai/")
+    assert result.exit_code == 2
+    assert "has no model" in result.stderr
+
+
 def test_skipping_calibration_saves_its_judge_calls(run_dir: Path) -> None:
     preview = output(invoke("evaluate", str(run_dir), "--skip-calibration"))["preview"]
     assert preview["calibration_calls"] == 0
@@ -202,7 +237,8 @@ def test_skipping_calibration_saves_its_judge_calls(run_dir: Path) -> None:
 
 
 def test_the_judge_must_not_be_the_model_being_trained(run_dir: Path) -> None:
-    for model in ("fake/fake-model", "fake-model"):
+    # Only the model id counts, whichever provider the judge names.
+    for model in ("accounts/fake/models/fake-model", "fake-model", "anthropic/fake-model"):
         result = invoke("evaluate", str(run_dir), "--judge-model", model)
         assert result.exit_code == 2
         assert "being trained" in result.stderr
@@ -211,7 +247,7 @@ def test_the_judge_must_not_be_the_model_being_trained(run_dir: Path) -> None:
 def test_the_judge_must_not_be_the_run_s_tuned_model(run_dir: Path) -> None:
     promoted = json.loads((run_dir / "result.json").read_text())["promoted_model"]
     for model in (promoted["model_id"], promoted["uri"], promoted["model_id"].upper()):
-        result = invoke("evaluate", str(run_dir), "--judge-model", model)
+        result = invoke("evaluate", str(run_dir), "--judge-model", f"fireworks/{model}")
         assert result.exit_code == 2, result.stderr
         assert "this run's tuned model" in result.stderr
     assert not (run_dir / "eval").exists()
@@ -371,7 +407,7 @@ def test_a_failed_calibration_generates_nothing(
 ) -> None:
     judge = AlwaysPass()
     use_judge(monkeypatch, judge)
-    result = invoke("evaluate", str(run_dir), "--judge-model", "some/judge", "--confirm")
+    result = invoke("evaluate", str(run_dir), "--judge-model", "fireworks/some-judge", "--confirm")
     assert result.exit_code == 1, result.stderr
     data = output(result)
     assert data["status"] == "calibration_failed"
@@ -391,7 +427,12 @@ def test_skip_calibration_judges_without_checking(
     judge = AlwaysPass()
     use_judge(monkeypatch, judge)
     result = invoke(
-        "evaluate", str(run_dir), "--judge-model", "some/judge", "--skip-calibration", "--confirm"
+        "evaluate",
+        str(run_dir),
+        "--judge-model",
+        "fireworks/some-judge",
+        "--skip-calibration",
+        "--confirm",
     )
     assert result.exit_code == 0, result.stderr
     data = output(result)
@@ -467,7 +508,7 @@ def test_the_fake_judge_is_for_development_only() -> None:
     assert config == JudgeConfig()
     dev = Runtime(dev_mode=True)
     assert runner_module.resolve_judge(None, provider="fake", runtime=dev).model == FAKE_JUDGE_MODEL
-    assert runner_module.resolve_judge("x/y", provider="fake", runtime=dev).model == "x/y"
+    assert runner_module.resolve_judge("x-y", provider="fake", runtime=dev).model == "x-y"
 
 
 def test_signals_cancel_first_and_stop_at_once_second() -> None:
@@ -549,7 +590,7 @@ def test_train_evaluate_trains_nothing_when_calibration_fails(
     use_judge(monkeypatch, AlwaysPass())
     run = tmp_path / "run"
     result = invoke(
-        *train_args(dataset, run, "--evaluate", "--eval-judge-model", "x/y", "--confirm")
+        *train_args(dataset, run, "--evaluate", "--eval-judge-model", "fireworks/x-y", "--confirm")
     )
     assert result.exit_code == 1, result.stderr
     assert output(result)["status"] == "calibration_failed"

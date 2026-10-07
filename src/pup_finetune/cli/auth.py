@@ -90,7 +90,9 @@ def _read_key(spec: credentials.CredentialSpec, *, from_stdin: bool) -> SecretSt
 )
 @run_command
 def login(
-    provider: Annotated[str, typer.Argument(help="The provider, e.g. `fireworks`.")],
+    provider: Annotated[
+        str, typer.Argument(help="The provider: `fireworks`, `anthropic` or `openai`.")
+    ],
     stdin: Annotated[
         bool, typer.Option("--stdin", help="Read the key from stdin instead of prompting.")
     ] = False,
@@ -121,6 +123,8 @@ def _status_entry(spec: credentials.CredentialSpec) -> dict[str, Any]:
         return entry
     if found is not None:
         entry.update(configured=True, source=found.source)
+    elif (sdk := credentials.sdk_login_source(spec.provider)) is not None:
+        entry.update(configured=True, source=sdk)
     return entry
 
 
@@ -129,7 +133,9 @@ def _status_entry(spec: credentials.CredentialSpec) -> dict[str, Any]:
     short_help="Show where each provider's API key comes from.",
     help=(
         "Report, per provider, whether an API key is configured and where it comes from "
-        f"(env, keychain or provider-config). Never prints the key. {_LOCAL_ONLY}"
+        "(env, keychain or provider-config; anthropic-sdk when no Anthropic key is set but "
+        "the Anthropic SDK can sign in on its own, e.g. after `ant auth login`). Never "
+        f"prints the key. {_LOCAL_ONLY}"
     ),
 )
 @run_command
@@ -149,7 +155,9 @@ def status(
 )
 @run_command
 def logout(
-    provider: Annotated[str, typer.Argument(help="The provider, e.g. `fireworks`.")],
+    provider: Annotated[
+        str, typer.Argument(help="The provider: `fireworks`, `anthropic` or `openai`.")
+    ],
 ) -> dict[str, Any]:
     spec = credentials.get_spec(provider)
     return {"provider": spec.provider, "deleted": credentials.delete(spec.provider)}

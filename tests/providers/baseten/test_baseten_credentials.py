@@ -77,7 +77,10 @@ def test_the_cli_registers_the_key_without_heavy_imports() -> None:
     completed = subprocess.run(  # noqa: S603 - this interpreter, a fixed script
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
     )
-    assert json.loads(completed.stdout) == {"providers": ["baseten", "fireworks"], "loaded": []}
+    assert json.loads(completed.stdout) == {
+        "providers": ["anthropic", "baseten", "fireworks", "openai"],
+        "loaded": [],
+    }
 
 
 # --- ~/.trussrc --------------------------------------------------------------------------

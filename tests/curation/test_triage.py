@@ -42,14 +42,14 @@ from pup_finetune.data.exclusions import Exclusion, ExclusionCode
 from pup_finetune.data.schema import TrainingRow, validate_row
 from pup_finetune.data.split import SplitParams
 from pup_finetune.errors import ExternalError, StateError, UsageError
-from pup_finetune.inference import DEFAULT_JUDGE_BASE_URL, ChatCompletion
+from pup_finetune.inference import ChatCompletion
 from pup_finetune.providers.base import ProviderAuthError
 from tests.fakes.chat_api import block
 
 SETTINGS = DatasetSettings("import", SplitParams(42, 0.0, 0.0))
 AT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 RUBRIC = Criteria.build("## Keep\nHelpful answers.\n## Drop\nWrong tool calls.", [])
-J1, J2, J3 = "judge-one", "judge-two", "judge-three"
+J1, J2, J3 = (f"accounts/fireworks/models/judge-{n}" for n in ("one", "two", "three"))
 
 Policy = Callable[[str, str], "bool | Exception | str"]
 """Answers a judge call for (judge, row id): a vote, an error to raise, or raw content."""
@@ -92,6 +92,7 @@ class FakeCouncil:
         tools: Sequence[Mapping[str, Any]] | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        response_schema: Mapping[str, Any] | None = None,
     ) -> ChatCompletion:
         conversation = block(str(messages[-1]["content"]), "conversation")
         row_id = re.sub(r"^question ", "", conversation[0]["content"])
@@ -132,9 +133,19 @@ def test_criteria_need_a_rubric_or_rules() -> None:
 
 def test_judges_parse_in_order_without_repeats() -> None:
     assert parse_judges(None) == DEFAULT_JUDGES
-    assert parse_judges(" a, b ,a,") == ("a", "b")
+    assert parse_judges(" judge-a, openai/b ,judge-a,") == ("judge-a", "openai/b")
     with pytest.raises(UsageError):
         parse_judges(" , ")
+
+
+def test_judges_are_written_one_way() -> None:
+    fireworks = "accounts/fireworks/models/judge"
+    assert parse_judges(f"{fireworks},{fireworks}") == (fireworks,)
+    assert parse_judges("Anthropic/claude-opus-5-5,anthropic/claude-opus-5-5") == (
+        "anthropic/claude-opus-5-5",
+    )
+    with pytest.raises(UsageError, match="has no model"):
+        parse_judges("openai/")
 
 
 def test_the_default_judges_are_fireworks_serverless_models() -> None:
@@ -257,7 +268,7 @@ def test_the_plan_counts_calls_and_writes_nothing(tmp_path: Path) -> None:
     dataset = make_dataset(tmp_path)
     before = sorted(p.name for p in dataset.path.iterdir())
     plan = plan_triage(dataset, RUBRIC, (J1, J2))
-    preview = plan.preview(base_url=DEFAULT_JUDGE_BASE_URL)
+    preview = plan.preview()
     assert preview["rows_to_review"] == 4
     assert preview["judge_calls"] == 8
     assert preview["judge_calls_pending"] == 8
@@ -398,7 +409,7 @@ def test_the_rubric_and_judges_are_frozen_once_votes_exist(tmp_path: Path) -> No
         plan_triage(dataset, RUBRIC, (J1,))
 
     reset = plan_triage(dataset, other, (J1,), reset=True)
-    assert reset.preview(base_url=DEFAULT_JUDGE_BASE_URL)["reset"] == {
+    assert reset.preview()["reset"] == {
         "votes_discarded": 4,
         "stale_judge_labels": 0,
     }
@@ -521,7 +532,7 @@ def test_a_reset_discards_an_unreadable_judgments_file(tmp_path: Path) -> None:
     with pytest.raises(StateError, match=f"{JUDGMENTS_FILE}:2"):
         plan_triage(dataset, RUBRIC, (J1,))
     reset = plan_triage(dataset, RUBRIC, (J1,), reset=True)
-    assert reset.preview(base_url=DEFAULT_JUDGE_BASE_URL)["reset"] == {
+    assert reset.preview()["reset"] == {
         "votes_discarded": 3,
         "stale_judge_labels": 0,
         "judgments_unreadable": True,
@@ -666,7 +677,7 @@ def test_a_reset_reports_judge_labels_the_new_rubric_does_not_back(tmp_path: Pat
     other = Criteria.build(None, ["drop everything"])
     reset = plan_triage(dataset, other, (J1,), max_rows=2, reset=True)
     sample = [row.id for row in reset.rows]
-    preview = reset.preview(base_url=DEFAULT_JUDGE_BASE_URL)
+    preview = reset.preview()
     assert preview["stale_judge_labels"] == 3
     assert preview["reset"] == {"votes_discarded": 5, "stale_judge_labels": 3}
 
@@ -698,3 +709,139 @@ def test_rows_outside_the_sample_decided_under_the_same_rubric_are_not_stale(
     assert plan.stale_labels() == []
     report = run_triage(plan, FakeCouncil(keep_all))
     assert report.complete
+
+
+# --- judges on several providers -------------------------------------------------------
+
+CLAUDE = "anthropic/claude-opus-5-5"
+GPT = "openai/gpt-6-astra"
+
+
+def test_a_refused_answer_is_not_a_vote(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path, n=1)
+
+    class Refusing(FakeCouncil):
+        def complete(self, *args: Any, **kwargs: Any) -> ChatCompletion:
+            content = '{"keep": true, "reason": "fine"}'
+            return ChatCompletion(
+                message={"role": "assistant", "content": content}, finish_reason="refusal"
+            )
+
+    report = run_triage(plan_triage(dataset, RUBRIC, (J1,)), Refusing(keep_all))
+    assert report.failure_counts() == {"refused": 1}
+    assert report.votes_cast == 0
+    assert report.counts()["undecided"] == 1
+
+
+def test_a_mixed_council_sends_each_judge_to_its_provider(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path, n=3)
+    seen: dict[str, list[dict[str, Any]]] = {}
+
+    class Recording(FakeCouncil):
+        def __init__(self, provider: str) -> None:
+            super().__init__(keep_all)
+            self.provider = provider
+
+        def complete(self, messages: Sequence[Mapping[str, Any]], **options: Any) -> ChatCompletion:
+            seen.setdefault(self.provider, []).append(options)
+            return super().complete(messages, **options)
+
+    clients = {name: Recording(name) for name in ("fireworks", "anthropic", "openai")}
+    plan = plan_triage(dataset, RUBRIC, (J1, CLAUDE, GPT))
+    report = run_triage(plan, clients)  # type: ignore[arg-type]
+    assert report.votes_cast == 9
+    assert report.complete
+    assert {call["model"] for call in seen["fireworks"]} == {J1}
+    assert {call["model"] for call in seen["anthropic"]} == {"claude-opus-5-5"}
+    assert {call["model"] for call in seen["openai"]} == {"gpt-6-astra"}
+    # Fireworks judges keep the triage's own settings; the others their provider's.
+    assert {(c["max_tokens"], c["temperature"]) for c in seen["fireworks"]} == {(1024, 0.0)}
+    assert {(c["max_tokens"], c["temperature"]) for c in seen["anthropic"]} == {(16000, None)}
+    assert all(c["response_schema"]["required"] == ["keep", "reason"] for c in seen["openai"])
+    votes = read_votes(dataset.path / JUDGMENTS_FILE)
+    assert {vote.judge for vote in votes} == {J1, CLAUDE, GPT}
+
+
+def test_a_failed_anthropic_sdk_sign_in_stops_the_triage(tmp_path: Path) -> None:
+    anthropic = pytest.importorskip("anthropic", reason="needs the anthropic extra")
+    from types import SimpleNamespace
+
+    from pup_finetune.anthropic_client import AnthropicChatClient
+
+    calls: list[dict[str, Any]] = []
+
+    def create(**params: Any) -> Any:
+        calls.append(params)
+        raise anthropic.CredentialsError("the profile's refresh token was revoked")
+
+    messages = SimpleNamespace(create=create)
+    sdk = SimpleNamespace(
+        messages=messages, beta=SimpleNamespace(messages=messages), close=lambda: None
+    )
+    dataset = make_dataset(tmp_path, n=3)
+    plan = plan_triage(dataset, RUBRIC, (CLAUDE,))
+    with (
+        AnthropicChatClient(None, client=sdk) as claude,  # type: ignore[arg-type]
+        pytest.raises(ProviderAuthError, match="could not sign in") as info,
+    ):
+        run_triage(plan, {"anthropic": claude}, concurrency=1)
+    assert "ant auth login" in (info.value.hint or "")
+    assert len(calls) < 3  # stopped with the calls already queued, not recorded as call_failed
+    assert read_votes(dataset.path / JUDGMENTS_FILE) == []
+
+
+def test_a_council_missing_a_provider_s_client_is_refused(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path, n=1)
+    plan = plan_triage(dataset, RUBRIC, (J1, CLAUDE))
+    with pytest.raises(ValueError, match="no client was given for the anthropic judge"):
+        run_triage(plan, {"fireworks": FakeCouncil(keep_all)})  # type: ignore[dict-item]
+    assert not (dataset.path / JUDGMENTS_FILE).exists()
+
+
+def test_the_preview_names_every_provider_the_rows_are_sent_to(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path)
+    preview = plan_triage(dataset, RUBRIC, (J1, CLAUDE, GPT, J2)).preview()
+    destination = preview["data_destination"]
+    for place in ("Fireworks (api.fireworks.ai)", "Anthropic (api.anthropic.com)", "OpenAI"):
+        assert place in destination
+    assert preview["judge_endpoints"] == [
+        {
+            "provider": "fireworks",
+            "endpoint": "https://api.fireworks.ai/inference/v1",
+            "credential": "fireworks",
+            "judges": [J1, J2],
+        },
+        {
+            "provider": "anthropic",
+            "endpoint": "https://api.anthropic.com",
+            "credential": "anthropic",
+            "judges": [CLAUDE],
+        },
+        {
+            "provider": "openai",
+            "endpoint": "https://api.openai.com/v1",
+            "credential": "openai",
+            "judges": [GPT],
+        },
+    ]
+
+
+def test_the_frozen_settings_hold_the_provider_qualified_judges(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path, n=1)
+    run_triage(plan_triage(dataset, RUBRIC, (J1,)), FakeCouncil(keep_all))
+    settings = json.loads((dataset.path / SETTINGS_FILE).read_text())
+    assert "judge_settings" not in settings  # a Fireworks council records what it always did
+
+    other = make_dataset(tmp_path / "other", n=1)
+    run_triage(plan_triage(other, RUBRIC, (J1, CLAUDE)), FakeCouncil(keep_all))
+    settings = json.loads((other.path / SETTINGS_FILE).read_text())
+    assert settings["judges"] == [J1, CLAUDE]
+    assert settings["judge_settings"] == {CLAUDE: {"max_tokens": 16000, "temperature": None}}
+    # The same model on another provider is another judge: a settings change.
+    with pytest.raises(StateError, match="judges"):
+        plan_triage(other, RUBRIC, (J1, "openai/claude-opus-5-5"))
+
+
+def test_a_judge_with_no_model_is_refused_when_planning(tmp_path: Path) -> None:
+    with pytest.raises(UsageError, match="has no model"):
+        plan_triage(make_dataset(tmp_path), RUBRIC, ("anthropic/",))

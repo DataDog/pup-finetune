@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import json
 import shlex
-from collections.abc import Iterator
+import sys
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -58,13 +59,13 @@ def chat(monkeypatch: pytest.MonkeyPatch) -> FakeChatApi:
     api = FakeChatApi(answer=drop_weather)
 
     @contextmanager
-    def open_client() -> Iterator[ChatCompleter]:
+    def open_clients(judges: Sequence[str]) -> Iterator[Mapping[str, ChatCompleter]]:
         with ChatClient(
             BASE_URL, SecretStr(API_KEY), max_attempts=1, transport=api.transport
         ) as client:
-            yield client
+            yield {"fireworks": client}
 
-    monkeypatch.setattr(triage_cli, "open_client", open_client)
+    monkeypatch.setattr(triage_cli, "open_clients", open_clients)
     return api
 
 
@@ -184,7 +185,7 @@ def test_failed_calls_leave_rows_undecided_and_exit_1(dataset: Path, chat: FakeC
 
 
 def test_a_changed_rubric_needs_a_reset(dataset: Path, chat: FakeChatApi) -> None:
-    base = ["dataset", "triage", str(dataset), "--max-rows", "2", "--judges", "j1"]
+    base = ["dataset", "triage", str(dataset), "--max-rows", "2", "--judges", "fireworks/j1"]
     assert invoke(*base, "--rule", "first", "--confirm").exit_code == 0
     changed = invoke(*base, "--rule", "second", "--confirm")
     assert changed.exit_code == 1
@@ -198,14 +199,14 @@ def test_a_changed_rubric_needs_a_reset(dataset: Path, chat: FakeChatApi) -> Non
     assert output(reset)["rows_reviewed"] == 2
 
 
-JUDGE_J1 = ["--judges", "j1", "--confirm"]
+JUDGE_J1 = ["--judges", "fireworks/j1", "--confirm"]
 
 
 def test_a_reset_sample_leaves_stale_judge_labels_and_asks_for_every_row(
     dataset: Path, chat: FakeChatApi
 ) -> None:
     rows = accepted(dataset)
-    base = ["dataset", "triage", str(dataset), "--judges", "j1"]
+    base = ["dataset", "triage", str(dataset), "--judges", "fireworks/j1"]
     assert invoke(*base, "--rule", "first", "--confirm").exit_code == 0
     preview = invoke(*base, "--rule", "second", "--max-rows", "1", "--reset-triage")
     assert output(preview)["preview"]["reset"]["stale_judge_labels"] == rows - 1
@@ -222,3 +223,67 @@ def test_a_reset_sample_leaves_stale_judge_labels_and_asks_for_every_row(
     assert final.exit_code == 0, final.stderr
     assert output(final)["status"] == "complete"
     assert output(final)["stale_judge_labels"] == 0
+
+
+def test_a_mixed_council_previews_every_provider_and_routes_each_judge(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    apis = {name: FakeChatApi(answer=drop_weather) for name in ("fireworks", "anthropic")}
+    opened: list[list[str]] = []
+
+    @contextmanager
+    def open_clients(judges: Sequence[str]) -> Iterator[Mapping[str, ChatCompleter]]:
+        opened.append(list(judges))
+        with (
+            ChatClient(BASE_URL, SecretStr(API_KEY), transport=apis["fireworks"].transport) as fw,
+            ChatClient(BASE_URL, SecretStr(API_KEY), transport=apis["anthropic"].transport) as an,
+        ):
+            yield {"fireworks": fw, "anthropic": an}
+
+    monkeypatch.setattr(triage_cli, "open_clients", open_clients)
+    judges = "accounts/fireworks/models/judge-a,anthropic/claude-opus-5-5"
+    base = ["dataset", "triage", str(dataset), "--rule", "stay on topic", "--judges", judges]
+    preview = invoke(*base)
+    assert preview.exit_code == 2, preview.stderr
+    data = output(preview)
+    council = ["accounts/fireworks/models/judge-a", "anthropic/claude-opus-5-5"]
+    assert data["preview"]["judges"] == council
+    assert "Fireworks (api.fireworks.ai)" in data["preview"]["data_destination"]
+    assert "Anthropic (api.anthropic.com)" in data["preview"]["data_destination"]
+    assert [e["provider"] for e in data["preview"]["judge_endpoints"]] == ["fireworks", "anthropic"]
+    assert shlex.split(data["next_command"])[-2] == ",".join(council)
+    assert opened == []
+
+    result = invoke(*base, "--confirm")
+    assert result.exit_code == 0, result.stderr
+    assert opened == [council]
+    rows = accepted(dataset)
+    assert {body["model"] for body in apis["fireworks"].bodies} == {council[0]}
+    assert {body["model"] for body in apis["anthropic"].bodies} == {"claude-opus-5-5"}
+    assert len(apis["fireworks"].bodies) == len(apis["anthropic"].bodies) == rows
+
+
+def test_a_judge_with_no_model_is_a_usage_error(dataset: Path, chat: FakeChatApi) -> None:
+    result = invoke("dataset", "triage", str(dataset), "--rule", "x", "--judges", "openai/")
+    assert result.exit_code == 2
+    assert "has no model" in result.stderr
+    assert chat.requests == []
+
+
+def test_an_anthropic_judge_without_the_extra_fails_before_the_preview(
+    dataset: Path, chat: FakeChatApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(sys.modules, "anthropic", None)
+    args = [
+        "dataset",
+        "triage",
+        str(dataset),
+        "--rule",
+        "x",
+        "--judges",
+        "anthropic/claude-opus-5-5",
+    ]
+    result = invoke(*args)
+    assert result.exit_code == 2
+    assert "uv sync --extra anthropic" in result.stderr
+    assert "pup-finetune[anthropic]" in result.stderr

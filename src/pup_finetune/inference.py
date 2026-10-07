@@ -7,9 +7,35 @@
 """An OpenAI-compatible chat completions client, over ``httpx`` (no SDK).
 
 :class:`ChatClient` sends ``POST {base_url}/chat/completions`` with a ``Bearer`` key and
-returns the first choice as a :class:`ChatCompletion`. LLM judges use it, and so will the
-deployment smoke test. :class:`JudgeConfig` is the judge's model, endpoint and sampling
-settings.
+returns the first choice as a :class:`ChatCompletion`. LLM judges on Fireworks and OpenAI
+use it, and so will the deployment smoke test. :class:`JudgeConfig` is the judge's provider,
+model, endpoint and sampling settings (:func:`pup_finetune.judges.parse_judge` builds one
+from a ``--judge-model`` spec), and :class:`ChatCompleter` the one call every judge client
+answers, the Anthropic one (:mod:`pup_finetune.anthropic_client`) included.
+
+What a request carries is the client's :class:`RequestPolicy`: which field holds the token
+limit, whether ``temperature`` is sent, and whether a JSON answer is asked for with
+``response_format``. The default policy is the one Fireworks takes; :data:`OPENAI_POLICY` is
+OpenAI's, checked against the OpenAI API reference (its OpenAPI description in
+``github.com/openai/openai-openapi``, and the latest-model and reasoning guides at
+``developers.openai.com``) in October 2026:
+
+- ``max_tokens`` is deprecated in favor of ``max_completion_tokens``, which also bounds
+  reasoning tokens, and is not compatible with reasoning models, so the limit is sent as
+  ``max_completion_tokens``.
+- Current models are reasoning models, and ``temperature`` and ``top_p`` must be left out
+  unless the reasoning effort is ``none`` (which the latest model does not support), so
+  ``temperature`` is never sent.
+- ``response_format: {"type": "json_object"}`` (JSON mode) is accepted by every chat model;
+  the stricter ``json_schema`` form is preferred where a model supports it, but not every
+  model does, so JSON mode is what a judge asks for. The verdict is parsed as strictly
+  either way.
+- A model that declines answers with a ``refusal`` string in its message (and no content),
+  or stops with ``finish_reason`` ``content_filter``; either is reported as the
+  ``finish_reason`` ``refusal``, as the Anthropic client reports one.
+- A reasoning model's answer is not streamed and arrives only once it is complete, so an
+  OpenAI judge's attempts are allowed :data:`OPENAI_TIMEOUT_S` rather than
+  :data:`DEFAULT_TIMEOUT_S`.
 
 Retries are bounded: HTTP 408, 429 and 5xx and connection failures (timeouts included) are
 retried up to ``max_attempts`` times in all, with exponential backoff and jitter, or after
@@ -34,7 +60,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import TracebackType
-from typing import Any, Final, Protocol, Self
+from typing import Any, Final, Literal, Protocol, Self
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
@@ -49,13 +75,19 @@ __all__ = [
     "DEFAULT_JUDGE_MODEL",
     "DEFAULT_TIMEOUT_S",
     "MAX_WAIT_S",
+    "OPENAI_POLICY",
+    "OPENAI_TIMEOUT_S",
     "ChatClient",
     "ChatCompleter",
     "ChatCompletion",
     "JudgeConfig",
+    "JudgeProvider",
+    "RequestPolicy",
 ]
 
 DEFAULT_TIMEOUT_S: Final = 60.0
+OPENAI_TIMEOUT_S: Final = 600.0
+"""Each attempt's limit for an OpenAI judge: a reasoning model can think for minutes."""
 DEFAULT_MAX_ATTEMPTS: Final = 4
 BASE_BACKOFF_S: Final = 1.0
 """The wait before the first retry, before jitter; it doubles for each later one."""
@@ -64,6 +96,10 @@ MAX_WAIT_S: Final = 30.0
 
 DEFAULT_JUDGE_MODEL: Final = "accounts/fireworks/models/deepseek-v4p1-flash"
 DEFAULT_JUDGE_BASE_URL: Final = "https://api.fireworks.ai/inference/v1"
+
+JudgeProvider = Literal["fireworks", "anthropic", "openai", "fake"]
+"""Where a judge is served. ``fake`` is the offline development judge
+(:mod:`pup_finetune.evaluation.fake_judge`), never parsed from a spec."""
 
 _DEFAULT_SOURCE: Final = "inference"
 _LOCAL_HOSTS: Final = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -90,7 +126,13 @@ class ChatCompletion:
 
 
 class ChatCompleter(Protocol):
-    """Anything that answers a chat completion request, such as :class:`ChatClient`."""
+    """Anything that answers a chat completion request, such as :class:`ChatClient`.
+
+    ``response_schema`` is the JSON Schema the answer should follow, when the caller wants
+    a JSON object back: a client may constrain the answer to it (Anthropic's structured
+    outputs), ask for JSON without it (OpenAI's JSON mode) or ignore it (Fireworks). The
+    caller parses the answer as strictly either way.
+    """
 
     def complete(
         self,
@@ -100,24 +142,58 @@ class ChatCompleter(Protocol):
         tools: Sequence[Mapping[str, Any]] | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        response_schema: Mapping[str, Any] | None = None,
     ) -> ChatCompletion: ...
 
 
-class JudgeConfig(BaseModel):
-    """Which model judges, where it is served and how it samples.
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RequestPolicy:
+    """What an OpenAI-compatible endpoint takes (see the module docstring).
 
-    ``credential`` names the registered :class:`~pup_finetune.credentials.CredentialSpec`
-    whose key the endpoint takes. :meth:`identity` is what a resumed evaluation compares, so
-    judgments made under other settings are never reused.
+    ``token_limit_field`` names the field the token limit is sent in, ``send_temperature``
+    whether ``temperature`` is sent at all, and ``json_mode`` whether a request with a
+    ``response_schema`` asks for ``response_format: {"type": "json_object"}``.
+    """
+
+    token_limit_field: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"  # noqa: S105
+    send_temperature: bool = True
+    json_mode: bool = False
+
+
+OPENAI_POLICY: Final = RequestPolicy(
+    token_limit_field="max_completion_tokens",  # noqa: S106 - a field name, not a secret
+    send_temperature=False,
+    json_mode=True,
+)
+"""The OpenAI API's request policy (see the module docstring)."""
+
+
+class JudgeConfig(BaseModel):
+    """Which model judges, on which provider, where it is served and how it samples.
+
+    ``model`` is the provider's own model id (no provider prefix). ``credential`` names the
+    registered :class:`~pup_finetune.credentials.CredentialSpec` whose key the endpoint
+    takes. ``temperature`` ``None`` means none is sent (the provider's default). :meth:`identity`
+    is what a resumed evaluation compares, so judgments made under other settings, or on
+    another provider, are never reused.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    provider: JudgeProvider = "fireworks"
     model: str = Field(default=DEFAULT_JUDGE_MODEL, min_length=1)
     base_url: str = Field(default=DEFAULT_JUDGE_BASE_URL, min_length=1)
     credential: str = Field(default="fireworks", min_length=1)
-    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    temperature: float | None = Field(default=0.0, ge=0.0, le=2.0)
     max_tokens: int = Field(default=512, ge=1)
+
+    @property
+    def spec(self) -> str:
+        """The judge as ``--judge-model`` names it: ``anthropic/<model>`` or
+        ``openai/<model>``, and a Fireworks model id or the fake judge's name as they are."""
+        if self.provider in ("fake", "fireworks"):
+            return self.model
+        return f"{self.provider}/{self.model}"
 
     def identity(self) -> dict[str, Any]:
         """Every setting that changes a judgment, as a JSON object."""
@@ -133,8 +209,9 @@ class ChatClient:
     ``httpx.MockTransport``); ``timeout_s`` bounds each attempt. ``sleep``, ``rng`` and
     ``clock`` (for ``Retry-After`` dates) are injectable for tests.
 
-    ``base_url`` must be ``https``, except on a local host, so the key never travels in the
-    clear.
+    ``policy`` says what each request carries (:class:`RequestPolicy`; the default is
+    Fireworks'). ``base_url`` must be ``https``, except on a local host, so the key never
+    travels in the clear.
     """
 
     def __init__(
@@ -144,6 +221,7 @@ class ChatClient:
         *,
         credential: str | None = None,
         source: str | None = None,
+        policy: RequestPolicy | None = None,
         transport: httpx.BaseTransport | None = None,
         timeout_s: float = DEFAULT_TIMEOUT_S,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
@@ -156,6 +234,7 @@ class ChatClient:
         url = _checked_url(base_url)
         self._credential = credential
         self._source = source or credential or _DEFAULT_SOURCE
+        self._policy = policy if policy is not None else RequestPolicy()
         secret = bearer_key(api_key, label=f"the {self._source} API key", hint=self._login_hint())
         self._timeout_s = timeout_s
         self._max_attempts = max_attempts
@@ -181,8 +260,9 @@ class ChatClient:
         config: JudgeConfig,
         *,
         env: Mapping[str, str] | None = None,
+        policy: RequestPolicy | None = None,
         transport: httpx.BaseTransport | None = None,
-        timeout_s: float = DEFAULT_TIMEOUT_S,
+        timeout_s: float | None = None,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         sleep: Callable[[float], None] = time.sleep,
         rng: _Random | None = None,
@@ -191,15 +271,25 @@ class ChatClient:
         """A client for ``config``'s endpoint, with the key of its credential.
 
         The key comes from :func:`pup_finetune.credentials.resolve` (the environment, then
-        the keychain); ``env`` replaces the environment. The other options are the
-        constructor's. The credential spec (``fireworks`` by default) is registered when the
-        providers package is imported, which importing this module does.
+        the keychain); ``env`` replaces the environment. ``policy`` defaults to
+        :data:`OPENAI_POLICY` for an OpenAI judge and to Fireworks' otherwise, ``timeout_s``
+        to :data:`OPENAI_TIMEOUT_S` for an OpenAI judge and to :data:`DEFAULT_TIMEOUT_S`
+        otherwise. The other options are the constructor's. The credential specs are registered when the providers
+        package is imported, which importing this module does.
         """
+        if config.provider not in ("fireworks", "openai"):
+            raise ValueError(f"a {config.provider} judge is not served by an OpenAI-compatible API")
+        openai = config.provider == "openai"
+        if policy is None and openai:
+            policy = OPENAI_POLICY
+        if timeout_s is None:
+            timeout_s = OPENAI_TIMEOUT_S if openai else DEFAULT_TIMEOUT_S
         resolved = credentials.resolve(config.credential, env=os.environ if env is None else env)
         return cls(
             config.base_url,
             resolved.value,
             credential=config.credential,
+            policy=policy,
             transport=transport,
             timeout_s=timeout_s,
             max_attempts=max_attempts,
@@ -231,19 +321,26 @@ class ChatClient:
         tools: Sequence[Mapping[str, Any]] | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        response_schema: Mapping[str, Any] | None = None,
     ) -> ChatCompletion:
         """One chat completion from ``model``; the first choice.
 
-        ``tools`` are sent when there are any; ``temperature`` and ``max_tokens`` when set.
+        ``tools`` are sent when there are any; ``temperature`` and ``max_tokens`` when set,
+        as the client's :class:`RequestPolicy` allows (the token limit in its field, the
+        temperature only when it sends one). With ``response_schema`` and a policy in JSON
+        mode, the answer is asked for as a JSON object (the schema itself is not sent).
         Raises as the module docstring says.
         """
+        policy = self._policy
         body: dict[str, Any] = {"model": model, "messages": [dict(m) for m in messages]}
         if tools:
             body["tools"] = [dict(tool) for tool in tools]
-        if temperature is not None:
+        if temperature is not None and policy.send_temperature:
             body["temperature"] = temperature
         if max_tokens is not None:
-            body["max_tokens"] = max_tokens
+            body[policy.token_limit_field] = max_tokens
+        if response_schema is not None and policy.json_mode:
+            body["response_format"] = {"type": "json_object"}
         response = self._post(body, what=f"a chat completion from {model}")
         return self._parse(response, model)
 
@@ -366,6 +463,9 @@ class ChatClient:
         usage = body.get("usage")
         answered = body.get("model")
         finish_reason = choice.get("finish_reason")
+        refusal = message.get("refusal")
+        if (isinstance(refusal, str) and refusal.strip()) or finish_reason == "content_filter":
+            finish_reason = "refusal"
         return ChatCompletion(
             message=message,
             usage=dict(usage) if isinstance(usage, dict) else {},

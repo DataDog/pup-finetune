@@ -62,8 +62,10 @@ def evaluate(
         str | None,
         typer.Option(
             "--judge-model",
-            help="The judge model (default: a Fireworks serverless model; the offline fake "
-            "judge for a fake run).",
+            help="The judge model: anthropic/<model> (ANTHROPIC_API_KEY, or the Anthropic "
+            "SDK's own login), openai/<model> (OPENAI_API_KEY), or otherwise a Fireworks model "
+            "id such as accounts/fireworks/models/<model> (FIREWORKS_API_KEY). "
+            "Default: a Fireworks serverless model; the offline fake judge for a fake run.",
             show_default=False,
         ),
     ] = None,

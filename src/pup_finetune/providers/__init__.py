@@ -147,6 +147,8 @@ register_provider("fireworks", "pup_finetune.providers.fireworks.provider:Firewo
 register_provider("baseten", "pup_finetune.providers.baseten.provider:BasetenProvider")
 
 # Providers with an API key register its CredentialSpec in their (lightweight) package, so
-# `auth`, `doctor` and every command that imports this registry know about the key.
+# `auth`, `doctor` and every command that imports this registry know about the key. The
+# judge-only providers (Anthropic, OpenAI) register theirs the same way, in judge_credentials.
+from pup_finetune import judge_credentials as _judge_credentials  # noqa: E402, F401
 from pup_finetune.providers import baseten as _baseten  # noqa: E402, F401
 from pup_finetune.providers import fireworks as _fireworks  # noqa: E402, F401
