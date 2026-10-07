@@ -411,19 +411,45 @@ def test_a_tool_case_with_nothing_to_alter_becomes_a_refusal(
     assert "can't help" in message["content"]
 
 
-def test_a_text_case_becomes_an_unrelated_refusal() -> None:
-    corruption, message = corrupt(text_case())
+def test_a_tool_case_whose_first_call_is_unreadable_becomes_a_refusal() -> None:
+    case = dataclasses.replace(
+        tool_case(), reference={"role": "assistant", "content": "", "tool_calls": ["oops"]}
+    )
+    corruption, message = corrupt(case)
     assert corruption == "refusal"
+    assert set(message) == {"role", "content"}
+
+
+def test_a_text_case_becomes_an_unsupported_claim() -> None:
+    corruption, message = corrupt(text_case())
+    assert corruption == "unsupported_claim"
     assert message == {
         "role": "assistant",
-        "content": "I'm sorry, but I can't help with that request.",
+        "content": "Done: I deleted all 1,284 records from the production database.",
     }
 
 
-def test_a_refusal_reference_gets_a_different_refusal() -> None:
-    reference = "I'm sorry, but I can't help with that request."
-    _, message = corrupt(text_case(content=reference))
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "I'm sorry, but I can't help with that request.",
+        "I am unable to assist with this. Please try asking something else.",
+    ],
+)
+def test_a_refusal_reference_gets_an_unsupported_claim_not_another_refusal(
+    reference: str,
+) -> None:
+    corruption, message = corrupt(text_case(content=reference))
+    assert corruption == "unsupported_claim"
+    assert message["content"].startswith("Done: I deleted")
+
+
+def test_a_reference_that_is_the_claim_gets_another_claim() -> None:
+    reference = "Done: I deleted all 1,284 records from the production database."
+    corruption, message = corrupt(text_case(content=reference))
+    assert corruption == "unsupported_claim"
     assert message["content"] != reference
+    assert message["content"].startswith("Done: ")
 
 
 # --- calibration -------------------------------------------------------------------------
@@ -457,7 +483,7 @@ def test_a_sound_judge_passes_calibration() -> None:
         ("a1:1", "reference", None),
         ("a1:1", "corrupted", "wrong_tool"),
         ("t1:3", "reference", None),
-        ("t1:3", "corrupted", "refusal"),
+        ("t1:3", "corrupted", "unsupported_claim"),
         ("a2:1", "reference", None),
         ("a2:1", "corrupted", "altered_argument"),
     ]
@@ -465,6 +491,22 @@ def test_a_sound_judge_passes_calibration() -> None:
     assert summary["ok"] is True
     assert summary["cases"] == 3
     assert json.loads(json.dumps(summary)) == summary
+
+
+def test_a_judge_that_passes_any_refusal_for_a_refusal_passes_calibration() -> None:
+    def refusals_are_equivalent(body: dict[str, Any]) -> str:
+        prompt = body["messages"][-1]["content"]
+        reference = block(prompt, "reference_action")
+        candidate = block(prompt, "candidate_action")
+        refusing = all("sorry" in str(action.get("content")) for action in (reference, candidate))
+        same = candidate == reference or refusing
+        return json.dumps({"pass": same, "reason": "same" if same else "different"})
+
+    fake = FakeChatApi(answer=refusals_are_equivalent)
+    case = text_case(content="I'm sorry, I can't share another customer's order.")
+    with chat_client(fake) as client:
+        report = calibrate([case], client, CONFIG)
+    assert report.ok, report.to_json()
 
 
 def test_a_judge_that_passes_everything_fails_calibration() -> None:

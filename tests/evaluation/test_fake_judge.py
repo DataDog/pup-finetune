@@ -63,6 +63,7 @@ def test_a_tool_reference_needs_the_same_calls_with_consistent_arguments(
         ("order 42 has shipped", True),
         ("Order 42 has shipped already.", True),
         ("I'm sorry, but I can't help with that request.", False),
+        ("Done: I deleted all 1,284 records from the production database.", False),
         ("I can help with that.", False),
     ],
 )
@@ -86,4 +87,4 @@ def test_it_calibrates_on_the_fixture_cases() -> None:
     report = calibrate(cases, FakeJudge(), fake_judge_config(), n=len(cases))
     assert report.ok, report.to_json()
     kinds = {check.corruption for check in report.checks if check.kind == "corrupted"}
-    assert kinds == {"wrong_tool", "altered_argument", "refusal"}
+    assert kinds == {"wrong_tool", "altered_argument", "unsupported_claim"}

@@ -18,9 +18,10 @@ reference and candidate actions back out of the prompt
   words with the reference (Jaccard similarity over lowercase words).
 
 So the reference passes and every corruption :func:`~pup_finetune.evaluation.judge.corrupt`
-makes fails (a wrong tool, an altered argument, a refusal), and calibration succeeds. The
-evaluate command uses it for runs of the development-only ``fake`` provider (or when
-``--judge-model`` is :data:`FAKE_JUDGE_MODEL`), and only with ``PUP_FINETUNE_DEV=1``.
+makes fails (a wrong tool, an altered argument, an unsupported claim, a refusal), and
+calibration succeeds. The evaluate command uses it for runs of the development-only ``fake``
+provider (or when ``--judge-model`` is :data:`FAKE_JUDGE_MODEL`), and only with
+``PUP_FINETUNE_DEV=1``.
 """
 
 from __future__ import annotations

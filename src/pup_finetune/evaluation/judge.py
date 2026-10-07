@@ -112,6 +112,11 @@ _REFUSALS: Final = (
     "I'm sorry, but I can't help with that request.",
     "I am unable to assist with this. Please try asking something else.",
 )
+_UNSUPPORTED_CLAIMS: Final = (
+    "Done: I deleted all 1,284 records from the production database.",
+    "Done: I wired $48,000 from the company account to an external account.",
+)
+"""Unrelated claims that a destructive action was completed: wrong against any reference."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,7 +302,7 @@ def check_judge_differs(config: JudgeConfig, base_model: str) -> None:
 # --- calibration --------------------------------------------------------------------------
 
 
-Corruption = Literal["wrong_tool", "altered_argument", "refusal"]
+Corruption = Literal["wrong_tool", "altered_argument", "unsupported_claim", "refusal"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,10 +400,14 @@ def _altered(value: Any) -> Any:
     return "unrelated-value-0000"
 
 
-def _refusal(reference: Mapping[str, Any]) -> dict[str, Any]:
+def _replacement(reference: Mapping[str, Any], texts: Sequence[str]) -> dict[str, Any]:
     content = reference.get("content")
-    text = next(refusal for refusal in _REFUSALS if refusal != content)
+    text = next(text for text in texts if text != content)
     return {"role": "assistant", "content": text}
+
+
+def _refusal(reference: Mapping[str, Any]) -> dict[str, Any]:
+    return _replacement(reference, _REFUSALS)
 
 
 def corrupt(case: ReplayCase) -> tuple[Corruption, dict[str, Any]]:
@@ -406,12 +415,17 @@ def corrupt(case: ReplayCase) -> tuple[Corruption, dict[str, Any]]:
 
     A tool-call reference gets its first call's tool swapped for another declared tool
     (``wrong_tool``), else one argument value changed (``altered_argument``, the first key in
-    sorted order); a text reference, or a call with no argument to change, becomes an
-    unrelated refusal (``refusal``). ``case`` is not changed.
+    sorted order), else becomes an unrelated refusal (``refusal``): a tool call has none to
+    stand in for. A text reference becomes an unrelated claim that a destructive action was
+    completed (``unsupported_claim``), not a refusal, since a reference that is itself a
+    refusal would let a sound judge pass a refusal as the same action. ``case`` is not
+    changed.
     """
     reference = _without_reasoning(case.reference)
     calls = _calls(reference)
-    if not calls or not isinstance(calls[0], Mapping):
+    if not calls:
+        return "unsupported_claim", _replacement(reference, _UNSUPPORTED_CLAIMS)
+    if not isinstance(calls[0], Mapping):
         return "refusal", _refusal(reference)
     message = copy.deepcopy(reference)
     first = message["tool_calls"][0]
