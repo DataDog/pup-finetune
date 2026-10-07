@@ -214,12 +214,17 @@ class LLMObsExperiments:
         self._pup.api("POST", _events_path(experiment_id), body, content_type=JSON_API)
 
     def count_events(self, experiment_id: str) -> int:
-        """How many events of the experiment are indexed (``total_matching``)."""
+        """How many events of the experiment are indexed (``total_matching``).
+
+        pup prints ``{"events": [...], "total_matching": N, ...}`` (checked live); an
+        enveloped ``{"data": {...}}`` answer is read too.
+        """
         data = self._pup.run_json(
             ["llm-obs", "experiments", "events", "list", experiment_id, "--limit", "1"]
         )
-        inner = data.get("data") if isinstance(data, dict) else None
-        total = inner.get("total_matching") if isinstance(inner, dict) else None
+        total = data.get("total_matching") if isinstance(data, dict) else None
+        if total is None and isinstance(data, dict) and isinstance(data.get("data"), dict):
+            total = data["data"].get("total_matching")
         if type(total) is not int:
             raise ExternalError(
                 "the experiment events list response has no total_matching count", source=_SOURCE

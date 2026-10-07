@@ -733,6 +733,17 @@ def test_publishing_waits_until_the_events_are_indexed(
     assert report["warnings"] == []
 
 
+@pytest.mark.parametrize("answer", ["ok", "enveloped"])
+def test_the_event_count_is_read_from_the_shape_pup_prints(
+    fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path, answer: str
+) -> None:
+    # pup prints total_matching at the top level (checked live); an envelope is read too.
+    api.events_list_answer = answer  # type: ignore[assignment]
+    report = publish(fake, Evaluation(), tmp_path / "eval", clock)
+    assert all(entry["indexed"] for entry in report["experiments"].values())
+    assert report["warnings"] == []
+
+
 def test_events_not_indexed_in_time_are_a_warning(
     fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
 ) -> None:

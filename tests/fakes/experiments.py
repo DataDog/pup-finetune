@@ -36,7 +36,7 @@ from typing import Any, Literal
 from tests.fakes.pup import FakePup, Handler, PupCall, PupExit, PupStdout
 
 CreateAnswer = Literal["ok", "unreadable", "no_id", "fail_after_create", "fail"]
-EventsListAnswer = Literal["ok", "fail", "no_total"]
+EventsListAnswer = Literal["ok", "enveloped", "fail", "no_total"]
 
 
 @dataclass
@@ -141,12 +141,12 @@ class FakeExperimentsApi:
             seen = min(seen, self.index_limit)
         limit = int(_flag(call, "--limit") or 20)
         events = [{"id": span["span_id"]} for span in experiment.spans[:seen][:limit]]
+        # The shape pup prints, as checked against the live service.
         if self.events_list_answer == "no_total":
-            return {"status": "success", "data": {"events": events}}
-        return {
-            "status": "success",
-            "data": {"events": events, "total_matching": seen, "returned": len(events)},
-        }
+            return {"events": events, "offset": 0, "returned": len(events)}
+        if self.events_list_answer == "enveloped":
+            return {"data": {"events": events, "total_matching": seen, "returned": len(events)}}
+        return {"events": events, "offset": 0, "returned": len(events), "total_matching": seen}
 
     def _api(self, call: PupCall) -> Any:
         path = call.args[1]
