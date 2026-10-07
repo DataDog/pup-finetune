@@ -74,6 +74,70 @@ def test_qwen_multiple_calls_and_json_values() -> None:
     assert [call["id"] for call in parsed.message["tool_calls"]] == ["call_0", "call_1"]
 
 
+def lookup_call(**values: str) -> str:
+    params = "".join(f"<parameter={key}>\n{value}\n</parameter>\n" for key, value in values.items())
+    return f"\n</think>\n\n<tool_call>\n<function=lookup>\n{params}</function>\n</tool_call>"
+
+
+def lookup_tool(**types: Any) -> dict[str, Any]:
+    properties = {key: {"type": kind} for key, kind in types.items()}
+    return {
+        "type": "function",
+        "function": {"name": "lookup", "parameters": {"type": "object", "properties": properties}},
+    }
+
+
+@pytest.mark.parametrize("value", ["123", "true", "null", "1.5", '{"a": 1}', "[1]", '"quoted"'])
+def test_qwen_a_declared_string_parameter_keeps_its_text(value: str) -> None:
+    # The template writes strings unquoted, so "123" may be the string the model meant.
+    parsed = QWEN.parse(lookup_call(code=value), [lookup_tool(code="string")])
+    assert parsed.format_valid
+    assert calls(parsed.message) == [("lookup", {"code": value})]
+
+
+def test_qwen_declared_non_string_parameters_are_decoded() -> None:
+    tool = lookup_tool(limit="integer", exact="boolean", ratio="number", tags="array")
+    parsed = QWEN.parse(lookup_call(limit="123", exact="true", ratio="0.5", tags='["a"]'), [tool])
+    assert calls(parsed.message) == [
+        ("lookup", {"limit": 123, "exact": True, "ratio": 0.5, "tags": ["a"]})
+    ]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("123", 123), ("null", None), ("true", "true"), ("abc", "abc"), ("1.5", "1.5")],
+)
+def test_qwen_a_type_list_with_string_decodes_only_the_other_listed_types(
+    value: str, expected: Any
+) -> None:
+    tool = lookup_tool(code=["string", "integer", "null"])
+    parsed = QWEN.parse(lookup_call(code=value), [tool])
+    assert calls(parsed.message) == [("lookup", {"code": expected})]
+
+
+@pytest.mark.parametrize(
+    "tools",
+    [
+        [],
+        [lookup_tool(other="string")],  # the parameter is not declared
+        [{**lookup_tool(code="string"), "function": {"name": "elsewhere"}}],  # another tool
+        [lookup_tool(code={"not": "a type"})],
+        [{"type": "function"}, "not a tool", {"function": {"name": "lookup", "parameters": []}}],
+    ],
+)
+def test_qwen_an_undeclared_parameter_is_decoded_as_before(tools: list[Any]) -> None:
+    parsed = QWEN.parse(lookup_call(code="123", note="hello"), tools)
+    assert parsed.format_valid
+    assert calls(parsed.message) == [("lookup", {"code": 123, "note": "hello"})]
+
+
+def test_qwen_the_first_tool_with_a_name_wins() -> None:
+    tools = [lookup_tool(code="string"), lookup_tool(code="integer")]
+    assert calls(QWEN.parse(lookup_call(code="123"), tools).message) == [
+        ("lookup", {"code": "123"})
+    ]
+
+
 def test_qwen_a_call_with_no_parameters() -> None:
     parsed = QWEN.parse("\n</think>\n\n<tool_call>\n<function=now>\n</function>\n</tool_call>")
     assert parsed.format_valid

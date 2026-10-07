@@ -90,7 +90,8 @@ an assistant message. `transformers` comes from the optional `hf` extra and load
   prefix.
 - `generation_prompt_tokens`, `stop_token_ids`, `decode` and `parse_response` are the
   inference side: the prompt a sampler continues, where it stops, and how a completion becomes
-  an OpenAI assistant message plus a `format_valid` flag.
+  an OpenAI assistant message plus a `format_valid` flag. `parse_response` takes the prompt's
+  tools, since a format can write argument values untyped (Qwen3.8 writes strings unquoted).
 - `identity()` pins the tokenizer, its revision, the template hash and the renderer and parser
   versions. A run records it, and a mismatch on resume means "prepare a new run".
 

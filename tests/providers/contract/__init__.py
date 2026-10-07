@@ -128,6 +128,28 @@ _CONVERSATIONS: list[Conversation] = [
     ),
 ]
 
+_LOOKUP_TOOL: ToolSpec = {
+    "type": "function",
+    "function": {
+        "name": "lookup",
+        "description": "Find a record.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string"},
+                "flag": {"type": "string"},
+                "label": {"type": "string"},
+                "limit": {"type": "integer"},
+                "exact": {"type": "boolean"},
+            },
+        },
+    },
+}
+
+# String arguments that read as JSON: a template may write strings unquoted, so a parse must
+# take their type from the declared tool.
+_TYPED_ARGUMENTS = {"code": "123", "flag": "true", "label": "null", "limit": 5, "exact": False}
+
 
 def _assistant_turns(messages: list[ChatMessage]) -> list[int]:
     return [i for i, message in enumerate(messages) if message["role"] == "assistant"]
@@ -288,7 +310,7 @@ class RendererContract:
                 assert not any(span[length:]), f"turn {turn} trains tokens after its completion"
                 completion = tokens[start : start + length]
                 assert completion[-1] in renderer.stop_token_ids
-                parsed = renderer.parse_response(renderer.decode(completion))
+                parsed = renderer.parse_response(renderer.decode(completion), tools)
                 assert parsed.format_valid
                 assert _comparable(parsed.message) == _comparable(rendered[turn])
 
@@ -311,13 +333,33 @@ class RendererContract:
                 example = renderer.per_turn_examples(trained, tools)[-1]
                 tokens, weights = _unshifted(example)
                 completion = [t for t, w in zip(tokens, weights, strict=True) if w > 0]
-                parsed = renderer.parse_response(renderer.decode(completion))
+                parsed = renderer.parse_response(renderer.decode(completion), tools)
                 assert parsed.format_valid
                 assert _comparable(parsed.message) == _comparable(messages[turn])
 
+    def test_parse_response_keeps_declared_argument_types(self, renderer: Renderer) -> None:
+        call = {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "lookup", "arguments": json.dumps(_TYPED_ARGUMENTS)},
+        }
+        messages: list[ChatMessage] = [
+            {"role": "user", "content": "Look up record 123."},
+            {"role": "assistant", "content": "", "tool_calls": [call]},
+        ]
+        example = renderer.per_turn_examples(messages, [_LOOKUP_TOOL])[-1]
+        tokens, weights = _unshifted(example)
+        completion = [t for t, w in zip(tokens, weights, strict=True) if w > 0]
+        parsed = renderer.parse_response(renderer.decode(completion), [_LOOKUP_TOOL])
+        assert parsed.format_valid
+        assert _comparable(parsed.message) == _comparable(messages[-1])
+
     @pytest.mark.parametrize("text", ["", "no end marker", '{"unclosed": ', "<|", "\n\n"])
-    def test_parse_response_never_raises(self, renderer: Renderer, text: str) -> None:
-        parsed = renderer.parse_response(text)
+    @pytest.mark.parametrize("tools", [[], [_LOOKUP_TOOL], [{"type": "function"}, "not a tool"]])
+    def test_parse_response_never_raises(
+        self, renderer: Renderer, text: str, tools: list[ToolSpec]
+    ) -> None:
+        parsed = renderer.parse_response(text, tools)
         assert parsed.message["role"] == "assistant"
         assert isinstance(parsed.format_valid, bool)
 

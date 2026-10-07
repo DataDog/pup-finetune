@@ -361,8 +361,8 @@ class HFChatTemplateRenderer:
     def decode(self, tokens: Sequence[int]) -> str:
         return self._chat_tokenizer().decode(tokens)
 
-    def parse_response(self, text: str) -> ParsedResponse:
-        return self._parser.parse(text)
+    def parse_response(self, text: str, tools: Sequence[ToolSpec] = ()) -> ParsedResponse:
+        return self._parser.parse(text, tools)
 
     def identity(self) -> dict[str, str]:
         template = self._chat_tokenizer().chat_template

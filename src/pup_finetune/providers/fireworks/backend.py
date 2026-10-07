@@ -331,7 +331,7 @@ class FireworksSampler:
         prompt = self._renderer.generation_prompt_tokens(messages, tools)
         stop = self._renderer.stop_token_ids
         sampled, latency = self._sample(prompt, max_tokens=max_tokens, stop=stop)
-        parsed = self._renderer.parse_response(self._renderer.decode(sampled.tokens))
+        parsed = self._renderer.parse_response(self._renderer.decode(sampled.tokens), tools)
         return Generation(
             message=parsed.message,
             # A completion cut off at max_tokens is not a whole turn, whatever it parses as.

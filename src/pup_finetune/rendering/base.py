@@ -144,8 +144,13 @@ class Renderer(Protocol):
         """Token ids back to text, special tokens included."""
         ...
 
-    def parse_response(self, text: str) -> ParsedResponse:
-        """A decoded completion (the tokens after the generation prompt) as a message."""
+    def parse_response(self, text: str, tools: Sequence[ToolSpec] = ()) -> ParsedResponse:
+        """A decoded completion (the tokens after the generation prompt) as a message.
+
+        ``tools`` are the tools the prompt declared. Pass them: a format that writes some
+        argument values untyped (Qwen3.8's XML tool calls write strings unquoted) reads each
+        one with the type its tool declares. Never raises.
+        """
         ...
 
     def identity(self) -> dict[str, str]:

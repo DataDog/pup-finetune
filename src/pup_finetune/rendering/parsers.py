@@ -32,19 +32,21 @@ false and a best-effort message. Two tool-call formats are covered:
   ``<tool_call>{"name": ..., "arguments": {...}}</tool_call>``.
 
 Both strip one trailing end-of-turn token. Model families pick a parser by name from
-:data:`PARSERS`.
+:data:`PARSERS`. A parser is also given the tools the prompt declared: the XML format needs
+their parameter types to read a value back (see :class:`Qwen3XmlToolParser`).
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, ClassVar, Protocol
 
-from pup_finetune.rendering.base import ChatMessage, ParsedResponse
+from pup_finetune.rendering.base import ChatMessage, ParsedResponse, ToolSpec
 from pup_finetune.storage import loads_finite
 
 _THINK_OPEN = "<think>"
@@ -69,8 +71,12 @@ class ResponseParser(Protocol):
         """Bumped whenever the parse of some text changes; recorded in renderer identities."""
         ...
 
-    def parse(self, text: str) -> ParsedResponse:
-        """``text`` (what follows the generation prompt) as a message. Never raises."""
+    def parse(self, text: str, tools: Sequence[ToolSpec] = ()) -> ParsedResponse:
+        """``text`` (what follows the generation prompt) as a message. Never raises.
+
+        ``tools`` are the tools the prompt declared, in OpenAI format. A parser may read
+        argument types from them, and accepts tools of any shape without raising.
+        """
         ...
 
 
@@ -147,20 +153,80 @@ def _parse_blocks(
     return ParsedResponse(message, format_valid=valid)
 
 
-def _value(text: str) -> Any:
-    """A parameter value: JSON when it parses as JSON, else the text itself."""
+_Properties = Mapping[str, Mapping[str, Mapping[str, Any]]]
+"""Each declared tool's ``parameters.properties``, by tool name."""
+
+
+def _properties(tools: Sequence[ToolSpec]) -> _Properties:
+    """The parameter schemas of ``tools`` by tool name.
+
+    Tools come from traces, so any shape is accepted: a tool or schema that is not the
+    expected mapping is skipped, and of two tools with one name the first wins.
+    """
+    found: dict[str, Mapping[str, Mapping[str, Any]]] = {}
+    for tool in tools:
+        spec = tool.get("function", tool) if isinstance(tool, Mapping) else None
+        if not isinstance(spec, Mapping):
+            continue
+        name, parameters = spec.get("name"), spec.get("parameters")
+        properties = parameters.get("properties") if isinstance(parameters, Mapping) else None
+        if isinstance(name, str) and isinstance(properties, Mapping) and name not in found:
+            found[name] = {
+                key: schema
+                for key, schema in properties.items()
+                if isinstance(key, str) and isinstance(schema, Mapping)
+            }
+    return found
+
+
+def _json_types(value: Any) -> set[str]:
+    """The JSON Schema ``type`` names a decoded JSON ``value`` has."""
+    if value is None:
+        return {"null"}
+    if isinstance(value, bool):
+        return {"boolean"}
+    if isinstance(value, int):
+        return {"integer", "number"}
+    if isinstance(value, float):
+        return {"number"}
+    if isinstance(value, str):
+        return {"string"}
+    if isinstance(value, list):
+        return {"array"}
+    return {"object"}
+
+
+def _value(text: str, schema: Mapping[str, Any] | None) -> Any:
+    """A parameter's value, read with the parameter's declared ``schema`` (``None`` if none).
+
+    The template writes a string unquoted and any other value as JSON, so the text alone
+    cannot tell the string ``"123"`` from the number. When the schema's ``type`` is
+    ``"string"`` the text is kept as is. When it is a list holding ``"string"``, the text is
+    decoded only if it is JSON of another listed type (``["string", "integer"]`` reads
+    ``123`` as a number, ``abc`` and ``true`` as text). Otherwise (no schema, no ``type``, or
+    one without ``"string"``) the text is decoded when it is valid JSON and kept otherwise.
+    """
+    declared = schema.get("type") if schema is not None else None
+    types = {declared} if isinstance(declared, str) else declared
     try:
-        return loads_finite(text)
+        decoded = loads_finite(text)
     except (ValueError, RecursionError):
         return text
+    if not isinstance(types, list | set) or "string" not in types:
+        return decoded
+    other = {kind for kind in types if isinstance(kind, str)} - {"string"}
+    return decoded if _json_types(decoded) & other else text
 
 
 @dataclass(frozen=True, slots=True)
 class Qwen3XmlToolParser:
     """The Qwen3.8 format: ``<think>`` reasoning and XML ``<function=...>`` tool calls.
 
-    A parameter's value is decoded as JSON when it is valid JSON (the template writes
-    non-string values as JSON) and kept as text otherwise. A block with no ``<function=...>``,
+    The template writes a string parameter value unquoted and any other value as JSON, so a
+    value is read with the type the called tool declares for that parameter in ``tools``: a
+    string parameter keeps its text, even text such as ``123``, ``true`` or ``null``. A
+    parameter no declared tool types is decoded as JSON when it is valid JSON and kept as text
+    otherwise (see :func:`_value`). A block with no ``<function=...>``,
     text outside its parameters or a repeated parameter is malformed. ``prompt_opens_think``
     (the default, as Qwen3.8's generation prompt ends ``<think>\\n``) makes text that never
     reaches ``</think>`` format-invalid; set it false for prompts that leave reasoning closed.
@@ -169,19 +235,21 @@ class Qwen3XmlToolParser:
     turn_end: str = "<|im_end|>"
     prompt_opens_think: bool = True
     name: ClassVar[str] = "qwen3_xml"
-    version: ClassVar[str] = "2"
+    version: ClassVar[str] = "3"
 
-    def parse(self, text: str) -> ParsedResponse:
+    def parse(self, text: str, tools: Sequence[ToolSpec] = ()) -> ParsedResponse:
+        parse_call = functools.partial(_xml_call, properties=_properties(tools))
         return _parse_blocks(
-            text, self.turn_end, _xml_call, prompt_opens_think=self.prompt_opens_think
+            text, self.turn_end, parse_call, prompt_opens_think=self.prompt_opens_think
         )
 
 
-def _xml_call(inner: str) -> tuple[str, dict[str, Any]] | None:
+def _xml_call(inner: str, *, properties: _Properties) -> tuple[str, dict[str, Any]] | None:
     function = _FUNCTION.fullmatch(inner.strip())
     if function is None:
         return None
     name, params = function.group(1).strip(), function.group(2)
+    schemas = properties.get(name, {})
     arguments: dict[str, Any] = {}
     position = 0
     for match in _PARAMETER.finditer(params):
@@ -189,7 +257,8 @@ def _xml_call(inner: str) -> tuple[str, dict[str, Any]] | None:
         if params[position : match.start()].strip() or not key or key in arguments:
             return None
         position = match.end()
-        arguments[key] = _value(match.group(2).removeprefix("\n").removesuffix("\n"))
+        text = match.group(2).removeprefix("\n").removesuffix("\n")
+        arguments[key] = _value(text, schemas.get(key))
     if params[position:].strip() or not name:
         return None
     return name, arguments
@@ -209,7 +278,8 @@ class JsonToolCallParser:
     name: ClassVar[str] = "json_tool_call"
     version: ClassVar[str] = "2"
 
-    def parse(self, text: str) -> ParsedResponse:
+    def parse(self, text: str, tools: Sequence[ToolSpec] = ()) -> ParsedResponse:
+        # JSON arguments carry their own types, so the declared tools are not needed.
         return _parse_blocks(
             text, self.turn_end, _json_call, prompt_opens_think=self.prompt_opens_think
         )

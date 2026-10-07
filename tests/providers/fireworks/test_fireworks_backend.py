@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -735,6 +736,30 @@ def test_the_base_sampler_parses_the_completion(
     assert stop == renderer.stop_token_ids
     decoded = token_sampler.tokenizer.decode(stop[:1], skip_special_tokens=False)
     assert decoded == renderer.decode(stop[:1])
+
+
+def test_the_sampler_parses_arguments_with_the_declared_tools(renderer: Renderer) -> None:
+    # Qwen3.8 writes string values unquoted: only the tool's schema says "123" is a string.
+    reply = (
+        "</think>\n\n<tool_call>\n<function=lookup>\n<parameter=code>\n123\n</parameter>\n"
+        "<parameter=limit>\n5\n</parameter>\n</function>\n</tool_call><|im_end|>"
+    )
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "lookup",
+            "parameters": {
+                "type": "object",
+                "properties": {"code": {"type": "string"}, "limit": {"type": "integer"}},
+            },
+        },
+    }
+    fw = FakeFireworksTrainingClient(sample_tokens=FakeChatTokenizer().encode(reply))
+    with backend_for(fw, renderer=renderer).open_session(PROFILE, LORA, **SESSION) as session:
+        generation = session.sampler(None).generate(PROMPT, [tool], max_tokens=512)
+    assert generation.format_valid
+    [call] = generation.message["tool_calls"]
+    assert json.loads(call["function"]["arguments"]) == {"code": "123", "limit": 5}
 
 
 def test_latency_counts_only_the_successful_attempt(fw: FakeFireworksTrainingClient) -> None:

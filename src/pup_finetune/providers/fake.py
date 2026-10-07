@@ -258,11 +258,12 @@ class FakeRenderer:
         """The completion text of an assistant ``message``, ``<|end|>`` included."""
         return self._assistant_body(message, where="the completion") + _END
 
-    def parse_response(self, text: str) -> ParsedResponse:
+    def parse_response(self, text: str, tools: Sequence[ToolSpec] = ()) -> ParsedResponse:
         """``text`` as an assistant message, the inverse of :meth:`render_completion`.
 
         Text the renderer could not have produced is format-invalid, including a template
         marker anywhere but in its own place (the renderer refuses marker-bearing text).
+        ``tools`` are not needed: this format writes tool-call arguments as JSON.
         """
         body, end, rest = text.partition(_END)
         invalid = ParsedResponse({"role": "assistant", "content": text}, format_valid=False)
@@ -861,7 +862,7 @@ class FakeSampler:
         stop_reason = "stop"
         if len(completion) > max_tokens:
             completion, stop_reason = completion[:max_tokens], "length"
-        parsed = self.renderer.parse_response(self.renderer.decode(completion))
+        parsed = self.renderer.parse_response(self.renderer.decode(completion), tools)
         return Generation(
             message=parsed.message,
             format_valid=parsed.format_valid,
