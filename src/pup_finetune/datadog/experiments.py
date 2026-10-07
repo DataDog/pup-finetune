@@ -333,7 +333,12 @@ class SpanGroup:
 
 
 def _ids(eval_key: str, name: str) -> tuple[str, str]:
-    """The span id (decimal, below 2**63) and trace id (32 hex digits) for ``name``."""
+    """The span id (decimal, below 2**63) and trace id (32 hex digits) for ``name``.
+
+    Names say what they name: ``root:<target>:<row id>`` for a row's root span and
+    ``case:<target>:<case id>`` for a case's span, so a row id that looks like a case id
+    (``row-a:1``) cannot take the id of another row's case.
+    """
     namespace = uuid.uuid5(_NAMESPACE, eval_key)
     derived = uuid.uuid5(namespace, name)
     span_id = derived.int & _UINT63 or 1
@@ -398,7 +403,7 @@ def _child(
     fallback_ns: int,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     """The span of ``case``, its metrics and its step in the root's output."""
-    span_id, _ = _ids(settings.eval_key, f"{target}:{case.id}")
+    span_id, _ = _ids(settings.eval_key, f"case:{target}:{case.id}")
     start_ns, duration = _timing(generation, result, fallback_ns)
     ok = result.get("status") == "ok"
     source = settings.records[case.row_id].get("metadata") or {}
@@ -468,7 +473,7 @@ def _row_group(
 ) -> SpanGroup:
     record = settings.records[row_id]
     record_id = settings.push.record_ids[row_id]
-    span_id, trace_id = _ids(settings.eval_key, f"{target}:{row_id}")
+    span_id, trace_id = _ids(settings.eval_key, f"root:{target}:{row_id}")
     tags = [
         *settings.tags(target),
         f"experiment_id:{experiment_id}",

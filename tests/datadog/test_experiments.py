@@ -88,8 +88,10 @@ def record(row_id: str) -> dict[str, Any]:
 class Evaluation:
     """Synthetic cases, generations and results of both targets: tuned passes, base fails."""
 
-    def __init__(self, rows: int = 2, cases_per_row: int = 2) -> None:
-        self.row_ids = [f"row-{n:03d}" for n in range(rows)]
+    def __init__(
+        self, rows: int = 2, cases_per_row: int = 2, *, row_ids: Sequence[str] | None = None
+    ) -> None:
+        self.row_ids = list(row_ids) if row_ids else [f"row-{n:03d}" for n in range(rows)]
         self.cases = [case(row, 2 * i + 1) for row in self.row_ids for i in range(cases_per_row)]
         self.generations: dict[tuple[str, str], dict[str, Any]] = {}
         self.results: dict[tuple[str, str], dict[str, Any]] = {}
@@ -549,6 +551,27 @@ def test_span_ids_are_the_same_in_every_run_of_one_evaluation(clock: Clock, tmp_
         experiment = api.experiments[report["experiments"]["tuned"]["experiment_id"]]
         ids.append([(span["span_id"], span["trace_id"]) for span in experiment.spans])
     assert ids[0] == ids[1]
+
+
+def test_a_row_id_that_looks_like_a_case_id_gets_ids_of_its_own(
+    fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
+) -> None:
+    # The case ``row-a:1`` of the row ``row-a`` and the row ``row-a:1`` have the same name.
+    evaluation = Evaluation(cases_per_row=1, row_ids=["row-a", "row-a:1"])
+    out = tmp_path / "eval"
+    api.events_failures = {2}
+    first = publish(fake, evaluation, out, clock, batch_size=2)  # one row a request
+    assert first["status"] == "failed"
+    second = publish(fake, evaluation, out, clock, batch_size=2)
+    assert second["status"] == "published"
+    assert second["experiments"]["base"]["already_published"] == 2
+    assert second["experiments"]["base"]["submitted"] == 2
+    for experiment in api.experiments.values():
+        assert len(experiment.spans) == 4
+        assert len({span["span_id"] for span in experiment.spans}) == 4
+        roots = spans_named(experiment.spans, ROOT_SPAN_NAME)
+        assert {root["meta"]["metadata"]["row_id"] for root in roots} == {"row-a", "row-a:1"}
+        assert len({root["trace_id"] for root in roots}) == 2
 
 
 # --- batching and resuming ----------------------------------------------------------------
