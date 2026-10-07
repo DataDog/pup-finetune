@@ -19,9 +19,14 @@ stopped (completed, early stop, budget, cancel):
   deployable artifact.
 
 Re-creating a sampler checkpoint is a paid save, so when a ``spend_guard`` refuses it the
-promotion fails (and the run stays resumable to retry only the promotion). A retry passes
-``adopt_since``, so a model an earlier attempt promoted, whose response was lost, is adopted
-rather than promoted again under a taken id.
+promotion fails (and the run stays resumable to retry only the promotion).
+
+Before its first promotion request a run records when it made it (``requested_at``, saved in
+``state.json`` and kept across resumes), and every promotion passes that time, less
+:data:`ADOPT_CLOCK_ALLOWANCE` for the provider's clock, as ``adopt_since``. So a model an
+earlier attempt promoted, whose response was lost, is adopted rather than promoted again
+under a taken id, while a model under the same id that existed before the run first asked
+(another run directory reusing the run id, say) is refused.
 """
 
 from __future__ import annotations
@@ -29,7 +34,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from pup_finetune.errors import ExternalError, StateError
 from pup_finetune.providers.base import CheckpointRef, TrainingSession
@@ -38,6 +43,9 @@ from pup_finetune.training.records import TrainResult
 
 NOTHING_TO_PROMOTE = "no epoch finished, so there is no checkpoint to promote"
 NO_SAMPLER_CHECKPOINT = "the best epoch has no sampler checkpoint to deploy"
+ADOPT_CLOCK_ALLOWANCE = timedelta(seconds=60)
+"""How much earlier than the recorded request a provider's creation time may read and still be
+the run's: the provider's clock and this machine's can disagree."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -50,10 +58,12 @@ class Promotion:
     sampler checkpoint is named by ``checkpoint_namer`` (kind ``recreated``), at most
     ``max_checkpoint_name_len`` characters. ``spend_guard``, when given, says why a
     re-creation must not be paid for (e.g. the training budget, reserve included, is spent).
-    ``adopt_since`` is when the run started, passed to
-    :meth:`~pup_finetune.providers.base.TrainingSession.promote` so that a model this run
-    already promoted is adopted. The returned result carries ``promoted_model`` (``None`` without promotion) and
-    ``deployable_ckpt``.
+    ``requested_at`` returns when the run first asked for a promotion, recording it first if
+    it never did (:meth:`~pup_finetune.runs.RunState.mark_promotion_requested`); it is called
+    right before :meth:`~pup_finetune.providers.base.TrainingSession.promote`, which gets that
+    time less :data:`ADOPT_CLOCK_ALLOWANCE` as ``adopt_since``, so that a model this run
+    already promoted is adopted. Without it no existing model is adopted. The returned
+    result carries ``promoted_model`` (``None`` without promotion) and ``deployable_ckpt``.
     """
 
     model_id: str
@@ -61,7 +71,7 @@ class Promotion:
     checkpoint_namer: CheckpointNamer
     max_checkpoint_name_len: int
     spend_guard: Callable[[], str | None] | None = None
-    adopt_since: datetime | None = None
+    requested_at: Callable[[], datetime] | None = None
 
     def __call__(self, session: TrainingSession, result: TrainResult) -> TrainResult:
         if not self.supports_promotion or result.best_epoch is None:
@@ -69,7 +79,10 @@ class Promotion:
         best = result.best_sampler_ckpt
         if best is None or best.created_in_session != session.session_id:
             best = self._recreate(session, result)
-        model = session.promote(best, self.model_id, adopt_since=self.adopt_since)
+        since = None
+        if self.requested_at is not None:
+            since = self.requested_at() - ADOPT_CLOCK_ALLOWANCE
+        model = session.promote(best, self.model_id, adopt_since=since)
         return dataclasses.replace(result, promoted_model=model, deployable_ckpt=best)
 
     def record_deployable(self, result: TrainResult) -> TrainResult:

@@ -26,7 +26,8 @@ leaves nothing running.
 - ``promote`` finds the checkpoint in the session's listing, where Fireworks has renamed it
   (``run-<hex>-<name>-<8 hex>``): the newest promotable sampler row carrying the name. It
   first looks the model up: one that already exists is adopted when it can only be this
-  run's (the same base model, created since ``adopt_since``, the run's start), because an
+  run's (the same base model, created since ``adopt_since``, shortly before the run first
+  asked for a promotion), because an
   earlier attempt's promotion succeeded but its response was lost; any other is refused
   with a :class:`~pup_finetune.errors.StateError` rather than promoted into a conflict. A
   promotion that fails in a way that can hide a success (a timeout, a dropped connection, a
@@ -549,7 +550,7 @@ class FireworksSession:
 
         ``checked`` says the model was absent when this promotion started, so only its base
         model is compared; otherwise it must also have been created no earlier than
-        ``since``, the run's start.
+        ``since``, just before the run first asked for a promotion.
         """
         name = record.get("name")
         name = name if isinstance(name, str) and name else expected
@@ -576,7 +577,7 @@ class FireworksSession:
             if created < since:
                 raise StateError(
                     f"{taken}: it was created at {created.isoformat()}, before this run "
-                    f"started at {since.isoformat()}",
+                    f"first asked to promote it (allowing for clock skew, {since.isoformat()})",
                     hint=hint,
                 )
         _warn(f"adopting the Fireworks model {name}, which this run already promoted")

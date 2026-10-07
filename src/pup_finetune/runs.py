@@ -127,6 +127,23 @@ def _iso(moment: datetime) -> str:
     return moment.isoformat(timespec="seconds")
 
 
+def _parsed_time(value: object) -> datetime | None:
+    """An ISO 8601 time from a run file as an aware time, or ``None`` when it is not one."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _optional_str(value: object) -> str | None:
+    if value is None or isinstance(value, str):
+        return value
+    raise ValueError(f"expected a string, got {type(value).__name__}")
+
+
 def check_run_id(run_id: str) -> str:
     """Return ``run_id`` if it is a valid run id, else raise :class:`UsageError`."""
     if not _RUN_ID.fullmatch(run_id):
@@ -438,6 +455,11 @@ class RunState:
     larger of the recorded value and the budget's, and every save records it. So a resume
     counts the time spent after the last training checkpoint too, up to the last save (at
     most one step or heartbeat before a crash).
+
+    :attr:`promotion_requested_at` is when the run first asked its provider to promote a
+    checkpoint (:meth:`mark_promotion_requested`), saved before that request and kept across
+    resumes, so a model created since can be told to be this run's (see
+    :class:`~pup_finetune.training.promotion.Promotion`).
     """
 
     def __init__(
@@ -458,6 +480,7 @@ class RunState:
         pid: int | None = None,
         error: Mapping[str, Any] | None = None,
         elapsed_seconds: float = 0.0,
+        promotion_requested_at: str | None = None,
         now: Clock = utcnow,
     ) -> None:
         if not (math.isfinite(elapsed_seconds) and elapsed_seconds >= 0):
@@ -479,6 +502,7 @@ class RunState:
         self.pid = pid
         self.error = None if error is None else dict(error)
         self._elapsed_seconds = float(elapsed_seconds)
+        self.promotion_requested_at = promotion_requested_at
         self._elapsed: Callable[[], float] | None = None
         self._now = now
         self._cancel = threading.Event()
@@ -512,6 +536,7 @@ class RunState:
                 pid=data.get("pid"),
                 error=data.get("error"),
                 elapsed_seconds=float(data.get("elapsed_seconds") or 0.0),
+                promotion_requested_at=_optional_str(data.get("promotion_requested_at")),
                 now=now,
             )
         except (TypeError, ValueError) as exc:
@@ -533,6 +558,7 @@ class RunState:
             "pid": self.pid,
             "error": self.error,
             "elapsed_seconds": self.elapsed_seconds,
+            "promotion_requested_at": self.promotion_requested_at,
         }
 
     @property
@@ -646,6 +672,23 @@ class RunState:
         if resume_point is not None:
             self.resume_point = resume_point.to_json()
         self.save()
+
+    def mark_promotion_requested(self) -> datetime:
+        """When the run first asked for a promotion: now, saved, the first time it is called.
+
+        Every later call, also in a resumed attempt, returns the recorded time unchanged, so
+        it is never later than any promotion request the run made. The time is saved before
+        it is returned, so a request made after the call is always covered.
+        """
+        recorded = _parsed_time(self.promotion_requested_at)
+        if recorded is not None:
+            return recorded
+        moment = self._now()
+        self.promotion_requested_at = _iso(moment)
+        self.save()
+        # The saved time, truncated to the second, so a resume reads back the same value.
+        parsed = _parsed_time(self.promotion_requested_at)
+        return moment if parsed is None else parsed
 
     def record_warning(self, message: str) -> None:
         self.warnings.append(message)

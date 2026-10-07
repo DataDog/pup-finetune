@@ -278,8 +278,9 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   computed from `forward`'s per-token logprobs, checkpoint names checked against the
   17-character limit before saving, `promote` picking the newest promotable sampler row
   carrying the checkpoint's name (`promotable_row`) and adopting a model this run already
-  promoted whose response was lost (`adopt_since`, the run's start), sampler checkpoints of an ended session
-  refused with a hint); and `FireworksSampler` (render, sample greedily to the renderer's stop
+  promoted whose response was lost (`adopt_since`: the run's first promotion request, saved
+  in `state.json` as `promotion_requested_at`, less a minute's clock allowance), sampler
+  checkpoints of an ended session refused with a hint); and `FireworksSampler` (render, sample greedily to the renderer's stop
   tokens, parse; only sampling is retried, a bounded number of times). Deployment arrives
   later. See `docs/architecture.md`.
 

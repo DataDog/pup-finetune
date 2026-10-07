@@ -415,10 +415,11 @@ class TrainingSession(Protocol):
         provider's fully qualified name for the model as ``uri``.
 
         A promotion can succeed on the provider while its response is lost, and a retry then
-        finds ``model_id`` taken. ``adopt_since`` (when the run started) lets a provider that
-        can look models up return such a model instead: one named ``model_id``, of the same
-        base model, created no earlier than ``adopt_since``, so it is this run's and not an
-        earlier run's that used the same id. A provider that cannot tell ignores it.
+        finds ``model_id`` taken. ``adopt_since`` (shortly before the run first asked for a
+        promotion) lets a provider that can look models up return such a model instead: one
+        named ``model_id``, of the same base model, created no earlier than ``adopt_since``, so
+        it is this run's and not another run's that used the same id. A provider that cannot
+        tell ignores it.
         """
         ...
 

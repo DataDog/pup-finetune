@@ -138,6 +138,8 @@ class RecordingSession:
         self.train_metrics = list(train_metrics)
         self.forward_metrics = list(forward_metrics)
         self.calls: list[str] = []
+        self.adopt_since: list[datetime | None] = []
+        """The ``adopt_since`` of each promotion."""
         self.train_batches: list[tuple[TokenizedExample, ...]] = []
         self.validation_batches: list[tuple[TokenizedExample, ...]] = []
         self.outstanding: list[TrackedResult[Any]] = []
@@ -198,6 +200,7 @@ class RecordingSession:
     def promote(
         self, ckpt: CheckpointRef, model_id: str, *, adopt_since: datetime | None = None
     ) -> ModelRef:
+        self.adopt_since.append(adopt_since)
         return self.inner.promote(ckpt, model_id, adopt_since=adopt_since)
 
     def sampler(self, ckpt: CheckpointRef | None) -> Sampler:

@@ -700,7 +700,7 @@ def test_an_existing_model_of_this_run_is_adopted_without_promoting(
 @pytest.mark.parametrize(
     ("created", "since", "match"),
     [
-        (SINCE - timedelta(seconds=1), SINCE, "before this run started"),
+        (SINCE - timedelta(seconds=1), SINCE, "before this run first asked to promote it"),
         (SINCE, None, "already exists"),
         (None, SINCE, "does not say when it was created"),
     ],
@@ -971,8 +971,9 @@ def _provider(fw: FakeFireworksTrainingClient) -> FireworksProvider:
     )
 
 
-def _new_run(path: Path, renderer: Renderer) -> RunDir:
+def _new_run(path: Path, renderer: Renderer, *, created_at: datetime | None = None) -> RunDir:
     spec = TrainSpec(max_epochs=2, batch_size=2, pipeline_depth=2, patience=2)
+    clock = {} if created_at is None else {"now": lambda: created_at}
     return RunDir.create(
         path,
         provider="fireworks",
@@ -982,6 +983,7 @@ def _new_run(path: Path, renderer: Renderer) -> RunDir:
         dataset_sha256="d" * 64,
         rendering=renderer.identity(),
         run_id=RUN_ID,
+        **clock,
     )
 
 
@@ -1007,30 +1009,91 @@ def test_a_run_promotes_its_best_epoch_before_the_session_ends(
     assert _live(fw) == []
 
 
+class _RequestWatcher(FakeFireworksTrainingClient):
+    """The in-memory Fireworks, noting the run's recorded promotion request at each promotion."""
+
+    def __init__(self, run_dir: RunDir) -> None:
+        super().__init__()
+        self.run_dir = run_dir
+        self.recorded: list[str | None] = []
+
+    def promote_session_checkpoint(
+        self, resource_name: str, output_model_id: str, base_model: str
+    ) -> dict[str, Any]:
+        self.recorded.append(self.run_dir.load_state().promotion_requested_at)
+        return super().promote_session_checkpoint(resource_name, output_model_id, base_model)
+
+
 def test_a_run_whose_promotion_response_was_lost_adopts_the_model_on_resume(
-    fw: FakeFireworksTrainingClient, renderer: Renderer, tmp_path: Path
+    renderer: Renderer, tmp_path: Path
 ) -> None:
-    run_dir = _new_run(tmp_path / "run", renderer)
+    run_dir = _new_run(tmp_path / "run", renderer, created_at=SINCE - timedelta(hours=1))
+    fw = _RequestWatcher(run_dir)
     train_rows, validation_rows = _rows(renderer, 4, "train"), _rows(renderer, 2, "val")
     # The promotion takes place but its response is lost, and so is the lookup after it.
     fw.lost_responses.append("connection")
     fw.fail("get_model", "connection", after=1)
+    fw.now = lambda: SINCE + timedelta(seconds=2)
     with pytest.raises(FinalizeFailed):
         start_training(
-            _provider(fw), run_dir, train_rows=train_rows, validation_rows=validation_rows
+            _provider(fw),
+            run_dir,
+            train_rows=train_rows,
+            validation_rows=validation_rows,
+            now=lambda: SINCE,
         )
     model_id = model_id_for_run(RUN_ID)
     assert model_id in fw.promoted
     assert (run_dir.read_result() or {})["promoted_model"] is None
+    # The request's time was saved before the request was made.
+    assert fw.recorded == [SINCE.isoformat()]
 
-    # Every retry used to promote again and fail on the taken id; it now adopts the model.
+    # Every retry used to promote again and fail on the taken id; it now adopts the model,
+    # created after the recorded request, however much later the retry runs.
     fw.calls.clear()
     result = resume_training(
-        _provider(fw), run_dir, train_rows=train_rows, validation_rows=validation_rows
+        _provider(fw),
+        run_dir,
+        train_rows=train_rows,
+        validation_rows=validation_rows,
+        now=lambda: SINCE + timedelta(days=1),
     )
     assert result["phase"] == "completed"
+    assert run_dir.load_state().promotion_requested_at == SINCE.isoformat()
     assert result["promoted_model"]["uri"] == f"accounts/{ACCOUNT}/models/{model_id}"
     assert not any(call[0] == "promote_session_checkpoint" for call in fw.calls)
+    assert _live(fw) == []
+
+
+def test_a_model_another_run_directory_promoted_under_the_run_id_is_refused(
+    fw: FakeFireworksTrainingClient, renderer: Renderer, tmp_path: Path
+) -> None:
+    train_rows, validation_rows = _rows(renderer, 4, "train"), _rows(renderer, 2, "val")
+    # Run A starts first; run B, reusing its run id, promotes before A gets to promote.
+    first = _new_run(tmp_path / "a" / "run", renderer, created_at=SINCE)
+    second = _new_run(tmp_path / "b" / "run", renderer, created_at=SINCE + timedelta(minutes=5))
+    fw.now = lambda: SINCE + timedelta(minutes=10)
+    start_training(
+        _provider(fw),
+        second,
+        train_rows=train_rows,
+        validation_rows=validation_rows,
+        now=fw.now,
+    )
+    fw.calls.clear()
+    # B's model was created after A started, but well before A asked for a promotion.
+    with pytest.raises(FinalizeFailed) as caught:
+        start_training(
+            _provider(fw),
+            first,
+            train_rows=train_rows,
+            validation_rows=validation_rows,
+            now=lambda: SINCE + timedelta(hours=1),
+        )
+    assert isinstance(caught.value.__cause__, StateError)
+    assert "before this run first asked to promote it" in str(caught.value.__cause__)
+    assert not any(call[0] == "promote_session_checkpoint" for call in fw.calls)
+    assert (first.read_result() or {})["promoted_model"] is None
     assert _live(fw) == []
 
 

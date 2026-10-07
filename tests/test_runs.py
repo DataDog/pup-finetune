@@ -261,6 +261,21 @@ def test_every_save_records_the_elapsed_time_and_it_never_decreases(tmp_path: Pa
     assert run_dir.load_state().elapsed_seconds == 120.0
 
 
+def test_the_first_promotion_request_is_saved_once_and_kept(tmp_path: Path) -> None:
+    run_dir = create(tmp_path / "run")
+    assert run_dir.load_state().promotion_requested_at is None
+    first = NOW + timedelta(hours=1, microseconds=500)
+    state = run_dir.load_state(now=lambda: first)
+    # Saved before it is returned, to the second, as read back later.
+    assert state.mark_promotion_requested() == first.replace(microsecond=0)
+    assert read(run_dir.state_path)["promotion_requested_at"] == "2026-10-06T13:30:45+00:00"
+    # A later attempt (a resume, a promotion retry) gets the recorded time, not its own.
+    later = run_dir.load_state(now=lambda: NOW + timedelta(days=1))
+    assert later.mark_promotion_requested() == first.replace(microsecond=0)
+    later.save()
+    assert run_dir.load_state().promotion_requested_at == "2026-10-06T13:30:45+00:00"
+
+
 @pytest.mark.parametrize("elapsed", [-1.0, "soon"])
 def test_an_invalid_elapsed_time_on_disk_is_an_error(tmp_path: Path, elapsed: Any) -> None:
     run_dir = create(tmp_path / "run")

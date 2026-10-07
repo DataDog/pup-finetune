@@ -14,9 +14,11 @@ rows, at most the profile's), and run
 :func:`~pup_finetune.training.loop.run_training` with
 :class:`~pup_finetune.training.promotion.Promotion` as its ``finalize`` hook, so the best
 checkpoint is promoted before the session closes. The promoted model's id is
-:func:`~pup_finetune.runs.model_id_for_run`, and the run's ``created_at`` is passed as
-``adopt_since``, so a model an earlier attempt of the run promoted (its response lost) is
-adopted. Once training and promotion are done, a
+:func:`~pup_finetune.runs.model_id_for_run`, and when the run first asked for a promotion is
+recorded in ``state.json`` before that request
+(:meth:`~pup_finetune.runs.RunState.mark_promotion_requested`), so a model an earlier attempt
+of the run promoted (its response lost) is adopted, and one that existed before is not. Once
+training and promotion are done, a
 failure to end the session only adds a warning: the result, and the promoted model, are
 kept.
 
@@ -40,7 +42,6 @@ import dataclasses
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any
 
 from pup_finetune.errors import StateError, UsageError
@@ -173,7 +174,6 @@ class _Run:
         provider.validate_options(spec.provider_options)
         backend = provider.backend()
         run_id = str(manifest["run_id"])
-        created_at = manifest.get("created_at")
         profile = run_dir.profile()
         # The same on every resume, since a resume needs the run's own rows.
         longest = _longest_example([*train_rows, *validation_rows])
@@ -192,7 +192,6 @@ class _Run:
                 supports_promotion=backend.supports_promotion,
                 checkpoint_namer=checkpoint_namer(run_id),
                 max_checkpoint_name_len=backend.max_checkpoint_name_len,
-                adopt_since=_parsed_time(created_at),
             ),
             clock=clock,
             sleep=sleep,
@@ -226,7 +225,9 @@ class _Run:
         state.track_elapsed(lambda: budget.elapsed_seconds)
         # Promotion may spend the reserve the budget keeps beyond where training stops.
         promotion = dataclasses.replace(
-            self.promotion, spend_guard=lambda: budget.spend_exhausted(use_reserve=True)
+            self.promotion,
+            spend_guard=lambda: budget.spend_exhausted(use_reserve=True),
+            requested_at=state.mark_promotion_requested,
         )
 
         def train_in(session: TrainingSession) -> TrainResult:
@@ -253,10 +254,11 @@ class _Run:
         result = TrainResult.from_json(self.run_dir.read_result() or {})
         if not self.backend.supports_promotion or result.best_epoch is None:
             return self.promotion.record_deployable(result)
+        promotion = dataclasses.replace(self.promotion, requested_at=state.mark_promotion_requested)
 
         def promote_in(session: TrainingSession) -> TrainResult:
             try:
-                return self.promotion(session, result)
+                return promotion(session, result)
             except BaseException as exc:
                 raise FinalizeFailed(result, exc) from exc
 
@@ -309,17 +311,6 @@ class _Run:
 def _describe(error: BaseException) -> str:
     detail = redact(str(error))
     return f"{type(error).__name__}{': ' + detail if detail else ''}"
-
-
-def _parsed_time(value: object) -> datetime | None:
-    """``run.json``'s ``created_at`` as an aware time, or ``None`` when it is not readable."""
-    if not isinstance(value, str):
-        return None
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def _longest_example(rows: Iterable[RowExamples]) -> int | None:
