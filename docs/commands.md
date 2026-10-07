@@ -96,7 +96,7 @@ pup finetune models list [OPTIONS]
 
 ## `pup finetune dataset preview`
 
-Export LLM spans from Datadog, check and convert them into training rows, and assign splits, all in memory: nothing is written. Shows the time range it read, how many spans matched, how many rows would be accepted, why the rest would be excluded, a few samples, and the `dataset pull` command with the same flags. Spans are LLM spans of --ml-app in the time range, narrowed by --span-name, --query and --tag. Each span becomes a conversation (input then output messages); per trace, a conversation another one contains is dropped, so sub-agents stay their own rows. Errored LLM calls are excluded as span_error unless --include-errors is passed. Reading stops once --target-count rows are accepted or --max-candidates spans are read, unreadable ones included. It only reads from Datadog (through pup), so it is allowed with PUP_READ_ONLY set.
+Export LLM spans from Datadog, check and convert them into training rows, and assign splits, all in memory: nothing is written. Shows the time range it read, how many spans matched, how many rows would be accepted, why the rest would be excluded, a few samples, and the `dataset pull` command with the same flags. Spans are LLM spans of --ml-app in the time range, narrowed by --span-name, --query and --tag. Each span becomes a conversation (input then output messages; a plain input or output value is the user or assistant message); per trace, a conversation another one contains is dropped, so sub-agents stay their own rows. Errored LLM calls are excluded as span_error unless --include-errors is passed. Reading stops once --target-count rows are accepted or --max-candidates spans are read, unreadable ones included. It only reads from Datadog (through pup), so it is allowed with PUP_READ_ONLY set.
 
 ```
 pup finetune dataset preview [OPTIONS]
@@ -120,7 +120,7 @@ pup finetune dataset preview [OPTIONS]
 
 ## `pup finetune dataset pull`
 
-Export LLM spans from Datadog, check and convert them into training rows, and add them to DIR with their splits, creating it if needed. Excluded rows are recorded in excluded.jsonl with their reason. The filter, --reasoning, --include-errors and the split settings are frozen in DIR on the first pull; a pull with other values fails, so use a new directory. Raw pages are cached in DIR/raw/, so re-running an interrupted pull with the same flags resumes without fetching them again, and a higher --target-count or --max-candidates reads further (a stored row that turns out to be a prefix of a longer conversation of its trace is then excluded as contained_conversation). A relative --from or --to, such as the default now-7d, is resolved when the first pull starts and that window is frozen with the expressions; a re-run with the same expressions reads the same window. Spans are LLM spans of --ml-app in the time range, narrowed by --span-name, --query and --tag. Each span becomes a conversation (input then output messages); per trace, a conversation another one contains is dropped, so sub-agents stay their own rows. Errored LLM calls are excluded as span_error unless --include-errors is passed. Reading stops once --target-count rows are accepted or --max-candidates spans are read, unreadable ones included. It only reads from Datadog (through pup), so it is allowed with PUP_READ_ONLY set.
+Export LLM spans from Datadog, check and convert them into training rows, and add them to DIR with their splits, creating it if needed. Excluded rows are recorded in excluded.jsonl with their reason. The filter, --reasoning, --include-errors and the split settings are frozen in DIR on the first pull; a pull with other values fails, so use a new directory. Raw pages are cached in DIR/raw/, so re-running an interrupted pull with the same flags resumes without fetching them again, and a higher --target-count or --max-candidates reads further (a stored row that turns out to be a prefix of a longer conversation of its trace is then excluded as contained_conversation). A relative --from or --to, such as the default now-7d, is resolved when the first pull starts and that window is frozen with the expressions; a re-run with the same expressions reads the same window. Spans are LLM spans of --ml-app in the time range, narrowed by --span-name, --query and --tag. Each span becomes a conversation (input then output messages; a plain input or output value is the user or assistant message); per trace, a conversation another one contains is dropped, so sub-agents stay their own rows. Errored LLM calls are excluded as span_error unless --include-errors is passed. Reading stops once --target-count rows are accepted or --max-candidates spans are read, unreadable ones included. It only reads from Datadog (through pup), so it is allowed with PUP_READ_ONLY set.
 
 ```
 pup finetune dataset pull [OPTIONS] DIR
@@ -232,7 +232,7 @@ pup finetune dataset triage [OPTIONS] [DIR]
 | `--judges` | `M1,M2` |  | Comma-separated judge models (default: accounts/fireworks/models/deepseek-v4p1-flash,accounts/fireworks/models/glm-5p3-flash). |
 | `--concurrency` | `INTEGER (1<=x<=64)` | `4` | Judge calls made at once. |
 | `--max-rows` | `INTEGER (x>=1)` |  | Review at most this many rows (a fixed sample, e.g. 20 to calibrate the rubric first; a larger run later reuses its votes). |
-| `--reset-triage` |  |  | Discard every vote and the frozen rubric and judges first. |
+| `--reset-triage` |  |  | Discard every vote (even an unreadable judgments.jsonl) and the frozen rubric and judges first. |
 | `--print-template` |  |  | Print a rubric template (Task / Keep / Drop / Examples) and exit. |
 | `--confirm` |  |  | Run the judges (paid); without it, only preview. |
 
@@ -279,12 +279,12 @@ pup finetune train [OPTIONS]
 | `--seed` | `INTEGER` |  | Seed (default: 42). |
 | `--checkpoint-every-minutes` | `FLOAT` |  | Also save a resumable checkpoint this often, between epochs (default: 15.0). |
 | `--max-train-tokens` | `INTEGER` |  | Stop before training on more rendered tokens than this. |
-| `--max-spend-usd` | `FLOAT` |  | Stop before the elapsed time costs more; needs --hourly-rate-usd. |
+| `--max-spend-usd` | `FLOAT` |  | Stop before the elapsed time costs more; needs --hourly-rate-usd. With --evaluate, the evaluation in the training session stops at it too. |
 | `--hourly-rate-usd` | `FLOAT` |  | Your training price per hour (USD), for --max-spend-usd. |
 | `--spend-reserve-fraction` | `FLOAT` |  | The share of --max-spend-usd kept for the checkpoint and promotion at the stop; training stops that much short of the cap (default: 0.1). |
 | `--microbatch-token-budget` | `INTEGER` |  | Pack each step into microbatches of at most this many tokens. |
 | `--provider-option` | `KEY=VALUE, repeatable` |  | A provider-specific option; repeat for more. |
-| `--evaluate` |  |  | Also evaluate the run on the test split once it is trained, in its training session (paid; see `pup finetune evaluate`). |
+| `--evaluate` |  |  | Also evaluate the run on the test split once it is trained, in its training session (paid; see `pup finetune evaluate`), within --max-spend-usd. |
 | `--eval-out-dir` | `PATH` |  | With --evaluate: where the evaluation goes (default: RUN_DIR/eval). |
 | `--eval-max-cases-per-trajectory` | `INTEGER (x>=1)` | `2` | With --evaluate: most assistant turns replayed per test conversation. |
 | `--eval-judge-model` | `TEXT` |  | With --evaluate: the judge model (default: as `evaluate`). |
