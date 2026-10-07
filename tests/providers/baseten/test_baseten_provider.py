@@ -5,7 +5,8 @@
 # This product includes software developed at Datadog (https://www.datadoghq.com/).
 # Copyright 2026-present Datadog, Inc.
 """The Baseten provider against the Loops fake: the renderer and provider contracts, then
-registration, profiles, preflight, checks, the key, options and deployment."""
+registration, profiles, preflight, checks, the key and options. Deployment is in
+test_baseten_deploy.py."""
 
 from __future__ import annotations
 
@@ -27,9 +28,7 @@ from pup_finetune import redaction
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.providers import get_provider, known_providers
 from pup_finetune.providers.base import (
-    DeploymentRequest,
     DeployOptions,
-    Endpoint,
     LoraConfig,
     ModelProfile,
     ModelRef,
@@ -49,6 +48,7 @@ from pup_finetune.rendering.families import GLM5_3, QWEN3_5
 from pup_finetune.rendering.hf import ChatTokenizer
 from pup_finetune.runtime import Runtime
 from tests.fakes.baseten import Answer, BasetenTransport, FakeLoops, capabilities
+from tests.fakes.fireworks_deploy import FakeClock
 from tests.fakes.tokenizer import FakeChatTokenizer, glm5_like
 from tests.providers.contract import ProviderContract, RendererContract
 
@@ -64,15 +64,20 @@ FAKE_TOKENIZERS: dict[str, Callable[[], ChatTokenizer]] = {
 """A fake tokenizer per renderer family, with a template like the family's."""
 
 
-def provider_on(loops: FakeLoops, tokenizer: ChatTokenizer | None = None) -> BasetenProvider:
-    """The real provider on the Loops fake, with a key and a workspace offering every model."""
+def provider_on(
+    loops: FakeLoops, tokenizer: ChatTokenizer | None = None, *, clock: FakeClock | None = None
+) -> BasetenProvider:
+    """The real provider on the Loops fake, with a key and a workspace offering every model;
+    its waits run on ``clock`` (by default, a new one)."""
+    time = clock or FakeClock()
     return BasetenProvider(
         Runtime(),
         env=ENV,
         transport=loops.transport({CAPABILITIES_ROUTE: (200, CAPABILITIES)}),
         loops=loops,
         tokenizer=tokenizer or FakeChatTokenizer(),
-        sleep=lambda _: None,
+        sleep=time.sleep,
+        clock=time.now,
     )
 
 
@@ -117,14 +122,21 @@ class TestBasetenRenderer(RendererContract):
 
 class TestBasetenProviderContract(ProviderContract):
     @pytest.fixture
-    def provider(self) -> Provider:
-        return provider_on(FakeLoops())
+    def loops(self) -> FakeLoops:
+        return FakeLoops()
 
-    @pytest.mark.skip(reason="Baseten deployment lands in the next PR, with Provider.deploy")
-    def test_deploy_smoke_test_and_undeploy(
-        self, provider: Provider, model_ref: ModelRef, deploy_options: DeployOptions
-    ) -> None:
-        raise NotImplementedError
+    @pytest.fixture
+    def provider(self, loops: FakeLoops) -> Provider:
+        return provider_on(loops)
+
+    @pytest.fixture
+    def model_ref(self, loops: FakeLoops) -> ModelRef:
+        uri = loops.sampler_checkpoint("best", base_model=QWEN.base_model)
+        return ModelRef(provider="baseten", model_id="best", uri=uri)
+
+    @pytest.fixture
+    def deploy_options(self) -> DeployOptions:
+        return DeployOptions(deployment_id="pft-contract-deployment", shape="H100:1")
 
 
 # --- registration and profiles -----------------------------------------------------------
@@ -481,39 +493,3 @@ def test_the_max_seq_len_option_caps_the_backend() -> None:
     assert loops.calls == []
     with backend.open_session(QWEN, LoraConfig(rank=8), seed=1, max_seq_len=2048):
         pass
-
-
-# --- deployment --------------------------------------------------------------------------
-
-
-def test_deploying_is_refused_before_anything_is_sent() -> None:
-    provider, transport = provider_for()
-    model = ModelRef(provider="baseten", model_id="m", uri="bt://loops:run1/sampler_weights/s1")
-    events: list[str] = []
-    with pytest.raises(UsageError, match="deploying on Baseten is not available"):
-        provider.deploy(
-            model,
-            DeployOptions(deployment_id="pft-run"),
-            on_creating=lambda _: events.append("creating"),
-            on_created=lambda *_: events.append("created"),
-        )
-    assert events == []
-    assert provider.deployment_name("pft-run") is None
-    request = DeploymentRequest(
-        deployment_id="pft-run",
-        base_model=model.uri,
-        name=None,
-        display_name="pft-run",
-        shape="H100:1",
-        min_replicas=0,
-        max_replicas=1,
-    )
-    endpoint = Endpoint(provider="baseten", deployment_id="d", model_id="m", inference_model="m")
-    for call in (
-        lambda: provider.owns_deployment(request),
-        lambda: provider.smoke_test(endpoint),
-        lambda: provider.undeploy(endpoint),
-    ):
-        with pytest.raises(UsageError, match="not available"):
-            call()
-    assert transport.calls == []

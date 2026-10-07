@@ -7,10 +7,12 @@
 """The backend and provider contracts against the real Baseten Loops (``PUP_FINETUNE_LIVE=1``).
 
 The backend suite is paid: it trains real, billed Loops runs and samplers with the real
-``qwen3_5`` tokenizer. The provider suite is read only: preflight and checks ask Baseten, and
-renderers load the real tokenizers. Both need the ``baseten`` and ``hf`` extras and a key in
-``BASETEN_API_KEY`` (never the keychain). Every session deactivates its run and samplers when
-it ends.
+``qwen3_5`` tokenizer. The provider suite is read only (preflight and checks ask Baseten, and
+renderers load the real tokenizers) but for its deploy test, which runs only with
+``PUP_FINETUNE_BASETEN_CHECKPOINT`` set to a ``bt://loops:`` sampler checkpoint of
+``qwen3p5-9b``: it deploys it on a billed H100 and always undeploys it. Both need the
+``baseten`` and ``hf`` extras and a key in ``BASETEN_API_KEY`` (never the keychain). Every
+session deactivates its run and samplers when it ends.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ import os
 import pytest
 from pydantic import SecretStr
 
-from pup_finetune.providers.base import ModelProfile, Provider
+from pup_finetune.providers.base import ModelProfile, ModelRef, Provider
 from pup_finetune.providers.baseten.backend import BasetenBackend
 from pup_finetune.providers.baseten.provider import BasetenProvider
 from pup_finetune.rendering.families import QWEN3_5
@@ -61,3 +63,10 @@ class TestBasetenProviderLive(provider_on_fake.TestBasetenProviderContract):
         if not key:
             pytest.skip("set BASETEN_API_KEY to run the live Baseten tests")
         return BasetenProvider(Runtime(), env={"BASETEN_API_KEY": key})
+
+    @pytest.fixture
+    def model_ref(self) -> ModelRef:
+        uri = os.environ.get("PUP_FINETUNE_BASETEN_CHECKPOINT", "").strip()
+        if not uri:
+            pytest.skip("set PUP_FINETUNE_BASETEN_CHECKPOINT to a checkpoint to deploy (billed)")
+        return ModelRef(provider="baseten", model_id=uri.rsplit("/", 1)[-1], uri=uri)

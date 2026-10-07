@@ -385,7 +385,7 @@ pup finetune deploy [OPTIONS] RUN_DIR
 | Option | Value | Default | Description |
 | --- | --- | --- | --- |
 | `--deployment-id` | `TEXT` |  | The deployment's id (default: derived from the run id). |
-| `--shape` | `TEXT` |  | The deployment shape (default: the first validated shape the provider matches to the model). |
+| `--shape` | `TEXT` |  | The deployment shape (default: the provider's default shape for the model). |
 | `--timeout-minutes` | `FLOAT (x>=1)` | `30.0` | How long to wait for the deployment to serve. |
 | `--confirm` |  |  | Create it (paid); without it, only preview. |
 
