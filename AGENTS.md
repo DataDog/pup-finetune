@@ -48,7 +48,43 @@ uv run pup-finetune train --provider fake --model fake-model --dataset /tmp/ds -
                                      # preview only (exit 2); its next_command adds --confirm
 uv run pup-finetune train --provider fake --model fake-model --dataset /tmp/ds --run-dir /tmp/run --confirm
 uv run pup-finetune status /tmp/run  # phase, losses, best epoch, worker, promoted model
+uv run pup-finetune evaluate /tmp/run          # preview only (exit 2): cases and calls
+uv run pup-finetune evaluate /tmp/run --confirm
+                                     # replays the test split with base and tuned into
+                                     # /tmp/run/eval; rerun to resume; summary.json at the end
 ```
+
+A complete evaluation is also published to Datadog as two Agent Observability experiments
+(`pup-finetune-base-<run id>` and `pup-finetune-tuned-<run id>`) on the dataset `dataset push`
+created, at the version it pushed: a root span per test conversation linked to its dataset
+record and a child span per replayed action, with the metrics and judge verdicts. It needs the
+dataset's push receipt (`push.json`): without one the preview and the result warn and the
+evaluation is not published (the local results are complete either way); `--no-publish`
+(`--eval-no-publish` for `train --evaluate`) skips it without a warning. Publishing resumes:
+`experiments.json` and `published.json` in the evaluation directory record the experiments
+created and the spans sent, so a rerun creates and sends nothing twice, and a failed publish
+exits 1 with a `next_command` that publishes the rest (a Ctrl-C while publishing leaves a
+`cancelled` publication that the rerun continues too). Spans already published keep the
+results they were sent with: retrying an evaluation's errors updates only the local results,
+so evaluate into a new `--out-dir` for experiments with every result. Spans not indexed within
+two minutes (one budget for both experiments) are a warning. Tests serve it with `FakePup` and `FakeExperimentsApi`; nothing reaches Datadog.
+
+`evaluate` on a fake run uses the offline fake judge (`--judge-model fake-judge`, dev mode
+only), and the fake's tuned checkpoint calls the tools its training data called, so the
+summary shows a positive `tuned_minus_base`. `train ... --evaluate --confirm` evaluates in the
+training session right after promotion instead (foreground only; `--eval-out-dir`, which must
+be new or empty and is checked before training, `--eval-max-cases-per-trajectory`,
+`--eval-judge-model`, `--eval-concurrency`, `--eval-max-tokens`, `--eval-seed` and
+`--eval-skip-calibration` configure it). The run's end is recorded before that evaluation
+starts, so a crash during it keeps the trained, promoted run; a failed evaluation exits 1
+with the trained run and the `evaluate` command to retry it. A cancelled or budget-capped
+training is not evaluated in its session (the evaluation would spend the session's time past
+the cap); `evaluate` evaluates it on request. Evaluating a real run is paid and needs the
+judge's key (`FIREWORKS_API_KEY` for the default judge); the preview is free and allowed with
+`PUP_READ_ONLY` set, evaluating is not. A changed `--max-tokens`, judge, seed or cap needs a
+new `--out-dir`. An evaluation whose pairs ended in errors (a sampler or judge outage) reports
+`complete_with_errors` with an error count and a `next_command` that retries them, and exits
+1 when a target has no verdict at all; a cancelled one reports `partial`.
 
 To build a dataset from your own Agent Observability traces (Datadog reads through pup, so
 both work with `PUP_READ_ONLY` set):
@@ -126,8 +162,10 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
 
 - `cli/` - the Typer app; one module per command group. `dataset.py` has `dataset import`,
   `preview`, `pull`, `show`, `sample`, `label` and `push`; `train.py` has `train`, `resume`,
-  `status`, `cancel` and the hidden `_worker` a detached run executes; `models.py` has
-  `models list` (with `--check`, a preflight per profile).
+  `status`, `cancel` and the hidden `_worker` a detached run executes (and `train
+  --evaluate`); `models.py` has `models list` (with `--check`, a preflight per profile);
+  `evaluate.py` has `evaluate`, which only parses its flags and emits what
+  `evaluation/runner.py` returns.
 - `runtime.py` - non-secret settings from the environment (`PUP_OUTPUT`, `PUP_READ_ONLY`, ...).
 - `errors.py` - expected failures and their exit codes; the `--confirm` and read-only guards.
 - `output.py` - the one stdout result (through `pup format` under pup), progress on stderr.
@@ -138,6 +176,17 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   from the environment variable, then the OS keychain (`keyring`), as `SecretStr`; `store` refuses
   when there is no OS keychain rather than writing a file. `auth login/status/logout` use it.
 - `redaction.py` - masks resolved secrets and `Bearer` tokens in error output and logs.
+- `concurrency.py` - `DaemonPool`, worker threads for parallel remote calls that never hold
+  up the process's exit, so Ctrl-C stops at once instead of waiting for a call in flight.
+- `http_common.py` - what the `httpx` clients that send a provider key share: `bearer_key`
+  (refuses an empty or malformed key and registers it for redaction), `CLIENT_SOURCE`
+  (`pup-finetune/<version>`) and short, redacted failure text.
+- `inference.py` - `ChatClient`, an OpenAI-compatible `POST {base_url}/chat/completions` client
+  over `httpx` (no SDK): bounded retries with backoff and jitter on 408, 429, 5xx and connection
+  errors (honoring a capped `Retry-After`), no retry on other 4xx, 401/403 as
+  `ProviderAuthError` with a login hint, 429 after retries as `ProviderCapacityError`, the rest
+  as `TransientError` or `ExternalError`; `ChatCompleter` is its protocol. `JudgeConfig` is the
+  judge's model, endpoint, credential and sampling settings (`identity()` for resume checks).
 - `datadog/` - Datadog access via `pup`. `pup.py` is the client every Datadog call goes
   through: `pup --no-agent --output json ...`, a scrubbed environment, timeouts, and failures as
   `ExternalError`. `spans.py` exports LLM spans through the Export API
@@ -149,8 +198,17 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   (listed and created through `Pup.api` on `v2/llm-obs/v1/<project>/datasets`, since pup
   1.10.7 cannot read the response of `pup llm-obs datasets create`), `records-add --confirm`
   and `records-all`; lists are read page by page, a create whose response is lost is found
-  again by name, and `--file` bodies are `0600` in a private temporary directory, removed
-  afterwards. Experiments arrive later.
+  again by name. `jsonapi.py` has the JSON:API helpers both clients share: the media type,
+  `private_json_file` (`--file` bodies are `0600` in a private temporary directory, removed
+  afterwards) and `object_id`. `experiments.py` publishes an evaluation: `LLMObsExperiments` (`pup llm-obs
+  experiments create --file`, `list`, `events list`, and spans plus metrics through `Pup.api`
+  on `v2/llm-obs/v1/experiments/<id>/events`) and `ExperimentsPublisher`, the evaluation's
+  `Publisher`: one experiment per target on the pushed dataset version, a `replay_trajectory`
+  root span per test row (`dataset_record_id` from `push.json`) and a `replay_assistant`
+  child per case, metrics stamped at submission, at most 100 spans a request, uuid5 span ids,
+  `experiments.json` and `published.json` so a rerun sends nothing twice (a batch whose
+  response was lost is sent again with the same span ids), cancellation between requests,
+  and a bounded read-back until the events are indexed.
 - `data/` - training data. `schema.py` is the canonical row every provider consumes (OpenAI
   chat format plus its source) and the stable `RowErrorCode` reasons a row is rejected for;
   `jsonl.py` reads and writes rows and converts them to the provider form; `exclusions.py`
@@ -216,7 +274,9 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   `promotion.py` has `Promotion`, the `finalize` hook that promotes the best checkpoint
   before the session ends (re-creating its sampler checkpoint when that session expired) or
   records it as the deployable checkpoint; `runner.py` has `start_training` and
-  `resume_training`, which open a session for a run directory and train or resume in it;
+  `resume_training`, which open a session for a run directory and train or resume in it
+  (`start_training` takes an `after_finalize` hook, run in the session after a successful
+  promotion with the run's spend guard; its failure only adds a warning);
   `inputs.py` renders a dataset's train and validation rows for a run (and checks, for an
   existing run, that the dataset and renderer did not change); `worker.py` runs a mode
   (`train`, `resume`, `finalize`) in the foreground or a detached worker (`spawn_worker`:
@@ -246,14 +306,54 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   `JsonToolCallParser`) that turn sampled text back into a message; `families.py` is the
   model-family table (`qwen3_8` for now), each entry a tokenizer, revision, parser and stop
   tokens.
-- `evaluation/` - *later*. Replay cases, deterministic metrics, LLM judge and reporting.
+- `evaluation/` - replay evaluation, provider-neutral. `cases.py` turns a dataset's kept
+  test-split rows into `ReplayCase`s (`cases_from_dataset`, `build_cases`): one per trained
+  (`weight` not `0`) assistant message with a visible action, with the recorded prefix and
+  tools as input and the recorded message as the reference, capped per trajectory
+  (`max_cases_per_trajectory`) with evenly spaced, seeded picks that always keep the final
+  turn. Tools are never executed, so replay measures agreement with the recorded behavior, not
+  task success. `metrics.py` has the deterministic tool-call metrics (`MetricName`,
+  `score_case`, `aggregate`; `None` when a metric does not apply) and `schema_errors`, a
+  validator for the common JSON Schema subset tool declarations use. `judge.py` is the LLM
+  judge: `judge` asks whether a candidate action is an acceptable substitute for the reference
+  (the recorded data JSON-encoded in tagged blocks marked untrusted, reasoning never shown) and
+  parses `{"pass", "reason"}` strictly (`parse_verdict`, outside any `<think>` block; anything
+  else fails as `unparseable`, or `truncated` when the judge hit `max_tokens`); a malformed candidate fails without a call, and a judge outage raises rather
+  than failing the case. `calibrate` checks that references pass and `corrupt`ed ones fail on a
+  few mixed cases; `check_judge_differs` refuses a judge that is the model being trained or the run's
+  tuned model (`model_id_for_run`, and the promoted model once there is one).
+  `fake_judge.py` is `FakeJudge`, an offline, deterministic judge for development mode and
+  tests (same tools with consistent arguments, or mostly the same words). `replay.py` has
+  `run_replay`: every `(target, case)` pair (`base`, `tuned`) generated, scored and judged on
+  a thread pool, each generation appended to `generations.jsonl` and each result to
+  `results.jsonl` as it completes, so a rerun skips finished pairs; `evaluation.json` is the
+  identity a rerun must match (`evaluation_identity`; a mismatch is a `StateError` asking for
+  a new `--out-dir`); a sampler or judge failure is an error result, counted apart and out of
+  every rate; `cancel` stops new pairs and keeps finished ones (any other error waits for the
+  pairs in flight, then propagates). `summarize` writes
+  `summary.json`: per-target pass rates (judge and metrics), per-trajectory agreement, the
+  paired wins, regressions and ties, and `tuned_minus_base` with a seeded paired bootstrap
+  95% CI over trajectories (`paired_bootstrap_ci`), plus the agreement-not-task-success
+  `CAVEAT`. A `Publisher` (default `NoopPublisher`) gets a complete evaluation and returns
+  what it reports, the outcome's `publication`. `runner.py` is what `evaluate` and `train
+  --evaluate` run: `plan_evaluation` (an `EvalPlan`: cases, judge, settings and `Publishing`,
+  whether the dataset's push receipt allows publishing), calibration (`prepare_eval_dir`
+  stores a passing one), `replay` with the plan's publisher, `replay_result` and
+  `evaluation_exit_code`, `plan_standalone` and `StandaloneEvaluation` for `evaluate`, and
+  `EvaluateAfterTraining`, the `after_finalize` hook that evaluates in the training session
+  and stops, partial, at the run's `--max-spend-usd`.
+  The package exports its names lazily, so importing the runner (the CLI does, for every
+  command) loads no judge client. `targets.py` makes the two samplers from a session: the live training
+  session's best sampler checkpoint, or the best training checkpoint loaded and saved again
+  as an `ev...` sampler checkpoint in a new session (`run_samplers`).
 - `providers/` - the provider seam. `base.py` has the neutral types (`ModelProfile`,
   `TrainSpec`, `CheckpointRef`, `StepMetrics`, ...) and the `Provider`, `TrainingBackend`,
   `TrainingSession` and `Sampler` protocols; `__init__.py` is the lazy registry
   (`register_provider`, `get_provider`, `known_providers`), which imports a provider only on
   first use. `fake.py` is the offline, deterministic, dev-only reference provider (registered
   with `dev_only=True`, so it needs `PUP_FINETUNE_DEV=1`) that the default tests train
-  against. `options.py` has `parse_options`, which every provider validates its
+  against; its tuned checkpoints learn, per role of the message before each trained turn,
+  whether to call a tool (by position) or answer in text, carried in the checkpoint URI. `options.py` has `parse_options`, which every provider validates its
   `--provider-option`s with (unknown keys refused, string values decoded as JSON). `fireworks/` is the Fireworks provider: its `__init__.py` only registers the
   `FIREWORKS_API_KEY` `CredentialSpec` (the registry imports it, so `auth` and `doctor` see
   the key without loading anything heavy; the validator lists accounts); `models.py` is the
@@ -290,8 +390,14 @@ argument prefix (or computes the answer with a `handler`) and records every call
 `tests/fakes/llmobs.py` has `FakeExportApi`, the Export API search route served by cursor.
 `tests/fakes/datasets.py` has `FakeDatasetsApi`, in-memory projects, datasets and records
 behind the pup calls `LLMObsDatasets` makes, with failures to inject.
+`tests/fakes/experiments.py` has `FakeExperimentsApi`, in-memory experiments and their events
+behind the pup calls `LLMObsExperiments` makes (failed and lost creates and event posts,
+delayed or capped indexing); it chains to the `api` handler installed before it, so it serves
+one `FakePup` with `FakeDatasetsApi`.
 `tests/fakes/tokenizer.py` has `FakeChatTokenizer`, a character-level chat tokenizer with a
 Qwen3.8-like Python template (optionally merging `\n\n` across the prompt boundary).
+`tests/fakes/chat_api.py` has `FakeChatApi`, an OpenAI-compatible chat completions endpoint
+(scripted responses or errors first, then an answer function) and `matching_judge`.
 `tests/fakes/fireworks_api.py` has `FakeFireworksApi`, the Fireworks model and account routes
 behind an `httpx.MockTransport`, with statuses and transport errors to inject.
 `tests/fakes/fireworks.py` has `FakeFireworksTrainingClient`, the Fireworks Training API

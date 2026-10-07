@@ -667,3 +667,125 @@ def test_distinct_run_ids_get_distinct_model_ids(first: str, second: str) -> Non
 )
 def test_the_model_id_fits_the_promotion_rules(run_id: str) -> None:
     assert MODEL_ID_PATTERN.fullmatch(model_id_for_run(run_id))
+
+
+# --- after_finalize ------------------------------------------------------------------------
+
+
+def test_after_finalize_runs_in_the_open_session_once_promoted(tmp_path: Path) -> None:
+    run_dir = new_run(tmp_path / "run")
+    fake = provider()
+    seen: list[dict[str, Any]] = []
+
+    def after(session: Any, result: Any, cancel: Any, spend_guard: Any) -> None:
+        backend = fake.backend()
+        seen.append(
+            {
+                "live": backend.is_live(session.session_id),
+                "promoted": result.promoted_model is not None,
+                "cancel": cancel.is_set(),
+            }
+        )
+
+    clock = Clock()
+    result = start_training(
+        fake,
+        run_dir,
+        train_rows=TRAIN,
+        validation_rows=VALIDATION,
+        clock=clock,
+        on_event=clock.on_event,
+        after_finalize=after,
+    )
+    assert seen == [{"live": True, "promoted": True, "cancel": False}]
+    assert result["phase"] == "completed"
+    assert result["warnings"] == []
+
+
+@pytest.mark.parametrize("capped", [False, True])
+def test_after_finalize_gets_the_run_s_spend_guard(tmp_path: Path, capped: bool) -> None:
+    spend = {"max_spend_usd": 10.0, "hourly_rate_usd": 1.0} if capped else {}
+    run_dir = new_run(tmp_path / "run", **spend)
+    clock = Clock()
+    seen: list[Any] = []
+
+    def after(session: Any, result: Any, cancel: Any, spend_guard: Any) -> None:
+        seen.append(None if spend_guard is None else spend_guard())
+        if spend_guard is not None:
+            clock.now += 10 * 3600  # the session's time still counts, reserve included
+            seen.append(spend_guard())
+
+    result = start_training(
+        provider(),
+        run_dir,
+        train_rows=TRAIN,
+        validation_rows=VALIDATION,
+        clock=clock,
+        on_event=clock.on_event,
+        after_finalize=after,
+    )
+    assert result["phase"] == "completed"
+    if not capped:
+        assert seen == [None]
+        return
+    assert seen[0] is None
+    assert "max_spend_usd 10.0" in seen[1]
+
+
+@pytest.mark.parametrize("error", [RuntimeError("replay broke"), KeyboardInterrupt()])
+def test_a_failing_after_finalize_only_warns(tmp_path: Path, error: BaseException) -> None:
+    run_dir = new_run(tmp_path / "run")
+
+    def after(session: Any, result: Any, cancel: Any, spend_guard: Any) -> None:
+        raise error
+
+    clock = Clock()
+    result = start_training(
+        provider(),
+        run_dir,
+        train_rows=TRAIN,
+        validation_rows=VALIDATION,
+        clock=clock,
+        on_event=clock.on_event,
+        after_finalize=after,
+    )
+    assert result["phase"] == "completed"
+    assert result["promoted_model"] is not None
+    assert any("after training failed" in warning for warning in result["warnings"])
+    assert run_dir.load_state().phase == "completed"
+
+
+def test_the_run_is_recorded_finished_before_after_finalize_runs(tmp_path: Path) -> None:
+    """A process killed during the hook leaves a completed run with its promoted model."""
+    run_dir = new_run(tmp_path / "run")
+    seen: list[dict[str, Any]] = []
+
+    def after(session: Any, result: Any, cancel: Any, spend_guard: Any) -> None:
+        stored = run_dir.read_result() or {}
+        seen.append(
+            {
+                "phase": run_dir.load_state().phase,
+                "result_phase": stored.get("phase"),
+                "promoted": stored.get("promoted_model") is not None,
+            }
+        )
+        raise RuntimeError("replay broke")
+
+    clock = Clock()
+    result = start_training(
+        provider(),
+        run_dir,
+        train_rows=TRAIN,
+        validation_rows=VALIDATION,
+        clock=clock,
+        on_event=clock.on_event,
+        after_finalize=after,
+    )
+    assert seen == [{"phase": "completed", "result_phase": "completed", "promoted": True}]
+    # Its warning is recorded once the hook returns.
+    stored = run_dir.read_result() or {}
+    assert any("after training failed" in warning for warning in stored["warnings"])
+    assert stored["warnings"] == result["warnings"]
+    # A finished run is not resumable, so nothing would train it again.
+    with pytest.raises(UsageError, match="completed"):
+        resume_training(provider(), run_dir, train_rows=TRAIN, validation_rows=VALIDATION)

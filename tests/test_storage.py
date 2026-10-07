@@ -107,6 +107,17 @@ def test_append_jsonl_creates_private_file_and_appends(tmp_path: Path, loose_uma
     assert len(target.read_text().splitlines()) == 3
 
 
+def test_append_jsonl_ascii_round_trips_lone_surrogates(tmp_path: Path) -> None:
+    target = tmp_path / "generations.jsonl"
+    row = {"text": "half an emoji \ud83d here", "accent": "é"}
+    with pytest.raises(UnicodeEncodeError):
+        append_jsonl(target, [row])
+    target.unlink()
+    assert append_jsonl(target, [row], ensure_ascii=True) == 1
+    assert target.read_text(encoding="ascii")
+    assert list(read_jsonl(target)) == [row]
+
+
 def test_append_jsonl_terminates_a_torn_line(tmp_path: Path) -> None:
     target = tmp_path / "labels.jsonl"
     target.write_text('{"id": "a"}\n{"id": "tor')

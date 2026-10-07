@@ -226,6 +226,114 @@ talks to the narrow interface in `providers/fireworks/client.py`, never to the S
   calls never are, since the loop owns that policy. `latency_s` times the successful attempt
   only.
 
+## Replay evaluation
+
+[`evaluation/`](../src/pup_finetune/evaluation/) is provider-neutral: it never imports a
+provider, and talks to models only through the `Sampler` protocol.
+
+- **Cases** ([`cases.py`](../src/pup_finetune/evaluation/cases.py)). Every assistant message
+  of a kept test-split row that does something visible (non-empty content or tool calls) and
+  was trained on (`weight` is not `0`) is a `ReplayCase`, with id `<row id>:<message index>`.
+  The model sees the recorded messages before it plus the row's tools, generates one
+  assistant message, and that message is compared with the recorded one, the reference. The
+  tool results that followed the reference are kept for a judge only. Tools are never
+  executed, so the conversation continues from the recording: replay measures agreement with
+  the recorded behavior, not whether the task succeeded. A per-trajectory cap keeps evenly
+  spaced turns, one per equal bucket at a seeded offset, and always the final turn.
+- **Metrics** ([`metrics.py`](../src/pup_finetune/evaluation/metrics.py)). Pure functions of
+  the candidate, the reference and the tools, each `true`, `false`, or `null` when it does not
+  apply: `tool_decision_match`, `tool_name_match`, `arguments_json_valid`,
+  `arguments_schema_valid` (against the declared `parameters`, with a small validator for the
+  common JSON Schema subset; other keywords are ignored), `reference_arguments_match`,
+  `parallel_call_set_match` (both order-insensitive for parallel calls) and `format_valid`,
+  from the sampler. Arguments compare as JSON values, and `reasoning_content` is never
+  compared. `aggregate` reports `{rate, passed, n}` per metric over the cases it applies to,
+  with `rate` `null` when `n` is `0`.
+- **Judge** ([`judge.py`](../src/pup_finetune/evaluation/judge.py)). An LLM, through an
+  OpenAI-compatible endpoint, says whether the candidate is an acceptable substitute for the
+  reference. The recorded data is untrusted and travels JSON-encoded in tagged blocks.
+  Before anything is generated, a calibration checks that references pass and corrupted
+  versions of them fail; a judge that fails it is not used. The judge must not be the model
+  being trained, nor the run's tuned model (its model id, or the promoted model).
+- **Targets** ([`targets.py`](../src/pup_finetune/evaluation/targets.py)). Two samplers from
+  one session: `base` (no checkpoint) and `tuned`, the best epoch. `train --evaluate` runs in
+  the training session through the runner's `after_finalize` hook, after promotion and
+  before the session closes, and samples the best epoch's own sampler checkpoint. The runner
+  records the run's end (`result.json`, phase `completed`) before the hook runs, so a process
+  killed during the evaluation leaves a finished run, not one a resume would train again. A
+  cancelled or budget-capped training is not evaluated in its session, since the evaluation
+  would spend the session's time past the cap. Any other is evaluated under the cap too: the
+  hook gets the run's spend guard (its reserve included), skips the evaluation when the cap
+  is already reached and stops it, partial, once it is, for `evaluate` to continue.
+  A standalone `evaluate`, of a completed or cancelled run with a best epoch, opens a new
+  session, loads the best *training* checkpoint and saves it again as a sampler checkpoint,
+  since a sampler checkpoint may not outlive the session that saved it.
+- **Replay** ([`replay.py`](../src/pup_finetune/evaluation/replay.py)). `run_replay` runs
+  every `(target, case)` pair on a thread pool: generate, score, judge. Each generation and
+  each result is appended to `generations.jsonl` and `results.jsonl` as soon as it is known,
+  so an interrupted evaluation loses only the pairs in flight, and a rerun skips the pairs
+  already judged. `evaluation.json` pins what the results depend on (the run, the tuned
+  weights, the base model, the judge, the cases, `max_tokens`, the rendering, the metrics
+  version, the seed, the cap); a rerun with anything else is refused and asks for a new
+  `--out-dir`. A generation or judge call that fails after its client's retries is an error
+  result: it is retried by a rerun, counted on its own, and never counts as a failed case;
+  an evaluation that ended with errors reports `complete_with_errors`, not `complete`, and
+  how to retry them. A judge answer with no verdict (unparseable or truncated) is a failed
+  case, as the judge decides, and the summary counts those per target
+  (`judge_no_verdict`). Ctrl-C or SIGTERM stops new pairs from starting and keeps what
+  finished. The directory is made `0700` even when it already existed.
+- **Summary** (`summary.json`). Per target, the judge pass rate, every metric's rate and the
+  mean of per-trajectory agreement. Across targets, the cases both answered are compared
+  verdict by verdict (wins, regressions, ties), and `tuned_minus_base` is the mean paired
+  difference of the judge pass, with a 95% bootstrap interval that resamples whole
+  trajectories (2000 seeded resamples; `null` with fewer than two trajectories), since the
+  cases of one conversation are not independent. Every number is finite or `null`, and the
+  summary says what the scores measure: agreement with the recorded behavior on held-out
+  conversations, not task success.
+- **Runner** ([`runner.py`](../src/pup_finetune/evaluation/runner.py)). What `evaluate` and
+  `train --evaluate` run, so the CLI only parses flags and emits: an `EvalPlan` (cases,
+  judge, settings, and whether the evaluation can be published), calibration, the replay
+  with the plan's publisher, and the result and exit code. The package exports its names
+  lazily, so the CLI loads the runner for every command without loading the judge's client.
+- **Publishing** ([`datadog/experiments.py`](../src/pup_finetune/datadog/experiments.py)).
+  `Publisher` receives a complete evaluation and returns what it reports. Datadog is the
+  system of record: `ExperimentsPublisher` publishes the evaluation, through pup's OAuth, as
+  one Agent Observability experiment per target on the curated dataset `dataset push`
+  created, pinned to the pushed version (`push.json`), so the training data and the
+  evaluation of the model trained on it stay on one dataset and the two experiments compare
+  side by side. Its config holds the provider, the models, the tuned checkpoint, the run, the
+  judge and the metrics version. Each test row is a root span, `replay_trajectory`, linked to
+  its dataset record and holding the record's input and expected output, with the replayed
+  steps as its output; each case is a child span in the same trace, `replay_assistant`, with
+  the prefix and tools in, the generated message out and the recorded one expected, timed by
+  its generation. Metrics join spans by id: a boolean per deterministic metric that applies
+  and `judge_pass` (with the judge's reason) on children, `trajectory_agreement` and
+  `completed_actions` on roots; an error case is an error span with no metric, as it counts
+  in no local rate either. Metrics are stamped when they are sent (the API refuses ones more
+  than a day old), and a request carries at most 100 spans. Span ids are uuid5 of the
+  evaluation's identity, the target and the row or case, the experiments are recorded in
+  `experiments.json` and the spans sent in `published.json`, so a rerun creates and sends
+  nothing twice. Each create is recorded as pending first, with a random nonce that goes in
+  the experiment's description, so a rerun after a crash between the create and the save
+  finds that experiment and adopts it (another `--out-dir` has its own nonce, and never
+  does). A span is recorded once its request is answered, so a batch whose
+  response was lost is sent again by the rerun, with the same deterministic span ids. A
+  span already published keeps the result it was sent with: a retried error updates only
+  the local results, and the experiments keep the error (the result's hint says so, and a
+  new `--out-dir` publishes experiments with every result). A cancel stops between requests
+  and leaves a `cancelled` publication the rerun continues. A read-back waits up to two
+  minutes, one budget for both experiments, for the events to be indexed (each count may
+  take only the time left, and a cancel is checked before each); spans not indexed
+  by then, or events that cannot be counted, are a warning. Without a push receipt the evaluation is not
+  published, with a warning; `--no-publish` turns publishing off.
+
+The fake provider makes the loop meaningful offline: its tuned checkpoints learn, from the
+conversations they trained on, whether an assistant turn after a message of each role calls
+a tool (and which declared tool, by position) or answers in text, and `FakeJudge` is an
+offline judge that passes the same tool calls with consistent arguments, or text with mostly
+the same words. So a development-mode `evaluate` of a fake run shows the tuned model ahead
+of the base model.
+
 ## How a new provider plugs in
 
 Using Baseten as the example:

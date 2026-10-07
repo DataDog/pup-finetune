@@ -35,6 +35,8 @@ leaves the run ``interrupted`` and resumable from its last training checkpoint. 
 the promotion at the end failed, the run is ``failed`` with the training result kept, and a
 resume re-runs just the promotion (``resume_mode`` ``finalize_only``). With ``signals``
 ``cancel``, SIGTERM and Ctrl-C stop training gracefully instead (see :func:`execute_run`).
+Work that follows training in the same process (``train --evaluate``) first records the
+run's end with :func:`record_finished`, so a crash during that work cannot lose it.
 """
 
 from __future__ import annotations
@@ -656,6 +658,11 @@ class RunState:
         """Ask the loop to stop at the next step boundary. Safe from signal handlers."""
         self._cancel.set()
 
+    @property
+    def cancel_event(self) -> threading.Event:
+        """The event :meth:`request_cancel` sets, for work that stops on the same signal."""
+        return self._cancel
+
     # --- the loop's reports (LoopState) -----------------------------------------------
 
     def cancel_requested(self) -> bool:
@@ -777,25 +784,26 @@ _CANCEL_NOTICE = (
 
 
 @contextmanager
-def _signals_cancel(state: RunState) -> Iterator[None]:
-    """Make SIGTERM and Ctrl-C ask ``state`` to cancel at the next step boundary.
+def cancel_on_signals(cancel: threading.Event, notice: bytes) -> Iterator[None]:
+    """Make SIGTERM and the first Ctrl-C set ``cancel``, writing ``notice`` to stderr.
 
     A repeated SIGTERM changes nothing; a second Ctrl-C raises ``KeyboardInterrupt``, which
-    stops at once (the run is then ``interrupted``). Main thread only, like every handler.
+    stops at once. After a Ctrl-C the notice says so. Main thread only, like every handler;
+    elsewhere it changes nothing.
     """
     if threading.current_thread() is not threading.main_thread():
         yield
         return
 
     def on_signal(signum: int, frame: FrameType | None) -> None:
-        if state.cancel_requested():
+        if cancel.is_set():
             if signum == signal.SIGINT:
                 raise KeyboardInterrupt
             return
-        state.request_cancel()
+        cancel.set()
         with contextlib.suppress(OSError):
             tail = b" (press Ctrl-C again to stop at once)" if signum == signal.SIGINT else b""
-            os.write(2, _CANCEL_NOTICE + tail + b"\n")
+            os.write(2, notice + tail + b"\n")
 
     sigs = (signal.SIGINT, signal.SIGTERM)
     previous = {sig: signal.signal(sig, on_signal) for sig in sigs}
@@ -804,6 +812,15 @@ def _signals_cancel(state: RunState) -> Iterator[None]:
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, signal.SIG_DFL if handler is None else handler)
+
+
+def _signals_cancel(state: RunState) -> contextlib.AbstractContextManager[None]:
+    """Make SIGTERM and Ctrl-C ask ``state`` to cancel at the next step boundary.
+
+    A second Ctrl-C stops at once (the run is then ``interrupted``); see
+    :func:`cancel_on_signals`.
+    """
+    return cancel_on_signals(state.cancel_event, _CANCEL_NOTICE)
 
 
 @contextmanager
@@ -900,6 +917,16 @@ def _record_end(
     A promotion retry that fails before it reaches the promotion keeps the ``result.json``
     it retries from, so a later resume can retry again.
     """
+    if state.phase in _FINISHED_PHASES and outcome is None:
+        # Recorded by record_finished, then what followed it raised (e.g. a stray Ctrl-C):
+        # the run did finish, so keep that record and only raise the error.
+        try:
+            return run_dir.read_result() or {}, error
+        except Exception as exc:
+            if error is None:
+                return {}, exc
+            error.add_note(f"could not read the run's result: {redact(str(exc))}")
+            return {}, error
     phase = _final_phase(outcome, error)
     kept = _kept_for_retry(run_dir, state, outcome, error)
     if kept is not None:
@@ -927,10 +954,38 @@ def _record_end(
                     "the training result could not be recorded; resume the run to continue "
                     "from its last training checkpoint and promote"
                 )
-        deployable = _ckpt_json(finished.deployable_ckpt)
-        if deployable is not None and deployable not in state.checkpoints:
-            state.checkpoints.append(deployable)  # e.g. re-created for promotion
+        _record_deployable(state, finished)
     return result, _recorded_phase(state, phase, error)
+
+
+_FINISHED_PHASES: frozenset[Phase] = frozenset({"completed", "cancelled"})
+
+
+def _record_deployable(state: RunState, finished: TrainResult) -> None:
+    deployable = _ckpt_json(finished.deployable_ckpt)
+    if deployable is not None and deployable not in state.checkpoints:
+        state.checkpoints.append(deployable)  # e.g. re-created for promotion
+
+
+def record_finished(
+    run_dir: RunDir, state: RunState, outcome: TrainResult, *, now: Clock = utcnow
+) -> None:
+    """Record ``outcome`` as how the run ended now, from inside :func:`execute_run`'s ``train``.
+
+    For work that follows training and promotion in the same process (``train --evaluate``
+    evaluates in the training session): ``result.json`` is written and the run moves to
+    ``completed`` (or ``cancelled``) first, so a process that dies during that work leaves
+    a finished run with its promoted model recorded, not a ``training`` run a resume would
+    train again. :func:`execute_run` records the end again when ``train`` returns, with
+    what that work added (e.g. a warning). Raises when either cannot be written; the run is
+    then recorded as usual when ``train`` returns.
+    """
+    phase = _final_phase(outcome, None)
+    result = _result_json(run_dir, state, run_dir.run_id, phase, outcome, None, now())
+    run_dir.write_result(result)
+    state.resume_mode = "train"
+    _record_deployable(state, outcome)
+    state.transition(phase)
 
 
 def _kept_for_retry(
@@ -959,9 +1014,15 @@ def _kept_for_retry(
 def _recorded_phase(
     state: RunState, phase: Phase, error: BaseException | None
 ) -> BaseException | None:
-    """Move ``state`` to ``phase``; returns ``error``, or the failure to record the phase."""
+    """Move ``state`` to ``phase``; returns ``error``, or the failure to record the phase.
+
+    A run :func:`record_finished` already moved to ``phase`` is saved again as it is.
+    """
     try:
-        state.transition(phase, error=error)
+        if state.phase == phase and error is None:
+            state.save()
+        else:
+            state.transition(phase, error=error)
     except Exception as exc:
         if error is None:
             return exc

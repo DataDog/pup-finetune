@@ -20,7 +20,14 @@ recorded in ``state.json`` before that request
 of the run promoted (its response lost) is adopted, and one that existed before is not. Once
 training and promotion are done, a
 failure to end the session only adds a warning: the result, and the promoted model, are
-kept.
+kept. :func:`start_training` takes an ``after_finalize`` hook (``train --evaluate`` passes
+one) that runs once the promotion succeeded, with the session still open, so work that needs
+the trained weights can use it before it closes, under the run's spend cap (the hook is
+given the guard, reserve included); the hook's failure, or an interrupt during it, only adds
+a warning too. Before the hook runs, the run's end is recorded
+(:func:`~pup_finetune.runs.record_finished`: ``result.json`` written, phase ``completed``),
+so a process killed during the hook leaves a finished run with its promoted model, not one
+to resume; the warnings the hook adds are recorded once it returns.
 
 A resume opens the session from the last training checkpoint and continues at its epoch and
 step, keeping the epoch history, the best epoch, the patience counter and the budget spent
@@ -39,6 +46,7 @@ epoch is a function of the seed and the rows, so other rows would skip the wrong
 from __future__ import annotations
 
 import dataclasses
+import threading
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
@@ -63,6 +71,7 @@ from pup_finetune.runs import (
     checkpoint_namer,
     execute_run,
     model_id_for_run,
+    record_finished,
     require_resumable,
     utcnow,
 )
@@ -72,7 +81,18 @@ from pup_finetune.training.loop import EventSink, FinalizeFailed, run_training
 from pup_finetune.training.promotion import Promotion
 from pup_finetune.training.records import EpochMetrics, Resume, TrainResult
 
-__all__ = ["resume_training", "start_training"]
+__all__ = ["AfterFinalize", "SpendGuard", "resume_training", "start_training"]
+
+SpendGuard = Callable[[], str | None]
+"""Why the run's spend cap is reached (see :meth:`Budget.spend_exhausted`); ``None`` while
+it is not."""
+
+AfterFinalize = Callable[[TrainingSession, TrainResult, threading.Event, SpendGuard | None], None]
+"""Runs after training and a successful promotion, in the still-open session: the session,
+the final result, the event that a graceful cancel (Ctrl-C, SIGTERM) sets, and the run's
+spend guard (``None`` without ``max_spend_usd``). The session's time still counts against
+the cap, its reserve included, so a hook that keeps the session busy stops once the guard
+says so."""
 
 
 def start_training(
@@ -87,14 +107,18 @@ def start_training(
     signals: SignalMode = "interrupt",
     heartbeat_s: float | None = None,
     now: Clock = utcnow,
+    after_finalize: AfterFinalize | None = None,
 ) -> dict[str, Any]:
     """Train the ``created`` run in ``run_dir`` on ``provider``; returns ``result.json``.
 
     ``clock`` (seconds) times checkpoints and the spend guard; ``now`` stamps the run files.
     ``signals`` and ``heartbeat_s`` are passed to :func:`~pup_finetune.runs.execute_run`,
-    which documents them and the errors raised.
+    which documents them and the errors raised. ``after_finalize`` runs after a successful
+    promotion and once the run's end is recorded, before the session closes (see the module
+    docstring); its error, or a Ctrl-C during it, becomes a warning on the result.
     """
     run = _Run.load(provider, run_dir, train_rows, validation_rows, clock, sleep, on_event)
+    run = dataclasses.replace(run, after_finalize=after_finalize, now=now)
     return execute_run(run_dir, run.train, signals=signals, heartbeat_s=heartbeat_s, now=now)
 
 
@@ -151,6 +175,8 @@ class _Run:
     clock: Callable[[], float]
     sleep: Callable[[float], None]
     on_event: EventSink | None
+    after_finalize: AfterFinalize | None = None
+    now: Clock = utcnow
 
     @classmethod
     def load(
@@ -231,7 +257,7 @@ class _Run:
         )
 
         def train_in(session: TrainingSession) -> TrainResult:
-            return run_training(
+            result = run_training(
                 session,
                 train_rows=self.train_rows,
                 validation_rows=self.validation_rows,
@@ -246,8 +272,45 @@ class _Run:
                 finalize=promotion,
                 resume=resume,
             )
+            guard = None
+            if budget.max_spend_usd is not None:
+
+                def guard() -> str | None:
+                    return budget.spend_exhausted(use_reserve=True)
+
+            return self._after(session, result, state, guard)
 
         return self._in_session(None if point is None else point.checkpoint, train_in)
+
+    def _after(
+        self,
+        session: TrainingSession,
+        result: TrainResult,
+        state: RunState,
+        spend_guard: SpendGuard | None,
+    ) -> TrainResult:
+        """Record the run's end, then run :attr:`after_finalize` with ``spend_guard``.
+
+        Its failure (or a Ctrl-C) is a warning on ``result``, as is a failure to record the
+        end early (it is recorded again when training returns).
+        """
+        if self.after_finalize is None:
+            return result
+        warnings: list[str] = []
+        try:
+            record_finished(self.run_dir, state, result, now=self.now)
+        except Exception as exc:
+            warnings.append(
+                f"the run's end could not be recorded before the step after "
+                f"training: {_describe(exc)}"
+            )
+        try:
+            self.after_finalize(session, result, state.cancel_event, spend_guard)
+        except (Exception, KeyboardInterrupt) as exc:
+            warnings.append(f"the step after training failed: {_describe(exc)}")
+        if not warnings:
+            return result
+        return dataclasses.replace(result, warnings=[*result.warnings, *warnings])
 
     def finalize_only(self, state: RunState) -> TrainResult:
         """Retry only the promotion of a run whose training ended."""

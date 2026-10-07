@@ -13,7 +13,6 @@ import json
 import pytest
 
 from pup_finetune.datadog.datasets import (
-    JSON_API,
     RECORDS_ALL_MAX_PAGES,
     DatasetInfo,
     DatasetRecord,
@@ -21,6 +20,7 @@ from pup_finetune.datadog.datasets import (
     RecordsListing,
     RecordsListTruncated,
 )
+from pup_finetune.datadog.jsonapi import JSON_API
 from pup_finetune.errors import ExternalError
 from tests.fakes.datasets import FakeDatasetsApi
 from tests.fakes.pup import FakePup, PupCall, PupExit

@@ -20,8 +20,13 @@ provider follows. ``tests/providers/contract`` holds the suites it passes.
   real provider, record what was saved, promoted and sampled, and can simulate a crash or a
   failed promotion. Both optional capabilities (resume and promotion) are on by default and
   can be turned off, to exercise the paths of providers without them.
-- :class:`FakeSampler` answers a fixed generic reply from the base model and the reference
-  answer (looked up in an optional teacher table) from a tuned checkpoint.
+- :class:`FakeSampler` answers a fixed generic reply from the base model. A tuned checkpoint
+  answers the reference when an optional teacher table has the prompt, else what the session
+  learned from the conversations it trained on: for the role of the message before each
+  trained assistant turn, whether the turn called a tool (and which declared tool, by
+  position) or answered in text. A tuned model so calls the tool a held-out conversation's
+  recording most likely calls, with empty arguments, where the base model only ever answers
+  in text, which makes development-mode replay evaluation meaningful.
 - :class:`FakeProvider` ties them together under the name ``fake``.
 
 Provider options (``TrainSpec.provider_options``, from ``--provider-option key=value``) are
@@ -38,7 +43,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, NoReturn
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
@@ -142,6 +147,8 @@ _SPECIAL_TOKENS: Final = (
 )
 _SPECIAL_IDS: Final = {word: i for i, word in enumerate(_SPECIAL_TOKENS)}
 _MARKER: Final = re.compile(r"<\|/?[a-z]+\|>")
+_ROLE_MARKER: Final = re.compile(r"<\|(system|user|assistant|tool)\|>")
+_TOOLS_HEADER: Final = "<|tools|>\n"
 _WORD: Final = re.compile(r"<\|/?[a-z]+\|>|\s+|[^\s<]+|<")
 _ROLES: Final = frozenset({"system", "user", "assistant", "tool"})
 
@@ -495,7 +502,10 @@ class _State:
     ``epoch`` indexes the curves for training (``0`` in the first epoch) and ``trained`` is
     the epoch the weights reflect. ``ended`` says an epoch-end call (a validation ``forward``
     or a sampler checkpoint) came since the last ``forward_backward``; ``steps_per_epoch`` is
-    learned from the first sampler checkpoint, ``None`` until then.
+    learned from the first sampler checkpoint, ``None`` until then. ``policy`` is what the
+    weights learned: how many trained assistant turns took each action after a message of
+    each role, keyed ``"<role>:<action>"`` (``text``, or ``call<i>`` for the ``i``-th
+    declared tool).
     """
 
     step: int = 0
@@ -503,17 +513,19 @@ class _State:
     trained: int | None = None
     ended: bool = False
     steps_per_epoch: int | None = None
+    policy: dict[str, int] = field(default_factory=dict)
 
     def to_query(self) -> str:
-        return urlencode(
-            {
-                "step": self.step,
-                "epoch": self.epoch,
-                "trained": -1 if self.trained is None else self.trained,
-                "v": int(self.ended),
-                "spe": self.steps_per_epoch or 0,
-            }
-        )
+        query: dict[str, str | int] = {
+            "step": self.step,
+            "epoch": self.epoch,
+            "trained": -1 if self.trained is None else self.trained,
+            "v": int(self.ended),
+            "spe": self.steps_per_epoch or 0,
+        }
+        if self.policy:
+            query["pol"] = ",".join(f"{key}={count}" for key, count in sorted(self.policy.items()))
+        return urlencode(query)
 
     @classmethod
     def from_ref(cls, ref: CheckpointRef) -> _State:
@@ -524,12 +536,18 @@ class _State:
                 raise ValueError(parts.scheme)
             trained = int(query["trained"][0])
             steps_per_epoch = int(query.get("spe", ["0"])[0])
+            policy: dict[str, int] = {}
+            for entry in query.get("pol", [""])[0].split(","):
+                if entry:
+                    key, _, count = entry.rpartition("=")
+                    policy[key] = int(count)
             return cls(
                 step=int(query["step"][0]),
                 epoch=int(query["epoch"][0]),
                 trained=None if trained < 0 else trained,
                 ended=query["v"][0] == "1",
                 steps_per_epoch=steps_per_epoch if steps_per_epoch > 0 else None,
+                policy=policy,
             )
         except (KeyError, IndexError, ValueError):
             raise UsageError(f"{ref.uri!r} is not a fake provider checkpoint") from None
@@ -704,6 +722,9 @@ class FakeSession:
             self._crashed = True
             crash = FakeCrash(f"simulated crash at step {step} (fail_at_step)")
             return _Pending(_raises(crash), self._options.step_delay_s)
+        for example in batch:
+            for key in self._observations(example):
+                state.policy[key] = state.policy.get(key, 0) + 1
         return self._metrics(batch, _at(self._options.loss_curve, state.epoch))
 
     def forward(self, batch: Sequence[TokenizedExample]) -> PendingResult[StepMetrics]:
@@ -737,6 +758,7 @@ class FakeSession:
         else:
             state = _State.from_ref(ckpt)
         self._state.trained = state.trained
+        self._state.policy = dict(state.policy)
 
     def promote(
         self, ckpt: CheckpointRef, model_id: str, *, adopt_since: datetime | None = None
@@ -764,12 +786,14 @@ class FakeSession:
     def sampler(self, ckpt: CheckpointRef | None) -> FakeSampler:
         self._require_open()
         tuned = False
+        policy: dict[str, int] = {}
         if ckpt is not None:
-            tuned = self._require_live_sampler(ckpt, "sample from").trained is not None
+            state = self._require_live_sampler(ckpt, "sample from")
+            tuned, policy = state.trained is not None, state.policy
         self._backend.sampled.append(ckpt)
-        if self._renderer is None:
-            self._renderer = FakeRenderer(self._profile)
-        return FakeSampler(self, self._renderer, tuned=tuned, teacher=self._backend.teacher)
+        return FakeSampler(
+            self, self._fake_renderer(), tuned=tuned, teacher=self._backend.teacher, policy=policy
+        )
 
     @property
     def closed(self) -> bool:
@@ -779,6 +803,34 @@ class FakeSession:
     def close(self) -> None:
         """End the session; :meth:`FakeBackend.open_session` calls it on exit."""
         self._closed = True
+
+    def _fake_renderer(self) -> FakeRenderer:
+        if self._renderer is None:
+            self._renderer = FakeRenderer(self._profile)
+        return self._renderer
+
+    def _observations(self, example: TokenizedExample) -> list[str]:
+        """The ``policy`` keys of the trained assistant turns in ``example`` (see :class:`_State`).
+
+        Each run of weighted tokens is one completion; the prompt before it says which role
+        spoke last and which tools were declared. Tokens that are not a fake render (they do
+        not decode, or the completion does not parse) teach nothing.
+        """
+        renderer = self._fake_renderer()
+        tokens = [*example.input_tokens, example.target_tokens[-1]]
+        weights = [0.0, *example.weights]
+        keys: list[str] = []
+        start: int | None = None
+        for index in range(len(tokens) + 1):
+            weighted = index < len(tokens) and weights[index] > 0
+            if weighted and start is None:
+                start = index
+            elif not weighted and start is not None:
+                key = _observation(renderer, tokens[:start], tokens[start:index])
+                if key is not None:
+                    keys.append(key)
+                start = None
+        return keys
 
     def _metrics(self, batch: Sequence[TokenizedExample], mean: float) -> _Pending[StepMetrics]:
         weight = sum(sum(example.weights) for example in batch)
@@ -828,13 +880,61 @@ class FakeSession:
         return state
 
 
+def _observation(
+    renderer: FakeRenderer, prompt_tokens: Sequence[int], completion_tokens: Sequence[int]
+) -> str | None:
+    """The ``"<role>:<action>"`` policy key of one trained completion, or ``None``."""
+    try:
+        prompt = renderer.decode(prompt_tokens)
+        completion = renderer.decode(completion_tokens)
+    except ValueError:
+        return None
+    if not prompt.endswith(_ASSISTANT_HEADER):
+        return None
+    roles = _ROLE_MARKER.findall(prompt.removesuffix(_ASSISTANT_HEADER))
+    role = roles[-1] if roles else "none"
+    parsed = renderer.parse_response(completion)
+    if not parsed.format_valid:
+        return None
+    calls = parsed.message.get("tool_calls")
+    if not calls:
+        return f"{role}:text"
+    names = _declared_tool_names(prompt)
+    name = calls[0]["function"]["name"]
+    return f"{role}:call{names.index(name)}" if name in names else None
+
+
+def _declared_tool_names(prompt: str) -> list[str]:
+    """The names of the tools a rendered prompt declares, in order."""
+    if not prompt.startswith(_TOOLS_HEADER):
+        return []
+    block = prompt[len(_TOOLS_HEADER) :].partition(_END)[0]
+    names: list[str] = []
+    for line in block.splitlines():
+        try:
+            tool = loads_finite(line)
+            names.append(str(tool["function"]["name"]))
+        except (ValueError, KeyError, TypeError):
+            names.append("")
+    return names
+
+
+def _tool_name(tool: ToolSpec) -> str | None:
+    function = tool.get("function")
+    name = function.get("name") if isinstance(function, Mapping) else None
+    return name if isinstance(name, str) and name else None
+
+
 class FakeSampler:
     """Greedy generation from the fake model; built by :meth:`FakeSession.sampler`.
 
-    The base model answers :data:`BASE_ANSWER`. A tuned checkpoint answers the reference: the
-    teacher table's message for :func:`prompt_hash` of the prompt, else
-    :data:`TUNED_FALLBACK_ANSWER`. The answer goes through the renderer like a real
-    completion, so ``max_tokens`` truncation yields ``format_valid=False``.
+    The base model answers :data:`BASE_ANSWER`. A tuned checkpoint answers the teacher table's
+    message for :func:`prompt_hash` of the prompt when there is one. Otherwise it acts as its
+    ``policy`` says for the role of the prompt's last message (the most frequent action, ties
+    broken by name): it calls the declared tool at the learned position, with ``{}`` as the
+    arguments, or answers :data:`TUNED_FALLBACK_ANSWER` (also when it learned nothing for
+    that role, or the prompt declares too few tools). The answer goes through the renderer
+    like a real completion, so ``max_tokens`` truncation yields ``format_valid=False``.
     """
 
     def __init__(
@@ -844,11 +944,13 @@ class FakeSampler:
         *,
         tuned: bool,
         teacher: Mapping[str, ChatMessage],
+        policy: Mapping[str, int] | None = None,
     ) -> None:
         self.session = session
         self.renderer = renderer
         self.tuned = tuned
         self.teacher = teacher
+        self.policy: dict[str, int] = dict(policy or {})
         self._closed = False
 
     def generate(
@@ -861,8 +963,8 @@ class FakeSampler:
         prompt = self.renderer.generation_prompt_tokens(messages, tools)
         answer: ChatMessage = {"role": "assistant", "content": BASE_ANSWER}
         if self.tuned:
-            fallback = {"role": "assistant", "content": TUNED_FALLBACK_ANSWER}
-            answer = self.teacher.get(prompt_hash(messages, tools), fallback)
+            key = prompt_hash(messages, tools)
+            answer = self.teacher.get(key) or self._recall(messages, tools, key)
         completion = self.renderer.tokenize(self.renderer.render_completion(answer))
         stop_reason = "stop"
         if len(completion) > max_tokens:
@@ -876,6 +978,34 @@ class FakeSampler:
             latency_s=0.0,
             stop_reason=stop_reason,
         )
+
+    def _recall(
+        self, messages: Sequence[ChatMessage], tools: Sequence[ToolSpec], key: str
+    ) -> ChatMessage:
+        """What the policy does after ``messages`` (see the class docstring)."""
+        role = str(messages[-1].get("role")) if messages else "none"
+        learned = [
+            (count, action)
+            for policy_key, count in self.policy.items()
+            for context, _, action in [policy_key.rpartition(":")]
+            if context == role
+        ]
+        text: ChatMessage = {"role": "assistant", "content": TUNED_FALLBACK_ANSWER}
+        if not learned:
+            return text
+        _, action = max(learned, key=lambda entry: (entry[0], entry[1]))
+        position = action.removeprefix("call")
+        if action == "text" or not position.isdigit() or int(position) >= len(tools):
+            return text
+        name = _tool_name(tools[int(position)])
+        if name is None:
+            return text
+        call = {
+            "id": f"call_{key[:8]}",
+            "type": "function",
+            "function": {"name": name, "arguments": "{}"},
+        }
+        return {"role": "assistant", "content": "", "tool_calls": [call]}
 
     def close(self) -> None:
         self._closed = True
