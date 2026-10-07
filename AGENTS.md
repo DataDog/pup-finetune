@@ -89,8 +89,9 @@ starts, so a crash during it keeps the trained, promoted run; a failed evaluatio
 with the trained run and the `evaluate` command to retry it. A cancelled or budget-capped
 training is not evaluated in its session (the evaluation would spend the session's time past
 the cap). A budget-capped run still ends `completed`, so `evaluate` evaluates it on request;
-`evaluate` refuses a `cancelled` run, which must be resumed to `completed` first. Evaluating a real run is paid and needs the
-judge's key (`FIREWORKS_API_KEY` for the default judge); the preview is free and allowed with
+like a budget-capped run, a cancelled run is evaluated by `evaluate` on request (its best
+epoch; one cancelled before any epoch has nothing to evaluate). Evaluating a real run is paid
+and needs the judge's key (`FIREWORKS_API_KEY` for the default judge); the preview is free and allowed with
 `PUP_READ_ONLY` set, evaluating is not. A changed `--max-tokens`, judge, seed or cap needs a
 new `--out-dir`. An evaluation whose pairs ended in errors (a sampler or judge outage) reports
 `complete_with_errors` with an error count and a `next_command` that retries them, and exits
@@ -155,11 +156,12 @@ uv run pup-finetune train --provider fireworks --model qwen3p8-27b --dataset /tm
   --run-dir /tmp/fw-run --max-epochs 1   # preview only (exit 2); add --confirm to train
 ```
 
-The best epoch is promoted to a Fireworks model (named after the run id) before the session
-ends, and `result.json` records it as `promoted_model`. `deploy /tmp/fw-run` previews an
-on-demand Fireworks deployment of it (paid per GPU-second while a replica runs, until
-`undeploy`); `--confirm` creates it (first validated shape unless `--shape`, at most one
-replica, scaling to zero when idle, hot loading off), waits until it is `READY`
+The best epoch is promoted to a Fireworks model (named after the run id; a new best found by
+resuming a run that already promoted one gets the id with `-e<epoch>s<step>`) before the
+session ends, and `result.json` records it as `promoted_model`. `deploy /tmp/fw-run`
+previews an on-demand Fireworks deployment of it (paid per GPU-second while a replica runs,
+until `undeploy`); `--confirm` creates it (first validated shape unless `--shape`, at most
+one replica, scaling to zero when idle, hot loading off), waits until it is `READY`
 (`--timeout-minutes`, default 30), smoke-tests one chat completion and prints the inference
 model (`accounts/<account>/deployments/<id>`). Fireworks' own CLI refuses to create
 deployments when an AI agent runs it; we use the API, so an agent must pass `--confirm` only
@@ -358,10 +360,12 @@ Source lives under `src/pup_finetune/`.
   `records.py` has its records (`EpochMetrics`, `TrainResult`, `ResumePoint`, `Resume`);
   `promotion.py` has `Promotion`, the `finalize` hook that promotes the best checkpoint
   before the session ends (re-creating its sampler checkpoint when that session expired) or
-  records it as the deployable checkpoint; `runner.py` has `start_training` and
-  `resume_training`, which open a session for a run directory and train or resume in it
-  (`start_training` takes an `after_finalize` hook, run in the session after a successful
-  promotion with the run's spend guard; its failure only adds a warning);
+  records it as the deployable checkpoint, recording each promotion request per checkpoint
+  first (a new best after an earlier promotion gets its own model id,
+  `model_id_for_checkpoint`, so a model id never holds two checkpoints); `runner.py` has
+  `start_training` and `resume_training`, which open a session for a run directory and train
+  or resume in it (`start_training` takes an `after_finalize` hook, run in the session after
+  a successful promotion with the run's spend guard; its failure only adds a warning);
   `inputs.py` renders a dataset's train and validation rows for a run (and checks, for an
   existing run, that the dataset and renderer did not change); `worker.py` runs a mode
   (`train`, `resume`, `finalize`) in the foreground or a detached worker (`spawn_worker`:
@@ -464,11 +468,11 @@ Source lives under `src/pup_finetune/`.
   computed from `forward`'s per-token logprobs, checkpoint names checked against the
   17-character limit before saving, `promote` picking the newest promotable sampler row
   carrying the checkpoint's name (`promotable_row`) and adopting a model this run already
-  promoted whose response was lost (`adopt_since`: the run's first promotion request, saved
-  in `state.json` as `promotion_requested_at`, less a minute's clock allowance), sampler
-  checkpoints of an ended session refused with a hint); and `FireworksSampler` (render, sample
-  greedily to the renderer's stop tokens, parse; only sampling is retried, a bounded number of
-  times). `client.py` also wraps
+  promoted whose response was lost (`adopt_since`: the run's request to promote that
+  checkpoint, saved in `state.json` under `promotions`, less a minute's clock allowance),
+  sampler checkpoints of an ended session refused with a hint); and `FireworksSampler`
+  (render, sample greedily to the renderer's stop tokens, parse; only sampling is retried, a
+  bounded number of times). `client.py` also wraps
   the SDK's `Fireworks` client for deployments (`FireworksDeployments`,
   `FireworksDeploymentsClient`: `match_shapes`, `create_deployment`, `get_deployment` and
   `delete_deployment` with plain `ShapeVersion` and `DeploymentRecord` results, 404 as gone,

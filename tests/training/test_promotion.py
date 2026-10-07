@@ -9,14 +9,20 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 from pup_finetune.errors import FinetuneError
-from pup_finetune.providers.base import LoraConfig, ModelRef, TrainSpec
+from pup_finetune.providers.base import (
+    MAX_MODEL_ID_LEN,
+    MODEL_ID_PATTERN,
+    LoraConfig,
+    ModelRef,
+    TrainSpec,
+)
 from pup_finetune.providers.fake import (
     FAKE_PROFILE,
     MAX_CHECKPOINT_NAME_LEN,
@@ -32,7 +38,11 @@ from pup_finetune.training import (
     TrainResult,
     run_training,
 )
-from pup_finetune.training.promotion import ADOPT_CLOCK_ALLOWANCE
+from pup_finetune.training.promotion import (
+    ADOPT_CLOCK_ALLOWANCE,
+    PromotionRequest,
+    model_id_for_checkpoint,
+)
 from tests.fakes.training import SESSION, MemoryState, RecordingSession, row_examples
 
 LORA = LoraConfig(rank=8)
@@ -168,35 +178,86 @@ def test_a_spend_guard_is_not_asked_when_nothing_is_re_created() -> None:
     assert asked == []
 
 
-def test_a_promotion_adopts_only_models_created_since_the_run_first_asked() -> None:
+class Requests:
+    """:class:`~pup_finetune.training.promotion.PromotionRequests` in memory, made at ``now``."""
+
+    def __init__(self, now: datetime) -> None:
+        self.now = now
+        self.recorded: list[PromotionRequest] = []
+
+    def promotion_request(self, epoch: int, step: int) -> PromotionRequest | None:
+        return next((r for r in self.recorded if (r.epoch, r.step) == (epoch, step)), None)
+
+    def any_promotion_requested(self) -> bool:
+        return bool(self.recorded)
+
+    def record_promotion_request(self, model_id: str, *, epoch: int, step: int) -> PromotionRequest:
+        request = PromotionRequest(model_id=model_id, epoch=epoch, step=step, requested_at=self.now)
+        self.recorded.append(request)
+        return request
+
+
+def promote_with(finalize: Promotion, *, epochs: int = 1) -> tuple[str, list[datetime | None]]:
+    """The promoted model id of a run of ``epochs`` (each one best), and its ``adopt_since``."""
+    backend = FakeBackend(FakeOptions(val_curve=[3.0, 2.0, 1.0]))
+    with backend.open_session(FAKE_PROFILE, LORA, **SESSION) as inner:
+        session = RecordingSession(inner)
+        result = run_training(
+            session,
+            train_rows=row_examples(2),
+            validation_rows=row_examples(2, prefix="val"),
+            spec=spec(max_epochs=epochs),
+            state=MemoryState(),
+            budget=Budget(),
+            checkpoint_namer=namer,
+            max_checkpoint_name_len=MAX_CHECKPOINT_NAME_LEN,
+            finalize=finalize,
+        )
+    assert result.promoted_model is not None
+    return result.promoted_model.model_id, session.adopt_since
+
+
+def test_a_promotion_adopts_only_models_created_since_the_run_asked_for_that_checkpoint() -> None:
     asked = datetime(2026, 10, 6, 12, 0, tzinfo=UTC)
-    calls: list[str] = []
-
-    def requested_at() -> datetime:
-        calls.append("requested_at")
-        return asked
-
-    def promote_with(finalize: Promotion) -> list[datetime | None]:
-        backend = FakeBackend(FakeOptions())
-        with backend.open_session(FAKE_PROFILE, LORA, **SESSION) as inner:
-            session = RecordingSession(inner)
-            run_training(
-                session,
-                train_rows=row_examples(2),
-                validation_rows=row_examples(2, prefix="val"),
-                spec=spec(max_epochs=1),
-                state=MemoryState(),
-                budget=Budget(),
-                checkpoint_namer=namer,
-                max_checkpoint_name_len=MAX_CHECKPOINT_NAME_LEN,
-                finalize=finalize,
-            )
-        return session.adopt_since
-
-    since = promote_with(dataclasses.replace(promotion(), requested_at=requested_at))
-    assert (calls, since) == (["requested_at"], [asked - ADOPT_CLOCK_ALLOWANCE])
+    requests = Requests(asked)
+    finalize = dataclasses.replace(promotion(), requests=requests)
+    since = asked - ADOPT_CLOCK_ALLOWANCE
+    assert promote_with(finalize) == ("ft-run-1", [since])
+    # Promoting the same checkpoint again (a retry) reuses its recorded request.
+    requests.now = asked + timedelta(hours=1)
+    assert promote_with(finalize) == ("ft-run-1", [since])
+    assert [(r.model_id, r.epoch, r.step) for r in requests.recorded] == [("ft-run-1", 1, 2)]
     # Without a recorded request, no existing model can be told to be the run's.
-    assert promote_with(promotion()) == [None]
+    assert promote_with(promotion()) == ("ft-run-1", [None])
+
+
+def test_a_new_best_after_a_promotion_gets_its_own_model_id() -> None:
+    # The run's model id holds epoch 1: epoch 3, a later best, must not be adopted as it.
+    asked = datetime(2026, 10, 6, 12, 0, tzinfo=UTC)
+    requests = Requests(asked)
+    finalize = dataclasses.replace(promotion(), requests=requests)
+    assert promote_with(finalize)[0] == "ft-run-1"
+    requests.now = later = asked + timedelta(hours=1)
+    model_id, since = promote_with(finalize, epochs=3)
+    assert (model_id, since) == ("ft-run-1-e3s6", [later - ADOPT_CLOCK_ALLOWANCE])
+    assert [(r.model_id, r.epoch, r.step) for r in requests.recorded] == [
+        ("ft-run-1", 1, 2),
+        ("ft-run-1-e3s6", 3, 6),
+    ]
+    # Asked again, epoch 3 keeps its own id and request.
+    assert promote_with(finalize, epochs=3) == ("ft-run-1-e3s6", since)
+
+
+def test_a_checkpoint_model_id_fits_the_model_id_rules() -> None:
+    assert model_id_for_checkpoint("ft-run-1", 3, 12) == "ft-run-1-e3s12"
+    longest = "a" * MAX_MODEL_ID_LEN
+    derived = model_id_for_checkpoint(longest, 3, 12)
+    assert len(derived) == MAX_MODEL_ID_LEN
+    assert MODEL_ID_PATTERN.fullmatch(derived)
+    assert derived.endswith("-e3s12")
+    # Two long ids that share the kept prefix stay apart.
+    assert derived != model_id_for_checkpoint(longest[:-1] + "b", 3, 12)
+    assert MODEL_ID_PATTERN.fullmatch(model_id_for_checkpoint("a" * 40 + "-" * 22 + "b", 3, 12))
 
 
 def test_without_promotion_the_best_sampler_checkpoint_is_the_deployable_one() -> None:

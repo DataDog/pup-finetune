@@ -410,6 +410,71 @@ def test_repeated_crashes_after_the_last_checkpoint_stop_at_the_spend_cap(
 # --- promotion --------------------------------------------------------------------------
 
 
+def cancel_after_epoch_one(
+    run_dir: RunDir, fake: FakeProvider, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, Any]:
+    """Start ``run_dir`` and cancel it once its first epoch finished."""
+    clock = Clock()
+    cancel = [False]
+
+    def on_event(event: dict[str, Any]) -> None:
+        clock.on_event(event)
+        cancel[0] = cancel[0] or event["type"] == "epoch"
+
+    # Stands in for a cancel request (``RunState.request_cancel``) after the first epoch.
+    monkeypatch.setattr(RunState, "cancel_requested", lambda self: cancel[0])
+    try:
+        return start_training(
+            fake,
+            run_dir,
+            train_rows=TRAIN,
+            validation_rows=VALIDATION,
+            clock=clock,
+            on_event=on_event,
+        )
+    finally:
+        monkeypatch.undo()
+
+
+def test_a_new_best_after_a_cancelled_run_promoted_is_promoted_under_its_own_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = new_run(tmp_path / "run", provider_options={"val_curve": [3.0, 2.0, 1.0]})
+    # One fake for both attempts: its models outlive the session, as a provider's do.
+    fake = provider()
+    cancelled = cancel_after_epoch_one(run_dir, fake, monkeypatch)
+    assert (cancelled["phase"], cancelled["best_epoch"]) == ("cancelled", 1)
+    assert cancelled["promoted_model"]["model_id"] == RUN_ID
+
+    # Epoch 3 is the new best: the run's model id holds epoch 1, so it gets its own.
+    result = resume(run_dir, fake)
+    assert (result["phase"], result["best_epoch"]) == ("completed", 3)
+    deployable = result["deployable_checkpoint"]
+    assert (deployable["epoch"], deployable["step"]) == (3, 12)
+    assert result["promoted_model"]["model_id"] == f"{RUN_ID}-e3s12"
+    assert [model.model_id for model in fake.backend().promoted] == [RUN_ID, f"{RUN_ID}-e3s12"]
+    assert [(r["model_id"], r["epoch"], r["step"]) for r in run_dir.load_state().promotions] == [
+        (RUN_ID, 1, 4),
+        (f"{RUN_ID}-e3s12", 3, 12),
+    ]
+
+
+def test_the_same_best_after_a_cancelled_run_promoted_keeps_its_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = new_run(tmp_path / "run", provider_options={"val_curve": [1.0, 2.0, 3.0]})
+    fake = provider()
+    cancelled = cancel_after_epoch_one(run_dir, fake, monkeypatch)
+    assert cancelled["promoted_model"]["model_id"] == RUN_ID
+
+    # Epoch 1 stays best: its weights are saved again and promoted to the same model.
+    result = resume(run_dir, fake)
+    assert (result["phase"], result["best_epoch"]) == ("completed", 1)
+    assert result["promoted_model"] == cancelled["promoted_model"]
+    assert result["deployable_checkpoint"]["name"].startswith("r1s4-")
+    assert len(run_dir.load_state().promotions) == 1
+
+
 def test_a_spend_stop_keeps_the_reserve_for_its_checkpoint_and_promotes_the_best(
     tmp_path: Path,
 ) -> None:

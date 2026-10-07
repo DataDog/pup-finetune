@@ -17,8 +17,9 @@ provider follows. ``tests/providers/contract`` holds the suites it passes.
   an id derived from the word itself. Assistant completions carry weight 1.
 - :class:`FakeBackend` and :class:`FakeSession` report losses from configurable per-epoch
   curves, enforce the 17-character checkpoint-name limit and the session-expiry rules of a
-  real provider, record what was saved, promoted and sampled, and can simulate a crash or a
-  failed promotion. Both optional capabilities (resume and promotion) are on by default and
+  real provider, record what was saved, promoted and sampled (and the weights each model id
+  holds, refusing other weights under a taken id), and can simulate a crash or a failed
+  promotion. Both optional capabilities (resume and promotion) are on by default and
   can be turned off, to exercise the paths of providers without them.
 - :class:`FakeSampler` answers a fixed generic reply from the base model. A tuned checkpoint
   answers the reference when an optional teacher table has the prompt, else what the session
@@ -50,7 +51,7 @@ from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt
 
-from pup_finetune.errors import FinetuneError, UsageError
+from pup_finetune.errors import FinetuneError, StateError, UsageError
 from pup_finetune.providers.base import (
     MODEL_ID_PATTERN,
     AdamConfig,
@@ -598,6 +599,7 @@ class FakeBackend:
         self.closed: list[str] = []
         self.saved: list[CheckpointRef] = []
         self.promoted: list[ModelRef] = []
+        self.models: dict[str, int | None] = {}
         self.sampled: list[CheckpointRef | None] = []
         self._live: set[str] = set()
         self._prefix = uuid.uuid4().hex[:8]
@@ -766,12 +768,13 @@ class FakeSession:
     def promote(
         self, ckpt: CheckpointRef, model_id: str, *, adopt_since: datetime | None = None
     ) -> ModelRef:
-        # The fake never refuses a model id it promoted before, so it has nothing to adopt.
+        # The fake promotes the same weights to a model id again as the model it promoted them
+        # to before, so it has nothing to adopt; other weights under a taken id are refused.
         del adopt_since
         self._require_open()
         if not self._backend.supports_promotion:
             raise UsageError("this fake backend is configured without promotion")
-        self._require_live_sampler(ckpt, "promote")
+        weights = self._require_live_sampler(ckpt, "promote").trained
         if not MODEL_ID_PATTERN.fullmatch(model_id):
             raise UsageError(
                 f"invalid model id {model_id!r}",
@@ -782,6 +785,12 @@ class FakeSession:
             self._backend.fail_promotions -= 1
             error = self._backend.promotion_error
             raise error or FakeCrash(f"simulated failure promoting {ckpt.name!r} (fail_promotions)")
+        held = self._backend.models.setdefault(model_id, weights)
+        if held != weights:
+            raise StateError(
+                f"the fake model {model_id!r} already holds other weights, so "
+                f"{ckpt.name!r} cannot be promoted to it"
+            )
         model = ModelRef(provider=PROVIDER_NAME, model_id=model_id, uri=f"fake://models/{model_id}")
         self._backend.promoted.append(model)
         return model

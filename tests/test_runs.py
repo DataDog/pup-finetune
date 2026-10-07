@@ -262,19 +262,44 @@ def test_every_save_records_the_elapsed_time_and_it_never_decreases(tmp_path: Pa
     assert run_dir.load_state().elapsed_seconds == 120.0
 
 
-def test_the_first_promotion_request_is_saved_once_and_kept(tmp_path: Path) -> None:
+def test_a_promotion_request_is_saved_per_checkpoint_and_kept(tmp_path: Path) -> None:
     run_dir = create(tmp_path / "run")
-    assert run_dir.load_state().promotion_requested_at is None
+    assert run_dir.load_state().promotions == []
     first = NOW + timedelta(hours=1, microseconds=500)
     state = run_dir.load_state(now=lambda: first)
+    assert not state.any_promotion_requested()
+    assert state.promotion_request(1, 2) is None
     # Saved before it is returned, to the second, as read back later.
-    assert state.mark_promotion_requested() == first.replace(microsecond=0)
-    assert read(run_dir.state_path)["promotion_requested_at"] == "2026-10-06T13:30:45+00:00"
-    # A later attempt (a resume, a promotion retry) gets the recorded time, not its own.
+    request = state.record_promotion_request("ft-run", epoch=1, step=2)
+    assert (request.model_id, request.epoch, request.step) == ("ft-run", 1, 2)
+    assert request.requested_at == first.replace(microsecond=0)
+    assert read(run_dir.state_path)["promotions"] == [
+        {"model_id": "ft-run", "epoch": 1, "step": 2, "requested_at": "2026-10-06T13:30:45+00:00"}
+    ]
+    # A later attempt (a resume, a promotion retry) finds the recorded request of the
+    # checkpoint, not its own, and none for another checkpoint.
     later = run_dir.load_state(now=lambda: NOW + timedelta(days=1))
-    assert later.mark_promotion_requested() == first.replace(microsecond=0)
-    later.save()
-    assert run_dir.load_state().promotion_requested_at == "2026-10-06T13:30:45+00:00"
+    assert later.any_promotion_requested()
+    assert later.promotion_request(1, 2) == request
+    assert later.promotion_request(3, 6) is None
+    other = later.record_promotion_request("ft-run-e3s6", epoch=3, step=6)
+    assert other.requested_at == NOW + timedelta(days=1)
+    reloaded = run_dir.load_state()
+    assert (reloaded.promotion_request(1, 2), reloaded.promotion_request(3, 6)) == (request, other)
+
+
+def test_a_state_saved_with_only_the_first_request_time_reads_as_an_unknown_checkpoint(
+    tmp_path: Path,
+) -> None:
+    run_dir = create(tmp_path / "run")
+    data = read(run_dir.state_path)
+    del data["promotions"]
+    data["promotion_requested_at"] = "2026-10-06T13:30:45+00:00"
+    run_dir.state_path.write_text(json.dumps(data))
+    state = run_dir.load_state()
+    # Some checkpoint was promoted to the run's model id, but not which: none matches.
+    assert state.any_promotion_requested()
+    assert state.promotion_request(1, 2) is None
 
 
 @pytest.mark.parametrize("elapsed", [-1.0, "soon"])

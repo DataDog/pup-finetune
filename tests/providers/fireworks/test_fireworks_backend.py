@@ -50,10 +50,11 @@ from pup_finetune.providers.fireworks.provider import FireworksProvider
 from pup_finetune.rendering.base import Renderer
 from pup_finetune.rendering.families import get_family
 from pup_finetune.rendering.tokens import TokenizedExample
-from pup_finetune.runs import RunDir, model_id_for_run
+from pup_finetune.runs import RunDir, RunState, model_id_for_run
 from pup_finetune.runtime import Runtime
 from pup_finetune.training import FinalizeFailed
 from pup_finetune.training.datums import RowExamples, build_examples
+from pup_finetune.training.promotion import model_id_for_checkpoint
 from pup_finetune.training.runner import resume_training, start_training
 from tests.fakes.fireworks import ACCOUNT, FakeFireworksTrainingClient
 from tests.fakes.fireworks_api import API_KEY, FakeFireworksApi
@@ -1020,7 +1021,9 @@ class _RequestWatcher(FakeFireworksTrainingClient):
     def promote_session_checkpoint(
         self, resource_name: str, output_model_id: str, base_model: str
     ) -> dict[str, Any]:
-        self.recorded.append(self.run_dir.load_state().promotion_requested_at)
+        [request] = self.run_dir.load_state().promotions
+        assert request["model_id"] == output_model_id
+        self.recorded.append(request["requested_at"])
         return super().promote_session_checkpoint(resource_name, output_model_id, base_model)
 
 
@@ -1059,9 +1062,74 @@ def test_a_run_whose_promotion_response_was_lost_adopts_the_model_on_resume(
         now=lambda: SINCE + timedelta(days=1),
     )
     assert result["phase"] == "completed"
-    assert run_dir.load_state().promotion_requested_at == SINCE.isoformat()
+    [request] = run_dir.load_state().promotions
+    assert request["requested_at"] == SINCE.isoformat()
     assert result["promoted_model"]["uri"] == f"accounts/{ACCOUNT}/models/{model_id}"
     assert not any(call[0] == "promote_session_checkpoint" for call in fw.calls)
+    assert _live(fw) == []
+
+
+def test_a_new_best_after_a_cancelled_run_promoted_gets_its_own_model_and_adopts_it(
+    renderer: Renderer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = _new_run(tmp_path / "run", renderer, created_at=SINCE - timedelta(hours=1))
+    fw = FakeFireworksTrainingClient()
+    train_rows, validation_rows = _rows(renderer, 4, "train"), _rows(renderer, 2, "val")
+    cancel = [False]
+
+    def on_event(event: dict[str, Any]) -> None:
+        cancel[0] = cancel[0] or event["type"] == "epoch"
+
+    # Cancelled after epoch 1, which is promoted to the run's model id.
+    monkeypatch.setattr(RunState, "cancel_requested", lambda self: cancel[0])
+    fw.now = lambda: SINCE + timedelta(seconds=2)
+    cancelled = start_training(
+        _provider(fw),
+        run_dir,
+        train_rows=train_rows,
+        validation_rows=validation_rows,
+        on_event=on_event,
+        now=lambda: SINCE,
+    )
+    monkeypatch.undo()
+    first = model_id_for_run(RUN_ID)
+    assert (cancelled["phase"], cancelled["best_epoch"]) == ("cancelled", 1)
+    assert cancelled["promoted_model"]["model_id"] == first
+
+    # The resume makes epoch 2 the best. The run's model id holds epoch 1 and was created
+    # after the run first asked, so it would pass for this run's: epoch 2 gets its own id.
+    # That promotion takes place but its response is lost, and so is the lookup after it.
+    second = model_id_for_checkpoint(first, 2, 4)
+    fw.lost_responses.append("connection")
+    fw.fail("get_model", "connection", after=1)
+    fw.now = lambda: SINCE + timedelta(hours=1, seconds=2)
+    with pytest.raises(FinalizeFailed):
+        resume_training(
+            _provider(fw),
+            run_dir,
+            train_rows=train_rows,
+            validation_rows=validation_rows,
+            now=lambda: SINCE + timedelta(hours=1),
+        )
+    assert {first, second} <= set(fw.promoted)
+
+    # The retry adopts epoch 2's model, not epoch 1's.
+    fw.calls.clear()
+    result = resume_training(
+        _provider(fw),
+        run_dir,
+        train_rows=train_rows,
+        validation_rows=validation_rows,
+        now=lambda: SINCE + timedelta(days=1),
+    )
+    assert (result["phase"], result["best_epoch"]) == ("completed", 2)
+    assert result["deployable_checkpoint"]["epoch"] == 2
+    assert result["promoted_model"]["uri"] == f"accounts/{ACCOUNT}/models/{second}"
+    assert not any(call[0] == "promote_session_checkpoint" for call in fw.calls)
+    assert [(r["model_id"], r["epoch"]) for r in run_dir.load_state().promotions] == [
+        (first, 1),
+        (second, 2),
+    ]
     assert _live(fw) == []
 
 

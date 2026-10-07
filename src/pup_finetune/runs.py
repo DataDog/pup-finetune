@@ -83,6 +83,7 @@ from pup_finetune.storage import (
     settings_hash,
 )
 from pup_finetune.training.loop import CheckpointKind, CheckpointNamer, FinalizeFailed
+from pup_finetune.training.promotion import PromotionRequest
 from pup_finetune.training.records import EpochMetrics, ResumePoint, TrainResult
 
 RUN_FILE = "run.json"
@@ -142,6 +143,19 @@ def _parsed_time(value: object) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _promotions_json(data: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The promotion requests of a saved state; see :class:`RunState`."""
+    records = data.get("promotions")
+    if records is not None:
+        if not isinstance(records, list) or not all(isinstance(r, dict) for r in records):
+            raise ValueError("promotions must be a list of objects")
+        return records
+    legacy = _optional_str(data.get("promotion_requested_at"))
+    if legacy is None:
+        return []
+    return [{"model_id": None, "epoch": None, "step": None, "requested_at": legacy}]
 
 
 def _optional_str(value: object) -> str | None:
@@ -475,10 +489,13 @@ class RunState:
     counts the time spent after the last training checkpoint too, up to the last save (at
     most one step or heartbeat before a crash).
 
-    :attr:`promotion_requested_at` is when the run first asked its provider to promote a
-    checkpoint (:meth:`mark_promotion_requested`), saved before that request and kept across
-    resumes, so a model created since can be told to be this run's (see
-    :class:`~pup_finetune.training.promotion.Promotion`).
+    :attr:`promotions` are the run's promotion requests, one per checkpoint it asked its
+    provider to promote: the model id, the checkpoint's epoch and step, and when it first
+    asked (:meth:`record_promotion_request`), saved before that request and kept across
+    resumes, so a model created since under that id can be told to be this run's, holding
+    that checkpoint (see :class:`~pup_finetune.training.promotion.Promotion`). A state saved
+    before these were recorded holds only ``promotion_requested_at``, the time of the run's
+    first request; it is read as a request for an unknown checkpoint.
     """
 
     def __init__(
@@ -499,7 +516,7 @@ class RunState:
         pid: int | None = None,
         error: Mapping[str, Any] | None = None,
         elapsed_seconds: float = 0.0,
-        promotion_requested_at: str | None = None,
+        promotions: Sequence[Mapping[str, Any]] = (),
         now: Clock = utcnow,
     ) -> None:
         if not (math.isfinite(elapsed_seconds) and elapsed_seconds >= 0):
@@ -521,7 +538,7 @@ class RunState:
         self.pid = pid
         self.error = None if error is None else dict(error)
         self._elapsed_seconds = float(elapsed_seconds)
-        self.promotion_requested_at = promotion_requested_at
+        self.promotions = [dict(record) for record in promotions]
         self._elapsed: Callable[[], float] | None = None
         self._now = now
         self._cancel = threading.Event()
@@ -555,7 +572,7 @@ class RunState:
                 pid=data.get("pid"),
                 error=data.get("error"),
                 elapsed_seconds=float(data.get("elapsed_seconds") or 0.0),
-                promotion_requested_at=_optional_str(data.get("promotion_requested_at")),
+                promotions=_promotions_json(data),
                 now=now,
             )
         except (TypeError, ValueError) as exc:
@@ -577,7 +594,7 @@ class RunState:
             "pid": self.pid,
             "error": self.error,
             "elapsed_seconds": self.elapsed_seconds,
-            "promotion_requested_at": self.promotion_requested_at,
+            "promotions": self.promotions,
         }
 
     @property
@@ -697,22 +714,35 @@ class RunState:
             self.resume_point = resume_point.to_json()
         self.save()
 
-    def mark_promotion_requested(self) -> datetime:
-        """When the run first asked for a promotion: now, saved, the first time it is called.
+    def promotion_request(self, epoch: int, step: int) -> PromotionRequest | None:
+        """The recorded request to promote the checkpoint at ``epoch`` and ``step``, if any."""
+        for record in self.promotions:
+            if (record.get("epoch"), record.get("step")) != (epoch, step):
+                continue
+            model_id, requested_at = (
+                record.get("model_id"),
+                _parsed_time(record.get("requested_at")),
+            )
+            if isinstance(model_id, str) and requested_at is not None:
+                return PromotionRequest(
+                    model_id=model_id, epoch=epoch, step=step, requested_at=requested_at
+                )
+        return None
 
-        Every later call, also in a resumed attempt, returns the recorded time unchanged, so
-        it is never later than any promotion request the run made. The time is saved before
-        it is returned, so a request made after the call is always covered.
+    def any_promotion_requested(self) -> bool:
+        """Whether the run recorded a request to promote any checkpoint."""
+        return bool(self.promotions)
+
+    def record_promotion_request(self, model_id: str, *, epoch: int, step: int) -> PromotionRequest:
+        """Record a request to promote the checkpoint at ``epoch`` and ``step`` to
+        ``model_id``, made now, and save it before returning it, so a request made after the
+        call is always covered. Its time is truncated to the second, as a resume reads it back.
         """
-        recorded = _parsed_time(self.promotion_requested_at)
-        if recorded is not None:
-            return recorded
-        moment = self._now()
-        self.promotion_requested_at = _iso(moment)
+        moment = self._now().replace(microsecond=0)
+        record = {"model_id": model_id, "epoch": epoch, "step": step, "requested_at": _iso(moment)}
+        self.promotions.append(record)
         self.save()
-        # The saved time, truncated to the second, so a resume reads back the same value.
-        parsed = _parsed_time(self.promotion_requested_at)
-        return moment if parsed is None else parsed
+        return PromotionRequest(model_id=model_id, epoch=epoch, step=step, requested_at=moment)
 
     def record_warning(self, message: str) -> None:
         self.warnings.append(message)

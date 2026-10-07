@@ -587,6 +587,25 @@ class BackendContract:
         assert model.model_id == model_id
         assert model.uri
 
+    def test_other_weights_are_not_promoted_under_a_promoted_model_id(
+        self,
+        backend: TrainingBackend,
+        session: TrainingSession,
+        batch: list[TokenizedExample],
+        model_id: str,
+    ) -> None:
+        # A run promotes a new best under an id of its own; one that reused the id of an
+        # earlier best must fail rather than report the earlier model as the new best's.
+        if not backend.supports_promotion:
+            pytest.skip("the backend does not promote")
+        self._train_one_step(session, batch)
+        first = session.save_sampler_checkpoint("first", epoch=1, step=1)
+        self._train_one_step(session, batch)
+        second = session.save_sampler_checkpoint("second", epoch=2, step=2)
+        assert session.promote(first, model_id).model_id == model_id
+        with pytest.raises(FinetuneError):
+            session.promote(second, model_id)
+
     def test_a_sampler_checkpoint_from_a_closed_session_works_or_fails_cleanly(
         self,
         backend: TrainingBackend,
