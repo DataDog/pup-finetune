@@ -442,6 +442,26 @@ def test_votes_stored_since_planning_stop_the_triage(tmp_path: Path) -> None:
     assert len(plan_triage(dataset, RUBRIC, (J1,)).pending) == 1
 
 
+def test_votes_another_triage_reset_and_recast_since_planning_stop_the_triage(
+    tmp_path: Path,
+) -> None:
+    dataset = make_dataset(tmp_path, n=2)
+    run_triage(plan_triage(dataset, RUBRIC, (J1,)), FakeCouncil(keep_all))
+    plan = plan_triage(dataset, RUBRIC, (J1,))
+    assert plan.stored_votes == 2
+    # Another triage resets and casts as many votes, the other way.
+    drop = FakeCouncil(lambda judge, row_id: False)
+    run_triage(plan_triage(dataset, RUBRIC, (J1,), reset=True), drop)
+    labels = dataset.labels()
+    council = FakeCouncil(keep_all)
+    with pytest.raises(StateError, match="changed since this triage was planned") as caught:
+        run_triage(plan, council)
+    assert "run the triage again" in (caught.value.hint or "")
+    assert council.calls == []
+    assert dataset.labels() == labels
+    assert {label.keep for label in labels.values()} == {False}
+
+
 def _with_reasoning(row: TrainingRow, text: str) -> TrainingRow:
     *before, last = row.messages
     return row.model_copy(

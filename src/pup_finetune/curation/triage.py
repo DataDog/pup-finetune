@@ -343,6 +343,8 @@ class TriagePlan:
     settings: dict[str, Any] = field(default_factory=dict)
     votes_unreadable: bool = False
     """With ``reset``: ``judgments.jsonl`` could not be read, and is discarded all the same."""
+    votes_sha256: str | None = None
+    """The sha256 of ``judgments.jsonl`` as planned from; ``None`` when there was none."""
 
     @property
     def calls(self) -> int:
@@ -437,6 +439,8 @@ def plan_triage(
     settings = _settings(criteria, judges)
     votes_path = dataset.path / JUDGMENTS_FILE
     unreadable = False
+    # Before the votes are read: a vote stored in between then shows as a change in run_triage.
+    votes_sha256 = _file_sha256(votes_path)
     try:
         stored_votes = read_votes(votes_path)
     except StateError:
@@ -482,6 +486,7 @@ def plan_triage(
         reset=reset,
         settings=settings,
         votes_unreadable=unreadable,
+        votes_sha256=votes_sha256,
     )
 
 
@@ -505,6 +510,15 @@ def _check_frozen(dataset: DatasetDir, settings: Mapping[str, Any], votes: int) 
         hint="keep the same --rubric, --rule and --judges to resume, use a new dataset "
         "directory, or pass --reset-triage to discard the votes",
     )
+
+
+def _file_sha256(path: Path) -> str | None:
+    """The sha256 of ``path``'s bytes, or ``None`` when there is no such file."""
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    return hashlib.sha256(data).hexdigest()
 
 
 def _line_count(path: Path) -> int:
@@ -601,7 +615,7 @@ def run_triage(
     pull filled in its reasoning, say) or is gone since planning, as its votes and label
     would be for other content. The frozen settings are checked again too (unless
     ``plan.reset``): :class:`StateError` when votes now exist under other settings, or
-    the stored votes changed since planning (plan again). A
+    ``judgments.jsonl`` changed since planning (another triage ran; plan again). A
     row the agent or a person labeled since planning keeps that label and is skipped
     (:attr:`TriageReport.skipped_labeled`). A rejected API key stops the triage (the votes so far
     are kept); any other failed call is reported and retried on the next run. Ctrl-C stops
@@ -705,12 +719,14 @@ def _check_rows_unchanged(plan: TriagePlan) -> None:
 
 
 def _check_unchanged(plan: TriagePlan) -> None:
-    """Under the lock: the frozen settings still match, and no vote was stored since
-    ``plan`` was made (another triage ran in between); :class:`StateError` otherwise."""
+    """Under the lock: the frozen settings still match, and ``judgments.jsonl`` is as
+    ``plan`` read it (no other triage ran in between, also one that reset it and stored as
+    many other votes); :class:`StateError` otherwise."""
     dataset = plan.dataset
-    votes = len(read_votes(dataset.path / JUDGMENTS_FILE))
+    path = dataset.path / JUDGMENTS_FILE
+    votes = len(read_votes(path))
     _check_frozen(dataset, plan.settings, votes)
-    if votes != plan.stored_votes:
+    if _file_sha256(path) != plan.votes_sha256:
         raise StateError(
             f"the triage votes of {dataset.path} changed since this triage was planned "
             f"({plan.stored_votes} then, {votes} now): another triage ran meanwhile",
