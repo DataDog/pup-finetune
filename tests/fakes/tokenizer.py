@@ -11,6 +11,7 @@ Each special token is one id and every other character is its own id (its code p
     tokenizer = FakeChatTokenizer()  # Qwen3.8-like, token prefix-stable
     tokenizer = FakeChatTokenizer(merge_newlines=True)  # "\\n\\n" encodes as one token
     tokenizer = FakeChatTokenizer(template=role_tag_template)  # any template function
+    tokenizer = FakeChatTokenizer(template=glm5_like)  # GLM-5-like, role tags as stops
 
 :func:`qwen3_8_like` follows the real Qwen3.8 template: ``<|im_start|>role\\n...<|im_end|>\\n``
 turns, ``<think>`` blocks on assistant turns (kept in history unless the template argument
@@ -18,7 +19,7 @@ turns, ``<think>`` blocks on assistant turns (kept in history unless the templat
 turns and a generation prompt that opens ``<think>\\n``. With ``merge_newlines`` the empty
 reasoning block's newline merges with that prompt's trailing one, as BPE does. Like a real
 template, it raises on an empty conversation and on tool arguments that are not a mapping.
-Every render is recorded in ``calls``.
+Every render is recorded in ``calls``. :func:`glm5_like` follows the real GLM-5 template.
 """
 
 from __future__ import annotations
@@ -40,6 +41,11 @@ SPECIAL_TOKENS: tuple[str, ...] = (
     "<|user|>",
     "<|assistant|>",
     "<|observation|>",
+    "<|system|>",
+    "<arg_key>",
+    "</arg_key>",
+    "<arg_value>",
+    "</arg_value>",
 )
 _FIRST_SPECIAL_ID = 0x110000  # above every Unicode code point
 SPECIAL_IDS = {token: _FIRST_SPECIAL_ID + index for index, token in enumerate(SPECIAL_TOKENS)}
@@ -204,3 +210,39 @@ def role_tag_template(
 def role_tag_after(message: Mapping[str, Any]) -> str:
     """The tag a :func:`role_tag_template` model emits to end ``message``."""
     return "<|observation|>" if message.get("tool_calls") else "<|user|>"
+
+
+def glm5_like(
+    messages: Sequence[Mapping[str, Any]],
+    tools: Sequence[Mapping[str, Any]] | None,
+    add_generation_prompt: bool,
+    template_kwargs: Mapping[str, Any],
+) -> str:
+    """The GLM-5 chat template's structure: role tags and no end-of-turn token, a ``<think>``
+    block on every assistant turn, ``<arg_key>``/``<arg_value>`` tool calls (strings raw, other
+    values as JSON), tool results after ``<|observation|>`` and a prompt that opens ``<think>``.
+    """
+    parts = ["[gMASK]<sop>"]
+    if tools:
+        declared = "\n".join(json.dumps(dict(tool), sort_keys=True) for tool in tools)
+        parts.append(f"<|system|>\n# Tools\n<tools>\n{declared}\n</tools>")
+    for index, message in enumerate(messages):
+        role, content = message["role"], message.get("content") or ""
+        if role == "assistant":
+            reasoning = message.get("reasoning_content") or ""
+            parts.append(f"<|assistant|><think>{reasoning}</think>{content.strip()}")
+            for call in message.get("tool_calls") or ():
+                parts.append(f"<tool_call>{call['function']['name']}")
+                for key, value in _arguments(call).items():
+                    text = value if isinstance(value, str) else json.dumps(value)
+                    parts.append(f"<arg_key>{key}</arg_key><arg_value>{text}</arg_value>")
+                parts.append("</tool_call>")
+        elif role == "tool":
+            if messages[index - 1]["role"] != "tool":
+                parts.append("<|observation|>")
+            parts.append(f"<tool_response>{content}</tool_response>")
+        else:
+            parts.append(f"<|{role}|>{content}")
+    if add_generation_prompt:
+        parts.append("<|assistant|><think>")
+    return "".join(parts)

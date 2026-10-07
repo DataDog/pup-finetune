@@ -84,7 +84,37 @@ QWEN3_8 = ModelFamily(
 )
 """Qwen3.8 with its official template: preserved reasoning history, XML tool calls."""
 
-FAMILIES: Mapping[str, ModelFamily] = MappingProxyType({family.key: family for family in [QWEN3_8]})
+QWEN3_5 = ModelFamily(
+    key="qwen3_5",
+    tokenizer_model="Qwen/Qwen3.5-9B",
+    revision="c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+    parser="qwen3_5_xml",
+    stop_tokens=("<|im_end|>",),
+    # History drops reasoning before the last user turn, and "<think>\n" merges as in Qwen3.8.
+    prefix_stable=False,
+)
+"""Qwen3.5 with its official template: reasoning kept after the last user turn only."""
+
+
+def _glm_next_role_tag(message: ChatMessage) -> str:
+    return "<|observation|>" if message.get("tool_calls") else "<|user|>"
+
+
+GLM5_3 = ModelFamily(
+    key="glm5_3",
+    tokenizer_model="zai-org/GLM-5.3-Flash",
+    revision="eb9eb208eb0d988989d07a6a12d0fdeb5f52574a",
+    parser="glm_xml",
+    stop_tokens=("<|user|>", "<|observation|>"),
+    # Every turn boundary is a special token, so each turn's tokens prefix the whole render.
+    prefix_stable=True,
+    next_role_tag=_glm_next_role_tag,
+)
+"""GLM-5.3 with its official template: role tags as stops, ``<arg_key>`` tool calls."""
+
+FAMILIES: Mapping[str, ModelFamily] = MappingProxyType(
+    {family.key: family for family in [QWEN3_8, QWEN3_5, GLM5_3]}
+)
 """Every model family by key, as model profiles name them in ``renderer``."""
 
 
