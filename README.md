@@ -5,8 +5,8 @@ spans your application sends to Datadog Agent Observability and helps you:
 
 - **Curate** a supervised fine-tuning dataset from them, review it, and push it to an Agent
   Observability dataset.
-- **Train** a LoRA on Fireworks, keeping the epoch with the best validation loss and stopping
-  early.
+- **Train** a LoRA on Fireworks or Baseten, keeping the epoch with the best validation loss
+  and stopping early.
 - **Evaluate** the tuned model against the base model on held-out conversations, and publish
   the results as Agent Observability experiments.
 - **Deploy** the tuned model, and undeploy it when you're done.
@@ -22,6 +22,8 @@ write goes through Pup and its OAuth login.
 - Pup 1.10.7 or later, signed in to your Datadog organization with `pup auth login`.
 - A Fireworks account with access to Serverless Training, for training, triage, evaluation
   and deployment.
+- To train and deploy on Baseten instead, a Baseten account with access to Loops. Triage and
+  evaluation judges still run on Fireworks.
 
 ## Install for development
 
@@ -47,6 +49,9 @@ pup finetune auth login fireworks    # prompts for the key with hidden input
 pup finetune auth status             # shows where the key comes from, never the key itself
 pup finetune auth logout fireworks   # removes it from the keychain
 ```
+
+For Baseten, set `BASETEN_API_KEY` or run `pup finetune auth login baseten`. Without either,
+`pup-finetune` reads, read only, the key of your default Baseten remote in `~/.trussrc`.
 
 The key is never accepted as a command-line flag, never printed, and never written to a file.
 Without an OS keychain, `auth login` refuses to store the key and you use the environment
@@ -97,6 +102,12 @@ pup finetune train --provider fireworks --model qwen3p8-27b --dataset ./ds --run
 pup finetune train --provider fireworks --model qwen3p8-27b --dataset ./ds --run-dir ./run --detach --confirm
 pup finetune status ./run --watch
 ```
+
+To train on Baseten, pass `--provider baseten` with `--model qwen3p5-9b` or `glm-5p3-flash`,
+and check it first with `pup finetune models list --provider baseten --check`. Baseten has no
+promotion, so the run records the best epoch's checkpoint as its `deployable_checkpoint`, which
+`deploy` serves on a dedicated deployment (`--shape TYPE:COUNT`, default `H100:1`; the
+workspace needs BDN volumes).
 
 If the run is interrupted, `pup finetune resume ./run --confirm` continues it from its last
 checkpoint, and `pup finetune cancel ./run --confirm` stops it while keeping the best epoch.
@@ -149,9 +160,9 @@ Dataset and run directories hold trace content: conversations, tool calls and to
 caches the raw Export API pages in the dataset's `raw/` directory. Keep these directories out
 of version control.
 
-Training, `dataset triage` and `evaluate` send conversation content to the model provider
-you choose (Fireworks). `dataset preview`, `dataset pull` and every local command read from
-Datadog or your disk only.
+Training and `evaluate` send conversation content to the model provider you choose (Fireworks
+or Baseten), and `dataset triage` and the `evaluate` judge send it to Fireworks.
+`dataset preview`, `dataset pull` and every local command read from Datadog or your disk only.
 
 Set `PUP_READ_ONLY=true` to refuse remote writes: `train`, `resume` and `evaluate` with
 `--confirm`, and `dataset push`, `deploy` and `undeploy` (also their previews). Read-only mode
