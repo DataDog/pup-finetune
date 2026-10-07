@@ -454,6 +454,24 @@ def test_a_lost_create_answer_is_adopted(world: FireworksWorld, fireworks_run: P
     assert world.sdk.client_options == [{"max_retries": 0}]
 
 
+def test_a_create_answered_without_a_name_keeps_the_receipt_to_undeploy(
+    world: FireworksWorld, fireworks_run: Path
+) -> None:
+    world.sdk.create_without_name = True
+    result = invoke("deploy", str(fireworks_run), "--confirm")
+    assert result.exit_code == 1
+    assert "undeploy" in result.stderr
+    receipt = RunDir(fireworks_run).read_deployment()
+    assert receipt is not None
+    assert receipt["state"] == "REQUESTED"
+    deployment_id = model_id_for_run(RUN_ID)
+    assert receipt["deployment_name"] == f"accounts/{ACCOUNT}/deployments/{deployment_id}"
+    assert "could not be read" in receipt["error"]["message"]
+    removed = invoke("undeploy", str(fireworks_run), "--confirm")
+    assert removed.exit_code == 0, removed.stderr
+    assert world.sdk.deleted == [deployment_id]
+
+
 def test_a_refused_create_leaves_no_receipt(world: FireworksWorld, fireworks_run: Path) -> None:
     world.sdk.fail["create"] = FakeSdkError("invalid deployment shape", status_code=400)
     result = invoke("deploy", str(fireworks_run), "--confirm")

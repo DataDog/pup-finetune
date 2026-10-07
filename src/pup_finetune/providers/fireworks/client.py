@@ -1115,7 +1115,8 @@ class FireworksDeployments(Protocol):
         may hide a success (a 409, a timeout, a server error or a dropped connection), the
         deployment is read back: an existing deployment of ``base_model`` under that id is
         returned as the one created. Raises :class:`UsageError` when the id is taken by a
-        deployment of another model.
+        deployment of another model, and :class:`TransientError` when the create succeeded
+        but its answer cannot be read (no deployment name), as the deployment exists.
         """
         ...
 
@@ -1286,7 +1287,17 @@ class FireworksDeploymentsClient:
                     hint="pass another --deployment-id, or delete the existing deployment",
                 ) from exc
             raise error from exc
-        return _deployment_record(raw)
+        try:
+            return _deployment_record(raw)
+        except ExternalError as exc:
+            # The create was accepted, so the deployment exists and may bill: transient, so
+            # the caller keeps its receipt and says how to undeploy it, rather than treating
+            # it as refused.
+            raise TransientError(
+                f"{what} succeeded, but its answer could not be read: {exc.message}",
+                source=SOURCE,
+                hint=f"the deployment {deployment_id} was created",
+            ) from exc
 
     def _created_anyway(
         self, deployment_id: str, base_model: str, error: FinetuneError

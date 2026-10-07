@@ -99,6 +99,8 @@ class _Deployments:
         lost = self._sdk.lost.pop("create", None)
         if lost is not None:
             raise lost
+        if self._sdk.create_without_name:
+            return SimpleNamespace(**(record | {"name": None}))
         return SimpleNamespace(**record)
 
     def get(self, deployment_id: str) -> SimpleNamespace:
@@ -135,6 +137,8 @@ class FakeSdkFireworks:
         """An error to raise from the named call (``create``, ``get``, ...), once."""
         self.lost: dict[str, BaseException] = {}
         """An error to raise from the named call once it took effect (its answer was lost)."""
+        self.create_without_name = False
+        """Answer a create that took place with a deployment that has no name."""
         self.client_options: list[dict[str, Any]] = []
         """The options of every ``with_options`` copy of the client, in order."""
         self.calls: list[tuple[str, dict[str, Any]]] = []

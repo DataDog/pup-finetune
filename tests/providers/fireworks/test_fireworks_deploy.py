@@ -235,6 +235,18 @@ def test_a_create_whose_answer_was_lost_is_adopted(
     assert sdk.call_names() == ["match_for_model", "create", "get", "get"]
 
 
+def test_a_create_answered_without_a_name_is_transient(
+    deployer: FireworksDeployer, sdk: FakeSdkFireworks
+) -> None:
+    sdk.create_without_name = True
+    created: list[str] = []
+    with pytest.raises(TransientError, match="succeeded, but its answer could not be read"):
+        deployer.deploy(MODEL, OPTIONS, on_created=lambda e, s: created.append(s))
+    assert created == []
+    assert OPTIONS.deployment_id in sdk.records  # it exists, and may bill
+    assert sdk.call_names().count("create") == 1
+
+
 def test_a_dropped_connection_on_create_is_adopted(
     deployer: FireworksDeployer, sdk: FakeSdkFireworks
 ) -> None:
