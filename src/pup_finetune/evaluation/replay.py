@@ -46,7 +46,6 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
-import queue
 import random
 import threading
 from collections import Counter, defaultdict
@@ -57,6 +56,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, Literal, Protocol, get_args
 
+from pup_finetune.concurrency import DaemonPool
 from pup_finetune.errors import StateError
 from pup_finetune.evaluation.cases import ReplayCase
 from pup_finetune.evaluation.judge import Judgment
@@ -635,7 +635,7 @@ def _run_pool(
     """
     if not todo:
         return
-    pool = _DaemonPool(concurrency, name="replay")
+    pool = DaemonPool(concurrency, name="replay")
     futures: dict[Future[dict[str, Any] | None], tuple[Target, ReplayCase]] = {}
     done_count = 0
     interrupted = False
@@ -681,56 +681,6 @@ def _run_pool(
         raise
     finally:
         pool.shutdown(wait=not interrupted)
-
-
-class _DaemonPool:
-    """A fixed pool of daemon worker threads running submitted calls as :class:`Future`\\s.
-
-    Unlike :class:`~concurrent.futures.ThreadPoolExecutor`, whose workers the interpreter
-    joins at exit, an abandoned worker never delays the process's exit.
-    """
-
-    def __init__(self, workers: int, *, name: str) -> None:
-        self._queue: queue.SimpleQueue[tuple[Future[Any], Callable[[], Any]] | None]
-        self._queue = queue.SimpleQueue()
-        self._threads = [
-            threading.Thread(target=self._work, name=f"{name}-{n}", daemon=True)
-            for n in range(workers)
-        ]
-        for thread in self._threads:
-            thread.start()
-
-    def submit[T](self, fn: Callable[..., T], *args: Any) -> Future[T]:
-        future: Future[T] = Future()
-        self._queue.put((future, lambda: fn(*args)))
-        return future
-
-    def shutdown(self, *, wait: bool) -> None:
-        """Cancel the calls not started and stop the workers; with ``wait``, join them."""
-        while True:
-            try:
-                item = self._queue.get_nowait()
-            except queue.Empty:
-                break
-            if item is not None:
-                item[0].cancel()
-        for _ in self._threads:
-            self._queue.put(None)
-        if wait:
-            for thread in self._threads:
-                thread.join()
-
-    def _work(self) -> None:
-        while (item := self._queue.get()) is not None:
-            future, call = item
-            if not future.set_running_or_notify_cancel():
-                continue
-            try:
-                result = call()
-            except BaseException as exc:
-                future.set_exception(exc)
-            else:
-                future.set_result(result)
 
 
 # --- the summary --------------------------------------------------------------------------

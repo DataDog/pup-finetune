@@ -176,6 +176,8 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   from the environment variable, then the OS keychain (`keyring`), as `SecretStr`; `store` refuses
   when there is no OS keychain rather than writing a file. `auth login/status/logout` use it.
 - `redaction.py` - masks resolved secrets and `Bearer` tokens in error output and logs.
+- `concurrency.py` - `DaemonPool`, worker threads for parallel remote calls that never hold
+  up the process's exit, so Ctrl-C stops at once instead of waiting for a call in flight.
 - `http_common.py` - what the `httpx` clients that send a provider key share: `bearer_key`
   (refuses an empty or malformed key and registers it for redaction), `CLIENT_SOURCE`
   (`pup-finetune/<version>`) and short, redacted failure text.
