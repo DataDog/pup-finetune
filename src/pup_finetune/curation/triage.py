@@ -46,7 +46,7 @@ import importlib.resources
 import os
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, wait
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -54,6 +54,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
+from pup_finetune.concurrency import DaemonPool
 from pup_finetune.curation.labels import Label, LabelReport, apply_labels
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.schema import TrainingRow
@@ -619,7 +620,9 @@ def run_triage(
     row the agent or a person labeled since planning keeps that label and is skipped
     (:attr:`TriageReport.skipped_labeled`). A rejected API key stops the triage (the votes so far
     are kept); any other failed call is reported and retried on the next run. Ctrl-C stops
-    it the same way: the calls in flight are abandoned and the votes so far are kept.
+    it the same way: the calls in flight are abandoned and the votes so far are kept. The
+    calls run on daemon threads (:class:`~pup_finetune.concurrency.DaemonPool`), so one
+    still blocked in a judge does not hold up the process's exit either.
     """
     if concurrency < 1:
         raise ValueError(f"concurrency must be at least 1, got {concurrency}")
@@ -638,7 +641,7 @@ def run_triage(
             _check_unchanged(plan)
             _repair_torn_tail(votes_path)
         atomic_write_json(settings_path, plan.settings)
-        pool = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="triage")
+        pool = DaemonPool(concurrency, name="triage")
         futures: dict[Future[_Answer], tuple[TrainingRow, str]] = {}
         try:
             queue = iter(pending)
@@ -670,7 +673,9 @@ def run_triage(
                 if progress is not None:
                     progress(f"triage: {cast + len(failures)} of {len(pending)} judge calls done")
         finally:
-            pool.shutdown(wait=False, cancel_futures=True)
+            # Never waits: a vote is written only here, in this thread, so a call still in
+            # flight writes nothing once the lock is released.
+            pool.shutdown(wait=False)
         # Labels written since planning (by the agent or a person) win over the judges'.
         current = dataset.labels()
         relabeled = {

@@ -7,8 +7,8 @@
 """Worker threads that never hold up the process's exit.
 
 :class:`DaemonPool` runs calls on daemon threads, for the commands that make slow remote
-calls in parallel (such as replay's generation and judge calls) and must stop at once on
-Ctrl-C instead of waiting for a call in flight to return.
+calls in parallel (replay's generation and judge calls, triage's judge calls) and must stop
+at once on Ctrl-C instead of waiting for a call in flight to return.
 """
 
 from __future__ import annotations

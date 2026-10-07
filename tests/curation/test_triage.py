@@ -12,6 +12,7 @@ import json
 import re
 import stat
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -566,6 +567,33 @@ def test_a_torn_last_vote_is_skipped(tmp_path: Path) -> None:
     path.write_bytes(b"not json\n" + path.read_bytes())
     with pytest.raises(StateError, match=f"{JUDGMENTS_FILE}:1"):
         read_votes(path)
+
+
+def test_ctrl_c_abandons_a_call_in_flight_on_a_daemon_thread(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path, n=2)
+    started, release = threading.Event(), threading.Event()
+    workers: list[threading.Thread] = []
+
+    def policy(judge: str, row_id: str) -> bool:
+        if row_id == "row-0":
+            workers.append(threading.current_thread())
+            started.set()
+            release.wait(timeout=30)  # a judge that does not answer
+            return True
+        assert started.wait(timeout=5)
+        raise KeyboardInterrupt  # reaches the main thread through the call's result
+
+    began = time.monotonic()
+    with pytest.raises(KeyboardInterrupt):
+        run_triage(plan_triage(dataset, RUBRIC, (J1,)), FakeCouncil(policy), concurrency=2)
+    try:
+        assert time.monotonic() - began < 5  # did not wait for the blocked call
+        [worker] = workers
+        assert worker.is_alive() and worker.daemon  # so it does not hold up the exit
+    finally:
+        release.set()
+    worker.join(timeout=5)
+    assert read_votes(dataset.path / JUDGMENTS_FILE) == []  # nothing written after it stopped
 
 
 def test_judgments_do_not_hold_the_judges_raw_answers(tmp_path: Path) -> None:
