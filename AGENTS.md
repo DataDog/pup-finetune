@@ -476,8 +476,18 @@ Source lives under `src/pup_finetune/`.
   `DeploymentRejected` with Baseten's reason, `TransientError` for a call safe to repeat, a
   create accepted with an unreadable answer or a deployment whose outcome is unknown),
   `loops_service` (a Loops session with the key, base URL and dedicated availability passed
-  explicitly) and `to_loops_datum`.
-  The Baseten backend and provider arrive later. See `docs/architecture.md`.
+  explicitly), `loops_trainer`, `loops_sampling_client`, `loops_failure` (SDK failures, with
+  the same auth, capacity and transient classes) and `to_loops_datum`. `baseten/backend.py`
+  has `BasetenBackend` (a key factory resolved when a session opens, the profile's renderer,
+  an optional `max_seq_len` cap), `BasetenSession` and `BasetenSampler`: one dedicated Loops
+  trainer per session (its context the next power of two over the longest example, at least
+  1024; no capacity is a `ProviderCapacityError` with nothing left running), steps as SDK
+  futures, `bt://loops:` checkpoints, resume with the optimizer state, no promotion, and
+  samplers on their own deployments with the profile's context (render, sample greedily,
+  parse with the tools; a completion cut at `max_tokens` is not `format_valid`; only sampling
+  is retried, a bounded number of times; `generate` is safe from several threads); leaving a
+  session always deactivates its run and samplers. The Baseten provider arrives later. See
+  `docs/architecture.md`.
 
 Tests live under `tests/` and mirror `src/`. Shared fakes live in `tests/fakes/` (import them
 as `tests.fakes...`); `tests/fakes/pup.py` has `FakePup`, a fake pup runner that answers by
@@ -509,13 +519,15 @@ failures), `FakeClock`, and `fake_deployer`, the provider's `deployer` factory o
 `tests/cli/test_deploy.py`).
 `tests/fakes/baseten.py` has `FakeLoops`, the Loops SDK in memory (sessions, runs, futures,
 deterministic losses and logprobs, `bt://loops:` checkpoints with the name limit, expiry,
-closed clients and deactivated runs, injectable failures), and `BasetenTransport`, Baseten's
-HTTP routes by `"METHOD /path"` (`FakeLoops.transport()` also serves its runs).
+closed clients and deactivated runs, samplers that answer a fixed completion, injectable
+failures), and `BasetenTransport`, Baseten's HTTP routes by `"METHOD /path"`
+(`FakeLoops.transport()` also serves its runs, samplers and their deployments).
 `tests/fakes/keyring.py` has in-memory, failing and locked keyring backends; every test starts
 on the failing one, so none touches the real keychain.
 `tests/providers/contract/` has the `RendererContract`, `BackendContract` and
 `ProviderContract` suites every provider subclasses (`tests/providers/test_fake_contract.py`
-runs them against the fake provider; `tests/providers/fireworks/` against Fireworks on its fakes).
+runs them against the fake provider; `tests/providers/fireworks/` against Fireworks on its fakes;
+`tests/providers/baseten/` the backend suite against Baseten on its fake).
 Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds canonical rows and
 `llmobs/` raw Export API pages.
 

@@ -26,6 +26,7 @@ from pup_finetune.providers.baseten.client import (
 from pup_finetune.rendering.tokens import TokenizedExample
 from tests.fakes.baseten import (
     FakeAdamParams,
+    FakeBasetenDeployment,
     FakeDatum,
     FakeForwardBackwardOutput,
     FakeLoadWeightsResponse,
@@ -33,6 +34,10 @@ from tests.fakes.baseten import (
     FakeModelInput,
     FakeOptimStepResponse,
     FakeRemoteOpError,
+    FakeSampledSequence,
+    FakeSampleResponse,
+    FakeSamplerTerminatedError,
+    FakeSamplingParams,
     FakeSaveWeightsResponse,
     FakeServerShutdownError,
     FakeTensorData,
@@ -218,6 +223,86 @@ def test_a_failed_trainer_creation_creates_no_run() -> None:
     assert loops.runs == {}
 
 
+def sampler(loops: FakeLoops, **target: str) -> tuple[BasetenHTTP, dict[str, Any]]:
+    http = BasetenHTTP(KEY, transport=loops.transport())
+    session = loops_service(KEY, loops=loops).session_id
+    target = target or {"base_model": "Qwen/Qwen3.5-9B"}
+    return http, http.create_sampler(session_id=session, max_seq_len=16, **target)
+
+
+def sampling_client(loops: FakeLoops, created: dict[str, Any], path: str | None = None) -> Any:
+    deployment = FakeBasetenDeployment(
+        created["base_url"], created["model_id"], created["deployment_id"], "https://x"
+    )
+    return loops.SamplingClient(deployment=deployment, checkpoint_path=path)
+
+
+def test_a_sampler_is_a_deployment_that_reads_active_until_deactivated() -> None:
+    loops = FakeLoops()
+    http, created = sampler(loops)
+    assert created == {
+        "id": "sampler1",
+        "model_id": "model1",
+        "deployment_id": "dep1",
+        "base_url": "https://model-model1.api.baseten.co/deployment/dep1/sync",
+    }
+    deployment = http.get_deployment("model1", "dep1")
+    assert deployment == {"id": "dep1", "model_id": "model1", "status": "ACTIVE"}
+    http.deactivate_deployment("model1", "dep1")
+    assert http.get_deployment("model1", "dep1") == {**deployment, "status": "INACTIVE"}
+    assert http.get_deployment("model1", "dep9") is None
+
+
+def test_a_sampler_answers_the_completion_until_a_stop_token_or_max_tokens() -> None:
+    loops = FakeLoops(completion=[1, 2, 3, 4])
+    _, created = sampler(loops)
+    client = sampling_client(loops, created)
+    prompt = FakeModelInput([7, 8])
+
+    def sample(**params: Any) -> FakeSampledSequence:
+        out = client.sample(
+            prompt=prompt, num_samples=1, sampling_params=FakeSamplingParams(**params)
+        )
+        assert isinstance(out, FakeSampleResponse)
+        (sequence,) = out.sequences
+        return sequence
+
+    assert sample() == FakeSampledSequence([1, 2, 3, 4], "stop")
+    assert sample(stop=[3, 9]) == FakeSampledSequence([1, 2, 3], "stop")
+    assert sample(max_tokens=2) == FakeSampledSequence([1, 2], "length")
+    with pytest.raises(httpx.HTTPStatusError, match="HTTP 400"):
+        sample(max_tokens=15)
+
+
+def test_a_sampler_serves_only_a_live_sampler_checkpoint() -> None:
+    loops = FakeLoops()
+    client = trainer(loops)
+    path = client.save_weights_for_sampler("s1").result().path
+    state = client.save_state("t1").result().path
+    for refused in (state, "bt://loops:run1/sampler_weights/missing"):
+        with pytest.raises(ExternalError, match="HTTP 404"):
+            sampler(loops, model_path=refused)
+    _, created = sampler(loops, model_path=path)
+    serving = sampling_client(loops, created, path)
+    assert serving.sample(prompt=FakeModelInput([1])).sequences
+    loops.expire(path)
+    with pytest.raises(httpx.HTTPStatusError, match="HTTP 404"):
+        serving.sample(prompt=FakeModelInput([1]))
+    assert len(loops.samplers) == 1
+
+
+def test_a_sampler_refuses_to_sample_once_closed_or_deactivated() -> None:
+    loops = FakeLoops()
+    http, created = sampler(loops)
+    first, second = sampling_client(loops, created), sampling_client(loops, created)
+    first.close()
+    with pytest.raises(RuntimeError, match="client has been closed"):
+        first.sample(prompt=FakeModelInput([1]))
+    http.deactivate_deployment("model1", "dep1")
+    with pytest.raises(FakeSamplerTerminatedError, match="INACTIVE"):
+        second.sample(prompt=FakeModelInput([1]))
+
+
 # --- the real SDK ------------------------------------------------------------------------
 
 
@@ -235,11 +320,16 @@ def test_the_fake_types_have_the_real_fields() -> None:
         (FakeOptimStepResponse, sdk.OptimStepResponse),
         (FakeSaveWeightsResponse, sdk.SaveWeightsResponse),
         (FakeLoadWeightsResponse, sdk.LoadWeightsResponse),
+        (FakeSamplingParams, sdk.SamplingParams),
+        (FakeSampledSequence, sdk.SampledSequence),
+        (FakeSampleResponse, sdk.SampleResponse),
     ]
     for fake, real in pairs:
         assert _fields(fake) <= set(real.model_fields), fake.__name__
     defaults = sdk.AdamParams()
     assert dataclasses.asdict(FakeAdamParams()) == defaults.model_dump()
+    assert dataclasses.asdict(FakeSamplingParams()) == sdk.SamplingParams().model_dump()
+    assert _fields(FakeBasetenDeployment) == _fields(sdk.sampling_client.BasetenDeployment)
     assert {"from_ints", "to_ints", "length"} <= set(dir(sdk.ModelInput))
 
 
@@ -255,9 +345,27 @@ def test_every_call_the_fake_takes_binds_to_the_real_sdk() -> None:
     client.load_state(path).result()
     client.load_state_with_optimizer(path).result()
     client.close()
+    _, created = sampler(loops)
+    kwargs: dict[str, Any] = {
+        "api_key": "k",
+        "base_model": "m",
+        "sampler_id": "s",
+        "session_id": "x",
+    }
+    serving = loops.SamplingClient(
+        deployment=FakeBasetenDeployment(created["base_url"], "model1", "dep1", "https://x"),
+        checkpoint_path=None,
+        ready_timeout=1.0,
+        timeout=1.0,
+        **kwargs,
+    )
+    serving.sample(prompt=FakeModelInput([1]), num_samples=1, sampling_params=FakeSamplingParams())
+    serving.close()
     methods = {
         "ServiceClient": sdk.ServiceClient.__init__,
         "create_lora_training_client": sdk.ServiceClient.create_lora_training_client,
+        "SamplingClient": sdk.SamplingClient.__init__,
+        "sample": sdk.SamplingClient.sample,
     }
     for call in loops.calls:
         real = methods.get(call.method) or getattr(sdk.TrainingClient, call.method)

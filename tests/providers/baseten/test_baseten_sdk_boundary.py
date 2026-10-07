@@ -77,10 +77,10 @@ def test_the_check_finds_sdk_imports() -> None:
         assert not sdk_imports(line), line
 
 
-def test_importing_the_client_and_its_fake_loads_no_sdk() -> None:
+def test_importing_the_backend_and_its_fake_loads_no_sdk() -> None:
     script = (
         "import json, sys\n"
-        "import pup_finetune.providers.baseten.client\n"
+        "import pup_finetune.providers.baseten.backend\n"
         "import tests.fakes.baseten\n"
         "print(json.dumps('baseten' in sys.modules))\n"
     )
