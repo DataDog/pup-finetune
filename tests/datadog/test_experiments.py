@@ -15,6 +15,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import stat
+import subprocess
 import threading
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -42,7 +43,7 @@ from tests.fakes.experiments import (
     FakeExperimentsApi,
     ProcessDied,
 )
-from tests.fakes.pup import FakePup
+from tests.fakes.pup import FakePup, PupCall
 
 START = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
 RUN_ID = "run-synthetic-01"
@@ -820,7 +821,7 @@ def test_a_cancel_stops_waiting_for_the_read_back(
     report = publish(fake, Evaluation(), tmp_path / "eval", clock, cancel=cancel, sleep=sleep)
     assert report["status"] == "published"
     assert clock.sleeps == [10.0]
-    assert api.list_calls == 4
+    assert api.list_calls == 2  # the round after the sleep stops before its first request
     assert len(report["warnings"]) == 2
     for target, warning in zip(TARGETS, report["warnings"], strict=True):
         assert f"the {target} experiment to be indexed (cancelled)" in warning
@@ -874,14 +875,61 @@ def test_events_not_indexed_in_time_are_a_warning(
     api.index_limit = 1
     report = publish(fake, Evaluation(), tmp_path / "eval", clock)
     assert report["status"] == "published"
-    # One 120 s budget for both experiments, polled every 10 s: counts at 0, 10, ..., 120 s.
-    assert clock.sleeps == [10.0] * 12
-    assert api.list_calls == 2 * 13
+    # One 120 s budget for both experiments, polled every 10 s: counts at 0, 10, ..., 110 s,
+    # as a round at 120 s would have no time left to count in.
+    assert clock.sleeps == [10.0] * 11
+    assert api.list_calls == 2 * 12
     assert all(entry["indexed"] is False for entry in report["experiments"].values())
     assert all(entry["events_indexed"] == 1 for entry in report["experiments"].values())
     assert len(report["warnings"]) == 2
     for target, warning in zip(TARGETS, report["warnings"], strict=True):
         assert f"the {target} experiment shows 1 of its 6 spans after 120s" in warning
+
+
+def test_a_stalled_count_uses_up_the_read_back_time_and_the_next_is_not_made(
+    fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
+) -> None:
+    timeouts: list[float] = []
+
+    def stalled(call: PupCall) -> Any:
+        timeouts.append(call.timeout)
+        clock.now += timedelta(seconds=call.timeout)  # pup hangs until its timeout
+        raise subprocess.TimeoutExpired(call.argv, call.timeout)
+
+    fake.on("llm-obs", "experiments", "events", "list", handler=stalled)
+    report = publish(fake, Evaluation(), tmp_path / "eval", clock)
+    assert report["status"] == "published"
+    # The base count took the whole budget, so the tuned one was never requested.
+    assert timeouts == [120.0]
+    assert clock.sleeps == []
+    base, tuned = report["warnings"]
+    assert "could not count the events of the base experiment" in base
+    assert "timed out after 120s" in base
+    assert "the tuned experiment was not counted (6 spans sent) after 120s" in tuned
+
+
+def test_a_cancel_during_a_count_stops_before_the_next_request(
+    fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
+) -> None:
+    counted = fake.handler("llm-obs", "experiments", "events", "list")
+    assert counted is not None
+    cancel = threading.Event()
+    timeouts: list[float] = []
+
+    def slow(call: PupCall) -> Any:
+        timeouts.append(call.timeout)
+        clock.now += timedelta(seconds=30)
+        cancel.set()  # e.g. Ctrl-C while the count runs
+        return counted(call)
+
+    fake.on("llm-obs", "experiments", "events", "list", handler=slow)
+    api.index_limit = 1
+    report = publish(fake, Evaluation(), tmp_path / "eval", clock, cancel=cancel)
+    assert timeouts == [120.0]
+    assert clock.sleeps == []
+    base, tuned = report["warnings"]
+    assert "base experiment to be indexed (cancelled): it shows 1 of its 6 spans" in base
+    assert "tuned experiment to be indexed (cancelled): it was not counted" in tuned
 
 
 @pytest.mark.parametrize("answer", ["fail", "no_total"])

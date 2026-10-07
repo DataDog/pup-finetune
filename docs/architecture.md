@@ -322,7 +322,8 @@ provider, and talks to models only through the `Sampler` protocol.
   the local results, and the experiments keep the error (the result's hint says so, and a
   new `--out-dir` publishes experiments with every result). A cancel stops between requests
   and leaves a `cancelled` publication the rerun continues. A read-back waits up to two
-  minutes, one budget for both experiments, for the events to be indexed; spans not indexed
+  minutes, one budget for both experiments, for the events to be indexed (each count may
+  take only the time left, and a cancel is checked before each); spans not indexed
   by then, or events that cannot be counted, are a warning. Without a push receipt the evaluation is not
   published, with a warning; `--no-publish` turns publishing off.
 

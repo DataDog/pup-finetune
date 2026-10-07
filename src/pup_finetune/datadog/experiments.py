@@ -73,7 +73,7 @@ from urllib.parse import quote
 
 from pup_finetune.data.push import SOURCE_TAG, PushState
 from pup_finetune.datadog.jsonapi import JSON_API, object_id, private_json_file
-from pup_finetune.datadog.pup import Pup
+from pup_finetune.datadog.pup import DEFAULT_TIMEOUT_SECONDS, Pup
 from pup_finetune.errors import ExternalError, StateError, require_writable
 from pup_finetune.evaluation.cases import ReplayCase
 from pup_finetune.evaluation.replay import METRICS_VERSION, TARGETS, PairKey
@@ -218,14 +218,16 @@ class LLMObsExperiments:
         }
         self._pup.api("POST", _events_path(experiment_id), body, content_type=JSON_API)
 
-    def count_events(self, experiment_id: str) -> int:
+    def count_events(self, experiment_id: str, *, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> int:
         """How many events of the experiment are indexed (``total_matching``).
 
         pup prints ``{"events": [...], "total_matching": N, ...}`` (checked live); an
-        enveloped ``{"data": {...}}`` answer is read too.
+        enveloped ``{"data": {...}}`` answer is read too. ``timeout`` (seconds) bounds the
+        pup call, which raises :class:`ExternalError` when it passes.
         """
         data = self._pup.run_json(
-            ["llm-obs", "experiments", "events", "list", experiment_id, "--limit", "1"]
+            ["llm-obs", "experiments", "events", "list", experiment_id, "--limit", "1"],
+            timeout=timeout,
         )
         total = data.get("total_matching") if isinstance(data, dict) else None
         if total is None and isinstance(data, dict) and isinstance(data.get("data"), dict):
@@ -888,16 +890,30 @@ class ExperimentsPublisher:
 
     def _read_back(self, entries: Mapping[str, dict[str, Any]], warnings: list[str]) -> None:
         """Count every experiment's events until all its spans are indexed, or the one
-        timeout of all of them passes (or ``cancel`` is set)."""
+        timeout of all of them passes (or ``cancel`` is set).
+
+        Both are checked before every request, and each request may take only the time left
+        before the timeout, so a stalled count cannot hold a cancel, or the whole read back,
+        past it.
+        """
         deadline = self.clock().timestamp() + self.readback_timeout_s
         for entry in entries.values():
             entry["events_indexed"] = None
             entry["indexed"] = False
         waiting = dict(entries)
-        while waiting:
+        cancelled = stopped = False
+        while waiting and not stopped:
             for target, entry in list(waiting.items()):
+                cancelled = self.cancel.is_set()
+                remaining = deadline - self.clock().timestamp()
+                if cancelled or remaining <= 0:
+                    stopped = True
+                    break
                 try:
-                    seen = self.api.count_events(str(entry["experiment_id"]))
+                    seen = self.api.count_events(
+                        str(entry["experiment_id"]),
+                        timeout=min(remaining, DEFAULT_TIMEOUT_SECONDS),
+                    )
                 except ExternalError as exc:
                     warnings.append(
                         f"could not count the events of the {target} experiment: "
@@ -909,22 +925,27 @@ class ExperimentsPublisher:
                 if seen >= int(entry["spans"]):
                     entry["indexed"] = True
                     del waiting[target]
-            if not waiting:
-                return
-            if self.cancel.is_set():
-                for target, entry in waiting.items():
-                    warnings.append(
-                        f"stopped waiting for the events of the {target} experiment to be "
-                        f"indexed (cancelled): it shows {entry['events_indexed']} of its "
-                        f"{entry['spans']} spans so far"
-                    )
-                return
-            if self.clock().timestamp() + self.poll_s > deadline:
+            if stopped or not waiting:
+                break
+            cancelled = self.cancel.is_set()
+            # Another round only when it starts before the deadline, with time left to count.
+            if cancelled or self.clock().timestamp() + self.poll_s >= deadline:
                 break
             self.sleep(self.poll_s)
         for target, entry in waiting.items():
-            warnings.append(
-                f"the {target} experiment shows {entry['events_indexed']} of its "
-                f"{entry['spans']} spans after {self.readback_timeout_s:g}s; Datadog may still "
-                "be indexing the rest"
+            spans, indexed = entry["spans"], entry["events_indexed"]
+            shown = (
+                f"shows {indexed} of its {spans} spans"
+                if indexed is not None
+                else f"was not counted ({spans} spans sent)"
             )
+            if cancelled:
+                warnings.append(
+                    f"stopped waiting for the events of the {target} experiment to be "
+                    f"indexed (cancelled): it {shown} so far"
+                )
+            else:
+                warnings.append(
+                    f"the {target} experiment {shown} after {self.readback_timeout_s:g}s; "
+                    "Datadog may still be indexing the rest"
+                )
