@@ -40,6 +40,7 @@ from pup_finetune.providers.base import (
     AdamConfig,
     Check,
     CheckpointRef,
+    DeployOptions,
     Endpoint,
     Generation,
     LoraConfig,
@@ -653,8 +654,8 @@ class ProviderContract:
         )
 
     @pytest.fixture
-    def deploy_options(self) -> dict[str, Any]:
-        return {}
+    def deploy_options(self) -> DeployOptions:
+        return DeployOptions(deployment_id="pft-contract-deployment")
 
     def test_is_a_provider(self, provider: Provider) -> None:
         assert isinstance(provider, Provider)
@@ -704,15 +705,25 @@ class ProviderContract:
         with pytest.raises(UsageError):
             provider.validate_options({"no_such_option_pft_contract": "1"})
 
-    def test_deploy_and_undeploy(
-        self, provider: Provider, model_ref: ModelRef, deploy_options: dict[str, Any]
+    def test_deploy_smoke_test_and_undeploy(
+        self, provider: Provider, model_ref: ModelRef, deploy_options: DeployOptions
     ) -> None:
-        endpoint = provider.deploy(model_ref, deploy_options)
+        created: list[tuple[Endpoint, str]] = []
+        endpoint = provider.deploy(
+            model_ref, deploy_options, on_created=lambda e, state: created.append((e, state))
+        )
         try:
             assert isinstance(endpoint, Endpoint)
             assert endpoint.provider == provider.name
             assert endpoint.model_id == model_ref.model_id
-            assert endpoint.deployment_id and endpoint.inference_model
+            assert endpoint.deployment_id == deploy_options.deployment_id
+            assert endpoint.inference_model
+            # The creation is reported before the wait, with the same deployment.
+            assert [e.deployment_id for e, _ in created] == [endpoint.deployment_id]
+            smoke = provider.smoke_test(endpoint)
+            assert smoke.ok, smoke.detail
+            assert smoke.latency_s is not None and smoke.latency_s >= 0
         finally:
             # A live run deploys for real; never leave the deployment behind.
-            provider.undeploy(endpoint)
+            assert provider.undeploy(endpoint) is True
+        assert provider.undeploy(endpoint) is False  # already gone: idempotent

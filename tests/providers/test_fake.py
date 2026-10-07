@@ -18,7 +18,14 @@ import pytest
 
 from pup_finetune.errors import FinetuneError, UsageError
 from pup_finetune.providers import get_provider, known_providers
-from pup_finetune.providers.base import AdamConfig, CheckpointRef, LoraConfig, ModelRef
+from pup_finetune.providers.base import (
+    AdamConfig,
+    CheckpointRef,
+    DeployOptions,
+    Endpoint,
+    LoraConfig,
+    ModelRef,
+)
 from pup_finetune.providers.fake import (
     BASE_ANSWER,
     FAKE_PROFILE,
@@ -633,17 +640,27 @@ def test_invalid_options_are_usage_errors(options: dict[str, Any], match: str) -
 def test_deployments_are_recorded() -> None:
     provider = FakeProvider(Runtime())
     model = ModelRef(provider="fake", model_id="run-1", uri="fake://models/run-1")
-    endpoint = provider.deploy(model, {"replicas": 1})
-    assert provider.deployments == {endpoint.deployment_id: endpoint}
-    assert provider.deploy_calls == [(model, {"replicas": 1})]
-    assert endpoint.inference_model == "run-1"
-    provider.undeploy(endpoint)
+    options = DeployOptions(deployment_id="run-1-deployment", shape="small")
+    created: list[tuple[Endpoint, str]] = []
+    endpoint = provider.deploy(model, options, on_created=lambda e, s: created.append((e, s)))
+    assert created == [(endpoint, "CREATING")]
+    assert provider.deployments == {"run-1-deployment": endpoint}
+    assert provider.deploy_calls == [(model, options)]
+    assert (endpoint.inference_model, endpoint.shape) == ("run-1", "small")
+    assert provider.smoke_test(endpoint).ok
+    assert provider.undeploy(endpoint) is True
     assert provider.deployments == {}
     assert provider.undeployed == [endpoint]
-    with pytest.raises(FinetuneError, match="no fake deployment"):
-        provider.undeploy(endpoint)
+    assert provider.undeploy(endpoint) is False  # idempotent
     with pytest.raises(UsageError):
-        provider.deploy(dataclasses.replace(model, provider="other"), {})
+        provider.deploy(dataclasses.replace(model, provider="other"), options)
+
+
+def test_a_deployment_made_by_another_process_can_be_undeployed() -> None:
+    endpoint = Endpoint(
+        provider="fake", deployment_id="elsewhere", model_id="m", inference_model="m"
+    )
+    assert FakeProvider(Runtime()).undeploy(endpoint) is True
 
 
 # --- Backend: capabilities, promotion failures and session settings -------------------------

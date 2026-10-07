@@ -26,6 +26,9 @@ Files, all ``0600`` in a ``0700`` directory, written atomically:
   over every attempt and any error.
 - ``worker.json`` and ``worker.log`` - for a detached run, the worker process that was
   started and how it ended (written by :mod:`pup_finetune.training.worker`), and its output.
+- ``deployment.json`` - the receipt of the run's deployment (written by
+  :mod:`pup_finetune.deployment`): what was created where, its state, the smoke test and,
+  once undeployed, when it was deleted.
 
 Every number written is finite: a non-finite loss is stored as ``null``.
 
@@ -88,6 +91,7 @@ EPOCHS_FILE = "epochs.json"
 RESULT_FILE = "result.json"
 WORKER_FILE = "worker.json"
 WORKER_LOG = "worker.log"
+DEPLOYMENT_FILE = "deployment.json"
 
 Phase = Literal["created", "training", "completed", "failed", "cancelled", "interrupted"]
 PHASES: tuple[Phase, ...] = get_args(Phase)
@@ -330,6 +334,10 @@ class RunDir:
     def worker_log_path(self) -> Path:
         return self.path / WORKER_LOG
 
+    @property
+    def deployment_path(self) -> Path:
+        return self.path / DEPLOYMENT_FILE
+
     def lock(self) -> DirectoryLock:
         """The directory's lock; hold it while training or changing the run."""
         return DirectoryLock(self.path)
@@ -374,6 +382,12 @@ class RunDir:
             return None
         return self._read_object(self.result_path)
 
+    def read_deployment(self) -> dict[str, Any] | None:
+        """``deployment.json``, or ``None`` when the run was never deployed."""
+        if not self.deployment_path.exists():
+            return None
+        return self._read_object(self.deployment_path)
+
     def status(self) -> dict[str, Any]:
         """A summary of the run: what it trains, where it is, and how it ended if it did.
 
@@ -416,6 +430,9 @@ class RunDir:
 
     def write_result(self, result: Mapping[str, Any]) -> None:
         atomic_write_json(self.result_path, finite_json(dict(result)))
+
+    def write_deployment(self, receipt: Mapping[str, Any]) -> None:
+        atomic_write_json(self.deployment_path, finite_json(dict(receipt)))
 
     # --- checks ---------------------------------------------------------------------
 

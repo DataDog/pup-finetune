@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Literal, Protocol, Self, runtime_checkable
+from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, Self, runtime_checkable
 
 from pydantic import (
     BaseModel,
@@ -274,13 +274,97 @@ class ModelRef:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Endpoint:
-    """A deployment serving a model. ``inference_model`` is what chat requests name."""
+    """A deployment serving a model. ``inference_model`` is what chat requests name.
+
+    ``url`` is the base URL of the OpenAI-compatible API that serves it, when it has one;
+    ``name`` is the provider's full resource name for the deployment and ``shape`` the
+    hardware configuration it runs on, when the provider has those.
+    """
 
     provider: str
     deployment_id: str
     model_id: str
     inference_model: str
     url: str | None = None
+    name: str | None = None
+    shape: str | None = None
+
+
+DEFAULT_DEPLOY_TIMEOUT_S: Final = 30 * 60.0
+"""How long :meth:`Provider.deploy` waits for a new deployment to serve, by default."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DeployOptions:
+    """How to deploy a model: what :meth:`Provider.deploy` is given.
+
+    ``deployment_id`` fully matches :data:`MODEL_ID_PATTERN`, which every provider accepts.
+    ``shape`` names the provider's hardware configuration; ``None`` lets the provider pick a
+    validated one for the model. ``min_replicas`` ``0`` lets the deployment scale to zero
+    when idle. ``timeout_s`` bounds the wait for the deployment to serve.
+    """
+
+    deployment_id: str
+    shape: str | None = None
+    min_replicas: int = 0
+    max_replicas: int = 1
+    timeout_s: float = DEFAULT_DEPLOY_TIMEOUT_S
+    display_name: str | None = None
+
+    def __post_init__(self) -> None:
+        if not MODEL_ID_PATTERN.fullmatch(self.deployment_id):
+            raise ValueError(
+                "deployment_id must be lowercase letters, digits and dashes, starting with a "
+                f"letter, at most {MAX_MODEL_ID_LEN} characters, got {self.deployment_id!r}"
+            )
+        if self.min_replicas < 0 or self.max_replicas < max(self.min_replicas, 1):
+            raise ValueError("replica counts must satisfy 0 <= min_replicas <= max_replicas >= 1")
+        if not (math.isfinite(self.timeout_s) and self.timeout_s > 0):
+            raise ValueError(f"timeout_s must be positive, got {self.timeout_s}")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SmokeTest:
+    """One chat completion sent to a new deployment: whether it answered, and how fast.
+
+    ``latency_s`` is the time of the request that answered (``None`` when none did);
+    ``attempts`` counts the requests sent, retries while it scaled up included; ``detail``
+    says why it failed (redacted), empty when it passed.
+    """
+
+    ok: bool
+    latency_s: float | None = None
+    attempts: int = 0
+    detail: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "latency_s": self.latency_s,
+            "attempts": self.attempts,
+            "detail": self.detail,
+        }
+
+
+class DeploymentNotReady(ExternalError):
+    """A deployment that was created but did not come to serve.
+
+    ``state`` is the provider's last reported state (e.g. ``FAILED``); ``timed_out`` is true
+    when the wait ran out first. The deployment may still exist and bill: undeploy it.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        source: str,
+        state: str | None,
+        timed_out: bool = False,
+        hint: str | None = None,
+    ) -> None:
+        super().__init__(message, source=source, hint=hint)
+        self.state = state
+        self.timed_out = timed_out
 
 
 @dataclass(frozen=True, slots=True)
@@ -481,7 +565,7 @@ class Provider(Protocol):
     :meth:`preflight` raise :class:`UsageError` for an unknown or unusable model;
     :meth:`validate_options` returns the normalized ``provider_options`` or raises
     :class:`UsageError`. :meth:`deploy` and :meth:`undeploy` are remote writes: callers gate
-    them behind ``--confirm`` and ``PUP_READ_ONLY``.
+    them behind ``--confirm`` and ``PUP_READ_ONLY``; :meth:`smoke_test` is a paid call.
     """
 
     @property
@@ -526,10 +610,33 @@ class Provider(Protocol):
         """Check provider-specific ``TrainSpec.provider_options``; return them normalized."""
         ...
 
-    def deploy(self, model: ModelRef, options: Mapping[str, Any]) -> Endpoint:
-        """Deploy a promoted model and wait until it serves."""
+    def deploy(
+        self,
+        model: ModelRef,
+        options: DeployOptions,
+        *,
+        on_created: Callable[[Endpoint, str], None] | None = None,
+    ) -> Endpoint:
+        """Deploy a promoted model and wait (at most ``options.timeout_s``) until it serves.
+
+        ``on_created`` is called with the endpoint and the provider's state for it as soon as
+        the provider accepted the deployment, before the wait, so the caller can record what
+        now exists (and bills) even if the wait fails. Raises :class:`DeploymentNotReady` when
+        the deployment fails or the wait runs out; the deployment may then still exist.
+        """
         ...
 
-    def undeploy(self, endpoint: Endpoint) -> None:
-        """Tear a deployment down so it stops billing."""
+    def smoke_test(self, endpoint: Endpoint) -> SmokeTest:
+        """Send one short chat completion to ``endpoint``; never raises for a failed answer.
+
+        Retries while the deployment scales up from zero.
+        """
+        ...
+
+    def undeploy(self, endpoint: Endpoint) -> bool:
+        """Tear a deployment down so it stops billing; the deployed model is kept.
+
+        Idempotent: returns ``False`` when the deployment was already gone, ``True`` when
+        this call deleted it.
+        """
         ...

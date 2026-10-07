@@ -56,11 +56,13 @@ from pup_finetune.providers.base import (
     AdamConfig,
     Check,
     CheckpointRef,
+    DeployOptions,
     Endpoint,
     Generation,
     LoraConfig,
     ModelProfile,
     ModelRef,
+    SmokeTest,
     StepMetrics,
 )
 from pup_finetune.providers.options import parse_options
@@ -1040,8 +1042,10 @@ class FakeProvider:
             supports_promotion=supports_promotion,
         )
         self.deployments: dict[str, Endpoint] = {}
-        self.deploy_calls: list[tuple[ModelRef, dict[str, Any]]] = []
+        self.deploy_calls: list[tuple[ModelRef, DeployOptions]] = []
+        self.smoke_tested: list[Endpoint] = []
         self.undeployed: list[Endpoint] = []
+        self._undeployed_ids: set[str] = set()
 
     @property
     def name(self) -> str:
@@ -1079,23 +1083,47 @@ class FakeProvider:
         self.options = self._backend.options = parsed
         return parsed.model_dump(exclude_unset=True)
 
-    def deploy(self, model: ModelRef, options: Mapping[str, Any]) -> Endpoint:
+    def deploy(
+        self,
+        model: ModelRef,
+        options: DeployOptions,
+        *,
+        on_created: Callable[[Endpoint, str], None] | None = None,
+    ) -> Endpoint:
+        """Record the deployment in memory; it serves at once (``smoke_test`` answers)."""
         if model.provider != PROVIDER_NAME:
             raise UsageError(f"the fake provider cannot deploy a {model.provider} model")
-        self.deploy_calls.append((model, dict(options)))
+        self.deploy_calls.append((model, options))
         endpoint = Endpoint(
             provider=PROVIDER_NAME,
-            deployment_id=f"fake-deployment-{len(self.deploy_calls)}",
+            deployment_id=options.deployment_id,
             model_id=model.model_id,
             inference_model=model.model_id,
+            name=f"fake://deployments/{options.deployment_id}",
+            shape=options.shape or "fake-shape",
         )
+        if on_created is not None:
+            on_created(endpoint, "CREATING")
         self.deployments[endpoint.deployment_id] = endpoint
         return endpoint
 
-    def undeploy(self, endpoint: Endpoint) -> None:
-        if self.deployments.pop(endpoint.deployment_id, None) is None:
-            raise FinetuneError(f"no fake deployment {endpoint.deployment_id!r}")
+    def smoke_test(self, endpoint: Endpoint) -> SmokeTest:
+        """Passes at once (no request is sent); records the endpoint."""
+        self.smoke_tested.append(endpoint)
+        return SmokeTest(ok=True, latency_s=0.0, attempts=1)
+
+    def undeploy(self, endpoint: Endpoint) -> bool:
+        """Forget the deployment. ``False`` when this provider already undeployed it.
+
+        The table lives in memory, so a deployment made by another process (another
+        command) is unknown here: it is treated as still running and reported deleted.
+        """
+        if endpoint.deployment_id in self._undeployed_ids:
+            return False
+        self.deployments.pop(endpoint.deployment_id, None)
+        self._undeployed_ids.add(endpoint.deployment_id)
         self.undeployed.append(endpoint)
+        return True
 
     def _own(self, profile: ModelProfile) -> None:
         if profile.provider != PROVIDER_NAME:

@@ -43,7 +43,8 @@ _PROVIDER_SOURCE = textwrap.dedent(
         def training_profile(self, profile): return profile
         def backend(self): raise NotImplementedError
         def validate_options(self, options): return dict(options)
-        def deploy(self, model, options): raise NotImplementedError
+        def deploy(self, model, options, *, on_created=None): raise NotImplementedError
+        def smoke_test(self, endpoint): raise NotImplementedError
         def undeploy(self, endpoint): raise NotImplementedError
 
     NOT_A_PROVIDER = lambda runtime: object()

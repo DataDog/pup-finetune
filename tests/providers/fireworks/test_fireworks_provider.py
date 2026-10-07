@@ -24,19 +24,22 @@ from pydantic import SecretStr
 from pup_finetune import redaction
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.providers import get_provider, known_providers
-from pup_finetune.providers.base import Endpoint, LoraConfig, ModelRef, Provider
+from pup_finetune.providers.base import DeployOptions, LoraConfig, ModelRef, Provider
 from pup_finetune.providers.fake import FAKE_PROFILE
 from pup_finetune.providers.fireworks.api import FireworksAuthError
 from pup_finetune.providers.fireworks.models import PROFILES
 from pup_finetune.providers.fireworks.provider import (
     MAX_SEQ_LEN,
+    DeployerFactory,
     FireworksProvider,
     preflight_problems,
 )
 from pup_finetune.rendering.hf import INSTALL_HINT, HFChatTemplateRenderer
 from pup_finetune.runtime import Runtime
+from tests.fakes.chat_api import FakeChatApi
 from tests.fakes.fireworks import FakeFireworksTrainingClient
 from tests.fakes.fireworks_api import API_KEY, FakeFireworksApi
+from tests.fakes.fireworks_deploy import FakeClock, FakeSdkFireworks, fake_deployer
 from tests.fakes.keyring import LockedKeyring, MemoryKeyring
 from tests.fakes.tokenizer import FakeChatTokenizer
 from tests.providers.contract import ProviderContract
@@ -62,6 +65,7 @@ def provider_for(
     env: dict[str, str] | None = None,
     training: FakeFireworksTrainingClient | None = None,
     keys: list[SecretStr] | None = None,
+    deployer: DeployerFactory | None = None,
 ) -> FireworksProvider:
     fw = training or FakeFireworksTrainingClient()
 
@@ -76,6 +80,7 @@ def provider_for(
         transport=fake.transport if fake is not None else None,
         tokenizer=FakeChatTokenizer(),
         training_client=training_client,
+        deployer=deployer,
     )
 
 
@@ -85,20 +90,26 @@ def provider_for(
 class TestFireworksProviderContract(ProviderContract):
     @pytest.fixture
     def provider(self) -> Provider:
-        return provider_for(FakeFireworksApi())
+        deployer = fake_deployer(FakeSdkFireworks(), FakeChatApi(api_key=API_KEY), FakeClock())
+        return provider_for(FakeFireworksApi(), deployer=deployer)
 
-    # Deployment lands in a later release; until then it refuses clearly.
-
-    def test_deploy_and_undeploy(
-        self, provider: Provider, model_ref: ModelRef, deploy_options: dict[str, Any]
-    ) -> None:
-        with pytest.raises(UsageError, match=r"deploying on Fireworks .* later release"):
-            provider.deploy(model_ref, deploy_options)
-        endpoint = Endpoint(
-            provider="fireworks", deployment_id="d", model_id="m", inference_model="m"
+    @pytest.fixture
+    def model_ref(self, provider: Provider) -> ModelRef:
+        return ModelRef(
+            provider="fireworks",
+            model_id="pft-contract-model",
+            uri="accounts/synthetic-team/models/pft-contract-model",
         )
-        with pytest.raises(UsageError, match="later release"):
-            provider.undeploy(endpoint)
+
+    def test_deploy_runs_on_the_fake_sdk(
+        self, provider: Provider, model_ref: ModelRef, deploy_options: DeployOptions
+    ) -> None:
+        assert isinstance(provider, FireworksProvider)
+        endpoint = provider.deploy(model_ref, deploy_options)
+        assert endpoint.inference_model == (
+            "accounts/synthetic-team/deployments/pft-contract-deployment"
+        )
+        assert provider.undeploy(endpoint) is True
 
 
 # --- training ----------------------------------------------------------------------------
