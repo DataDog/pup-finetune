@@ -182,9 +182,10 @@ to a `"module:attr"` import path. Listing providers imports no provider implemen
 `get_provider(name, runtime)` imports the module on first use and calls `attr(runtime)`, which
 must return a `Provider`. A provider whose SDK is not installed fails with a hint to install its extra.
 Entries registered with `dev_only=True`, like the offline `fake` provider used for
-development, are visible only with `PUP_FINETUNE_DEV=1`. `fireworks` is registered for
-everyone. The registry also imports the lightweight package of every provider that has an API
-key (today `fireworks`, through an import at the bottom of `providers/__init__.py`). That
+development, are visible only with `PUP_FINETUNE_DEV=1`. `fireworks` and `baseten` are
+registered for everyone. The registry also imports the lightweight package of every provider
+that has an API key (today `fireworks` and `baseten`, through imports at the bottom of
+`providers/__init__.py`). That
 package's `__init__.py` does little more than register the provider's `CredentialSpec`, so
 `auth`, `doctor` and every other command know the API key without importing an SDK, an HTTP
 client or a tokenizer. The implementation lives in the package's `provider` module, which
@@ -228,6 +229,27 @@ talks to the narrow interface in `providers/fireworks/client.py`, never to the S
   transient failure, a bounded number of times with a warning before each retry; training
   calls never are, since the loop owns that policy. `latency_s` times the successful attempt
   only.
+
+## Training on Baseten
+
+[`providers/baseten/backend.py`](../src/pup_finetune/providers/baseten/backend.py) trains on
+Baseten Loops through `providers/baseten/client.py`, the only module that loads the Loops SDK:
+
+- **Preflight.** Read only: the SDK loads, and Loops' capabilities must offer and enable the
+  model to the workspace with a limit of at least the `max_seq_len` option, else the
+  profile's context. Nothing is paid before `--confirm`.
+- **Sessions.** `open_session` opens a Loops session and a dedicated LoRA trainer whose
+  context is the next power of two over the session's longest example (at least 1024 tokens,
+  at most the profile's). Leaving the context always deactivates the run and every sampler
+  the session started; a deactivation that fails names what to deactivate by hand. With no
+  capacity, nothing is left running.
+- **Checkpoints.** `bt://loops:` paths that outlive the run; a resume loads a training
+  checkpoint with its optimizer state into a new run. There is no promotion: the best sampler
+  checkpoint is the run's deployable checkpoint.
+- **Sampling.** Each sampler runs on its own dedicated deployment, sized to the profile's
+  context, and renders, samples and parses as on Fireworks. The `max_seq_len` provider option
+  cuts the training profile, so it also sizes the samplers and the trainer a standalone
+  evaluation opens.
 
 ## Replay evaluation
 

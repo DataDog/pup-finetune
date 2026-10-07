@@ -151,6 +151,7 @@ def test_npx_env_drops_datadog_secrets_and_provider_keys() -> None:
         "DD_APP_KEY": "synthetic",
         "DD_APPLICATION_KEY": "synthetic",
         "FIREWORKS_API_KEY": "synthetic",
+        "BASETEN_API_KEY": "synthetic",
     }
     assert skill.npx_env(environ) == {"PATH": "/usr/bin", "HOME": "/home/someone"}
     assert "DD_API_KEY" in environ  # the parent's mapping is left alone

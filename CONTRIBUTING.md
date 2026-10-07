@@ -82,9 +82,11 @@ SDK's datum type, maps `AdamConfig` onto the SDK's optimizer parameters, sizes t
 from the `seed` and `max_seq_len` it is opened with, and reports the provider's
 checkpoint-name limit as `max_checkpoint_name_len` and its capabilities as
 `supports_resume` and `supports_promotion`. The models Baseten serves use
-the same renderers as on any other provider. `BASETEN_API_KEY` gets a `CredentialSpec`, the SDK
-goes in a `baseten` extra, and the three contract suites run against a fake Loops client in
-the default suite and against Baseten itself under `PUP_FINETUNE_LIVE=1`.
+the same renderers as on any other provider, and `preflight` asks Baseten, read only, whether
+the workspace can train the model. `BASETEN_API_KEY` gets a `CredentialSpec` from the
+package's `__init__.py` (falling back, read only, to the key in `~/.trussrc`), the SDK goes in
+a `baseten` extra, and the three contract suites run against a fake Loops client in the
+default suite and against Baseten itself under `PUP_FINETUNE_LIVE=1`.
 
 ## License
 
