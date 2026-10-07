@@ -11,9 +11,12 @@ provider's deployable checkpoint. :func:`execute_deploy` deploys it through the 
 :class:`~pup_finetune.providers.base.Provider` and records the receipt, ``deployment.json``
 in the run directory:
 
-- before the provider is asked to create anything (``state`` ``REQUESTED``), so a Ctrl-C or
-  a lost answer while it is created still leaves the id to undeploy, with the resource name
-  the deployment gets (:meth:`~pup_finetune.providers.base.Provider.deployment_name`, e.g.
+- right before the provider sends the create (``state`` ``REQUESTED``, from the provider's
+  ``on_creating`` callback, after any lookup such as the shape, so a failure before it
+  leaves the earlier receipt as it was), so a Ctrl-C or a lost answer while it is created
+  still leaves the id to undeploy, with what the create sends (``request``: the base model,
+  display name and shape) and the resource name the deployment gets
+  (:meth:`~pup_finetune.providers.base.Provider.deployment_name`, e.g.
   ``accounts/<account>/deployments/<id>``), so undeploying it under another account is
   refused rather than deleting, or taking as gone, a deployment of the same id there; it is
   removed again when the provider refused the deployment, so nothing exists;
@@ -24,7 +27,11 @@ in the run directory:
   that raises is recorded as failed, with its error).
 
 :func:`execute_undeploy` deletes the deployment and records ``deleted_at``; the promoted
-model is kept. Deleting a deployment that is already gone succeeds.
+model is kept. Deleting a deployment that is already gone succeeds. A ``REQUESTED`` receipt's
+creation was never confirmed, and the create fails when the id is taken, so the deployment
+under its id is read back first (:meth:`~pup_finetune.providers.base.Provider.owns_deployment`)
+and deleted only when it is the one the receipt's request creates; when there is none the
+receipt is marked deleted, and another deployment under the id is never deleted.
 
 A run has one deployment at a time: deploying a run whose receipt has no ``deleted_at`` is
 refused until it is undeployed. Both hold the run directory's lock.
@@ -43,6 +50,7 @@ from pup_finetune.providers.base import (
     MAX_MODEL_ID_LEN,
     MODEL_ID_PATTERN,
     DeploymentNotReady,
+    DeploymentRequest,
     DeployOptions,
     Endpoint,
     ModelRef,
@@ -228,19 +236,20 @@ def _receipt(target: DeployTarget, endpoint: Endpoint, state: str, now: Clock) -
 
 
 def _requested_receipt(
-    target: DeployTarget, options: DeployOptions, name: str | None, now: Clock
+    target: DeployTarget, request: DeploymentRequest, now: Clock
 ) -> dict[str, Any]:
-    """The receipt written before the provider is asked to create the deployment ``name``."""
+    """The receipt written right before the provider sends the create ``request``."""
     endpoint = Endpoint(
         provider=target.provider,
-        deployment_id=options.deployment_id,
+        deployment_id=request.deployment_id,
         model_id=target.model.model_id,
         inference_model="",
-        name=name,
-        shape=options.shape,
+        name=request.name,
+        shape=request.shape,
     )
     receipt = _receipt(target, endpoint, REQUESTED, now)
     receipt["inference_model"] = None
+    receipt["request"] = request.to_json()
     return receipt
 
 
@@ -271,17 +280,23 @@ def execute_deploy(
     smoke test passed.
 
     A failure once the deployment may exist is recorded in the receipt (its ``state`` and
-    ``error``) and raised with a hint to undeploy. A failure that shows nothing was created
-    (the provider refused the request) restores the receipt that was there before, if any.
+    ``error``) and raised with a hint to undeploy. A failure before the create is sent (e.g.
+    the shape lookup) or that shows nothing was created (the provider refused the request)
+    leaves, or restores, the receipt that was there before, if any.
     """
     run_dir = target.run_dir
     with run_dir.lock():
         require_not_deployed(run_dir)
         previous = run_dir.read_deployment()
-        name = provider.deployment_name(options.deployment_id)
-        receipt = _requested_receipt(target, options, name, now)
-        run_dir.write_deployment(receipt)
-        created = False
+        receipt: dict[str, Any] = {}
+        requested = created = False
+
+        def on_creating(request: DeploymentRequest) -> None:
+            nonlocal requested
+            requested = True
+            receipt.clear()
+            receipt.update(_requested_receipt(target, request, now))
+            run_dir.write_deployment(receipt)
 
         def on_created(endpoint: Endpoint, state: str) -> None:
             nonlocal created
@@ -294,8 +309,12 @@ def execute_deploy(
             )
 
         try:
-            endpoint = provider.deploy(target.model, options, on_created=on_created)
+            endpoint = provider.deploy(
+                target.model, options, on_creating=on_creating, on_created=on_created
+            )
         except FinetuneError as exc:
+            if not requested:
+                raise  # before the create was sent: the earlier receipt was not touched
             if not created and not isinstance(exc, TransientError):
                 _restore(run_dir, previous)  # refused: nothing was created
                 raise
@@ -352,15 +371,28 @@ def undeploy_preview(run_dir: RunDir, receipt: Mapping[str, Any]) -> dict[str, A
         "deployment_id": receipt.get("deployment_id"),
         "deployment_name": receipt.get("deployment_name"),
         "state": receipt.get("state"),
-        "action": f"delete the deployment {receipt.get('deployment_id')}; the model "
-        f"{receipt.get('model')} is kept and can be deployed again",
+        "action": _undeploy_action(receipt),
     }
+
+
+def _undeploy_action(receipt: Mapping[str, Any]) -> str:
+    deployment_id, model = receipt.get("deployment_id"), receipt.get("model")
+    kept = f"the model {model} is kept and can be deployed again"
+    if receipt.get("state") == REQUESTED:
+        return (
+            f"read back the deployment {deployment_id}, whose creation was never confirmed, "
+            f"and delete it only if it is the one this run requested; {kept}"
+        )
+    return f"delete the deployment {deployment_id}; {kept}"
 
 
 def execute_undeploy(provider: Provider, run_dir: RunDir, *, now: Clock = utcnow) -> dict[str, Any]:
     """Delete the run's deployment and record ``deleted_at``; the updated receipt.
 
-    ``already_deleted`` in it is true when the provider no longer had the deployment.
+    ``already_deleted`` in it is true when the provider no longer had the deployment. For a
+    ``REQUESTED`` receipt the deployment is read back first and deleted only when it is the
+    one the receipt's request creates; another deployment under its id raises
+    :class:`StateError` and nothing is deleted.
     """
     with run_dir.lock():
         receipt = run_dir.read_deployment()
@@ -371,7 +403,22 @@ def execute_undeploy(provider: Provider, run_dir: RunDir, *, now: Clock = utcnow
             )
         if receipt.get("deleted_at"):
             return receipt
-        deleted = provider.undeploy(endpoint_from_receipt(receipt))
+        endpoint = endpoint_from_receipt(receipt)
+        if receipt.get("state") == REQUESTED:
+            # The create was never confirmed, and it fails when the id is taken: the
+            # deployment under the id may be someone else's.
+            owned = provider.owns_deployment(_request_of(receipt, run_dir))
+            if owned is False:
+                raise StateError(
+                    f"the deployment {endpoint.deployment_id} is not the one run {run_dir.path} "
+                    "requested (its creation was never confirmed, and the id holds another "
+                    "deployment): nothing was deleted",
+                    hint=f"this run made no deployment: remove {run_dir.deployment_path} to "
+                    "forget the request, and deploy with another --deployment-id",
+                )
+            deleted = owned is True and provider.undeploy(endpoint)
+        else:
+            deleted = provider.undeploy(endpoint)
         receipt.update(
             {
                 "state": "DELETED",
@@ -381,3 +428,20 @@ def execute_undeploy(provider: Provider, run_dir: RunDir, *, now: Clock = utcnow
         )
         run_dir.write_deployment(receipt)
     return receipt
+
+
+def _request_of(receipt: Mapping[str, Any], run_dir: RunDir) -> DeploymentRequest:
+    """The create request a ``REQUESTED`` receipt records."""
+    data = receipt.get("request")
+    if isinstance(data, Mapping):
+        try:
+            return DeploymentRequest.from_json(data)
+        except ValueError:
+            pass
+    raise StateError(
+        f"{run_dir.deployment_path} records a deployment whose creation was never confirmed, "
+        "but not what was requested, so the deployment under its id cannot be told to be "
+        "this run's",
+        hint=f"check the deployment {receipt.get('deployment_id')} with the provider; if this "
+        f"run did not create it, remove {run_dir.deployment_path}",
+    )

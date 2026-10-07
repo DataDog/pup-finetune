@@ -87,6 +87,7 @@ __all__ = [
     "TRAINING_CHECKPOINT",
     "TRAINING_URL",
     "CheckpointRow",
+    "CreateRequest",
     "DeploymentRecord",
     "FireworksDeployments",
     "FireworksDeploymentsClient",
@@ -1171,7 +1172,7 @@ SdkFireworksFactory = Callable[..., _SdkFireworks]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class _Requested:
+class CreateRequest:
     """What a create asked for, to tell a deployment it made from one already there."""
 
     base_model: str
@@ -1202,6 +1203,11 @@ class _Requested:
             if theirs is not None and theirs != ours:
                 return f"its {label} replica count is {theirs}, not {ours}"
         return None
+
+    def made(self, existing: DeploymentRecord) -> bool:
+        """Whether ``existing`` is the deployment this request creates: of its base model,
+        and with nothing :meth:`mismatch` finds."""
+        return existing.base_model == self.base_model and self.mismatch(existing) is None
 
 
 def _deployment_record(raw: Any) -> DeploymentRecord:
@@ -1329,7 +1335,7 @@ class FireworksDeploymentsClient:
             conflict = _has_status(exc, 409)
             if not (conflict or isinstance(error, TransientError)):
                 raise error from exc
-            requested = _Requested(
+            requested = CreateRequest(
                 base_model=base_model,
                 shape=shape,
                 display_name=display_name,
@@ -1358,7 +1364,7 @@ class FireworksDeploymentsClient:
             ) from exc
 
     def _created_anyway(
-        self, deployment_id: str, requested: _Requested, error: FinetuneError
+        self, deployment_id: str, requested: CreateRequest, error: FinetuneError
     ) -> DeploymentRecord | None:
         """The deployment a failed create may have made anyway, read back; ``None`` when
         there is none. Raises :class:`UsageError` when the id holds a deployment this create

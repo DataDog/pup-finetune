@@ -39,7 +39,7 @@ from pup_finetune.training import inputs as inputs_module
 from tests.fakes.chat_api import FakeChatApi
 from tests.fakes.fireworks import ACCOUNT, FakeFireworksTrainingClient, FakeSdkError
 from tests.fakes.fireworks_api import API_KEY, FakeFireworksApi
-from tests.fakes.fireworks_deploy import FakeClock, FakeSdkFireworks, fake_deployer
+from tests.fakes.fireworks_deploy import SHAPE, FakeClock, FakeSdkFireworks, fake_deployer
 from tests.fakes.tokenizer import FakeChatTokenizer
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
@@ -414,6 +414,12 @@ def test_a_ctrl_c_while_creating_leaves_a_receipt_to_undeploy(
     assert receipt is not None
     assert receipt["state"] == "REQUESTED"
     assert receipt["deployment_id"] == model_id_for_run(RUN_ID)
+    # What the create sent, to tell the deployment it made from another one under the id.
+    (create,) = [kwargs for name, kwargs in world.sdk.calls if name == "create"]
+    request = receipt["request"]
+    assert request["base_model"] == create["base_model"] == receipt["model"]
+    assert request["display_name"] == create["display_name"] == f"pup-finetune {RUN_ID}"
+    assert request["shape"] == create["deployment_shape"]
     # Deploying again is refused until it is undeployed, which finds and deletes it.
     again = invoke("deploy", str(fireworks_run), "--confirm")
     assert again.exit_code == 1
@@ -443,6 +449,82 @@ def test_a_receipt_left_while_creating_names_its_account(
     stored = RunDir(fireworks_run).read_deployment() or {}
     assert stored["deleted_at"] is None
     assert world.sdk.deleted == []
+
+
+def test_a_failed_shape_lookup_leaves_no_receipt(
+    world: FireworksWorld, fireworks_run: Path
+) -> None:
+    world.sdk.fail["match_for_model"] = FakeSdkError("service unavailable", status_code=503)
+    result = invoke("deploy", str(fireworks_run), "--confirm")
+    assert result.exit_code == 1
+    assert not RunDir(fireworks_run).deployment_path.exists()
+    assert "create" not in world.sdk.call_names()
+    assert "undeploy" not in result.stderr
+
+
+def test_a_failed_shape_lookup_keeps_the_earlier_receipt(
+    world: FireworksWorld, fireworks_run: Path
+) -> None:
+    assert invoke("deploy", str(fireworks_run), "--confirm").exit_code == 0
+    assert invoke("undeploy", str(fireworks_run), "--confirm").exit_code == 0
+    before = RunDir(fireworks_run).read_deployment()
+    world.sdk.fail["match_for_model"] = FakeSdkError("service unavailable", status_code=503)
+    assert invoke("deploy", str(fireworks_run), "--confirm").exit_code == 1
+    assert RunDir(fireworks_run).read_deployment() == before
+
+
+def foreign_deployment(world: FireworksWorld, deployment_id: str) -> None:
+    """Another model's deployment under ``deployment_id``, made outside this run."""
+    world.sdk.records[deployment_id] = {
+        "name": f"accounts/{ACCOUNT}/deployments/{deployment_id}",
+        "state": "READY",
+        "base_model": f"accounts/{ACCOUNT}/models/someone-elses-model",
+        "deployment_shape": f"{SHAPE}/versions/v2",
+        "display_name": "someone else's deployment",
+        "min_replica_count": 0,
+        "max_replica_count": 1,
+        "status": None,
+    }
+
+
+def test_undeploying_a_requested_deployment_never_deletes_another_one(
+    world: FireworksWorld, fireworks_run: Path
+) -> None:
+    deployment_id = "shared-name"
+    world.sdk.fail["create"] = KeyboardInterrupt()  # before the create took effect
+    interrupted = invoke(
+        "deploy", str(fireworks_run), "--deployment-id", deployment_id, "--confirm"
+    )
+    assert interrupted.exit_code == 130
+    receipt = RunDir(fireworks_run).read_deployment()
+    assert receipt is not None and receipt["state"] == "REQUESTED"
+    # The id is someone else's deployment, which the create would have been refused for.
+    foreign_deployment(world, deployment_id)
+    preview = invoke("undeploy", str(fireworks_run))
+    assert "read back the deployment" in output(preview)["preview"]["action"]
+    refused = invoke("undeploy", str(fireworks_run), "--confirm")
+    assert refused.exit_code == 1, refused.stderr
+    assert "is not the one run" in refused.stderr
+    assert str(RunDir(fireworks_run).deployment_path) in refused.stderr
+    assert world.sdk.deleted == []
+    assert "delete" not in world.sdk.call_names()
+    assert deployment_id in world.sdk.records
+    assert (RunDir(fireworks_run).read_deployment() or {})["deleted_at"] is None
+
+
+def test_undeploying_a_requested_deployment_that_was_never_made_deletes_nothing(
+    world: FireworksWorld, fireworks_run: Path
+) -> None:
+    world.sdk.fail["create"] = KeyboardInterrupt()  # before the create took effect
+    assert invoke("deploy", str(fireworks_run), "--confirm").exit_code == 130
+    removed = invoke("undeploy", str(fireworks_run), "--confirm")
+    assert removed.exit_code == 0, removed.stderr
+    assert output(removed)["already_deleted"] is True
+    assert "delete" not in world.sdk.call_names()
+    receipt = RunDir(fireworks_run).read_deployment()
+    assert receipt is not None and receipt["deleted_at"] is not None
+    # The run can be deployed again.
+    assert invoke("deploy", str(fireworks_run), "--confirm").exit_code == 0
 
 
 def test_a_lost_create_answer_is_adopted(world: FireworksWorld, fireworks_run: Path) -> None:

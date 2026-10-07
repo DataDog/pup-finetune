@@ -21,6 +21,7 @@ from pup_finetune.providers import get_provider, known_providers
 from pup_finetune.providers.base import (
     AdamConfig,
     CheckpointRef,
+    DeploymentRequest,
     DeployOptions,
     Endpoint,
     LoraConfig,
@@ -654,6 +655,29 @@ def test_deployments_are_recorded() -> None:
     assert provider.undeploy(endpoint) is False  # idempotent
     with pytest.raises(UsageError):
         provider.deploy(dataclasses.replace(model, provider="other"), options)
+
+
+def test_owns_deployment_compares_the_request() -> None:
+    provider = FakeProvider(Runtime())
+    model = ModelRef(provider="fake", model_id="run-1", uri="fake://models/run-1")
+    options = DeployOptions(deployment_id="run-1-deployment", display_name="pup-finetune run-1")
+    requests: list[DeploymentRequest] = []
+    endpoint = provider.deploy(model, options, on_creating=requests.append)
+    [request] = requests
+    assert request == DeploymentRequest(
+        deployment_id="run-1-deployment",
+        base_model="fake://models/run-1",
+        name="fake://deployments/run-1-deployment",
+        display_name="pup-finetune run-1",
+        shape="fake-shape",
+        min_replicas=0,
+        max_replicas=1,
+    )
+    assert DeploymentRequest.from_json(request.to_json()) == request
+    assert provider.owns_deployment(request) is True
+    assert provider.owns_deployment(dataclasses.replace(request, display_name="other")) is False
+    assert provider.undeploy(endpoint) is True
+    assert provider.owns_deployment(request) is None
 
 
 def test_a_deployment_made_by_another_process_can_be_undeployed() -> None:

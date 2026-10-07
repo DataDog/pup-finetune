@@ -136,7 +136,7 @@ class FakeSdkFireworks:
         """The state each read reports, in order; the last one read stays."""
         self.records: dict[str, dict[str, Any]] = {}
         self.deleted: list[str] = []
-        self.fail: dict[str, Exception] = {}
+        self.fail: dict[str, BaseException] = {}
         """An error to raise from the named call (``create``, ``get``, ...), once."""
         self.lost: dict[str, BaseException] = {}
         """An error to raise from the named call once it took effect (its answer was lost)."""

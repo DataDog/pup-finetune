@@ -342,11 +342,16 @@ it is provider-neutral: it deploys a finished run's promoted model (or, on a pro
 promotion, its deployable checkpoint) through `Provider.deploy`, with `DeployOptions` (the
 deployment id, derived from the run id unless `--deployment-id` is given; the shape; at most
 one replica, none when idle; the wait's timeout). The receipt, `deployment.json` in the run
-directory, is first written as `REQUESTED` before the provider is called, so a Ctrl-C while
-the deployment is created still leaves its id to undeploy, with the resource name it gets
-(`Provider.deployment_name`, on Fireworks `accounts/<account>/deployments/<id>`), so an
-undeploy under another account is refused (it is removed again when the provider refused
-the request). The `on_created` callback rewrites it as soon as the provider
+directory, is first written as `REQUESTED` from the provider's `on_creating` callback, right
+before the create is sent and after any lookup it needs (the shape), so a failure before
+that leaves no receipt and a Ctrl-C while the deployment is created still leaves its id to
+undeploy, with the resource name it gets (`Provider.deployment_name`, on Fireworks
+`accounts/<account>/deployments/<id>`), so an undeploy under another account is refused, and
+what the create sends (`DeploymentRequest`: the base model, display name and shape), as its
+creation is never confirmed: `undeploy` reads the deployment under the id back
+(`Provider.owns_deployment`) and deletes it only when it is the one requested, takes it as
+gone when there is none, and refuses when the id holds another deployment (the receipt is
+removed again when the provider refused the request). The `on_created` callback rewrites it as soon as the provider
 accepted the deployment and before the wait, so a failure, a timeout or a Ctrl-C while
 waiting still records what exists and bills; a smoke test that raises is recorded as failed,
 with an undeploy hint. It is updated once the deployment serves, with the
@@ -431,10 +436,12 @@ Using Baseten as the example:
    `from pup_finetune.providers import baseten as _baseten  # noqa: E402, F401`, so
    `auth login baseten`, `auth status` and `doctor` work without new code. Pass the resolved
    key explicitly to the SDK; never copy it into the environment.
-6. **Deploy.** Implement `deploy` (call `on_created` once the deployment exists, then wait
+6. **Deploy.** Implement `deploy` (call `on_creating` with what the create sends right
+   before sending it, `on_created` once the deployment exists, then wait
    until it serves, raising `DeploymentNotReady` when it fails or the wait runs out),
    `smoke_test` (one short chat completion, retried while it scales up; a failed answer is a
-   result, not an exception) and an idempotent `undeploy` for a promoted `ModelRef`. Callers
+   result, not an exception), `owns_deployment` (whether the deployment under an id is the
+   one a `DeploymentRequest` creates) and an idempotent `undeploy` for a promoted `ModelRef`. Callers
    gate them behind `--confirm` and `PUP_READ_ONLY`.
 7. **Registration and install.** Call `register_provider("baseten",
    "pup_finetune.providers.baseten.provider:BasetenProvider")` in the registry (the

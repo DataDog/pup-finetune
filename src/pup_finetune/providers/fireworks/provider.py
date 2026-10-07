@@ -42,6 +42,7 @@ from pup_finetune.doctor import error_detail
 from pup_finetune.errors import FinetuneError, UsageError
 from pup_finetune.providers.base import (
     Check,
+    DeploymentRequest,
     DeployOptions,
     Endpoint,
     ModelProfile,
@@ -277,6 +278,7 @@ class FireworksProvider:
         model: ModelRef,
         options: DeployOptions,
         *,
+        on_creating: Callable[[DeploymentRequest], None] | None = None,
         on_created: Callable[[Endpoint, str], None] | None = None,
     ) -> Endpoint:
         """Create an on-demand deployment of ``model`` and wait until it is ``READY``.
@@ -284,7 +286,9 @@ class FireworksProvider:
         See :mod:`pup_finetune.providers.fireworks.deploy`. Needs the API key. It bills per
         GPU-second while a replica runs, until :meth:`undeploy`.
         """
-        return self._deployments().deploy(model, options, on_created=on_created)
+        return self._deployments().deploy(
+            model, options, on_creating=on_creating, on_created=on_created
+        )
 
     def deployment_name(self, deployment_id: str) -> str:
         """``accounts/<account>/deployments/<id>``, in the account the key resolves to."""
@@ -299,6 +303,10 @@ class FireworksProvider:
         """Delete the deployment (idempotent); the promoted model is kept."""
         self._own_endpoint(endpoint)
         return self._deployments().undeploy(endpoint)
+
+    def owns_deployment(self, request: DeploymentRequest) -> bool | None:
+        """Whether the deployment under the requested id is the one ``request`` creates."""
+        return self._deployments().owns_deployment(request)
 
     # Internals.
 

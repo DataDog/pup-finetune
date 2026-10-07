@@ -27,6 +27,7 @@ them against the real service by overriding the fixtures.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import uuid
@@ -40,6 +41,7 @@ from pup_finetune.providers.base import (
     AdamConfig,
     Check,
     CheckpointRef,
+    DeploymentRequest,
     DeployOptions,
     Endpoint,
     Generation,
@@ -708,9 +710,20 @@ class ProviderContract:
     def test_deploy_smoke_test_and_undeploy(
         self, provider: Provider, model_ref: ModelRef, deploy_options: DeployOptions
     ) -> None:
+        events: list[str] = []
+        requests: list[DeploymentRequest] = []
         created: list[tuple[Endpoint, str]] = []
+
+        def on_creating(request: DeploymentRequest) -> None:
+            events.append("creating")
+            requests.append(request)
+
+        def on_created(endpoint: Endpoint, state: str) -> None:
+            events.append("created")
+            created.append((endpoint, state))
+
         endpoint = provider.deploy(
-            model_ref, deploy_options, on_created=lambda e, state: created.append((e, state))
+            model_ref, deploy_options, on_creating=on_creating, on_created=on_created
         )
         try:
             assert isinstance(endpoint, Endpoint)
@@ -718,8 +731,18 @@ class ProviderContract:
             assert endpoint.model_id == model_ref.model_id
             assert endpoint.deployment_id == deploy_options.deployment_id
             assert endpoint.inference_model
-            # The creation is reported before the wait, with the same deployment.
+            # What the create sends is reported before it is sent, then the creation before
+            # the wait, with the same deployment.
+            assert events == ["creating", "created"]
+            [request] = requests
+            assert request.deployment_id == endpoint.deployment_id
+            assert request.base_model == model_ref.uri
+            assert request.name == provider.deployment_name(endpoint.deployment_id)
             assert [e.deployment_id for e, _ in created] == [endpoint.deployment_id]
+            # The deployment under the id is the one requested; another request's is not.
+            assert provider.owns_deployment(request) is True
+            other = dataclasses.replace(request, base_model=f"{request.base_model}-other")
+            assert provider.owns_deployment(other) is False
             smoke = provider.smoke_test(endpoint)
             assert smoke.ok, smoke.detail
             assert smoke.latency_s is not None and smoke.latency_s >= 0

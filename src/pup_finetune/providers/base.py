@@ -324,6 +324,60 @@ class DeployOptions:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class DeploymentRequest:
+    """What :meth:`Provider.deploy` is about to ask the provider to create.
+
+    ``name`` is the resource name the deployment gets (:meth:`Provider.deployment_name`),
+    ``base_model`` the model URI it serves, and ``shape`` the hardware configuration the
+    request names, once resolved. A receipt records it before the create is sent, so a
+    deployment whose creation was never confirmed can later be told apart from another one
+    under the same id (:meth:`Provider.owns_deployment`).
+    """
+
+    deployment_id: str
+    base_model: str
+    name: str | None = None
+    display_name: str | None = None
+    shape: str | None = None
+    min_replicas: int = 0
+    max_replicas: int = 1
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "deployment_id": self.deployment_id,
+            "base_model": self.base_model,
+            "name": self.name,
+            "display_name": self.display_name,
+            "shape": self.shape,
+            "min_replicas": self.min_replicas,
+            "max_replicas": self.max_replicas,
+        }
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> Self:
+        """The request :meth:`to_json` wrote; raises ``ValueError`` when it is malformed."""
+        try:
+            deployment_id, base_model = data["deployment_id"], data["base_model"]
+            minimum, maximum = data.get("min_replicas", 0), data.get("max_replicas", 1)
+        except (KeyError, TypeError) as exc:
+            raise ValueError(f"a deployment request lacks {exc}") from exc
+        optional = {key: data.get(key) for key in ("name", "display_name", "shape")}
+        if not (isinstance(deployment_id, str) and isinstance(base_model, str)) or any(
+            value is not None and not isinstance(value, str) for value in optional.values()
+        ):
+            raise ValueError("a deployment request holds a value of the wrong type")
+        if type(minimum) is not int or type(maximum) is not int:
+            raise ValueError("a deployment request's replica counts are not integers")
+        return cls(
+            deployment_id=deployment_id,
+            base_model=base_model,
+            min_replicas=minimum,
+            max_replicas=maximum,
+            **optional,
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SmokeTest:
     """One chat completion sent to a new deployment: whether it answered, and how fast.
 
@@ -615,10 +669,14 @@ class Provider(Protocol):
         model: ModelRef,
         options: DeployOptions,
         *,
+        on_creating: Callable[[DeploymentRequest], None] | None = None,
         on_created: Callable[[Endpoint, str], None] | None = None,
     ) -> Endpoint:
         """Deploy a promoted model and wait (at most ``options.timeout_s``) until it serves.
 
+        ``on_creating`` is called with what the create sends right before it is sent, after
+        every lookup it needs (e.g. the shape), so the caller records a deployment that may
+        come to exist only once one can, and a failure before it leaves nothing to undeploy.
         ``on_created`` is called with the endpoint and the provider's state for it as soon as
         the provider accepted the deployment, before the wait, so the caller can record what
         now exists (and bills) even if the wait fails. Raises :class:`DeploymentNotReady` when
@@ -629,10 +687,23 @@ class Provider(Protocol):
     def deployment_name(self, deployment_id: str) -> str | None:
         """The full resource name the deployment ``deployment_id`` gets, before it exists.
 
-        ``None`` when the provider names deployments by id alone. The caller records it
-        before asking for the deployment, so a receipt left by an interrupted create still
-        says where it was made (e.g. which account), and :meth:`undeploy` can refuse to
-        delete in another one.
+        ``None`` when the provider names deployments by id alone. The request passed to
+        ``on_creating`` carries it, so a receipt left by an interrupted create still says
+        where it was made (e.g. which account), and :meth:`undeploy` can refuse to delete in
+        another one.
+        """
+        ...
+
+    def owns_deployment(self, request: DeploymentRequest) -> bool | None:
+        """Whether the deployment under ``request.deployment_id`` is the one ``request``
+        asked for: ``True`` when it is, ``False`` when the id holds another deployment,
+        ``None`` when there is none.
+
+        For a receipt whose creation was never confirmed: the create may have failed because
+        the id was taken, so only a deployment that matches the request (its model, display
+        name and shape, as far as the provider reports them) may be deleted as this run's.
+        Raises :class:`UsageError` when ``request.name`` places it where this provider
+        cannot look (e.g. another account).
         """
         ...
 

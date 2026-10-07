@@ -223,12 +223,15 @@ Source lives under `src/pup_finetune/`.
 - `deployment.py` - what `deploy` and `undeploy` run, provider-neutral: `deploy_target` (a
   finished run's promoted model, else its deployable checkpoint), `deployment_id_for` (the
   run id made safe, or `--deployment-id`), `execute_deploy` (writes `deployment.json` as
-  `REQUESTED`, with the deployment's resource name, before the provider is called, removed
-  again if the provider refused; then
+  `REQUESTED`, with the deployment's resource name and what the create sends (`request`),
+  from the provider's `on_creating` callback right before the create, removed again if the
+  provider refused; then
   from the provider's `on_created` callback, before the wait, on `READY` and with the smoke
   test; a failure once it may exist, a smoke test that raises included, is recorded with an
   undeploy hint; one deployment per run)
-  and `execute_undeploy` (idempotent; records `deleted_at`; the model is kept).
+  and `execute_undeploy` (idempotent; records `deleted_at`; the model is kept; a `REQUESTED`
+  receipt's deployment is read back with `Provider.owns_deployment` and deleted only when it
+  is the one requested).
 - `runtime.py` - non-secret settings from the environment (`PUP_OUTPUT`, `PUP_READ_ONLY`, ...).
 - `errors.py` - expected failures and their exit codes; the `--confirm` and read-only guards.
 - `output.py` - the one stdout result (through `pup format` under pup), progress on stderr.

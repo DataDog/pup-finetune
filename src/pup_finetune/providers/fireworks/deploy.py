@@ -42,6 +42,7 @@ from pup_finetune.inference import DEFAULT_JUDGE_BASE_URL, ChatCompleter
 from pup_finetune.output import info
 from pup_finetune.providers.base import (
     DeploymentNotReady,
+    DeploymentRequest,
     DeployOptions,
     Endpoint,
     ModelRef,
@@ -53,6 +54,7 @@ from pup_finetune.providers.base import (
 from pup_finetune.providers.fireworks import PROVIDER_NAME
 from pup_finetune.providers.fireworks.client import (
     SOURCE,
+    CreateRequest,
     DeploymentRecord,
     FireworksDeployments,
     ShapeVersion,
@@ -158,17 +160,34 @@ class FireworksDeployer:
         model: ModelRef,
         options: DeployOptions,
         *,
+        on_creating: Callable[[DeploymentRequest], None] | None = None,
         on_created: Callable[[Endpoint, str], None] | None = None,
     ) -> Endpoint:
-        """Create the deployment and wait until it is ``READY``; see the module docstring."""
+        """Create the deployment and wait until it is ``READY``; see the module docstring.
+
+        ``on_creating`` is called once the shape is chosen, right before the create is sent.
+        """
         if model.provider != PROVIDER_NAME:
             raise UsageError(f"the fireworks provider cannot deploy a {model.provider} model")
         shape = options.shape or choose_shape(self._deployments.match_shapes(model.uri), model.uri)
+        display_name = (options.display_name or options.deployment_id)[:63]
+        if on_creating is not None:
+            on_creating(
+                DeploymentRequest(
+                    deployment_id=options.deployment_id,
+                    base_model=model.uri,
+                    name=self.deployment_name(options.deployment_id),
+                    display_name=display_name,
+                    shape=shape,
+                    min_replicas=options.min_replicas,
+                    max_replicas=options.max_replicas,
+                )
+            )
         record = self._deployments.create_deployment(
             base_model=model.uri,
             deployment_id=options.deployment_id,
             shape=shape,
-            display_name=(options.display_name or options.deployment_id)[:63],
+            display_name=display_name,
             min_replica_count=options.min_replicas,
             max_replica_count=options.max_replicas,
             scale_to_zero_window=SCALE_TO_ZERO_WINDOW,
@@ -217,17 +236,40 @@ class FireworksDeployer:
         Raises :class:`UsageError` when the deployment's resource name places it in another
         account than the one the key resolves to now: a 404 there would not mean it is gone.
         """
-        account = _account_of(endpoint.name)
+        self._check_account(endpoint.name, endpoint.deployment_id)
+        return self._deployments.delete_deployment(endpoint.deployment_id)
+
+    def owns_deployment(self, request: DeploymentRequest) -> bool | None:
+        """Whether the deployment under the requested id is the one ``request`` creates: of
+        its base model, display name, shape and replica counts (as far as Fireworks reports
+        them, as a create that failed checks it); ``None`` when there is none.
+
+        Raises :class:`UsageError` when ``request.name`` places it in another account.
+        """
+        self._check_account(request.name, request.deployment_id)
+        existing = self._deployments.get_deployment(request.deployment_id)
+        if existing is None:
+            return None
+        create = CreateRequest(
+            base_model=request.base_model,
+            shape=request.shape or "",
+            display_name=request.display_name or "",
+            min_replica_count=request.min_replicas,
+            max_replica_count=request.max_replicas,
+        )
+        return create.made(existing)
+
+    # Internals.
+
+    def _check_account(self, name: str | None, deployment_id: str) -> None:
+        account = _account_of(name)
         if account is not None and account != self.account_id:
             raise UsageError(
-                f"the deployment {endpoint.deployment_id} was made in the Fireworks account "
+                f"the deployment {deployment_id} was made in the Fireworks account "
                 f"{account}, but this key and FIREWORKS_ACCOUNT_ID resolve to {self.account_id}",
                 hint=f"set FIREWORKS_ACCOUNT_ID={account} (with a key of that account) and "
                 "undeploy again",
             )
-        return self._deployments.delete_deployment(endpoint.deployment_id)
-
-    # Internals.
 
     def _endpoint(
         self, model: ModelRef, deployment_id: str, record: DeploymentRecord, shape: str
