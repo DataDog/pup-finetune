@@ -170,6 +170,13 @@ def test_the_prompt_marks_the_row_as_untrusted_json_data() -> None:
     assert "\\u003c/conversation\\u003e" in user["content"]
 
 
+def test_the_prompt_data_is_ascii() -> None:
+    row = make_row("r", "Wo ist Bestellung 42? ✓")
+    text = build_messages(row, RUBRIC)[1]["content"]
+    assert text.isascii()
+    assert block(text, "conversation")[0]["content"] == "Wo ist Bestellung 42? ✓"
+
+
 def test_the_system_prompt_formats() -> None:
     assert "{rubric}" in SYSTEM_PROMPT
     assert "{rubric}" not in build_messages(make_row("r"), RUBRIC)[0]["content"]
@@ -181,6 +188,8 @@ def test_the_system_prompt_formats() -> None:
         ('{"keep": true, "reason": "good"}', (True, "good")),
         ('```json\n{"keep": false, "reason": "loops"}\n```', (False, "loops")),
         ('<think>{"keep": true}</think>{"keep": false, "reason": "x"}', (False, "x")),
+        ('{"keep": true, "reason": "ends at </think>"}', (True, "ends at </think>")),
+        ('<think>{"keep": true, "reason": "draft </think>"}', None),
         ('{"keep": "true", "reason": "x"}', None),
         ('{"pass": true}', None),
         ("", None),
