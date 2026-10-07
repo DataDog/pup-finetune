@@ -170,7 +170,8 @@ def register(app: typer.Typer) -> None:
             "(--timeout-minutes), and send one chat completion as a smoke test. The receipt, "
             "deployment.json in RUN_DIR, is written as soon as the deployment exists, so a "
             "failed or timed-out wait still records it. Without --confirm, previews what "
-            f"would be created. {BILLING}: run `pup finetune undeploy RUN_DIR --confirm`. "
+            f"would be created. {BILLING[0].upper()}{BILLING[1:]}: run `pup finetune undeploy "
+            "RUN_DIR --confirm`. "
             "A failed smoke test exits 1 and keeps the deployment. A remote write: refused "
             f"when PUP_READ_ONLY is set. {_AGENT_RULE}"
         ),

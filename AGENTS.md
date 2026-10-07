@@ -8,7 +8,10 @@ Guide for contributors and coding agents working in this repository.
 traces, fine-tunes an open-weight model on it, evaluates the tuned model against the base model,
 and deploys it. It ships as a `pup` extension, so users run it as `pup finetune ...`; the
 standalone executable is `pup-finetune`. All Datadog reads and writes go through `pup` and its
-OAuth login. The project is in early development: most commands arrive in later PRs.
+OAuth login. The project is in early development: commands and file formats may change.
+User-facing docs: `README.md` (install, quickstart), `docs/commands.md` (every command and
+flag), `docs/data-format.md` (rows, exclusion codes, dataset files) and the agent skill in
+`skills/datadog-finetune/SKILL.md`.
 
 ## Commands
 
@@ -20,6 +23,8 @@ uv run ruff format                   # format (check only: uv run ruff format --
 uv run mypy src                      # type-check (strict)
 uv run python scripts/check_headers.py  # license header on every tracked .py and shell script
 uv run python scripts/check_3rdparty.py # LICENSE-3rdparty.csv covers every dependency
+uv run python scripts/gen_command_docs.py  # regenerate docs/commands.md (and the exclusion
+                                     # table in docs/data-format.md); a test fails when stale
 uv run pre-commit install            # run the hooks above on every commit
 uv run pup-finetune --help           # run the CLI from the checkout
 ```
@@ -82,7 +87,8 @@ be new or empty and is checked before training, `--eval-max-cases-per-trajectory
 starts, so a crash during it keeps the trained, promoted run; a failed evaluation exits 1
 with the trained run and the `evaluate` command to retry it. A cancelled or budget-capped
 training is not evaluated in its session (the evaluation would spend the session's time past
-the cap); `evaluate` evaluates it on request. Evaluating a real run is paid and needs the
+the cap). A budget-capped run still ends `completed`, so `evaluate` evaluates it on request;
+`evaluate` refuses a `cancelled` run, which must be resumed to `completed` first. Evaluating a real run is paid and needs the
 judge's key (`FIREWORKS_API_KEY` for the default judge); the preview is free and allowed with
 `PUP_READ_ONLY` set, evaluating is not. A changed `--max-tokens`, judge, seed or cap needs a
 new `--out-dir`. An evaluation whose pairs ended in errors (a sampler or judge outage) reports
@@ -179,13 +185,27 @@ Environment variables for development and unusual setups:
 - `PUP_FINETUNE_DEV=1` - development mode: enables dev-only providers such as the offline
   `fake` provider (`--provider fake`).
 
+The `datadog-finetune` agent skill (`skills/datadog-finetune/SKILL.md`, the one source, in the
+layout the skills CLI discovers) ships in the wheel as `pup_finetune/_skills/` through
+`[tool.hatch.build.targets.wheel.force-include]`; an editable install reads the repository's
+copy. `skill show` prints it; `skill install` runs `npx --yes skills add <bundled dir> --skill
+datadog-finetune` (passing on `-a`, `-g` and `-y`, its stdout sent to stderr, and its
+environment without the Datadog secrets or any provider key variable, since npx downloads and
+runs the skills CLI from npm) when `npx` is on `PATH` and `--dir` is not given, and otherwise
+copies it to `.agents/skills/` and `.claude/skills/` under the project (or the home directory
+with `-g`). Neither makes a Datadog or provider call, so both work with `PUP_READ_ONLY` set.
+When you change a command the skill names, keep the skill in step:
+`tests/test_doc_commands.py` checks every `pup finetune` command and flag in it (and in the
+README) against the app. `SKILL.md` has no license header: its frontmatter must come first,
+and `scripts/check_headers.py` checks only code.
+
 Opt-in test suites: `PUP_FINETUNE_LIVE=1` runs `live` tests (real external services);
 `PUP_FINETUNE_TOKENIZER_TESTS=1` runs `tokenizer` tests (downloads real tokenizers, needs the
 `hf` extra): `PUP_FINETUNE_TOKENIZER_TESTS=1 uv run pytest -m tokenizer`.
 
 ## Layout
 
-Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later PRs.
+Source lives under `src/pup_finetune/`.
 
 - `cli/` - the Typer app; one module per command group. `dataset.py` has `dataset import`,
   `preview`, `pull`, `show`, `sample`, `label` and `push`; `train.py` has `train`, `resume`,
@@ -194,7 +214,12 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   `evaluate.py` has `evaluate`, which only parses its flags and emits what
   `evaluation/runner.py` returns; `deploy.py` has `deploy` and `undeploy` (over
   `deployment.py`); `triage.py` has `dataset triage` (over `curation/triage.py`; its
-  `open_client` builds the judges' chat client).
+  `open_client` builds the judges' chat client); `skill.py` has `skill show` and `skill
+  install` (its `find_npx` and `run_npx` are what tests replace).
+- `skill.py` - the bundled agent skill: `bundled_skills_dir` (the package's `_skills/`, else
+  the repository's `skills/`), `npx_argv`, `npx_env` (the environment without
+  `datadog/pup.py`'s `SECRET_ENV` and every registered provider key variable) and
+  `install_files` (the fallback copy; a different copy is replaced only when asked).
 - `deployment.py` - what `deploy` and `undeploy` run, provider-neutral: `deploy_target` (a
   finished run's promoted model, else its deployable checkpoint), `deployment_id_for` (the
   run id made safe, or `--deployment-id`), `execute_deploy` (writes `deployment.json` as

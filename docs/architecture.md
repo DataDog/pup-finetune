@@ -171,6 +171,7 @@ Renderers receive rows in the OpenAI form that
 [`data/jsonl.py`](../src/pup_finetune/data/jsonl.py)'s `to_provider_dict` produces, and adapt
 it to their template (for example, decoding `arguments` for templates that expect an object).
 Rows are validated once, when they enter a dataset, so renderers can rely on this shape.
+[data-format.md](data-format.md) has the full format, an example and the exclusion codes.
 
 ## The registry
 

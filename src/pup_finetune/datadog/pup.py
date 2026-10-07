@@ -51,8 +51,9 @@ _FORMAT_TIMEOUT_SECONDS = 30.0
 # pup applies these to its own output; internal reads must get plain JSON.
 _OUTPUT_ENV: tuple[str, ...] = ("PUP_FILTER", "PUP_OUTPUT")
 _TOKEN_ENV = "DD_ACCESS_TOKEN"  # noqa: S105 - an env var name, not a secret
-# Values of these are redacted from any pup stderr we repeat.
-_SECRET_ENV: tuple[str, ...] = ("DD_ACCESS_TOKEN", "DD_API_KEY", "DD_APP_KEY", "DD_APPLICATION_KEY")
+SECRET_ENV: tuple[str, ...] = ("DD_ACCESS_TOKEN", "DD_API_KEY", "DD_APP_KEY", "DD_APPLICATION_KEY")
+"""Datadog secrets pup may hold in the environment: redacted from any pup stderr we repeat,
+and removed from the environment of any process that is not pup."""
 _MIN_REDACT_LENGTH = 8
 _MAX_DETAIL_LINES = 3
 _MAX_DETAIL_CHARS = 300
@@ -390,7 +391,7 @@ class Pup:
     def _error_detail(self, output: bytes) -> str:
         """The first few non-empty output lines, without styling, secrets or bearer tokens."""
         text = _ANSI.sub("", _decode(output))
-        for name in _SECRET_ENV:
+        for name in SECRET_ENV:
             value = self.environ.get(name)
             if value and len(value) >= _MIN_REDACT_LENGTH:
                 text = text.replace(value, "[redacted]")

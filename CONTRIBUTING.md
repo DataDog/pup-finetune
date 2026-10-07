@@ -25,6 +25,9 @@ uv run python scripts/check_headers.py  # license headers
 uv run python scripts/check_3rdparty.py # LICENSE-3rdparty.csv covers every dependency
 ```
 
+After you change a command's help or flags, regenerate the command reference with
+`uv run python scripts/gen_command_docs.py`; a test fails when `docs/commands.md` is stale.
+
 ## Pull requests
 
 - Keep pull requests small and focused on one change. Open an issue first for larger changes.

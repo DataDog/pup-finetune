@@ -13,7 +13,17 @@ from typing import Annotated
 import typer
 
 from pup_finetune import __version__
-from pup_finetune.cli import auth, dataset, deploy, doctor, evaluate, models, train, triage
+from pup_finetune.cli import (
+    auth,
+    dataset,
+    deploy,
+    doctor,
+    evaluate,
+    models,
+    skill,
+    train,
+    triage,
+)
 from pup_finetune.cli._common import PROG_NAME, run_app
 
 app = typer.Typer(
@@ -58,6 +68,7 @@ deploy.register(app)
 doctor.register(app)
 evaluate.register(app)
 models.register(app)
+skill.register(app)
 train.register(app)
 
 
