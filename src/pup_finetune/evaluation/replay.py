@@ -28,7 +28,11 @@ still needs a judgment, and retries the pairs that failed. A generation that fai
 sampler's own retries, or a judge call that fails after the client's (an outage, not a
 verdict), is recorded as an error result and the run goes on; errors are counted apart and
 never count in a pass rate. Setting ``cancel`` (the CLI sets it on Ctrl-C or SIGTERM) stops
-new pairs from starting; the ones in flight finish and are kept.
+new pairs from starting; the ones in flight finish and are kept. A second Ctrl-C stops at
+once: the pairs in flight are abandoned, and nothing they finish later is written, since
+the directory's lock is released and the samplers are closed once :func:`run_replay`
+returns. The workers are daemon threads, so the process can exit without waiting for a call
+still blocked in a provider.
 
 Like the metrics and the judge, every score measures agreement with the recorded behavior
 on held-out conversations, not task success: tools were never executed (:data:`CAVEAT`).
@@ -42,11 +46,12 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import queue
 import random
 import threading
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, wait
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -460,6 +465,27 @@ class _Replay:
         self.cancel = cancel
         self.generations = eval_dir.read_generations()
         self.results = eval_dir.read_results()
+        self._writes = threading.Lock()
+        self._closed = False
+
+    def close_writes(self) -> None:
+        """Stop the workers' writes, once an append in progress is done (a second Ctrl-C).
+
+        A worker that finishes later writes nothing: the directory's lock is about to be
+        released, and its sampler closed.
+        """
+        with self._writes:
+            self._closed = True
+
+    def _append(
+        self, append: Callable[[Mapping[str, Any]], None], record: Mapping[str, Any]
+    ) -> bool:
+        """``append(record)`` unless writes are closed; whether it was written."""
+        with self._writes:
+            if self._closed:
+                return False
+            append(record)
+            return True
 
     def todo(self, cases: Sequence[ReplayCase]) -> list[tuple[Target, ReplayCase]]:
         return [
@@ -488,10 +514,10 @@ class _Replay:
                 )
             except Exception as exc:
                 result = _result_record(target, case, error=_error_json("generation", exc))
-                self.eval_dir.append_result(result)
-                return result
+                return result if self._append(self.eval_dir.append_result, result) else None
             record = _generation_record(target, case, generation)
-            self.eval_dir.append_generation(record)
+            if not self._append(self.eval_dir.append_generation, record):
+                return None
         else:
             generation = _generation_from(record)
         if self.cancel.is_set():
@@ -505,7 +531,8 @@ class _Replay:
             result = _result_record(target, case, metrics=metrics, error=_error_json("judge", exc))
         else:
             result = _result_record(target, case, metrics=metrics, judgment=judgment)
-        self.eval_dir.append_result(result)
+        if not self._append(self.eval_dir.append_result, result):
+            return None
         return {**result, "generation": record}
 
     def collect(self, target: Target, case: ReplayCase, outcome: dict[str, Any] | None) -> None:
@@ -599,14 +626,16 @@ def _run_pool(
     """Run ``todo`` on ``concurrency`` threads until done or ``replay.cancel`` is set.
 
     On cancel, the pairs not started are dropped and the ones in flight finish. An interrupt
-    in this thread (a second Ctrl-C) sets cancel and returns at once; what the workers still
-    finish is appended to the files all the same. Any other error (e.g. a failed write) also
-    cancels the pairs not started, but waits for the ones in flight before it propagates, so
-    none outlives the directory's lock or its sampler.
+    in this thread (a second Ctrl-C) sets cancel, closes the workers' writes (waiting only
+    for an append in progress) and returns at once, so nothing is written after the
+    directory's lock is released; the workers are daemon threads, so a call blocked in a
+    provider does not hold up the process's exit either. Any other error (e.g. a failed
+    write) also cancels the pairs not started, but waits for the ones in flight before it
+    propagates, so none outlives the directory's lock or its sampler.
     """
     if not todo:
         return
-    pool = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="replay")
+    pool = _DaemonPool(concurrency, name="replay")
     futures: dict[Future[dict[str, Any] | None], tuple[Target, ReplayCase]] = {}
     done_count = 0
     interrupted = False
@@ -645,12 +674,63 @@ def _run_pool(
     except KeyboardInterrupt:
         interrupted = True
         replay.cancel.set()
+        replay.close_writes()
         raise
     except BaseException:
         replay.cancel.set()
         raise
     finally:
-        pool.shutdown(wait=not interrupted, cancel_futures=True)
+        pool.shutdown(wait=not interrupted)
+
+
+class _DaemonPool:
+    """A fixed pool of daemon worker threads running submitted calls as :class:`Future`\\s.
+
+    Unlike :class:`~concurrent.futures.ThreadPoolExecutor`, whose workers the interpreter
+    joins at exit, an abandoned worker never delays the process's exit.
+    """
+
+    def __init__(self, workers: int, *, name: str) -> None:
+        self._queue: queue.SimpleQueue[tuple[Future[Any], Callable[[], Any]] | None]
+        self._queue = queue.SimpleQueue()
+        self._threads = [
+            threading.Thread(target=self._work, name=f"{name}-{n}", daemon=True)
+            for n in range(workers)
+        ]
+        for thread in self._threads:
+            thread.start()
+
+    def submit[T](self, fn: Callable[..., T], *args: Any) -> Future[T]:
+        future: Future[T] = Future()
+        self._queue.put((future, lambda: fn(*args)))
+        return future
+
+    def shutdown(self, *, wait: bool) -> None:
+        """Cancel the calls not started and stop the workers; with ``wait``, join them."""
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            if item is not None:
+                item[0].cancel()
+        for _ in self._threads:
+            self._queue.put(None)
+        if wait:
+            for thread in self._threads:
+                thread.join()
+
+    def _work(self) -> None:
+        while (item := self._queue.get()) is not None:
+            future, call = item
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                result = call()
+            except BaseException as exc:
+                future.set_exception(exc)
+            else:
+                future.set_result(result)
 
 
 # --- the summary --------------------------------------------------------------------------

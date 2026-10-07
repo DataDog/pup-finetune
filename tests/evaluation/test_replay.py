@@ -464,6 +464,40 @@ def test_a_cancel_keeps_what_finished_and_a_rerun_completes(tmp_path: Path) -> N
     assert len(tuned.calls) + len(tuned2.calls) == len(CASES)
 
 
+def test_a_second_interrupt_returns_at_once_and_writes_nothing_after(tmp_path: Path) -> None:
+    out = tmp_path / "eval"
+    blocked = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def block_first(count: int) -> None:
+        if count == 1:
+            blocked.set()
+            release.wait(5)
+            finished.set()
+
+    def interrupt(event: Mapping[str, Any]) -> None:
+        assert blocked.wait(5)
+        raise KeyboardInterrupt  # a second Ctrl-C, in the main thread
+
+    base = ScriptedSampler(on_call=block_first)
+    tuned = ScriptedSampler()
+    with pytest.raises(KeyboardInterrupt):
+        replay(out, {"base": base, "tuned": tuned}, Judge(), concurrency=2, on_progress=interrupt)
+    assert not finished.is_set()  # returned while a generation was still blocked
+    workers = [t for t in threading.enumerate() if t.name.startswith("replay")]
+    assert workers
+    assert all(worker.daemon for worker in workers)  # never joined at interpreter exit
+    written = {path.name: path.read_bytes() for path in out.iterdir() if path.suffix == ".jsonl"}
+
+    release.set()
+    assert finished.wait(5)
+    for worker in workers:
+        worker.join(5)
+    after = {path.name: path.read_bytes() for path in out.iterdir() if path.suffix == ".jsonl"}
+    assert after == written  # the abandoned generation was not appended
+
+
 def test_a_cancel_before_starting_runs_nothing(tmp_path: Path) -> None:
     cancel = threading.Event()
     cancel.set()
