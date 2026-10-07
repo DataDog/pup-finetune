@@ -325,6 +325,34 @@ def test_string_lengths_and_enums() -> None:
     assert schema_errors({"a": [1]}, {"enum": [{"a": [1]}]}) == []
 
 
+@pytest.mark.parametrize(
+    ("value", "schema", "ok"),
+    [
+        # Integer bounds above 2**53 compare exactly, not rounded to a float.
+        (2**53 + 1, {"maximum": 2**53 + 1}, True),
+        (2**53 + 2, {"maximum": 2**53 + 1}, False),
+        (2**53 + 1, {"minimum": 2**53 + 1}, True),
+        (2**53, {"minimum": 2**53 + 1}, False),
+        (2**63, {"maximum": 2**63 - 1}, False),
+        (2**63 - 1, {"maximum": 2**63 - 1}, True),
+        (10**400, {"maximum": 10**400}, True),
+        (10**400 + 1, {"maximum": 10**400}, False),
+        (1.5, {"maximum": 10**400}, True),
+        # Float bounds are unchanged, against integers and floats alike.
+        (2, {"maximum": 1.5}, False),
+        (1, {"maximum": 1.5}, True),
+        (0.5, {"minimum": 0.25, "maximum": 0.75}, True),
+        (0.8, {"minimum": 0.25, "maximum": 0.75}, False),
+        # A boolean or non-finite bound is no bound.
+        (5, {"maximum": True}, True),
+        (5, {"minimum": False, "maximum": float("nan")}, True),
+        (5, {"maximum": float("-inf")}, True),
+    ],
+)
+def test_numeric_bounds_compare_exactly(value: Any, schema: dict[str, Any], ok: bool) -> None:
+    assert (schema_errors(value, schema) == []) is ok
+
+
 def test_unknown_keywords_and_types_are_ignored() -> None:
     schema = {"type": "object", "properties": {"x": {"anyOf": [{"type": "string"}]}}}
     assert schema_errors({"x": 3}, schema) == []

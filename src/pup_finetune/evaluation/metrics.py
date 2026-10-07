@@ -331,10 +331,17 @@ def _type_ok(value: object, declared: object) -> bool:
     return any(_TYPE_CHECKS[name](value) for name in known)
 
 
-def _bound(schema: Mapping[str, Any], keyword: str) -> float | None:
+def _bound(schema: Mapping[str, Any], keyword: str) -> int | float | None:
+    """The numeric ``keyword`` bound as written, or ``None``.
+
+    An integer bound stays an integer: Python compares ``int`` and ``float`` exactly, while
+    ``float()`` would round a bound above ``2**53`` (and overflow past the float range).
+    """
     value = schema.get(keyword)
-    if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value):
-        return float(value)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) or (isinstance(value, float) and math.isfinite(value)):
+        return value
     return None
 
 
