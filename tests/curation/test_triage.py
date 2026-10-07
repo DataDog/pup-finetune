@@ -37,6 +37,7 @@ from pup_finetune.curation.triage import (
     run_triage,
 )
 from pup_finetune.data.dataset_dir import DatasetDir, DatasetSettings
+from pup_finetune.data.exclusions import Exclusion, ExclusionCode
 from pup_finetune.data.schema import TrainingRow, validate_row
 from pup_finetune.data.split import SplitParams
 from pup_finetune.errors import ExternalError, StateError, UsageError
@@ -439,6 +440,46 @@ def test_votes_stored_since_planning_stop_the_triage(tmp_path: Path) -> None:
     assert council.calls == []
     # Planned again, it reuses that vote.
     assert len(plan_triage(dataset, RUBRIC, (J1,)).pending) == 1
+
+
+def _with_reasoning(row: TrainingRow, text: str) -> TrainingRow:
+    *before, last = row.messages
+    return row.model_copy(
+        update={"messages": [*before, last.model_copy(update={"reasoning_content": text})]}
+    )
+
+
+@pytest.mark.parametrize("reset", [False, True])
+def test_rows_changed_since_planning_stop_the_triage(tmp_path: Path, reset: bool) -> None:
+    dataset = make_dataset(tmp_path, n=2)
+    run_triage(plan_triage(dataset, RUBRIC, (J1,), max_rows=1), FakeCouncil(keep_all))
+    plan = plan_triage(dataset, RUBRIC, (J1,), reset=reset)
+    files = {name: (dataset.path / name).read_bytes() for name in (JUDGMENTS_FILE, SETTINGS_FILE)}
+    # A pull fills in a row's reasoning after the plan read it.
+    stored = {row.id: row for row in dataset.rows()}
+    updated = _with_reasoning(stored["row-1"], "Think.")
+    dataset.add([], settings=SETTINGS, updated=[updated])
+    council = FakeCouncil(keep_all)
+    with pytest.raises(StateError, match=r"rows of .* changed since this triage was planned"):
+        run_triage(plan, council)
+    assert council.calls == []
+    assert {name: (dataset.path / name).read_bytes() for name in files} == files
+    # Planned again, the row is judged for its content now.
+    assert ("row-1", J1) in {
+        (row.id, judge) for row, judge in plan_triage(dataset, RUBRIC, (J1,)).pending
+    }
+
+
+def test_a_row_gone_since_planning_stops_the_triage(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path, n=2)
+    plan = plan_triage(dataset, RUBRIC, (J1,))
+    (gone,) = [row for row in dataset.rows() if row.id == "row-0"]
+    retire = Exclusion.for_row(gone, ExclusionCode.CONTAINED_CONVERSATION, "a longer one")
+    dataset.add([], settings=SETTINGS, retired=[retire])
+    council = FakeCouncil(keep_all)
+    with pytest.raises(StateError, match="'row-0'"):
+        run_triage(plan, council)
+    assert council.calls == []
 
 
 def test_a_reset_discards_an_unreadable_judgments_file(tmp_path: Path) -> None:

@@ -596,9 +596,12 @@ def run_triage(
     """Make every pending judge call of ``plan`` and label the decided rows.
 
     Holds the dataset's directory lock while voting and labeling; each vote is appended to
-    ``judgments.jsonl`` as it arrives. Under the lock, before anything is written, the frozen
-    settings are checked again (unless ``plan.reset``): :class:`StateError` when votes now
-    exist under other settings, or the stored votes changed since planning (plan again). A
+    ``judgments.jsonl`` as it arrives. Under the lock, before anything is written, the rows
+    to review are checked against the stored ones: :class:`StateError` when one changed (a
+    pull filled in its reasoning, say) or is gone since planning, as its votes and label
+    would be for other content. The frozen settings are checked again too (unless
+    ``plan.reset``): :class:`StateError` when votes now exist under other settings, or
+    the stored votes changed since planning (plan again). A
     row the agent or a person labeled since planning keeps that label and is skipped
     (:attr:`TriageReport.skipped_labeled`). A rejected API key stops the triage (the votes so far
     are kept); any other failed call is reported and retried on the next run. Ctrl-C stops
@@ -613,6 +616,7 @@ def run_triage(
     cast = 0
     pending = plan.pending
     with DirectoryLock(dataset.path):
+        _check_rows_unchanged(plan)
         if plan.reset:
             votes_path.unlink(missing_ok=True)
             settings_path.unlink(missing_ok=True)
@@ -685,6 +689,19 @@ def run_triage(
         stale_labels=tuple(plan.stale_labels(judged=True)),
         skipped_labeled=len(relabeled),
     )
+
+
+def _check_rows_unchanged(plan: TriagePlan) -> None:
+    """Under the lock: every row ``plan`` reviews is stored with the content it was planned
+    with; :class:`StateError` otherwise."""
+    current = {row.id: row_digest(row) for row in plan.dataset.rows()}
+    changed = [row.id for row in plan.rows if current.get(row.id) != row_digest(row)]
+    if changed:
+        raise StateError(
+            f"the rows of {plan.dataset.path} changed since this triage was planned: "
+            f"{len(changed)} rows to review were updated or removed (e.g. {changed[0]!r})",
+            hint="run the triage again, to plan it from the rows stored now",
+        )
 
 
 def _check_unchanged(plan: TriagePlan) -> None:
