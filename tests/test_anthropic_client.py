@@ -33,7 +33,7 @@ from pup_finetune.anthropic_client import (  # noqa: E402
 )
 from pup_finetune.errors import ExternalError, FinetuneError, UsageError  # noqa: E402
 from pup_finetune.evaluation.judge import VERDICT_SCHEMA  # noqa: E402
-from pup_finetune.inference import ChatCompletion  # noqa: E402
+from pup_finetune.inference import ChatCompletion, ContextLimitError  # noqa: E402
 from pup_finetune.judges import parse_judge  # noqa: E402
 from pup_finetune.providers.base import (  # noqa: E402
     ProviderAuthError,
@@ -523,3 +523,23 @@ def test_the_real_sdk_client_sends_the_output_config_and_fallbacks_where_due(
     else:
         assert FALLBACK_BETA not in request.headers.get("anthropic-beta", "")
         assert "fallbacks" not in body
+
+
+def test_a_prompt_longer_than_the_context_window_is_a_context_limit_error() -> None:
+    detail = "prompt is too long: 2200057 tokens > 1000000 maximum"
+    sdk = FakeSdk(lambda params: status_error(anthropic.BadRequestError, 400, detail=detail))
+    with pytest.raises(ContextLimitError) as info:
+        chat(sdk).complete(MESSAGES, model="claude-opus-5-5")
+    assert info.value.source == "anthropic"
+    assert "context window" in info.value.message
+    assert detail in info.value.message
+    assert_no_key(info.value)
+
+
+def test_the_requested_reasoning_effort_is_the_output_effort() -> None:
+    sdk = FakeSdk()
+    chat(sdk).complete(MESSAGES, model="claude-opus-5-5", reasoning_effort="medium")
+    assert sdk.beta.messages.calls[0]["output_config"] == {"effort": "medium"}
+    unknown = FakeSdk()
+    chat(unknown).complete(MESSAGES, model="claude-3-haiku", reasoning_effort="low")
+    assert "output_config" not in unknown.messages.calls[0]

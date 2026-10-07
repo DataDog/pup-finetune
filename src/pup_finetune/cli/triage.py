@@ -11,7 +11,8 @@ calls. It reads and writes local files and calls the judges' inference APIs (Fir
 Anthropic or OpenAI, by each judge's prefix), with no Datadog or other remote write, so
 ``PUP_READ_ONLY`` does not block it; ``--confirm`` is still required, and never implied by
 ``PUP_AUTO_APPROVE``. The council, the votes file and the labels live in
-:mod:`pup_finetune.curation.triage`.
+:mod:`pup_finetune.curation.triage`. ``--agreement`` reviews the rows the agent or a person
+labeled instead, labels nothing, and reports how often the council agrees with them.
 """
 
 from __future__ import annotations
@@ -110,6 +111,15 @@ def triage_rows(
             show_default=False,
         ),
     ] = None,
+    agreement: Annotated[
+        bool,
+        typer.Option(
+            "--agreement",
+            help="Review the rows you or the agent labeled instead, label nothing, and report "
+            "how often the council agrees with those labels (rate, kappa, each judge, the "
+            "rows they disagree on).",
+        ),
+    ] = False,
     reset_triage: Annotated[
         bool,
         typer.Option(
@@ -141,7 +151,9 @@ def triage_rows(
     council = triage.parse_judges(judges)
     _check_available(council)
     dataset = DatasetDir(directory)
-    plan = triage.plan_triage(dataset, criteria, council, max_rows=max_rows, reset=reset_triage)
+    plan = triage.plan_triage(
+        dataset, criteria, council, max_rows=max_rows, reset=reset_triage, agreement=agreement
+    )
     args = ["pup", "finetune", "dataset", "triage", str(directory)]
     if rubric is not None:
         args += ["--rubric", str(rubric)]
@@ -151,6 +163,8 @@ def triage_rows(
         args += ["--judges", ",".join(council)]
     if concurrency != triage.DEFAULT_CONCURRENCY:
         args += ["--concurrency", str(concurrency)]
+    if agreement:
+        args.append("--agreement")
     every_row = list(args)
     if max_rows is not None:
         args += ["--max-rows", str(max_rows)]
@@ -159,10 +173,12 @@ def triage_rows(
     require_confirm(confirm, preview, shlex.join([*rerun, "--confirm"]))
     info(
         f"triage: {len(plan.pending)} judge calls for {len(plan.rows)} rows "
-        f"({plan.calls - len(plan.pending)} votes reused)"
+        f"({plan.votes_reused} votes reused)"
     )
     with open_clients(plan.judges) as clients:
         report = triage.run_triage(plan, clients, concurrency=concurrency, progress=info)
+    if report.agreement is not None:
+        return _agreement_result(dataset, plan, report, report.agreement, criteria, args)
     counts = report.counts()
     summary = dataset.summary()
     complete = report.complete
@@ -174,12 +190,14 @@ def triage_rows(
         "kept": counts["keep"],
         "dropped": counts["drop"],
         "undecided": counts["undecided"],
+        "too_long": report.too_long,
         "top_drop_reasons": report.top_drop_reasons(),
         "judges": list(plan.judges),
         "rubric_sha256": criteria.sha256,
         "calls_made": report.calls_made,
         "votes_cast": report.votes_cast,
         "calls_failed": len(report.failures),
+        "calls_skipped_too_long": report.calls_skipped,
         "failures": triage.failures_shown(report.failures),
         "failure_counts": report.failure_counts(),
         "stale_judge_labels": len(report.stale_labels),
@@ -229,6 +247,53 @@ def triage_rows(
     return CommandResult(data, exit_code=1) if report.failures else data
 
 
+def _agreement_result(
+    dataset: DatasetDir,
+    plan: triage.TriagePlan,
+    report: triage.TriageReport,
+    agreement: triage.Agreement,
+    criteria: triage.Criteria,
+    args: list[str],
+) -> dict[str, Any] | CommandResult:
+    """The result of an ``--agreement`` run: the council against the user's labels."""
+    data: dict[str, Any] = {
+        "dataset_dir": str(dataset.path.resolve()),
+        "mode": "agreement",
+        "status": "complete" if report.complete else "incomplete",
+        "rows_reviewed": len(plan.rows),
+        "agreement": agreement.to_json(),
+        "judges": list(plan.judges),
+        "rubric_sha256": criteria.sha256,
+        "calls_made": report.calls_made,
+        "votes_cast": report.votes_cast,
+        "calls_failed": len(report.failures),
+        "calls_skipped_too_long": report.calls_skipped,
+        "failures": triage.failures_shown(report.failures),
+        "failure_counts": report.failure_counts(),
+        "judgments_file": str((dataset.path / triage.JUDGMENTS_FILE).resolve()),
+    }
+    without = [word for word in args if word != "--agreement"]
+    if report.failures:
+        data["next_command"] = shlex.join([*args, "--confirm"])
+        data["hint"] = (
+            "some judge calls produced no vote; rerun the same command to retry only those "
+            "(the votes so far are kept)"
+        )
+        return CommandResult(data, exit_code=1)
+    data["next_command"] = shlex.join([*without, "--confirm"])
+    data["next_commands"] = [
+        shlex.join([*without, "--confirm"]),
+        shlex.join([*args, "--reset-triage", "--confirm"]),
+    ]
+    data["hint"] = (
+        "go through the disagreements with the user: where the labels are right, sharpen the "
+        "rubric and measure again (a changed rubric needs --reset-triage, which discards "
+        "every vote); once the council agrees closely enough, drop --agreement to label the "
+        "rest"
+    )
+    return data
+
+
 def register(dataset_app: typer.Typer) -> None:
     """Add `triage` to the `dataset` command group."""
     dataset_app.command(
@@ -248,7 +313,7 @@ def register(dataset_app: typer.Typer) -> None:
             "serverless (the default judges), Anthropic or OpenAI, with that provider's API "
             "key; the preview names every one. Without --confirm, previews the calls. "
             "Paid, but no Datadog write: allowed with PUP_READ_ONLY set. Start with "
-            "--max-rows 20 to calibrate the rubric. --print-template prints a rubric "
-            "template."
+            "--max-rows 20 to calibrate the rubric, or --agreement to measure the council "
+            "against rows you labeled first. --print-template prints a rubric template."
         ),
     )(triage_rows)

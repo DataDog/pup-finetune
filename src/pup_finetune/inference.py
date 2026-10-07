@@ -15,7 +15,9 @@ answers, the Anthropic one (:mod:`pup_finetune.anthropic_client`) included.
 
 What a request carries is the client's :class:`RequestPolicy`: which field holds the token
 limit, whether ``temperature`` is sent, and whether a JSON answer is asked for with
-``response_format``. The default policy is the one Fireworks takes; :data:`OPENAI_POLICY` is
+``response_format``. A ``reasoning_effort`` is sent as it is given (Fireworks and OpenAI
+both take the field; a judge sends the lowest its model accepts, see
+:mod:`pup_finetune.judges`). The default policy is the one Fireworks takes; :data:`OPENAI_POLICY` is
 OpenAI's, checked against the OpenAI API reference (its OpenAPI description in
 ``github.com/openai/openai-openapi``, and the latest-model and reasoning guides at
 ``developers.openai.com``) in October 2026:
@@ -33,6 +35,8 @@ OpenAI's, checked against the OpenAI API reference (its OpenAPI description in
 - A model that declines answers with a ``refusal`` string in its message (and no content),
   or stops with ``finish_reason`` ``content_filter``; either is reported as the
   ``finish_reason`` ``refusal``, as the Anthropic client reports one.
+- ``reasoning_effort`` takes ``low``, ``medium``, ``high`` and ``xhigh`` on the latest
+  model; ``none`` and ``minimal`` are refused with HTTP 400.
 - A reasoning model's answer is not streamed and arrives only once it is complete, so an
   OpenAI judge's attempts are allowed :data:`OPENAI_TIMEOUT_S` rather than
   :data:`DEFAULT_TIMEOUT_S`.
@@ -45,7 +49,9 @@ that cannot be read are never retried. When the attempts run out,
 429 raises :class:`~pup_finetune.providers.base.ProviderCapacityError` and the rest
 :class:`~pup_finetune.providers.base.TransientError`; 401 and 403 raise
 :class:`~pup_finetune.providers.base.ProviderAuthError` with a login hint for the configured
-credential; anything else is an :class:`~pup_finetune.errors.ExternalError`.
+credential; a request the endpoint refuses as longer than the model's context window raises
+:class:`ContextLimitError` (see :func:`is_context_limit`); anything else is an
+:class:`~pup_finetune.errors.ExternalError`.
 
 The key is sent only as a ``Bearer`` header. It is registered for redaction when the client is
 built and every error message is redacted, so it never reaches output or logs.
@@ -56,6 +62,7 @@ from __future__ import annotations
 import email.utils
 import os
 import random
+import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -80,9 +87,11 @@ __all__ = [
     "ChatClient",
     "ChatCompleter",
     "ChatCompletion",
+    "ContextLimitError",
     "JudgeConfig",
     "JudgeProvider",
     "RequestPolicy",
+    "is_context_limit",
 ]
 
 DEFAULT_TIMEOUT_S: Final = 60.0
@@ -103,6 +112,30 @@ JudgeProvider = Literal["fireworks", "anthropic", "openai", "fake"]
 
 _DEFAULT_SOURCE: Final = "inference"
 _LOCAL_HOSTS: Final = frozenset({"localhost", "127.0.0.1", "::1"})
+
+_CONTEXT_CODES: Final = frozenset({"context_length_exceeded"})
+_CONTEXT_MESSAGE: Final = re.compile(
+    r"prompt is too long|maximum context length|context window|input tokens exceed",
+    re.IGNORECASE,
+)
+"""How providers word a request longer than the model's context window, as each answered
+one in October 2026: OpenAI with the code ``context_length_exceeded`` ("Input tokens exceed
+the configured limit ..."), Fireworks with "The prompt is too long: <n>, model maximum
+context length: <m>", Anthropic with "prompt is too long: <n> tokens > <m> maximum"."""
+
+
+class ContextLimitError(ExternalError):
+    """The request is longer than the model's context window: retrying it cannot succeed."""
+
+
+def is_context_limit(status: int, code: object, message: object) -> bool:
+    """Whether an error answer (HTTP ``status``, the error's ``code`` and ``message``) refuses
+    the request as longer than the model's context window. Only a 400, 413 or 422 can."""
+    if status not in (400, 413, 422):
+        return False
+    if isinstance(code, str) and code in _CONTEXT_CODES:
+        return True
+    return isinstance(message, str) and _CONTEXT_MESSAGE.search(message) is not None
 
 
 class _Random(Protocol):
@@ -131,7 +164,9 @@ class ChatCompleter(Protocol):
     ``response_schema`` is the JSON Schema the answer should follow, when the caller wants
     a JSON object back: a client may constrain the answer to it (Anthropic's structured
     outputs), ask for JSON without it (OpenAI's JSON mode) or ignore it (Fireworks). The
-    caller parses the answer as strictly either way.
+    caller parses the answer as strictly either way. ``reasoning_effort`` is how hard a
+    reasoning model thinks (``none``, ``low``, ...), the provider's default when ``None``.
+    A request longer than the model's context window raises :class:`ContextLimitError`.
     """
 
     def complete(
@@ -143,6 +178,7 @@ class ChatCompleter(Protocol):
         temperature: float | None = None,
         max_tokens: int | None = None,
         response_schema: Mapping[str, Any] | None = None,
+        reasoning_effort: str | None = None,
     ) -> ChatCompletion: ...
 
 
@@ -173,7 +209,8 @@ class JudgeConfig(BaseModel):
 
     ``model`` is the provider's own model id (no provider prefix). ``credential`` names the
     registered :class:`~pup_finetune.credentials.CredentialSpec` whose key the endpoint
-    takes. ``temperature`` ``None`` means none is sent (the provider's default). :meth:`identity`
+    takes. ``temperature`` ``None`` means none is sent (the provider's default), and so does
+    ``reasoning_effort`` ``None`` (see :func:`pup_finetune.judges.parse_judge`). :meth:`identity`
     is what a resumed evaluation compares, so judgments made under other settings, or on
     another provider, are never reused.
     """
@@ -186,6 +223,7 @@ class JudgeConfig(BaseModel):
     credential: str = Field(default="fireworks", min_length=1)
     temperature: float | None = Field(default=0.0, ge=0.0, le=2.0)
     max_tokens: int = Field(default=512, ge=1)
+    reasoning_effort: str | None = Field(default=None, min_length=1)
 
     @property
     def spec(self) -> str:
@@ -322,14 +360,15 @@ class ChatClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
         response_schema: Mapping[str, Any] | None = None,
+        reasoning_effort: str | None = None,
     ) -> ChatCompletion:
         """One chat completion from ``model``; the first choice.
 
         ``tools`` are sent when there are any; ``temperature`` and ``max_tokens`` when set,
         as the client's :class:`RequestPolicy` allows (the token limit in its field, the
-        temperature only when it sends one). With ``response_schema`` and a policy in JSON
-        mode, the answer is asked for as a JSON object (the schema itself is not sent).
-        Raises as the module docstring says.
+        temperature only when it sends one), and ``reasoning_effort`` when set. With
+        ``response_schema`` and a policy in JSON mode, the answer is asked for as a JSON
+        object (the schema itself is not sent). Raises as the module docstring says.
         """
         policy = self._policy
         body: dict[str, Any] = {"model": model, "messages": [dict(m) for m in messages]}
@@ -341,6 +380,8 @@ class ChatClient:
             body[policy.token_limit_field] = max_tokens
         if response_schema is not None and policy.json_mode:
             body["response_format"] = {"type": "json_object"}
+        if reasoning_effort is not None:
+            body["reasoning_effort"] = reasoning_effort
         response = self._post(body, what=f"a chat completion from {model}")
         return self._parse(response, model)
 
@@ -417,6 +458,13 @@ class ChatClient:
                 hint=self._login_hint(),
             )
         detail = error_detail(response)
+        if is_context_limit(status, _error_code(response), detail):
+            return ContextLimitError(
+                f"{what} failed: the request is longer than the model's context window "
+                f"(HTTP {status})" + (f": {detail}" if detail else ""),
+                source=self._source,
+                hint="pick a model with a larger context window",
+            )
         return ExternalError(
             f"{what} failed with HTTP {status}" + (f": {detail}" if detail else ""),
             source=self._source,
@@ -486,6 +534,16 @@ def _checked_url(base_url: str) -> httpx.URL:
         f"{base_url!r} is not an https URL",
         hint="the API key is sent with every request, so the endpoint must use https",
     )
+
+
+def _error_code(response: httpx.Response) -> object:
+    """``error.code`` of an error answer's JSON body; ``None`` when there is none."""
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    error = body.get("error") if isinstance(body, dict) else None
+    return error.get("code") if isinstance(error, dict) else None
 
 
 def _retryable(status: int) -> bool:

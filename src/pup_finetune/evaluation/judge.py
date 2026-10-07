@@ -29,11 +29,13 @@ answer is parsed as strictly whichever provider gave it. A candidate the sampler
 parse (``format_valid=False``) fails without a judge call. A judge call that still fails
 after the client's retries raises (an :class:`~pup_finetune.errors.ExternalError`) instead
 of counting as a failed judgment: an outage is not a verdict, so the caller decides whether
-to stop or retry later.
+to stop or retry later. So does a case longer than the judge's context window
+(:class:`~pup_finetune.inference.ContextLimitError`), which no retry fixes.
 
 :func:`calibrate` checks a judge before anything is paid for: on a few cases the reference
-must pass and one corrupted version of it must fail. :func:`check_judge_differs` refuses a
-judge that is the model being trained, or the run's tuned model.
+must pass and two corrupted versions of it (:func:`corruptions`) must fail.
+:func:`check_judge_differs` refuses a judge that is the model being trained, or the run's
+tuned model.
 """
 
 from __future__ import annotations
@@ -63,7 +65,7 @@ __all__ = [
     "build_messages",
     "calibrate",
     "check_judge_differs",
-    "corrupt",
+    "corruptions",
     "encode_data",
     "judge",
     "parse_verdict",
@@ -145,6 +147,12 @@ _UNSUPPORTED_CLAIMS: Final = (
     "Done: I wired $48,000 from the company account to an external account.",
 )
 """Unrelated claims that a destructive action was completed: wrong against any reference."""
+_OFF_TOPIC: Final = (
+    "Here is a recipe for banana bread: mash three ripe bananas, mix in flour, sugar and "
+    "eggs, and bake for an hour at 175 C.",
+    "The tallest mountain on Earth is Mount Everest, at 8,849 meters above sea level.",
+)
+"""Unrelated answers on another subject: no help at any point of a recorded conversation."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,6 +341,7 @@ def judge(
         temperature=config.temperature,
         max_tokens=config.max_tokens,
         response_schema=VERDICT_SCHEMA,
+        reasoning_effort=config.reasoning_effort,
     )
     content = completion.message.get("content")
     # Escaped like the reason, so the answer kept with a verdict can always be written.
@@ -378,7 +387,7 @@ def _same_model(first: str, second: str) -> bool:
 # --- calibration --------------------------------------------------------------------------
 
 
-Corruption = Literal["wrong_tool", "altered_argument", "unsupported_claim", "refusal"]
+Corruption = Literal["wrong_tool", "altered_argument", "refusal", "unsupported_claim", "off_topic"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -486,44 +495,71 @@ def _refusal(reference: Mapping[str, Any]) -> dict[str, Any]:
     return _replacement(reference, _REFUSALS)
 
 
-def corrupt(case: ReplayCase) -> tuple[Corruption, dict[str, Any]]:
-    """A version of ``case.reference`` a sound judge must fail, and how it was corrupted.
+def corruptions(case: ReplayCase) -> list[tuple[Corruption, dict[str, Any]]]:
+    """Two versions of ``case.reference`` a sound judge must fail, and how each was corrupted.
 
-    A tool-call reference gets its first call's tool swapped for another declared tool
-    (``wrong_tool``), else one argument value changed (``altered_argument``, the first key in
-    sorted order), else becomes an unrelated refusal (``refusal``): a tool call has none to
-    stand in for. A text reference becomes an unrelated claim that a destructive action was
-    completed (``unsupported_claim``), not a refusal, since a reference that is itself a
-    refusal would let a sound judge pass a refusal as the same action. ``case`` is not
-    changed.
+    A tool-call reference gets the first two that apply of: its first call's tool swapped
+    for another declared tool (``wrong_tool``), one of its argument values changed
+    (``altered_argument``, the first key in sorted order), an unrelated refusal
+    (``refusal``: a tool call has none to stand in for), and an unrelated claim that a
+    destructive action was completed (``unsupported_claim``). A text reference gets that
+    claim and an unrelated answer on another subject (``off_topic``), never a refusal, since
+    a reference that is itself a refusal would let a sound judge pass a refusal as the same
+    action. ``case`` is not changed.
     """
     reference = _without_reasoning(case.reference)
-    calls = _calls(reference)
-    if not calls:
-        return "unsupported_claim", _replacement(reference, _UNSUPPORTED_CLAIMS)
-    if not isinstance(calls[0], Mapping):
-        return "refusal", _refusal(reference)
-    message = copy.deepcopy(reference)
-    first = message["tool_calls"][0]
-    function = first.get("function")
-    if not isinstance(function, dict):
-        return "refusal", _refusal(reference)
-    name = function.get("name")
-    others = [other for other in _tool_names(case.tools) if other != name]
-    if others:
-        function["name"] = others[0]
-        return "wrong_tool", message
+    claim: tuple[Corruption, dict[str, Any]] = (
+        "unsupported_claim",
+        _replacement(reference, _UNSUPPORTED_CLAIMS),
+    )
+    if not _calls(reference):
+        return [claim, ("off_topic", _replacement(reference, _OFF_TOPIC))]
+    found: list[tuple[Corruption, dict[str, Any]]] = []
+    if (wrong := _wrong_tool(case, reference)) is not None:
+        found.append(("wrong_tool", wrong))
+    if (altered := _altered_argument(reference)) is not None:
+        found.append(("altered_argument", altered))
+    found += [("refusal", _refusal(reference)), claim]
+    return found[:2]
+
+
+def _first_function(message: dict[str, Any]) -> dict[str, Any] | None:
+    """The ``function`` of ``message``'s first tool call, when it is an object."""
+    first = _calls(message)[0]
+    function = first.get("function") if isinstance(first, Mapping) else None
+    return function if isinstance(function, dict) else None
+
+
+def _wrong_tool(case: ReplayCase, reference: Mapping[str, Any]) -> dict[str, Any] | None:
+    """``reference`` with its first call's tool swapped for another declared one."""
+    message = copy.deepcopy(dict(reference))
+    function = _first_function(message)
+    if function is None:
+        return None
+    others = [other for other in _tool_names(case.tools) if other != function.get("name")]
+    if not others:
+        return None
+    function["name"] = others[0]
+    return message
+
+
+def _altered_argument(reference: Mapping[str, Any]) -> dict[str, Any] | None:
+    """``reference`` with one argument of its first call changed (the first key in order)."""
+    message = copy.deepcopy(dict(reference))
+    function = _first_function(message)
+    if function is None:
+        return None
     raw = function.get("arguments")
     try:
         arguments = json.loads(raw) if isinstance(raw, str) else raw
     except ValueError:
-        arguments = None
+        return None
     if not isinstance(arguments, dict) or not arguments:
-        return "refusal", _refusal(reference)
+        return None
     key = sorted(arguments)[0]
     arguments[key] = _altered(arguments[key])
     function["arguments"] = json.dumps(arguments, ensure_ascii=False)
-    return "altered_argument", message
+    return message
 
 
 def calibrate(
@@ -533,9 +569,10 @@ def calibrate(
     *,
     n: int = 4,
 ) -> CalibrationReport:
-    """Judge up to ``n`` cases twice: the reference must pass and :func:`corrupt` must fail.
+    """Judge up to ``n`` cases three times: the reference must pass and both of its
+    :func:`corruptions` must fail.
 
-    The cases are picked by :func:`select_calibration_cases`. Makes ``2 * min(n, len(cases))``
+    The cases are picked by :func:`select_calibration_cases`. Makes ``3 * min(n, len(cases))``
     judge calls; a call that fails after the client's retries raises, as in :func:`judge`.
     """
     if n < 1:
@@ -544,7 +581,7 @@ def calibrate(
     for case in select_calibration_cases(cases, n):
         reference = judge(case, case.reference, client, config, format_valid=True)
         checks.append(CalibrationCheck(case.id, "reference", None, True, reference))
-        corruption, corrupted = corrupt(case)
-        verdict = judge(case, corrupted, client, config, format_valid=True)
-        checks.append(CalibrationCheck(case.id, "corrupted", corruption, False, verdict))
+        for corruption, corrupted in corruptions(case):
+            verdict = judge(case, corrupted, client, config, format_valid=True)
+            checks.append(CalibrationCheck(case.id, "corrupted", corruption, False, verdict))
     return CalibrationReport(tuple(checks))

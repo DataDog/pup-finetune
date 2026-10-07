@@ -280,8 +280,10 @@ provider, and talks to models only through the `Sampler` protocol.
   The answer is parsed strictly whichever provider gave it; an answer the provider refused
   (`finish_reason` `refusal`) is a failed judgment with error `refused`, like an unparseable
   one.
-  Before anything is generated, a calibration checks that references pass and corrupted
-  versions of them fail; a judge that fails it is not used. The judge must not be the model
+  Before anything is generated, a calibration checks that references pass and two corrupted
+  versions of each fail (for a tool call, the first two that apply of the wrong tool, an
+  altered argument, a refusal and an unsupported claim; for a text answer, an unsupported
+  claim and an off-topic answer); a judge that fails it is not used. The judge must not be the model
   being trained, nor the run's tuned model (its model id, or the promoted model).
 - **Targets** ([`targets.py`](../src/pup_finetune/evaluation/targets.py)). Two samplers from
   one session: `base` (no checkpoint) and `tuned`, the best epoch. `train --evaluate` runs in
@@ -414,12 +416,22 @@ LLM judges (the replay judge and the triage council) run on Fireworks, Anthropic
 `parse_judge` reads a judge spec by prefix (`anthropic/<model>` or `openai/<model>`; any
 other spec is a Fireworks model id such as `accounts/fireworks/models/<model>`, as before)
 into a `JudgeConfig` with the provider's defaults (endpoint, credential,
-whether a temperature is sent, the token limit). `JudgeConfig.provider` is part of the
+whether a temperature is sent, the token limit, the reasoning effort). A verdict needs
+little thinking, so every judge of a reasoning model asks for the lowest effort its model
+accepts: `low` on Anthropic (on its models with effort levels) and OpenAI (not its GPT-4-era
+models, which do not reason and refuse the field), and on Fireworks the effort
+`FIREWORKS_REASONING` records per model (`none` for DeepSeek V4.1 Flash, `low` for GLM-5.3
+Flash, which cannot turn thinking off); other Fireworks models are sent no reasoning effort.
+The effort is part of the judge's identity and of a triage's frozen settings, so an
+evaluation or triage made before a change to it is continued only in a new `--out-dir`, or
+after `--reset-triage`. `JudgeConfig.provider` is part of the
 judge's identity, so a judge on another provider never reuses earlier judgments or votes, and
 `JudgeConfig.spec` writes the judge back the one way commands pin it. `open_client` builds
 the client for a judge, and `open_clients` one client per provider for a council that mixes
 them; every client answers the one `ChatCompleter.complete` call, which takes an optional
-`response_schema` for a JSON answer.
+`response_schema` for a JSON answer and an optional `reasoning_effort`. A request longer than
+the model's context window is a `ContextLimitError` on every provider (`is_context_limit`
+reads each one's error answer), which no retry fixes.
 
 - **Fireworks** and **OpenAI** share the `httpx` `ChatClient`
   ([`inference.py`](../src/pup_finetune/inference.py)), with a per-provider `RequestPolicy`:
@@ -432,7 +444,7 @@ them; every client answers the one `ChatCompleter.complete` call, which takes an
   [`anthropic_client.py`](../src/pup_finetune/anthropic_client.py), the only module that
   imports it: the leading system message becomes `system`, no sampling parameter is sent,
   `output_config.format` carries the verdict's JSON schema on models with structured outputs,
-  `output_config.effort` is `low` on models with effort levels, and the models with
+  `output_config.effort` is the judge's effort on models with effort levels, and the models with
   server-side refusal fallbacks are called through the beta API with `fallbacks="default"`.
   Its typed errors map to the same error classes as `ChatClient`'s; a failed SDK sign-in
   (`CredentialsError`, `WorkloadIdentityError`) is a rejected key, which stops a triage.
@@ -459,7 +471,10 @@ travels JSON-encoded in tagged blocks it cannot close. The answer is parsed stri
 A row is kept only on a strict majority of keep votes; a tie drops it; a row missing a vote
 is undecided and left unlabeled. A failed call, an answer without a vote, or one the
 provider refused, is not a vote:
-it is reported and retried by the next run. Votes are appended to `judgments.jsonl` as they
+it is reported and retried by the next run. A row a judge refuses as longer than its
+context window is never truncated: that answer is stored as a `too_long` vote, which drops
+the row (the council keeps no row one of its judges could not read whole), and the row's
+other calls are skipped, on this run and the next. Votes are appended to `judgments.jsonl` as they
 arrive, and count only for the row content, rubric and judge they were cast for, so an
 interrupted triage resumes. The rubric's hash and the judges (as provider-qualified specs)
 are frozen in `triage.json`
@@ -470,6 +485,12 @@ discarded rubric, outside a `--max-rows` sample, or on a row left undecided) is 
 stale, and the triage is `incomplete` until a run over every row replaces it.
 `--max-rows` reviews a fixed pseudo-random sample, so a calibration run's votes are reused
 by the full run. A rubric template ships with the package (`--print-template`).
+
+`--agreement` measures a council before it labels anything: it reviews the rows the agent or
+a person labeled instead, writes no label, and reports how often the council's decisions agree
+with those labels (`Agreement`: the rate, Cohen's kappa, the confusion counts, each judge's own
+agreement, per labeler, and the rows they disagree on). Its votes are stored and frozen like
+any other, so the same rubric then labels the remaining rows.
 
 ## How a new provider plugs in
 

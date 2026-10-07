@@ -287,3 +287,91 @@ def test_an_anthropic_judge_without_the_extra_fails_before_the_preview(
     assert result.exit_code == 2
     assert "uv sync --extra anthropic" in result.stderr
     assert "pup-finetune[anthropic]" in result.stderr
+
+
+def test_a_row_too_long_for_its_judge_is_dropped_and_counted(
+    dataset: Path, chat: FakeChatApi
+) -> None:
+    too_long = {
+        "error": {
+            "message": "The prompt is too long: 2200031, model maximum context length: 1048571"
+        }
+    }
+    chat.script.append(httpx.Response(400, json=too_long))
+    args = ["dataset", "triage", str(dataset), "--rule", "stay on topic"]
+    args += ["--judges", "judge-a", "--concurrency", "1", "--confirm"]
+    result = invoke(*args)
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["status"] == "complete"
+    assert data["too_long"] == 1
+    assert data["calls_failed"] == 0
+    assert any("context window" in item["reason"] for item in data["top_drop_reasons"])
+    before = len(chat.requests)
+    assert invoke(*args).exit_code == 0
+    assert len(chat.requests) == before  # the row is not sent again
+
+
+def test_agreement_compares_the_council_with_the_user_s_labels(
+    dataset: Path, chat: FakeChatApi, tmp_path: Path
+) -> None:
+    labels = tmp_path / "labels.jsonl"
+    rows = {
+        "row-weather-001": (True, ""),  # the council drops weather rows: a disagreement
+        "row-weather-003": (False, "off topic"),
+        "row-calendar-001": (True, ""),
+        "row-calendar-002": (False, "too vague"),  # the council keeps it: a disagreement
+    }
+    labels.write_text(
+        "".join(
+            json.dumps({"id": row_id, "keep": keep, "reason": reason}) + "\n"
+            for row_id, (keep, reason) in rows.items()
+        )
+    )
+    assert invoke("dataset", "label", str(dataset), "--file", str(labels)).exit_code == 0
+    labels_before = (dataset / "labels.jsonl").read_text()
+    args = ["dataset", "triage", str(dataset), "--rule", "stay on topic"]
+    args += ["--judges", "judge-a,judge-b", "--agreement"]
+
+    preview = invoke(*args)
+    assert preview.exit_code == 2, preview.stderr
+    assert output(preview)["preview"]["mode"] == "agreement"
+    assert output(preview)["preview"]["rows_to_review"] == 4
+
+    result = invoke(*args, "--confirm")
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["mode"] == "agreement"
+    assert data["status"] == "complete"
+    agreement = data["agreement"]
+    assert (agreement["rows_compared"], agreement["rows_agreed"], agreement["rate"]) == (4, 2, 0.5)
+    assert agreement["confusion"] == {
+        "keep_keep": 1,
+        "keep_drop": 1,
+        "drop_keep": 1,
+        "drop_drop": 1,
+    }
+    assert agreement["by"] == {"agent": {"rows_compared": 4, "rate": 0.5}}
+    assert set(agreement["judges"]) == {"judge-a", "judge-b"}
+    assert sorted(item["row_id"] for item in agreement["disagreements_shown"]) == [
+        "row-calendar-002",
+        "row-weather-001",
+    ]
+    assert len(chat.requests) == 8
+    assert (dataset / "labels.jsonl").read_text() == labels_before  # nothing labeled
+    without = [word for word in args if word != "--agreement"]
+    assert data["next_command"] == shlex.join(["pup", "finetune", *without, "--confirm"])
+    assert "--reset-triage" in data["next_commands"][1]
+
+    # Labeling the rest afterwards reviews only the unlabeled rows.
+    labeled = invoke(*without, "--confirm")
+    assert labeled.exit_code == 0, labeled.stderr
+    assert output(labeled)["rows_reviewed"] == accepted(dataset) - 4
+    assert output(labeled)["rows_skipped_labeled"] == 4
+
+
+def test_agreement_without_labels_is_a_usage_error(dataset: Path, chat: FakeChatApi) -> None:
+    result = invoke("dataset", "triage", str(dataset), "--rule", "x", "--agreement")
+    assert result.exit_code == 2
+    assert "label" in result.stderr
+    assert chat.requests == []

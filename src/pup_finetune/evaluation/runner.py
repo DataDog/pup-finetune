@@ -107,7 +107,8 @@ DEFAULT_CONCURRENCY: Final = 4
 DEFAULT_MAX_TOKENS: Final = 1024
 DEFAULT_SEED: Final = 0
 CALIBRATION_CASES: Final = 4
-"""How many cases :func:`~pup_finetune.evaluation.judge.calibrate` judges, twice each."""
+"""How many cases :func:`~pup_finetune.evaluation.judge.calibrate` judges, three times each
+(the reference and two corruptions of it)."""
 
 EVALUATED_STOPS: Final[frozenset[StoppedReason]] = frozenset({"completed", "early_stopped"})
 """How a training must have stopped for ``train --evaluate`` to evaluate it.
@@ -291,7 +292,7 @@ class EvalPlan:
     def calibration_calls(self) -> int:
         if self.settings.skip_calibration:
             return 0
-        return 2 * min(CALIBRATION_CASES, len(self.cases))
+        return 3 * min(CALIBRATION_CASES, len(self.cases))
 
     def evaluate_command(self) -> list[str]:
         """The standalone ``evaluate`` command for this plan, every setting pinned."""
@@ -431,11 +432,11 @@ def resolve_judge(judge_model: str | None, *, provider: str, runtime: Runtime) -
     or the judge the spec names (:func:`pup_finetune.judges.parse_judge`).
 
     :data:`~pup_finetune.evaluation.fake_judge.FAKE_JUDGE_MODEL` is the offline judge, for
-    development mode only. Raises :class:`UsageError` for a spec that names no known
-    provider, and when a package the judge needs is not installed.
+    development mode only. Raises :class:`UsageError` for an empty spec or an empty model
+    after a provider prefix, and when a package the judge needs is not installed.
     """
     from pup_finetune.evaluation.fake_judge import FAKE_JUDGE_MODEL, fake_judge_config
-    from pup_finetune.inference import JudgeConfig
+    from pup_finetune.inference import DEFAULT_JUDGE_MODEL
     from pup_finetune.judges import check_available, parse_judge
 
     if judge_model is None and provider == "fake":
@@ -447,7 +448,7 @@ def resolve_judge(judge_model: str | None, *, provider: str, runtime: Runtime) -
                 hint="set PUP_FINETUNE_DEV=1, or pass another --judge-model",
             )
         return fake_judge_config()
-    config = JudgeConfig() if judge_model is None else parse_judge(judge_model)
+    config = parse_judge(DEFAULT_JUDGE_MODEL if judge_model is None else judge_model)
     check_available(config)
     return config
 
@@ -529,7 +530,7 @@ def run_calibration(plan: EvalPlan, client: ChatCompleter) -> dict[str, Any] | N
 
     if plan.settings.skip_calibration:
         return None
-    info(f"calibrating the judge {plan.judge.spec} on {plan.calibration_calls() // 2} cases")
+    info(f"calibrating the judge {plan.judge.spec} on {plan.calibration_calls() // 3} cases")
     report = calibrate(plan.cases, client, plan.judge, n=CALIBRATION_CASES).to_json()
     return {**report, "judge": plan.judge.identity()}
 
@@ -696,6 +697,15 @@ def replay_result(
             f"{errors} case(s) ended in an error, left out of every rate (see results.jsonl "
             "in out_dir); run next_command to retry them"
         )
+        too_long = sum(
+            int(target.get("errors_too_long", 0)) for target in summary["targets"].values()
+        )
+        if too_long:
+            hint += (
+                f". {too_long} of them are longer than the judge's context window, which a "
+                "retry cannot fix: evaluate into a new --out-dir with a --judge-model that has "
+                "a larger context window"
+            )
         if publication["status"] in _SENT:
             hint += (
                 ". Spans already published keep the results they were sent with, these errors "

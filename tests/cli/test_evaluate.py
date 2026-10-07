@@ -35,7 +35,7 @@ from pup_finetune.evaluation import cases as cases_module
 from pup_finetune.evaluation import runner as runner_module
 from pup_finetune.evaluation import targets as targets_module
 from pup_finetune.evaluation.fake_judge import FAKE_JUDGE_MODEL, FakeJudge
-from pup_finetune.inference import ChatCompleter, ChatCompletion, JudgeConfig
+from pup_finetune.inference import ChatCompleter, ChatCompletion, ContextLimitError, JudgeConfig
 from pup_finetune.providers.fake import FakeRenderer
 from pup_finetune.runs import RunDir, RunState, model_id_for_run
 from pup_finetune.runtime import Runtime
@@ -117,6 +117,7 @@ class AlwaysPass:
         temperature: float | None = None,
         max_tokens: int | None = None,
         response_schema: Mapping[str, Any] | None = None,
+        reasoning_effort: str | None = None,
     ) -> ChatCompletion:
         self.calls += 1
         return ChatCompletion(
@@ -139,9 +140,18 @@ class Outage:
         temperature: float | None = None,
         max_tokens: int | None = None,
         response_schema: Mapping[str, Any] | None = None,
+        reasoning_effort: str | None = None,
     ) -> ChatCompletion:
         self.calls += 1
         raise ExternalError("the judge endpoint is unreachable", source="judge")
+
+
+class TooLong(Outage):
+    """A judge whose context window every case is longer than."""
+
+    def complete(self, *args: Any, **kwargs: Any) -> ChatCompletion:
+        self.calls += 1
+        raise ContextLimitError("the request is longer than the context window", source="judge")
 
 
 class Interrupting(FakeJudge):
@@ -182,7 +192,7 @@ def test_the_preview_exits_2_with_the_calls_and_pins_the_rerun(run_dir: Path) ->
     cases = preview["cases"]
     assert cases == 4  # two test rows, at most two turns each
     assert preview["generation_calls"] == 2 * cases
-    assert preview["calibration_calls"] == 2 * 4
+    assert preview["calibration_calls"] == 3 * 4
     assert preview["judge_calls"] == 2 * cases + preview["calibration_calls"]
     assert preview["max_generated_tokens"] == 2 * cases * 1024
     assert preview["targets"]["base"] == "fake/fake-model"
@@ -412,7 +422,7 @@ def test_a_failed_calibration_generates_nothing(
     data = output(result)
     assert data["status"] == "calibration_failed"
     assert data["calibration"]["ok"] is False
-    assert judge.calls == 2 * 4  # calibration only
+    assert judge.calls == 3 * 4  # calibration only
     assert not (run_dir / "eval" / "generations.jsonl").exists()
     assert not (run_dir / "eval" / "results.jsonl").exists()
     # With a sound judge, the same directory takes it: nothing was generated yet.
@@ -505,7 +515,7 @@ def test_the_fake_judge_is_for_development_only() -> None:
     with pytest.raises(UsageError, match="development"):
         runner_module.resolve_judge(FAKE_JUDGE_MODEL, provider="other", runtime=Runtime())
     config = runner_module.resolve_judge(None, provider="other", runtime=Runtime())
-    assert config == JudgeConfig()
+    assert config == JudgeConfig(reasoning_effort="none")
     dev = Runtime(dev_mode=True)
     assert runner_module.resolve_judge(None, provider="fake", runtime=dev).model == FAKE_JUDGE_MODEL
     assert runner_module.resolve_judge("x-y", provider="fake", runtime=dev).model == "x-y"
@@ -534,7 +544,7 @@ def test_train_previews_the_evaluation_calls(dataset: Path, tmp_path: Path) -> N
     evaluation = data["preview"]["evaluation"]
     assert evaluation["cases"] == 4
     assert evaluation["generation_calls"] == 8
-    assert evaluation["judge_calls"] == 8 + 8
+    assert evaluation["judge_calls"] == 8 + 12
     assert evaluation["max_generated_tokens"] == 8 * 256
     assert evaluation["out_dir"] == str(run / "eval")
     words = shlex.split(data["next_command"])
@@ -791,3 +801,16 @@ def test_the_evaluation_package_exports_lazily() -> None:
         assert getattr(evaluation, name) is getattr(importlib.import_module(module), name)
     with pytest.raises(AttributeError):
         _ = evaluation.no_such_name  # type: ignore[attr-defined]
+
+
+def test_cases_too_long_for_the_judge_say_a_retry_cannot_fix_them(
+    run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    use_judge(monkeypatch, TooLong())
+    result = invoke("evaluate", str(run_dir), "--skip-calibration", "--confirm")
+    data = output(result)
+    cases = data["summary"]["n_cases"]
+    assert data["status"] == "complete_with_errors"
+    assert data["summary"]["targets"]["tuned"]["errors_too_long"] == cases
+    assert "retry cannot fix" in data["hint"]
+    assert "larger context window" in data["hint"]

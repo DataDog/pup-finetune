@@ -152,7 +152,7 @@ content. Keep it out of version control.
 | `splits.json` | The split of every trace and the frozen seed and fractions. A trace never changes split once assigned. |
 | `summary.json` | Counts, splits and warnings, rewritten after every change. |
 | `raw/` | For a Datadog pull, the Export API pages it read, so a rerun resumes without fetching them again. |
-| `judgments.jsonl`, `triage.json` | For `dataset triage`, every judge vote and the frozen rubric hash and judges. |
+| `judgments.jsonl`, `triage.json` | For `dataset triage`, every judge vote (`{"row_id", "row_sha256", "judge", "criteria_sha256", "keep", "reason", "at"}`, plus `"too_long": true` when the judge refused the row as longer than its context window, which drops it) and the frozen rubric hash, judges and the settings they are called with. |
 | `push.json` | The receipt `dataset push` writes (see below). |
 
 ## The pushed record

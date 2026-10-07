@@ -29,7 +29,9 @@ from pup_finetune.inference import (
     OPENAI_TIMEOUT_S,
     ChatClient,
     ChatCompletion,
+    ContextLimitError,
     JudgeConfig,
+    is_context_limit,
 )
 from pup_finetune.providers.base import ProviderAuthError, ProviderCapacityError, TransientError
 from tests.fakes.chat_api import API_KEY, BASE_URL, MODEL, FakeChatApi, always
@@ -469,8 +471,10 @@ def test_the_judge_config_identity_is_json_and_tracks_every_setting() -> None:
         "credential": "fireworks",
         "temperature": 0.0,
         "max_tokens": 512,
+        "reasoning_effort": None,
     }
     assert JudgeConfig(model="other").identity() != identity
+    assert JudgeConfig(reasoning_effort="low").identity() != identity
     assert JudgeConfig(provider="openai").identity() != identity
     assert JudgeConfig(max_tokens=64).identity() != identity
 
@@ -574,3 +578,80 @@ def test_the_judge_spec_names_the_provider() -> None:
 def test_the_key_is_registered_for_redaction(fake: FakeChatApi, sleeps: list[float]) -> None:
     client(fake, sleeps).close()
     assert redaction.redact(f"x {API_KEY} y") == "x *** y"
+
+
+# --- the context window and the reasoning effort -------------------------------------------
+
+# How each provider answered a request longer than the model's context window (October 2026).
+OPENAI_TOO_LONG = {
+    "error": {
+        "message": "Input tokens exceed the configured limit of 922000 tokens. Your messages "
+        "resulted in 2200007 tokens. Please reduce the length of the messages.",
+        "type": "invalid_request_error",
+        "param": "messages",
+        "code": "context_length_exceeded",
+    }
+}
+FIREWORKS_TOO_LONG = {
+    "error": {
+        "object": "error",
+        "type": "invalid_request_error",
+        "code": "invalid_request_error",
+        "message": "The prompt is too long: 2200031, model maximum context length: 1048571",
+    }
+}
+ANTHROPIC_TOO_LONG = "prompt is too long: 2200057 tokens > 1000000 maximum"
+
+
+@pytest.mark.parametrize("body", [OPENAI_TOO_LONG, FIREWORKS_TOO_LONG])
+def test_a_request_longer_than_the_context_window_is_a_context_limit_error(
+    fake: FakeChatApi, sleeps: list[float], body: dict[str, Any]
+) -> None:
+    fake.script.append(httpx.Response(400, json=body))
+    with client(fake, sleeps) as chat, pytest.raises(ContextLimitError) as info:
+        chat.complete(MESSAGES, model=MODEL)
+    assert "context window" in info.value.message
+    assert "larger context window" in (info.value.hint or "")
+    assert len(fake.requests) == 1  # never retried
+    assert sleeps == []
+
+
+def test_another_bad_request_is_not_a_context_limit_error(
+    fake: FakeChatApi, sleeps: list[float]
+) -> None:
+    body = {
+        "error": {"message": "Unsupported value: 'reasoning_effort'", "code": "unsupported_value"}
+    }
+    fake.script.append(httpx.Response(400, json=body))
+    with client(fake, sleeps) as chat, pytest.raises(ExternalError) as info:
+        chat.complete(MESSAGES, model=MODEL)
+    assert type(info.value) is ExternalError
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "message", "expected"),
+    [
+        (400, "context_length_exceeded", "", True),
+        (400, None, FIREWORKS_TOO_LONG["error"]["message"], True),
+        (400, None, ANTHROPIC_TOO_LONG, True),
+        (413, None, "Prompt is too long", True),
+        (422, None, "the input exceeds the model's maximum context length", True),
+        (400, "rate_limit_exceeded", "Rate limit reached for tokens per minute", False),
+        (400, None, "max_tokens is too large for this model", False),
+        (429, "context_length_exceeded", "prompt is too long", False),
+        (500, None, "prompt is too long", False),
+    ],
+)
+def test_context_limits_are_told_from_other_errors(
+    status: int, code: str | None, message: str, expected: bool
+) -> None:
+    assert is_context_limit(status, code, message) is expected
+
+
+def test_the_reasoning_effort_is_sent_only_when_set(fake: FakeChatApi, sleeps: list[float]) -> None:
+    with client(fake, sleeps) as chat:
+        chat.complete(MESSAGES, model=MODEL, reasoning_effort="none")
+        chat.complete(MESSAGES, model=MODEL)
+    first, second = (json.loads(request.content) for request in fake.requests)
+    assert first["reasoning_effort"] == "none"
+    assert "reasoning_effort" not in second

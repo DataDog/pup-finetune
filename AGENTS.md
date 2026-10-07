@@ -129,7 +129,11 @@ each whole row and vote keep or drop: a strict majority of keep votes keeps a ro
 drops it, a row missing a vote stays undecided. Votes go to `judgments.jsonl` as they arrive,
 so rerunning the same command resumes and retries only failed calls; the rubric hash and
 judges are frozen in `triage.json` once votes exist (`--reset-triage` discards them). Decided
-rows are labeled `by: judge`; rows the agent or a person labeled are skipped. A label cannot be
+rows are labeled `by: judge`; rows the agent or a person labeled are skipped. A row a judge
+refuses as longer than its context window is dropped (`too_long`), never truncated, and its
+other calls are skipped. `--agreement` reviews the agent's and people's labeled rows instead,
+labels nothing, and reports the council's agreement with those labels (rate, Cohen's kappa,
+confusion counts, per judge, the disagreements), to check a rubric before labeling the rest. A label cannot be
 withdrawn, so judge labels the current votes do not back (after a reset with `--max-rows`, or
 on undecided rows) are reported as `stale_judge_labels`, and the triage stays `incomplete`
 until a run over every row replaces them. It is paid, so
@@ -139,7 +143,9 @@ Tests replace the judges' clients (`cli/triage.py`'s `open_clients`) with a fake
 Judges can run on Anthropic or OpenAI too: `--judge-model`, `--eval-judge-model` and each
 `--judges` entry take `anthropic/<model>` (`ANTHROPIC_API_KEY`, or the Anthropic SDK's own
 login), `openai/<model>` (`OPENAI_API_KEY`), or otherwise a Fireworks model id such as
-`accounts/fireworks/models/<model>`, and a triage council can mix them. Anthropic
+`accounts/fireworks/models/<model>`, and a triage council can mix them. A judge on a
+reasoning model asks for the lowest reasoning effort the model takes (`low` on Anthropic and
+OpenAI; per model on Fireworks, `judges.FIREWORKS_REASONING`). Anthropic
 judges need the `anthropic` extra (`uv sync --extra anthropic`, or `--all-extras`):
 
 ```sh
@@ -283,17 +289,20 @@ Source lives under `src/pup_finetune/`.
   `ProviderAuthError` with a login hint, 429 after retries as `ProviderCapacityError`, the rest
   as `TransientError` or `ExternalError`; `ChatCompleter` is its protocol (with an optional
   `response_schema`). `RequestPolicy` is what an endpoint takes (`OPENAI_POLICY`:
-  `max_completion_tokens`, no temperature, JSON mode). `JudgeConfig` is the judge's provider,
-  model, endpoint, credential and sampling settings (`identity()` for resume checks, `spec`
-  for the command line).
+  `max_completion_tokens`, no temperature, JSON mode); a `reasoning_effort` is sent as given.
+  A request longer than the model's context window is a `ContextLimitError` (never retried;
+  `is_context_limit` reads each provider's error answer). `JudgeConfig` is the judge's
+  provider, model, endpoint, credential, sampling settings and reasoning effort (`identity()`
+  for resume checks, `spec` for the command line).
 - `judges.py` - judges on any provider, no SDK import: `parse_judge` reads a spec by prefix
   (`anthropic/` or `openai/`; anything else is a Fireworks model id) with the
-  provider's defaults (`PROVIDERS`), `check_available` refuses a missing extra up front,
+  provider's defaults (`PROVIDERS`; the lowest reasoning effort each model takes,
+  `FIREWORKS_REASONING` per Fireworks model), `check_available` refuses a missing extra up front,
   `open_client` and `open_clients` (one per provider) build the clients.
 - `anthropic_client.py` - `AnthropicChatClient`, the Anthropic judge client over the official
   SDK (the `anthropic` extra), the only module that imports `anthropic` (and its `httpx2`):
   `system` from the leading system message, no sampling parameters, `output_config` format
-  and effort, `fallbacks="default"` through the beta API on the models that have it, `stop_reason`
+  and effort (the judge's), "prompt is too long" as `ContextLimitError`, `fallbacks="default"` through the beta API on the models that have it, `stop_reason`
   mapped to `finish_reason`, typed SDK errors mapped to ours. Tests pass a fake SDK client.
 - `judge_credentials.py` - registers the `anthropic` and `openai` `CredentialSpec`s (imported
   by the providers package); `anthropic_sdk_login` detects the Anthropic SDK's own login,
@@ -376,12 +385,14 @@ Source lives under `src/pup_finetune/`.
   rules, hashed), `build_messages` (the untrusted-data system prompt with the rubric, the
   whole row JSON-encoded in blocks), `parse_vote` (strict `{"keep", "reason"}`), `Vote`s in
   `judgments.jsonl` (counted only for the row content, rubric and judge they were cast for),
-  `decide` (strict majority keeps, a tie drops, a missing vote is undecided), `plan_triage`
-  (rows not labeled by the agent or a person, in a fixed pseudo-random order for
-  `--max-rows`; settings frozen in `triage.json` once votes exist) and `run_triage` (a thread
-  pool, votes appended as they arrive, failed calls reported and retried next run, labels
-  `by: judge` for decided rows, judge labels the votes do not back reported as stale; a torn
-  last vote line is cut before appending). `rubric_template.md` ships in the wheel. Curation builds on
+  `decide` (strict majority keeps, a tie drops, a missing vote is undecided, a `too_long`
+  vote drops), `plan_triage` (rows not labeled by the agent or a person, or with
+  `agreement` only those, in a fixed pseudo-random order for `--max-rows`; settings frozen in
+  `triage.json` once votes exist) and `run_triage` (a thread pool, votes appended as they
+  arrive, failed calls reported and retried next run, a row's calls skipped once a judge
+  found it too long, labels `by: judge` for decided rows, judge labels the votes do not back
+  reported as stale, or with `agreement` no label and `measure_agreement`'s `Agreement`; a
+  torn last vote line is cut before appending). `rubric_template.md` ships in the wheel. Curation builds on
   `data/`; `data/` never imports `curation/`.
 - `training/` - the shared, provider-neutral SFT loop. `datums.py` renders rows into
   `TokenizedExample`s (per turn when a renderer is not prefix-stable) and rejects rows that
@@ -442,9 +453,10 @@ Source lives under `src/pup_finetune/`.
   (the recorded data JSON-encoded in tagged blocks marked untrusted, reasoning never shown) and
   parses `{"pass", "reason"}` strictly (`parse_verdict`, outside any `<think>` block; anything
   else fails as `unparseable`, or `truncated` when the judge hit `max_tokens`, and a refused
-  answer as `refused`); a malformed candidate fails without a call, and a judge outage raises rather
-  than failing the case. `calibrate` checks that references pass and `corrupt`ed ones fail on a
-  few mixed cases; `check_judge_differs` refuses a judge that is the model being trained or the run's
+  answer as `refused`); a malformed candidate fails without a call, and a judge outage (or a
+  case longer than its context window) raises rather than failing the case (replay records
+  it as the pair's error; the result's hint says a retry cannot fix a case too long). `calibrate` checks
+  that references pass and both of their `corruptions` fail on a few mixed cases; `check_judge_differs` refuses a judge that is the model being trained or the run's
   tuned model (`model_id_for_run`, and the promoted model once there is one).
   `fake_judge.py` is `FakeJudge`, an offline, deterministic judge for development mode and
   tests (same tools with consistent arguments, or mostly the same words). `replay.py` has

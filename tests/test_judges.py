@@ -57,6 +57,7 @@ def test_an_anthropic_spec() -> None:
         credential="anthropic",
         temperature=None,
         max_tokens=16000,
+        reasoning_effort="low",
     )
     assert config.spec == "anthropic/claude-opus-5-5"
 
@@ -69,15 +70,42 @@ def test_an_openai_spec() -> None:
     assert config.credential == "openai"
     assert config.temperature is None
     assert config.max_tokens == 16000
+    assert config.reasoning_effort == "low"  # the lowest the current model accepts
     assert config.spec == "openai/gpt-6-astra"
 
 
 @pytest.mark.parametrize("spec", [DEFAULT_JUDGE_MODEL, f" {DEFAULT_JUDGE_MODEL} "])
 def test_a_fireworks_spec_is_the_default_judge_s_settings(spec: str) -> None:
     config = parse_judge(spec)
-    assert config == JudgeConfig()
+    assert config == JudgeConfig(reasoning_effort="none")
     assert config.base_url == DEFAULT_JUDGE_BASE_URL
     assert config.spec == DEFAULT_JUDGE_MODEL
+
+
+@pytest.mark.parametrize(
+    ("model", "effort"),
+    [("gpt-6-astra", "low"), ("o4-mini", "low"), ("gpt-4.1-mini", None), ("GPT-4o", None)],
+)
+def test_an_openai_judge_sends_an_effort_only_to_a_reasoning_model(
+    model: str, effort: str | None
+) -> None:
+    # GPT-4-era models refuse the field ("Unrecognized request argument supplied").
+    assert parse_judge(f"openai/{model}").reasoning_effort == effort
+
+
+@pytest.mark.parametrize(
+    ("model", "effort"),
+    [
+        ("accounts/fireworks/models/deepseek-v4p1-flash", "none"),
+        ("accounts/fireworks/models/glm-5p3-flash", "low"),  # thinking only: refuses none
+        ("accounts/fireworks/models/another-judge", None),
+        ("judge-x", None),
+    ],
+)
+def test_a_fireworks_judge_asks_for_the_lowest_effort_its_model_takes(
+    model: str, effort: str | None
+) -> None:
+    assert parse_judge(model).reasoning_effort == effort
 
 
 def test_a_bare_fireworks_id_of_another_account_stays_fireworks() -> None:

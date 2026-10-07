@@ -148,15 +148,28 @@ pup finetune dataset triage <dataset_dir> --rubric rubric.md --max-rows 20 --con
 pup finetune dataset triage <dataset_dir> --rubric rubric.md
 ```
 
-Write the rubric (Task / Keep / Drop / Examples) with the user. Calibrate on about 20 rows
-first with `--max-rows 20`, compare the votes with your own reading of those rows, and adjust
-the rubric before the full run. A changed rubric needs a new directory or `--reset-triage`.
+Write the rubric (Task / Keep / Drop / Examples) with the user. When the user (or you, with
+their agreement) has labeled rows with `dataset label`, measure the council against them
+first:
+
+```sh
+pup finetune dataset triage <dataset_dir> --rubric rubric.md --agreement
+pup finetune dataset triage <dataset_dir> --rubric rubric.md --agreement --confirm
+```
+
+It labels nothing. Show the user `agreement.rate`, `agreement.kappa` and
+`agreement.disagreements_shown`; where their labels are right, sharpen the rubric and measure again
+(`--reset-triage` with the changed rubric) until they are satisfied, then run without
+`--agreement`. Without labeled rows, calibrate on about 20 rows with `--max-rows 20`,
+compare the votes with your own reading of those rows, and adjust the rubric before the full
+run. A changed rubric needs a new directory or `--reset-triage`.
 
 Check:
 
 - [ ] The user saw a sample and agreed with the keep/drop decisions.
-- [ ] For triage: the calibration votes match your reading of those 20 rows, and the full run
-      reports no `stale_judge_labels` and no undecided rows you have not discussed.
+- [ ] For triage: the user accepted the council's agreement with their labels (or the
+      calibration votes match your reading of those 20 rows), and the full run reports no
+      `stale_judge_labels` and no undecided rows you have not discussed.
 - [ ] `dataset show` still has a non-empty train and validation split after the drops.
 
 ## Step 4: push the dataset to Agent Observability
@@ -281,6 +294,7 @@ Check:
 | `doctor` fails `datadog_auth` | Pup is not signed in, or signed in to another site | Ask the user to run `pup auth login`, then rerun `pup finetune doctor`. |
 | `auth status` shows no `fireworks` key, or a call fails with HTTP 401 or 403 | No key, or a revoked key | Ask the user to run `pup finetune auth login fireworks` (or `anthropic` / `openai`, for a judge there) in their own terminal. Never ask for the key in chat. |
 | A judge answer is `refused` (`judge_no_verdict_by_error`, or a triage failure `refused`) | The judge's provider declined to answer that case | It counts as no verdict, not a pass or a keep. Tell the user; if many cases are refused, pick another judge with them. |
+| Triage reports `too_long` rows | A row is longer than a judge's context window; it was dropped, never truncated | Tell the user; to review such rows, pick judges with a larger context window with them. |
 | `dataset preview` matches no spans | Wrong ml_app, filter or time range | Go back to step 1 and build the filter only from values seen in real spans; widen `--from`. |
 | Most rows are excluded | Spans that cannot train, by code | Read `excluded_by_code` in `dataset show`; `span_error` rows come back only with `--include-errors`, after the user agrees. |
 | `ReadOnlyError`: PUP_READ_ONLY is set | Read-only mode blocks remote writes | Tell the user; only they can unset `PUP_READ_ONLY`. The previews of `train`, `resume` and `evaluate` and local commands still work; `dataset push`, `deploy` and `undeploy` are refused even without `--confirm`. |

@@ -19,12 +19,21 @@ its provider by prefix:
 
 :func:`parse_judge` turns a spec into a :class:`~pup_finetune.inference.JudgeConfig` with
 the provider's defaults (:data:`PROVIDERS`: endpoint, credential, whether a temperature is
-sent, and the token limit; thinking shares the limit on Anthropic's and OpenAI's current
-models, so theirs is larger). :func:`open_client` opens the client for a judge and
-:func:`open_clients` one client per provider of a council. Nothing here imports a provider
-SDK: :mod:`pup_finetune.anthropic_client` is loaded only when an Anthropic judge is used
-(:func:`anthropic_client_class`), and :func:`check_available` says before then when its extra
-is missing.
+sent, the token limit, and the reasoning effort; thinking shares the limit on Anthropic's and
+OpenAI's current models, so theirs is larger). :func:`open_client` opens the client for a
+judge and :func:`open_clients` one client per provider of a council. Nothing here imports a
+provider SDK: :mod:`pup_finetune.anthropic_client` is loaded only when an Anthropic judge is
+used (:func:`anthropic_client_class`), and :func:`check_available` says before then when its
+extra is missing.
+
+**Reasoning effort.** A verdict needs little thinking, so a judge asks for the lowest effort
+its model accepts: ``low`` on Anthropic and OpenAI (the lowest their current models take;
+OpenAI's GPT-4-era models, :data:`OPENAI_PLAIN_MODELS`, do not reason and refuse the field
+with HTTP 400, so they are sent no reasoning effort), and on Fireworks the effort
+:data:`FIREWORKS_REASONING` records for the model, as each one answered in October 2026
+(DeepSeek V4.1 Flash takes ``none``; GLM-5.3 Flash thinks on every request and refuses
+``none``, but ``low`` cuts its thinking to a few tokens). Any other Fireworks model is sent
+no reasoning effort, so it thinks as its provider's default does.
 """
 
 from __future__ import annotations
@@ -48,6 +57,8 @@ if TYPE_CHECKING:
     from pup_finetune.anthropic_client import AnthropicChatClient
 
 __all__ = [
+    "FIREWORKS_REASONING",
+    "OPENAI_PLAIN_MODELS",
     "PROVIDERS",
     "SPEC_FORMS",
     "JudgeProvider",
@@ -87,6 +98,8 @@ class ProviderDefaults:
     temperature: float | None
     """The temperature sent, or ``None`` when the provider's models take none."""
     max_tokens: int
+    reasoning_effort: str | None
+    """The reasoning effort sent, or ``None`` to send none (the model's default)."""
 
 
 PROVIDERS: Final[dict[RemoteProvider, ProviderDefaults]] = {
@@ -96,6 +109,7 @@ PROVIDERS: Final[dict[RemoteProvider, ProviderDefaults]] = {
         credential="fireworks",
         temperature=0.0,
         max_tokens=512,
+        reasoning_effort=None,
     ),
     # Current Claude models think on every request, with thinking counted against
     # max_tokens, and reject sampling parameters.
@@ -105,6 +119,7 @@ PROVIDERS: Final[dict[RemoteProvider, ProviderDefaults]] = {
         credential="anthropic",
         temperature=None,
         max_tokens=16000,
+        reasoning_effort="low",
     ),
     # Current OpenAI models reason, with reasoning tokens counted against the limit, and
     # take no temperature (see pup_finetune.inference).
@@ -114,8 +129,20 @@ PROVIDERS: Final[dict[RemoteProvider, ProviderDefaults]] = {
         credential="openai",
         temperature=None,
         max_tokens=16000,
+        reasoning_effort="low",
     ),
 }
+
+FIREWORKS_REASONING: Final[dict[str, str]] = {
+    "accounts/fireworks/models/deepseek-v4p1-flash": "none",
+    "accounts/fireworks/models/glm-5p3-flash": "low",
+}
+"""The lowest reasoning effort each Fireworks model accepts, by model id (see the module
+docstring); a model not listed is sent no reasoning effort."""
+
+OPENAI_PLAIN_MODELS: Final = ("gpt-4", "gpt-3.5", "chatgpt-")
+"""The prefixes of the OpenAI models that do not reason, which refuse ``reasoning_effort``
+("Unrecognized request argument", checked on gpt-4.1-mini and gpt-4o-mini in October 2026)."""
 
 _PREFIXED_PROVIDERS: Final[frozenset[str]] = frozenset({"anthropic", "openai"})
 """The providers a judge spec names by prefix; any other spec is a Fireworks model id."""
@@ -125,7 +152,8 @@ def parse_judge(spec: str) -> JudgeConfig:
     """The judge ``spec`` names (see the module docstring), with its provider's defaults.
 
     ``anthropic/<model>`` and ``openai/<model>`` name those providers (the prefix in any
-    case); any other spec is a Fireworks model id. Raises :class:`UsageError` for an empty spec or an empty model
+    case); any other spec is a Fireworks model id. The reasoning effort is the lowest the
+    model takes (see the module docstring). Raises :class:`UsageError` for an empty spec or an empty model
     after a provider prefix.
     """
     text = spec.strip()
@@ -140,6 +168,11 @@ def parse_judge(spec: str) -> JudgeConfig:
     else:
         provider, model = "fireworks", text
     defaults = PROVIDERS[provider]
+    effort = defaults.reasoning_effort
+    if provider == "fireworks":
+        effort = FIREWORKS_REASONING.get(model)
+    elif provider == "openai" and model.lower().startswith(OPENAI_PLAIN_MODELS):
+        effort = None
     return JudgeConfig(
         provider=provider,
         model=model,
@@ -147,6 +180,7 @@ def parse_judge(spec: str) -> JudgeConfig:
         credential=defaults.credential,
         temperature=defaults.temperature,
         max_tokens=defaults.max_tokens,
+        reasoning_effort=effort,
     )
 
 

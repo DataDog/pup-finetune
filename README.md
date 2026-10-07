@@ -101,7 +101,9 @@ pup finetune dataset label ./ds --file labels.jsonl
 ```
 
 For larger datasets, `dataset triage` has a council of judge models label the rows against a
-rubric (`pup finetune dataset triage --print-template` prints one).
+rubric (`pup finetune dataset triage --print-template` prints one). With `--agreement`, it
+first reports how often the council agrees with the rows you labeled yourself, and labels
+nothing.
 
 Push the kept rows to an Agent Observability dataset. Like every remote or paid command, it
 previews first, and runs only when you add `--confirm`:
