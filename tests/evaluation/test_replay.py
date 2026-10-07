@@ -220,6 +220,49 @@ def test_a_rerun_does_only_what_is_missing(tmp_path: Path) -> None:
     assert again.summary["errors"] == {"base": 0, "tuned": 0}
 
 
+class SurrogateSampler(ScriptedSampler):
+    """Calls a tool with an argument a parser decoded from ``"\\ud800"``: a lone surrogate."""
+
+    def generate(
+        self, messages: list[ChatMessage], tools: list[ToolSpec], *, max_tokens: int
+    ) -> Generation:
+        super().generate(messages, tools, max_tokens=max_tokens)
+        arguments = json.dumps({"query": "half \ud800"}, ensure_ascii=False)
+        call = {
+            "id": "call-0",
+            "type": "function",
+            "function": {"name": "lookup", "arguments": arguments},
+        }
+        return Generation(
+            message={"role": "assistant", "content": None, "tool_calls": [call]},
+            format_valid=True,
+            prompt_tokens=10,
+            completion_tokens=3,
+            latency_s=0.0,
+            stop_reason="stop",
+        )
+
+
+def test_a_lone_surrogate_in_a_generated_tool_call_is_stored(tmp_path: Path) -> None:
+    out = tmp_path / "eval"
+    tuned = SurrogateSampler()
+    outcome = replay(out, {"base": ScriptedSampler(), "tuned": tuned}, Judge())
+    assert outcome.complete
+    assert len(tuned.calls) == len(CASES)
+    generations = EvalDir(out).read_generations()
+    stored = generations[("tuned", CASES[0].id)]["message"]["tool_calls"][0]
+    assert json.loads(stored["function"]["arguments"]) == {"query": "half \ud800"}
+    results = EvalDir(out).read_results()
+    assert all(results[("tuned", case.id)]["status"] == "ok" for case in CASES)
+    assert json.loads((out / "summary.json").read_text()) == outcome.summary
+
+    # A rerun after the results are lost reuses the stored generations: nothing is paid twice.
+    (out / "results.jsonl").unlink()
+    again = SurrogateSampler()
+    assert replay(out, {"base": ScriptedSampler(), "tuned": again}, Judge()).complete
+    assert again.calls == []
+
+
 def test_a_target_without_a_sampler_is_refused_while_it_has_work(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="no sampler for tuned"):
         replay(tmp_path / "eval", {"base": ScriptedSampler()}, Judge())

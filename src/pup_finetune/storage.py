@@ -110,15 +110,20 @@ def atomic_write_json(path: Path, data: Any, *, ensure_ascii: bool = False) -> N
     atomic_write_text(path, text + "\n")
 
 
-def append_jsonl(path: Path, rows: Iterable[Mapping[str, Any]]) -> int:
+def append_jsonl(
+    path: Path, rows: Iterable[Mapping[str, Any]], *, ensure_ascii: bool = False
+) -> int:
     """Append ``rows`` as JSON lines, flushed and fsynced; returns the number of rows written.
 
     The file is created ``0600`` when missing. If an earlier append was torn (the file does
     not end with a newline), the partial line is terminated first so the new rows stay intact;
     :func:`read_jsonl` then reports the partial line with its line number.
+
+    ``ensure_ascii=True`` writes non-ASCII characters as ``\\u`` escapes, as
+    :func:`atomic_write_json` does, for data that may hold lone surrogates.
     """
     path = Path(path)
-    lines = [canonical_json(row) + "\n" for row in rows]
+    lines = [canonical_json(row, ensure_ascii=ensure_ascii) + "\n" for row in rows]
     created = not path.exists()
     fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, _PRIVATE_FILE)
     with os.fdopen(fd, "r+b") as handle:
@@ -299,10 +304,14 @@ class DirectoryLock:
                 os.close(fd)
 
 
-def canonical_json(value: Any) -> str:
-    """Serialize ``value`` deterministically: sorted keys, no whitespace."""
+def canonical_json(value: Any, *, ensure_ascii: bool = False) -> str:
+    """Serialize ``value`` deterministically: sorted keys, no whitespace.
+
+    ``ensure_ascii=True`` writes non-ASCII characters as ``\\u`` escapes (see
+    :func:`atomic_write_json`).
+    """
     return json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=ensure_ascii, allow_nan=False
     )
 
 

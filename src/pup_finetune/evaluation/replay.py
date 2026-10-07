@@ -269,13 +269,17 @@ class EvalDir:
         """The last result of each pair, ``ok`` or ``error``."""
         return _by_pair(_read_lines(self.results_path))
 
+    # Generations hold model output, which a tool call parser can decode into a lone
+    # surrogate (JSON's ``\ud800`` escape); UTF-8 cannot encode one, so these files are
+    # written ASCII-only, as ``\u`` escapes that read back to the same strings.
+
     def append_generation(self, record: Mapping[str, Any]) -> None:
         with self._append_lock:
-            append_jsonl(self.generations_path, [finite_json(dict(record))])
+            append_jsonl(self.generations_path, [finite_json(dict(record))], ensure_ascii=True)
 
     def append_result(self, record: Mapping[str, Any]) -> None:
         with self._append_lock:
-            append_jsonl(self.results_path, [finite_json(dict(record))])
+            append_jsonl(self.results_path, [finite_json(dict(record))], ensure_ascii=True)
 
     def read_calibration(self) -> dict[str, Any] | None:
         if not self.calibration_path.exists():

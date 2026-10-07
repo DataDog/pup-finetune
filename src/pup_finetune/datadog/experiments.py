@@ -354,7 +354,8 @@ class SpanGroup:
     def digest(self, span: Mapping[str, Any]) -> str:
         """A sha256 over ``span`` and its metrics: what was sent for it, minus timestamps."""
         payload = canonical_json({"span": span, "metrics": self.metrics.get(span["span_id"], [])})
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        # A generated tool call can hold a lone surrogate, which strict UTF-8 cannot encode.
+        return hashlib.sha256(payload.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def _ids(eval_key: str, name: str) -> tuple[str, str]:

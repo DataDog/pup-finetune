@@ -589,6 +589,28 @@ def test_roots_and_children_are_linked_to_the_records(
     assert not {span["span_id"] for span in base.spans} & {span["span_id"] for span in roots}
 
 
+def test_a_lone_surrogate_in_a_generated_tool_call_is_published(
+    fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
+) -> None:
+    evaluation = Evaluation(rows=1, cases_per_row=1)
+    arguments = json.dumps({"query": "half \ud800"}, ensure_ascii=False)
+    call = {
+        "id": "call-0",
+        "type": "function",
+        "function": {"name": "lookup", "arguments": arguments},
+    }
+    message = {"role": "assistant", "content": None, "tool_calls": [call]}
+    for target in TARGETS:
+        evaluation.generations[(target, evaluation.cases[0].id)]["message"] = message
+    report = publish(fake, evaluation, tmp_path / "eval", clock)
+    experiment = api.experiments[report["experiments"]["tuned"]["experiment_id"]]
+    [child] = spans_named(experiment.spans, CHILD_SPAN_NAME)
+    assert child["meta"]["output"] == message
+    # A rerun finds every span published, by its digest.
+    again = publish(fake, evaluation, tmp_path / "eval", clock)
+    assert again["experiments"]["tuned"]["submitted"] == 0
+
+
 def test_metrics_are_stamped_at_submission_and_carry_the_judge_reason(
     fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
 ) -> None:
