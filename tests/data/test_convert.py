@@ -200,6 +200,44 @@ def test_roleless_input_message_is_the_user() -> None:
     ]
 
 
+def test_plain_values_are_the_user_and_assistant_messages() -> None:
+    span = make_span(input={"value": "Hi"}, output={"value": "Hello!"})
+    conversation = span_conversation(span)
+    assert conversation.messages == [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello!"},
+    ]
+    assert conversation.issues == []
+    as_row(conversation)
+
+
+def test_plain_input_value_comes_before_chat_output() -> None:
+    span = make_span(
+        input={"value": "Hi"}, output={"messages": [{"role": "assistant", "content": "Hello!"}]}
+    )
+    assert span_conversation(span).messages == [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello!"},
+    ]
+
+
+def test_messages_win_over_a_plain_value() -> None:
+    span = make_span(
+        input={"value": "rendered prompt", "messages": [{"role": "user", "content": "Hi"}]},
+        output={"value": "rendered", "messages": [{"role": "assistant", "content": "Hello!"}]},
+    )
+    assert span_conversation(span).messages == [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello!"},
+    ]
+
+
+@pytest.mark.parametrize("section", [{"value": ""}, {"value": None}, {"messages": []}, {}])
+def test_an_empty_value_adds_no_message(section: dict[str, Any]) -> None:
+    span = make_span([{"role": "user", "content": "Hi"}], output=section)
+    assert span_conversation(span).messages == [{"role": "user", "content": "Hi"}]
+
+
 def test_null_content_is_empty() -> None:
     conversation = span_conversation(
         make_span([{"role": "user", "content": None}], [{"role": "assistant", "content": "Hi"}])

@@ -7,7 +7,10 @@
 """One LLM span as one chat conversation in the canonical (OpenAI chat) shape.
 
 :func:`span_conversation` maps a span's ``input.messages`` followed by its
-``output.messages``, and its ``tool_definitions``, to canonical message and tool dicts:
+``output.messages``, and its ``tool_definitions``, to canonical message and tool dicts. An
+input or output recorded as a plain ``value`` and no ``messages`` is one message with that
+content: the ``user`` message on input, the ``assistant`` message on output. When a section
+has both, its ``messages`` are used.
 
 =========================================  ====================================================
 LLM span                                   canonical
@@ -45,7 +48,7 @@ from pydantic import ValidationError
 
 from pup_finetune.data.exclusions import ExclusionCode, ExclusionReason
 from pup_finetune.data.schema import RowErrorCode, SourceRef
-from pup_finetune.datadog.spans import LLMObsMessage, LLMObsSpan, LLMObsToolCall
+from pup_finetune.datadog.spans import LLMObsIO, LLMObsMessage, LLMObsSpan, LLMObsToolCall
 from pup_finetune.errors import UsageError
 
 ReasoningMode = Literal["omit", "preserve"]
@@ -89,11 +92,25 @@ def span_conversation(span: LLMObsSpan, *, reasoning: ReasoningMode = "omit") ->
     """The conversation ``span`` records: its input messages, then its output messages."""
     check_reasoning(reasoning)
     builder = _Builder(span.span_id, reasoning)
-    builder.add_section(span.input.messages if span.input else None, default_role="user")
-    builder.add_section(span.output.messages if span.output else None, default_role="assistant")
+    builder.add_section(_section_messages(span.input), default_role="user")
+    builder.add_section(_section_messages(span.output), default_role="assistant")
     source, source_issue = _source(span)
     issues = builder.issues if source_issue is None else [*builder.issues, source_issue]
     return Conversation(builder.messages, _tools(span), source, issues)
+
+
+def _section_messages(section: LLMObsIO | None) -> Sequence[LLMObsMessage] | None:
+    """A span's input or output as messages: its ``messages``, else its plain ``value``.
+
+    The value becomes one message without a role, so it takes the section's default role.
+    """
+    if section is None:
+        return None
+    if section.messages:
+        return section.messages
+    if section.value:
+        return [LLMObsMessage(content=section.value)]
+    return section.messages
 
 
 # --- messages -------------------------------------------------------------------------------

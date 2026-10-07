@@ -165,8 +165,9 @@ IncludeErrorsOption = Annotated[
 
 _PULL_FLAGS = (
     "Spans are LLM spans of --ml-app in the time range, narrowed by --span-name, --query and "
-    "--tag. Each span becomes a conversation (input then output messages); per trace, a "
-    "conversation another one contains is dropped, so sub-agents stay their own rows. "
+    "--tag. Each span becomes a conversation (input then output messages; a plain input or "
+    "output value is the user or assistant message); per trace, a conversation another one "
+    "contains is dropped, so sub-agents stay their own rows. "
     "Errored LLM calls are excluded as span_error unless --include-errors is passed. Reading "
     "stops once --target-count rows are accepted or --max-candidates spans are read, "
     "unreadable ones included."

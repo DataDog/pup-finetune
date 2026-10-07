@@ -133,8 +133,8 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   per id wins, a reason required to drop; `DatasetDir.kept_rows` leaves dropped rows out of
   training and split exports).
   `convert.py` maps one LLM span to a canonical conversation (`span_conversation`: input then
-  output messages, tool calls and results, tools, `SourceRef`; reasoning omitted or
-  preserved), with conversion issues as stable codes; `trajectories.py` has
+  output messages, a plain `value` as one message, tool calls and results, tools, `SourceRef`;
+  reasoning omitted or preserved), with conversion issues as stable codes; `trajectories.py` has
   `rows_from_spans`, which dedupes spans by id, groups them by trace, collapses conversations
   that are a prefix or duplicate of another (so sub-agents stay their own rows) and yields a
   validated row or an `Exclusion` per kept conversation. `checks.py` has the span-level checks
