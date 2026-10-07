@@ -464,6 +464,39 @@ def test_retirement_compares_tool_call_arguments_canonically() -> None:
     ]
 
 
+WEATHER = [{"name": "get_weather", "description": "Weather.", "schema": {"type": "object"}}]
+WEATHER_V2 = [
+    {
+        "name": "get_weather",
+        "description": "Weather.",
+        "schema": {"type": "object", "properties": {"city": {"type": "string"}}},
+    }
+]
+
+
+def test_a_stored_prefix_is_not_retired_into_a_conversation_with_other_tools() -> None:
+    short = [SYSTEM, Q1, A1]
+    stored, _ = collected([page([item("synthetic-span-1", short, tool_definitions=WEATHER)])])
+    long = [SYSTEM, Q1, A1, Q2, A2]
+    longer, _ = collected([page([item("synthetic-span-2", long, tool_definitions=WEATHER_V2)])])
+    longer.read_ids.add("synthetic-trace-9000:synthetic-span-1")
+    assert retirements(longer, stored.rows, []) == []
+
+    same, _ = collected([page([item("synthetic-span-2", long, tool_definitions=WEATHER)])])
+    same.read_ids.add("synthetic-trace-9000:synthetic-span-1")
+    assert [e.row_id for e in retirements(same, stored.rows, [])] == [
+        "synthetic-trace-9000:synthetic-span-1"
+    ]
+
+
+def test_contained_keeps_a_new_row_a_stored_row_with_other_tools_starts_with() -> None:
+    short = [SYSTEM, Q1, A1]
+    collection, _ = collected([page([item("synthetic-span-1", short, tool_definitions=WEATHER)])])
+    long = [SYSTEM, Q1, A1, Q2, A2]
+    longer, _ = collected([page([item("synthetic-span-2", long, tool_definitions=WEATHER_V2)])])
+    assert contained(collection.rows, longer.rows) == (collection.rows, [])
+
+
 def two_page_conversation() -> list[dict[str, Any]]:
     return [
         page([item("synthetic-span-1", [SYSTEM, Q1, A1])], after="cursor-2"),

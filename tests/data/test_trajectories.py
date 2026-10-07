@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Iterator
 from typing import Any
 
@@ -18,6 +19,7 @@ from pup_finetune.data.schema import RowErrorCode
 from pup_finetune.data.trajectories import (
     ConversionResult,
     comparable_messages,
+    comparable_tools,
     rows_from_spans,
 )
 from pup_finetune.datadog.spans import LLMObsSpan, SpanQuery, iter_spans, parse_span
@@ -508,15 +510,83 @@ def test_identical_conversations_without_start_keep_the_last_read() -> None:
 
 
 def test_identical_conversations_prefer_a_valid_row() -> None:
-    # Same messages, but the later span declares tools that do not include the call.
-    call = {"name": "get_weather", "arguments": {"city": "Northvale"}, "tool_id": "call_1"}
-    messages = [Q1, {"role": "assistant", "tool_calls": [call]}]
-    other_tool = [{"name": "get_time", "schema": {"type": "object"}}]
+    # Same conversation, but the later span's evaluations cannot be recorded.
     spans = [
-        make_span("synthetic-span-1", messages, start_ns=1),
-        make_span("synthetic-span-2", messages, start_ns=2, tool_definitions=other_tool),
+        make_span("synthetic-span-1", [Q1, A1], start_ns=1),
+        make_span("synthetic-span-2", [Q1, A1], start_ns=2, evaluation={"score": math.nan}),
     ]
     assert outcome(rows_from_spans(spans)) == ["row:synthetic-trace-9000:synthetic-span-1"]
+
+
+# --- tools ----------------------------------------------------------------------------------
+
+WEATHER = [{"name": "get_weather", "description": "Weather.", "schema": {"type": "object"}}]
+WEATHER_V2 = [
+    {
+        "name": "get_weather",
+        "description": "Weather.",
+        "schema": {"type": "object", "properties": {"city": {"type": "string"}}},
+    }
+]
+
+
+def test_the_same_messages_under_other_tools_are_separate_rows() -> None:
+    spans = [
+        make_span("synthetic-span-1", [Q1, A1], start_ns=1, tool_definitions=WEATHER),
+        make_span("synthetic-span-2", [Q1, A1], start_ns=2, tool_definitions=WEATHER_V2),
+    ]
+    conversion = rows_from_spans(spans)
+    assert outcome(conversion) == [
+        "row:synthetic-trace-9000:synthetic-span-1",
+        "row:synthetic-trace-9000:synthetic-span-2",
+    ]
+    assert conversion.stats.collapsed == 0
+
+
+def test_a_prefix_under_other_tools_is_not_collapsed() -> None:
+    spans = [
+        make_span("synthetic-span-1", [Q1, A1], tool_definitions=WEATHER),
+        make_span("synthetic-span-2", [Q1, A1, Q2, A2], tool_definitions=WEATHER_V2),
+        make_span("synthetic-span-3", [Q1, A1, Q2, A2, Q3, A3]),
+    ]
+    assert outcome(rows_from_spans(spans)) == [
+        "row:synthetic-trace-9000:synthetic-span-1",
+        "row:synthetic-trace-9000:synthetic-span-2",
+        "row:synthetic-trace-9000:synthetic-span-3",
+    ]
+
+
+def test_a_prefix_under_the_same_tools_collapses() -> None:
+    spans = [
+        make_span("synthetic-span-1", [Q1, A1], tool_definitions=WEATHER),
+        make_span("synthetic-span-2", [Q1, A1], tool_definitions=WEATHER),
+        make_span("synthetic-span-3", [Q1, A1, Q2, A2], tool_definitions=WEATHER),
+    ]
+    conversion = rows_from_spans(spans)
+    assert outcome(conversion) == ["row:synthetic-trace-9000:synthetic-span-3"]
+    assert conversion.stats.collapsed == 2
+
+
+def test_reasoning_is_not_carried_across_tools() -> None:
+    spans = [
+        thinking_span("synthetic-span-1", [Q1, A1], "Think.", tool_definitions=WEATHER),
+        make_span("synthetic-span-2", [Q1, A1, Q2, A2], tool_definitions=WEATHER_V2),
+    ]
+    results = list(rows_from_spans(spans, reasoning="preserve"))
+    rows = {r.row.id: r.row for r in results if r.row is not None}
+    later = rows["synthetic-trace-9000:synthetic-span-2"]
+    assert all(message.reasoning_content is None for message in later.messages)
+
+
+def test_comparable_tools_keep_the_order_given() -> None:
+    first = {"type": "function", "function": {"name": "a", "parameters": {"type": "object"}}}
+    second = {"type": "function", "function": {"name": "b", "parameters": {"type": "object"}}}
+    assert comparable_tools([first, second]) != comparable_tools([second, first])
+    reordered_keys = {
+        "function": {"parameters": {"type": "object"}, "name": "a"},
+        "type": "function",
+    }
+    assert comparable_tools([first]) == comparable_tools([reordered_keys])
 
 
 # --- exclusions -----------------------------------------------------------------------------

@@ -12,10 +12,10 @@ conversation so far, so most spans hold a prefix of a later span's conversation.
 and keeps, per trace, only the conversations no other one contains:
 
 - A conversation whose messages are a strict prefix of a valid row's messages in the same
-  trace is dropped: the longer row trains on the same turns. Sub-agents, with their own
-  system prompts, are prefixes of nothing and stay separate rows.
-- Of identical conversations, one is kept: a valid one over an invalid one, then the one with
-  the latest ``start_ns``, then the one that arrived last.
+  trace, with the same tools, is dropped: the longer row trains on the same turns.
+  Sub-agents, with their own system prompts, are prefixes of nothing and stay separate rows.
+- Of identical conversations (the same messages and tools), one is kept: a valid one over
+  an invalid one, then the one with the latest ``start_ns``, then the one that arrived last.
 
 Messages compare by role, content and tool calls (name, and arguments as canonical JSON), and
 a tool message by the position of the call it answers (which message, which call in it), as
@@ -24,6 +24,10 @@ generated id differs between spans, and a span's input rarely repeats the reason
 predecessor output. The position keeps apart conversations that pair the same results with
 different calls of a parallel tool call. Canonical arguments keep together the same call
 recorded as an object on one span and as formatted JSON text on another.
+
+Conversations compare only within the same tool definitions (:func:`comparable_tools`, in
+the order given): the tools are part of what a row trains on, so the same turns under another
+tool schema are another row, as the content hash that dedupes rows across traces also says.
 
 Because a later span's input rarely repeats reasoning, with ``reasoning="preserve"`` a kept
 row takes the ``reasoning_content`` of the valid rows collapsed into it: each of its assistant
@@ -119,14 +123,19 @@ def rows_from_spans(
 @dataclass(frozen=True, slots=True)
 class _Candidate:
     result: ConversionResult
+    empty: str
+    """The digest of the empty prefix: the tools alone."""
     prefixes: tuple[str, ...]
-    """The digest of each prefix of the messages: ``prefixes[k]`` covers ``k + 1`` messages."""
+    """The digest of each prefix of the messages: ``prefixes[k]`` covers ``k + 1`` messages.
+
+    Every digest covers the tools too, so prefixes compare equal only under the same tools.
+    """
     rank: tuple[bool, int, int]
     """Which of identical conversations to keep: valid, then latest ``start_ns``, then last."""
 
     @property
     def signature(self) -> str:
-        return self.prefixes[-1] if self.prefixes else ""
+        return self.prefixes[-1] if self.prefixes else self.empty
 
     @property
     def valid(self) -> bool:
@@ -163,11 +172,8 @@ def _candidate(conversation: Conversation, arrival: int) -> _Candidate:
     row_id = f"{source.trace_id}:{source.span_id}"
     result = _convert(conversation, row_id)
     start_ns = source.start_ns if source.start_ns is not None else -1
-    return _Candidate(
-        result,
-        _prefix_digests(conversation),
-        (result.row is not None, start_ns, arrival),
-    )
+    empty, prefixes = _prefix_digests(conversation)
+    return _Candidate(result, empty, prefixes, (result.row is not None, start_ns, arrival))
 
 
 def _convert(conversation: Conversation, row_id: str) -> ConversionResult:
@@ -197,9 +203,9 @@ def _collapse(candidates: list[_Candidate]) -> list[_Candidate]:
         kept = best.get(candidate.signature)
         if kept is None or candidate.rank > kept.rank:
             best[candidate.signature] = candidate
-    # Every strict prefix of a valid row (the empty one too): a conversation that ends at
-    # one is contained in that row.
-    contained = {digest for c in candidates if c.valid for digest in ("", *c.prefixes[:-1])}
+    # Every strict prefix of a valid row (the empty one too), under its tools: a
+    # conversation that ends at one is contained in that row.
+    contained = {digest for c in candidates if c.valid for digest in (c.empty, *c.prefixes[:-1])}
     survivors = [
         candidate
         for candidate in candidates
@@ -211,9 +217,9 @@ def _collapse(candidates: list[_Candidate]) -> list[_Candidate]:
 def _with_collapsed_reasoning(kept: _Candidate, candidates: list[_Candidate]) -> _Candidate:
     """``kept`` with the reasoning of the valid rows collapsed into it, where it has none.
 
-    A row collapsed into ``kept`` ends at one of its prefixes, so its messages compare equal
-    to the first messages of ``kept`` (reasoning takes no part in the comparison) and a
-    message index names the same turn in both.
+    A row collapsed into ``kept`` ends at one of its prefixes, so it has the same tools and
+    its messages compare equal to the first messages of ``kept`` (reasoning takes no part in
+    the comparison), and a message index names the same turn in both.
     """
     row = kept.result.row
     if row is None:
@@ -241,14 +247,31 @@ def _with_collapsed_reasoning(kept: _Candidate, candidates: list[_Candidate]) ->
     return replace(kept, result=ConversionResult(row=row.model_copy(update={"messages": messages})))
 
 
-def _prefix_digests(conversation: Conversation) -> tuple[str, ...]:
-    """A running digest over the messages' comparable parts, one per message."""
+def _prefix_digests(conversation: Conversation) -> tuple[str, tuple[str, ...]]:
+    """The digest of the tools, and a running digest over the messages' comparable parts
+    seeded with it, one per message."""
     digests: list[str] = []
     running = hashlib.sha256()
+    tools = comparable_tools(conversation.tools)
+    running.update(hashlib.sha256(tools.encode("utf-8", "surrogatepass")).digest())
+    empty = running.copy().hexdigest()
     for part in comparable_messages(conversation.messages):
         running.update(hashlib.sha256(part.encode("utf-8", "surrogatepass")).digest())
         digests.append(running.copy().hexdigest())
-    return tuple(digests)
+    return empty, tuple(digests)
+
+
+def comparable_tools(tools: Iterable[Mapping[str, Any]]) -> str:
+    """What a conversation's tool definitions compare by when conversations are matched.
+
+    ``tools`` are canonical tool dicts (a row's tools as ``model_dump`` gives them work too),
+    compared as JSON with sorted keys, in the order given. Two conversations are matched
+    (one a duplicate or a prefix of the other) only when their tools compare equal.
+    """
+    # Not canonical_json: a schema is kept as given and may hold anything.
+    return json.dumps(
+        list(tools), sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=repr
+    )
 
 
 def comparable_messages(messages: Iterable[Mapping[str, Any]]) -> list[str]:

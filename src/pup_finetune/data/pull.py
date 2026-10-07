@@ -62,6 +62,7 @@ from pup_finetune.data.split import SplitParams
 from pup_finetune.data.trajectories import (
     ConversionStats,
     comparable_messages,
+    comparable_tools,
     rows_from_spans,
 )
 from pup_finetune.datadog.pup import Pup
@@ -497,30 +498,34 @@ def _fill_reasoning(stored: TrainingRow, row: TrainingRow) -> TrainingRow | None
 class _Containers:
     """Rows that may contain another one, by trace, compared as conversion compares them.
 
-    A row contains another when its messages start with the other's, by
+    A row contains another when it has the same tools and its messages start with the
+    other's, by :func:`~pup_finetune.data.trajectories.comparable_tools` and
     :func:`~pup_finetune.data.trajectories.comparable_messages`: canonical tool call
     arguments, and each tool message by the position of the call it answers, so retirement
     and conversion agree on which conversations are one.
     """
 
     def __init__(self, rows: Iterable[TrainingRow]) -> None:
-        self._by_trace: dict[str | None, list[tuple[TrainingRow, list[str]]]] = {}
+        self._by_trace: dict[str | None, list[tuple[TrainingRow, str, list[str]]]] = {}
         for row in rows:
-            self._by_trace.setdefault(row.source.trace_id, []).append((row, _comparable(row)))
+            tools, parts = _comparable(row)
+            self._by_trace.setdefault(row.source.trace_id, []).append((row, tools, parts))
 
     def find(self, row: TrainingRow) -> TrainingRow | None:
-        """The first row in ``row``'s trace, other than ``row``, whose messages start with its."""
-        parts = _comparable(row)
-        for other, other_parts in self._by_trace.get(row.source.trace_id, ()):
+        """The first row in ``row``'s trace, other than ``row``, with its tools and whose
+        messages start with its."""
+        tools, parts = _comparable(row)
+        for other, other_tools, other_parts in self._by_trace.get(row.source.trace_id, ()):
             # A part depends only on its message and the ones before it, so the parts of
             # a prefix are a prefix of the parts.
-            if other.id != row.id and other_parts[: len(parts)] == parts:
+            if other.id != row.id and other_tools == tools and other_parts[: len(parts)] == parts:
                 return other
         return None
 
 
-def _comparable(row: TrainingRow) -> list[str]:
-    return comparable_messages(message.model_dump() for message in row.messages)
+def _comparable(row: TrainingRow) -> tuple[str, list[str]]:
+    tools = comparable_tools(tool.model_dump() for tool in row.tools)
+    return tools, comparable_messages(message.model_dump() for message in row.messages)
 
 
 def resolve_window(options: PullOptions, dataset: DatasetDir, clock: Clock) -> PullOptions:

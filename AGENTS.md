@@ -149,8 +149,8 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   `--max-candidates` (`SpanQuery.max_spans` caps export items, readable or not); a re-run that reads
   further retires a stored row its trace now shows to be a prefix of a longer conversation
   (`retirements`, `contained_conversation`), and one with lower limits does not add such a row
-  back (`contained`); both compare messages as conversion collapses them
-  (`comparable_messages` in `trajectories.py`). With `--reasoning preserve`, a stored row a
+  back (`contained`); both compare tools and messages as conversion collapses them
+  (`comparable_tools` and `comparable_messages` in `trajectories.py`). With `--reasoning preserve`, a stored row a
   re-run reads more reasoning for is updated in place, never losing reasoning it has
   (`reasoning_updates`, `DatasetDir.add(updated=...)`), and a stored row that update makes
   repeat another stored row is retired as `duplicate_conversation` (`repeat_retirements`).
