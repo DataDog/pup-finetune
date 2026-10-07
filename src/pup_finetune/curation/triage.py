@@ -24,11 +24,15 @@ row content, rubric and judge it was cast for.
 
 **Frozen settings.** The rubric's hash and the judges are recorded in ``triage.json`` when a
 triage first runs. Once votes exist, other ones are an error, unless ``reset`` discards the
-votes (and the recorded settings) first.
+votes (and the recorded settings) first. The check is made when planning and again under the dataset's lock before
+anything is written, so a triage planned while another one ran stops instead of mixing the
+votes of two rubrics.
 
 **Labels.** Decided rows are labeled through :func:`~pup_finetune.curation.labels.apply_labels`
-with ``by="judge"``. Rows whose decision in force came from the agent or a person are not
-reviewed: their label is never overwritten. A label cannot be withdrawn, so a judge label
+with ``by="judge"``, under the same lock as the voting. Rows whose decision in force came
+from the agent or a person are not reviewed, and the labels are read again just before the
+judge labels are recorded, so one written after planning is never overwritten either: that
+row is skipped. A label cannot be withdrawn, so a judge label
 that the current votes do not back (cast under a rubric ``reset`` discarded, on a row outside
 this ``max_rows`` sample, or on a row left undecided) is reported as stale
 (:meth:`TriagePlan.stale_labels`), and the triage is not complete while any remains.
@@ -425,22 +429,9 @@ def plan_triage(
     """
     dataset.settings()  # A UsageError when this is not a dataset directory.
     settings = _settings(criteria, judges)
-    settings_path = dataset.path / SETTINGS_FILE
     stored_votes = read_votes(dataset.path / JUDGMENTS_FILE)
-    if not reset and stored_votes and settings_path.exists():
-        stored = read_json(settings_path)
-        if canonical_json(stored) != canonical_json(settings):
-            changed = sorted(
-                key
-                for key in set(stored) | set(settings)
-                if canonical_json(stored.get(key)) != canonical_json(settings.get(key))
-            )
-            raise StateError(
-                f"{dataset.path} holds {len(stored_votes)} triage votes cast under other "
-                f"settings ({', '.join(changed)} changed)",
-                hint="keep the same --rubric, --rule and --judges to resume, use a new dataset "
-                "directory, or pass --reset-triage to discard the votes",
-            )
+    if not reset:
+        _check_frozen(dataset, settings, len(stored_votes))
     labels = dataset.labels()
     reviewable: list[TrainingRow] = []
     judge_labels: dict[str, Label] = {}
@@ -479,6 +470,28 @@ def plan_triage(
     )
 
 
+def _check_frozen(dataset: DatasetDir, settings: Mapping[str, Any], votes: int) -> None:
+    """Raise :class:`StateError` when ``votes`` stored votes exist under other settings than
+    ``settings`` (see the module docstring)."""
+    settings_path = dataset.path / SETTINGS_FILE
+    if not votes or not settings_path.exists():
+        return
+    stored = read_json(settings_path)
+    if canonical_json(stored) == canonical_json(settings):
+        return
+    changed = sorted(
+        key
+        for key in set(stored) | set(settings)
+        if canonical_json(stored.get(key)) != canonical_json(settings.get(key))
+    )
+    raise StateError(
+        f"{dataset.path} holds {votes} triage votes cast under other settings "
+        f"({', '.join(changed)} changed)",
+        hint="keep the same --rubric, --rule and --judges to resume, use a new dataset "
+        "directory, or pass --reset-triage to discard the votes",
+    )
+
+
 # --- running ------------------------------------------------------------------------------
 
 
@@ -506,6 +519,8 @@ class TriageReport:
     stale_labels: tuple[str, ...] = ()
     """Rows whose judge label the current votes do not back (see
     :meth:`TriagePlan.stale_labels`)."""
+    skipped_labeled: int = 0
+    """Decided rows not labeled because the agent or a person labeled them after planning."""
 
     @property
     def complete(self) -> bool:
@@ -560,8 +575,12 @@ def run_triage(
 ) -> TriageReport:
     """Make every pending judge call of ``plan`` and label the decided rows.
 
-    Holds the dataset's directory lock while voting; each vote is appended to
-    ``judgments.jsonl`` as it arrives. A rejected API key stops the triage (the votes so far
+    Holds the dataset's directory lock while voting and labeling; each vote is appended to
+    ``judgments.jsonl`` as it arrives. Under the lock, before anything is written, the frozen
+    settings are checked again (unless ``plan.reset``): :class:`StateError` when votes now
+    exist under other settings, or the stored votes changed since planning (plan again). A
+    row the agent or a person labeled since planning keeps that label and is skipped
+    (:attr:`TriageReport.skipped_labeled`). A rejected API key stops the triage (the votes so far
     are kept); any other failed call is reported and retried on the next run. Ctrl-C stops
     it the same way: the calls in flight are abandoned and the votes so far are kept.
     """
@@ -578,6 +597,7 @@ def run_triage(
             votes_path.unlink(missing_ok=True)
             settings_path.unlink(missing_ok=True)
         else:
+            _check_unchanged(plan)
             _repair_torn_tail(votes_path)
         atomic_write_json(settings_path, plan.settings)
         pool = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="triage")
@@ -613,13 +633,29 @@ def run_triage(
                     progress(f"triage: {cast + len(failures)} of {len(pending)} judge calls done")
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
-    decisions = tuple(decide(row.id, plan.votes.get(row.id, {}), plan.judges) for row in plan.rows)
-    labels = [
-        Label(id=d.row_id, keep=d.keep, reason=d.reason, by="judge", at=now())
-        for d in decisions
-        if d.keep is not None
-    ]
-    report = apply_labels(dataset, labels) if labels else None
+        # Labels written since planning (by the agent or a person) win over the judges'.
+        current = dataset.labels()
+        relabeled = {
+            row.id
+            for row in plan.rows
+            if (label := current.get(row.id)) is not None and label.by != "judge"
+        }
+        plan.judge_labels = {
+            row_id: label
+            for row_id, label in plan.judge_labels.items()
+            if (now_label := current.get(row_id)) is not None and now_label.by == "judge"
+        }
+        decisions = tuple(
+            decide(row.id, plan.votes.get(row.id, {}), plan.judges)
+            for row in plan.rows
+            if row.id not in relabeled
+        )
+        labels = [
+            Label(id=d.row_id, keep=d.keep, reason=d.reason, by="judge", at=now())
+            for d in decisions
+            if d.keep is not None
+        ]
+        report = apply_labels(dataset, labels, locked=True) if labels else None
     return TriageReport(
         calls_made=cast + len(failures),
         votes_cast=cast,
@@ -627,7 +663,22 @@ def run_triage(
         decisions=decisions,
         labels=report,
         stale_labels=tuple(plan.stale_labels(judged=True)),
+        skipped_labeled=len(relabeled),
     )
+
+
+def _check_unchanged(plan: TriagePlan) -> None:
+    """Under the lock: the frozen settings still match, and no vote was stored since
+    ``plan`` was made (another triage ran in between); :class:`StateError` otherwise."""
+    dataset = plan.dataset
+    votes = len(read_votes(dataset.path / JUDGMENTS_FILE))
+    _check_frozen(dataset, plan.settings, votes)
+    if votes != plan.stored_votes:
+        raise StateError(
+            f"the triage votes of {dataset.path} changed since this triage was planned "
+            f"({plan.stored_votes} then, {votes} now): another triage ran meanwhile",
+            hint="run the triage again, to plan it from the votes stored now",
+        )
 
 
 def _repair_torn_tail(path: Path) -> None:

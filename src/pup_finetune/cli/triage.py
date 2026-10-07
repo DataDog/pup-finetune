@@ -162,7 +162,7 @@ def triage_rows(
         "dataset_dir": str(dataset.path.resolve()),
         "status": "complete" if complete else "incomplete",
         "rows_reviewed": len(plan.rows),
-        "rows_skipped_labeled": plan.skipped_labeled,
+        "rows_skipped_labeled": plan.skipped_labeled + report.skipped_labeled,
         "kept": counts["keep"],
         "dropped": counts["drop"],
         "undecided": counts["undecided"],

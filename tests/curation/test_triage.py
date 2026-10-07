@@ -398,6 +398,49 @@ def test_the_rubric_and_judges_are_frozen_once_votes_exist(tmp_path: Path) -> No
     assert {label.keep for label in dataset.labels().values()} == {False}
 
 
+def test_a_label_written_after_planning_is_kept_and_its_row_skipped(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path, n=3)
+    plan = plan_triage(dataset, RUBRIC, (J1,))
+    assert plan.skipped_labeled == 0
+    # The agent drops a row after the plan was made, before the judges label it.
+    apply_labels(dataset, [Label(id="row-1", keep=False, reason="off topic", by="agent", at=AT)])
+    report = run_triage(plan, FakeCouncil(keep_all))
+    assert report.skipped_labeled == 1
+    assert "row-1" not in {decision.row_id for decision in report.decisions}
+    assert report.complete
+    labels = dataset.labels()
+    assert (labels["row-1"].keep, labels["row-1"].by) == (False, "agent")
+    assert {labels[row_id].by for row_id in ("row-0", "row-2")} == {"judge"}
+
+
+def test_a_triage_run_under_other_settings_meanwhile_stops_this_one(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path, n=2)
+    plan = plan_triage(dataset, RUBRIC, (J1,))
+    other = Criteria.build(None, ["drop everything"])
+    run_triage(plan_triage(dataset, other, (J1,)), FakeCouncil(lambda judge, row_id: False))
+    files = {name: (dataset.path / name).read_bytes() for name in (JUDGMENTS_FILE, SETTINGS_FILE)}
+    labels = dataset.labels()
+    council = FakeCouncil(keep_all)
+    with pytest.raises(StateError, match="other settings") as caught:
+        run_triage(plan, council)
+    assert "--reset-triage" in (caught.value.hint or "")
+    assert council.calls == []
+    assert {name: (dataset.path / name).read_bytes() for name in files} == files
+    assert dataset.labels() == labels
+
+
+def test_votes_stored_since_planning_stop_the_triage(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path, n=2)
+    plan = plan_triage(dataset, RUBRIC, (J1,))
+    run_triage(plan_triage(dataset, RUBRIC, (J1,), max_rows=1), FakeCouncil(keep_all))
+    council = FakeCouncil(keep_all)
+    with pytest.raises(StateError, match="0 then, 1 now"):
+        run_triage(plan, council)
+    assert council.calls == []
+    # Planned again, it reuses that vote.
+    assert len(plan_triage(dataset, RUBRIC, (J1,)).pending) == 1
+
+
 def test_settings_without_votes_can_change(tmp_path: Path) -> None:
     dataset = make_dataset(tmp_path, n=1)
     run_triage(plan_triage(dataset, RUBRIC, (J1,)), FakeCouncil(lambda j, r: outage()))
