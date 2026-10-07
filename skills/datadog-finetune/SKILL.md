@@ -198,8 +198,9 @@ Check:
 - [ ] The user saw the preview's token counts and authorized this training.
 - [ ] Any `resume --confirm` ran only after the user saw its preview and authorized it.
 - [ ] `status` ends in phase `completed` with a `best_epoch` and a `promoted_model`. A
-      `cancelled` run can be deployed (step 7), but `evaluate` refuses it: resume it to
-      `completed` first, with the user's authorization.
+      `cancelled` run with a `best_epoch` and a `promoted_model` can be evaluated (step 6)
+      and deployed (step 7) as is: its best epoch is what both use. Resume it only to train
+      further, with the user's authorization.
 - [ ] The validation loss improved over the first epoch; if it did not, tell the user before
       evaluating.
 
@@ -254,7 +255,8 @@ Check:
 ## End state
 
 - [ ] A dataset directory with reviewed, labeled rows and a `push.json` receipt.
-- [ ] A run directory whose `status` shows `completed` with a `promoted_model`.
+- [ ] A run directory whose `status` shows `completed` (or `cancelled`, with a `best_epoch`)
+      with a `promoted_model`.
 - [ ] An evaluation summary reported with its delta, interval, experiment ids and caveat.
 - [ ] No deployment left running unless the user asked to keep it.
 - [ ] No API key in the chat, the shell history or any file you wrote.
