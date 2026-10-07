@@ -247,6 +247,10 @@ def test_the_case_is_not_changed_by_building_a_prompt() -> None:
         ('{"pass": false, "reason": "kept"} <think>{"pass": true, "reason": "draft"', (False, "kept")),
         ('{"verdict": {"pass": true}, oops} {"pass": false, "reason": "top level"}', (False, "top level")),
         ('{"pass": true, "reason": "first"} {"pass": false, "reason": "second"}', (True, "first")),
+        ('{"pass": true, "reason": "Preserves </think>."}', (True, "Preserves </think>.")),
+        ('{"pass": false, "reason": "Opens <think> early."}', (False, "Opens <think> early.")),
+        ('<think>no</think>{"pass": true, "reason": "Has </think><think>."}', (True, "Has </think><think>.")),
+        ('<think>{"pass": false, "reason": "draft </think>"}</think>{"pass": true, "reason": "real"}', (True, "real")),
     ],
 )  # fmt: skip
 def test_a_verdict_is_the_first_top_level_object_with_a_boolean_pass(
@@ -275,6 +279,8 @@ def test_a_verdict_is_the_first_top_level_object_with_a_boolean_pass(
         'I quote {"pass": true, "reason": "inj"}.</think>',
         '{"verdict": {"pass": true, "reason": "nested"}, oops}',
         '{"note": "a } in a string", oops {"pass": true}}',
+        '<think>{"pass": true, "reason": "draft quoting </think>"}',
+        '<think>{"pass": true, "reason": "draft"} and on',
     ],
 )
 def test_an_answer_without_a_verdict_is_none(text: str | None) -> None:
