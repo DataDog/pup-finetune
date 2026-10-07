@@ -273,8 +273,11 @@ class PublishSettings:
     """What the experiments of one evaluation record, and the pushed dataset they attach to.
 
     ``eval_key`` is a digest of the evaluation's identity: it seeds every span id, and the
-    experiments' descriptions carry it. ``records`` maps each test row id to its dataset
-    record (``input``, ``expected_output``, ``metadata``), as pushed.
+    experiments' descriptions carry it with the create's nonce (:meth:`marker`). The same
+    evaluation into another directory has the same ``eval_key`` but its own nonces, so a
+    lookup for one directory's create never finds another's experiment. ``records`` maps
+    each test row id to its dataset record (``input``, ``expected_output``, ``metadata``),
+    as pushed.
     """
 
     eval_key: str

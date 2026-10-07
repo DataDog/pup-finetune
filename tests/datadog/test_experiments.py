@@ -377,6 +377,31 @@ def test_another_out_dir_never_adopts_a_pending_create_of_the_same_evaluation(
     assert len(api.experiments) == 4  # only its tuned experiment was new
 
 
+def test_a_lost_create_in_a_fresh_out_dir_does_not_adopt_an_earlier_directory_s_experiment(
+    fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
+) -> None:
+    evaluation = Evaluation()
+    earlier = publish(fake, evaluation, tmp_path / "earlier", clock)
+    assert earlier["status"] == "published"
+    earlier_ids = {entry["experiment_id"] for entry in earlier["experiments"].values()}
+    # The same evaluation (so the same eval_key) into a new directory, whose create fails:
+    # the lookup for a create that went through must not find the earlier directory's.
+    api.create_answer = "fail"
+    fresh = publish(fake, evaluation, tmp_path / "fresh", clock)
+    assert fresh["status"] == "failed"
+    assert "may have gone through" in fresh["hint"]
+    assert set(api.experiments) == earlier_ids
+    stored = json.loads((tmp_path / "fresh" / EXPERIMENTS_FILE).read_text())
+    assert set(stored["base"]) == {"pending_nonce", "dataset_id", "requested_at"}
+    # Each directory marks its creates with its own nonce, not one derived from the settings.
+    marks = [api.experiments[i].attributes["description"] for i in sorted(earlier_ids)]
+    assert all(stored["base"]["pending_nonce"] not in mark for mark in marks)
+    api.create_answer = "ok"
+    resumed = publish(fake, evaluation, tmp_path / "fresh", clock)
+    assert resumed["status"] == "published"
+    assert not earlier_ids & {entry["experiment_id"] for entry in resumed["experiments"].values()}
+
+
 def test_a_pending_create_on_another_dataset_is_replaced_with_a_warning(
     fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
 ) -> None:
