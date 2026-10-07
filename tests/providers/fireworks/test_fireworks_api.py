@@ -106,6 +106,25 @@ def test_a_model_without_optional_fields_reads_with_defaults(fake: FakeFireworks
     assert info.supervised_lora_tunable is False
 
 
+def test_get_model_returns_the_record_or_none(fake: FakeFireworksApi) -> None:
+    name = "accounts/synthetic-team/models/ft-synthetic-run"
+    fake.account_models[name] = {"name": name, "createTime": "2026-10-06T12:00:00Z"}
+    with client(fake) as api:
+        assert api.get_model(name) == fake.account_models[name]
+        assert api.get_model("accounts/synthetic-team/models/ft-missing") is None
+    assert [request.url.path for request in fake.requests] == [
+        f"/v1/{name}",
+        "/v1/accounts/synthetic-team/models/ft-missing",
+    ]
+
+
+def test_get_model_still_fails_on_other_errors(fake: FakeFireworksApi) -> None:
+    name = "accounts/synthetic-team/models/ft-synthetic-run"
+    fake.status[f"/v1/{name}"] = 503
+    with client(fake) as api, pytest.raises(ExternalError, match="HTTP 503"):
+        api.get_model(name)
+
+
 def test_list_accounts_returns_account_ids(fake: FakeFireworksApi) -> None:
     fake.accounts.append({"name": "accounts/second-team"})
     fake.accounts.append({"displayName": "no name"})

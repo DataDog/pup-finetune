@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from pup_finetune.providers.base import (
     LoraConfig,
     ModelProfile,
     ProviderCapacityError,
+    TrainingSession,
     TrainSpec,
     TransientError,
 )
@@ -641,6 +643,103 @@ def test_promote_names_the_fireworks_model(
     assert promoted["peftDetails"] == {"baseModel": PROFILE.base_model}
 
 
+def _promotable(session: TrainingSession) -> CheckpointRef:
+    return session.save_sampler_checkpoint("s1s1-ab12", epoch=1, step=1)
+
+
+SINCE = datetime(2026, 10, 6, 12, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("kind", ["connection", "server", "conflict"])
+def test_a_promotion_whose_response_was_lost_adopts_the_model(
+    fw: FakeFireworksTrainingClient, kind: Any
+) -> None:
+    fw.lost_responses.append(kind)
+    with backend_for(fw).open_session(PROFILE, LORA, **SESSION) as session:
+        model = session.promote(_promotable(session), "ft-synthetic-run")
+    assert model.uri == f"accounts/{ACCOUNT}/models/ft-synthetic-run"
+    promotes = [call for call in fw.calls if call[0] == "promote_session_checkpoint"]
+    assert len(promotes) == 1
+
+
+def test_a_failed_promotion_without_a_model_is_raised(fw: FakeFireworksTrainingClient) -> None:
+    fw.fail("promote_session_checkpoint", "conflict")
+    with (
+        backend_for(fw).open_session(PROFILE, LORA, **SESSION) as session,
+        pytest.raises(ExternalError, match="HTTP 409"),
+    ):
+        session.promote(_promotable(session), "ft-synthetic-run")
+    assert fw.promoted == {}
+
+
+def test_a_failed_lookup_after_a_failed_promotion_raises_the_promotion_error(
+    fw: FakeFireworksTrainingClient,
+) -> None:
+    fw.lost_responses.append("connection")
+    with backend_for(fw).open_session(PROFILE, LORA, **SESSION) as session:
+        ckpt = _promotable(session)
+        fw.fail("get_model", "server", after=1)
+        with pytest.raises(TransientError, match="promoting"):
+            session.promote(ckpt, "ft-synthetic-run")
+
+
+def test_an_existing_model_of_this_run_is_adopted_without_promoting(
+    fw: FakeFireworksTrainingClient,
+) -> None:
+    backend = backend_for(fw)
+    fw.now = lambda: SINCE + timedelta(hours=1)
+    with backend.open_session(PROFILE, LORA, **SESSION) as first:
+        first.promote(_promotable(first), "ft-synthetic-run")
+    with backend.open_session(PROFILE, LORA, **SESSION) as later:
+        fw.calls.clear()
+        model = later.promote(_promotable(later), "ft-synthetic-run", adopt_since=SINCE)
+    assert model.uri == f"accounts/{ACCOUNT}/models/ft-synthetic-run"
+    assert not any(call[0] == "promote_session_checkpoint" for call in fw.calls)
+
+
+@pytest.mark.parametrize(
+    ("created", "since", "match"),
+    [
+        (SINCE - timedelta(seconds=1), SINCE, "before this run started"),
+        (SINCE, None, "already exists"),
+        (None, SINCE, "does not say when it was created"),
+    ],
+)
+def test_an_existing_model_that_may_be_another_run_s_is_refused(
+    fw: FakeFireworksTrainingClient,
+    created: datetime | None,
+    since: datetime | None,
+    match: str,
+) -> None:
+    name = f"accounts/{ACCOUNT}/models/ft-synthetic-run"
+    record: dict[str, Any] = {"name": name, "peftDetails": {"baseModel": PROFILE.base_model}}
+    if created is not None:
+        record["createTime"] = created.isoformat()
+    fw.promoted["ft-synthetic-run"] = record
+    with backend_for(fw).open_session(PROFILE, LORA, **SESSION) as session:
+        ckpt = _promotable(session)
+        with pytest.raises(StateError, match=match) as caught:
+            session.promote(ckpt, "ft-synthetic-run", adopt_since=since)
+    assert caught.value.hint
+    assert not any(call[0] == "promote_session_checkpoint" for call in fw.calls)
+
+
+def test_an_existing_model_of_another_base_model_is_refused(
+    fw: FakeFireworksTrainingClient,
+) -> None:
+    name = f"accounts/{ACCOUNT}/models/ft-synthetic-run"
+    fw.promoted["ft-synthetic-run"] = {
+        "name": name,
+        "peftDetails": {"baseModel": "accounts/fireworks/models/other-base"},
+        "createTime": (SINCE + timedelta(hours=1)).isoformat(),
+    }
+    with (
+        backend_for(fw).open_session(PROFILE, LORA, **SESSION) as session,
+        pytest.raises(StateError, match="other-base"),
+    ):
+        session.promote(_promotable(session), "ft-synthetic-run", adopt_since=SINCE)
+
+
 class _NamelessPromotion(FakeFireworksTrainingClient):
     """Fireworks answering a promotion without the model's name."""
 
@@ -905,6 +1004,33 @@ def test_a_run_promotes_its_best_epoch_before_the_session_ends(
     }
     assert result["deployable_checkpoint"]["kind"] == "sampler"
     assert model_id in fw.promoted
+    assert _live(fw) == []
+
+
+def test_a_run_whose_promotion_response_was_lost_adopts_the_model_on_resume(
+    fw: FakeFireworksTrainingClient, renderer: Renderer, tmp_path: Path
+) -> None:
+    run_dir = _new_run(tmp_path / "run", renderer)
+    train_rows, validation_rows = _rows(renderer, 4, "train"), _rows(renderer, 2, "val")
+    # The promotion takes place but its response is lost, and so is the lookup after it.
+    fw.lost_responses.append("connection")
+    fw.fail("get_model", "connection", after=1)
+    with pytest.raises(FinalizeFailed):
+        start_training(
+            _provider(fw), run_dir, train_rows=train_rows, validation_rows=validation_rows
+        )
+    model_id = model_id_for_run(RUN_ID)
+    assert model_id in fw.promoted
+    assert (run_dir.read_result() or {})["promoted_model"] is None
+
+    # Every retry used to promote again and fail on the taken id; it now adopts the model.
+    fw.calls.clear()
+    result = resume_training(
+        _provider(fw), run_dir, train_rows=train_rows, validation_rows=validation_rows
+    )
+    assert result["phase"] == "completed"
+    assert result["promoted_model"]["uri"] == f"accounts/{ACCOUNT}/models/{model_id}"
+    assert not any(call[0] == "promote_session_checkpoint" for call in fw.calls)
     assert _live(fw) == []
 
 

@@ -19,7 +19,9 @@ stopped (completed, early stop, budget, cancel):
   deployable artifact.
 
 Re-creating a sampler checkpoint is a paid save, so when a ``spend_guard`` refuses it the
-promotion fails (and the run stays resumable to retry only the promotion).
+promotion fails (and the run stays resumable to retry only the promotion). A retry passes
+``adopt_since``, so a model an earlier attempt promoted, whose response was lost, is adopted
+rather than promoted again under a taken id.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 
 from pup_finetune.errors import ExternalError, StateError
 from pup_finetune.providers.base import CheckpointRef, TrainingSession
@@ -47,7 +50,9 @@ class Promotion:
     sampler checkpoint is named by ``checkpoint_namer`` (kind ``recreated``), at most
     ``max_checkpoint_name_len`` characters. ``spend_guard``, when given, says why a
     re-creation must not be paid for (e.g. the training budget, reserve included, is spent).
-    The returned result carries ``promoted_model`` (``None`` without promotion) and
+    ``adopt_since`` is when the run started, passed to
+    :meth:`~pup_finetune.providers.base.TrainingSession.promote` so that a model this run
+    already promoted is adopted. The returned result carries ``promoted_model`` (``None`` without promotion) and
     ``deployable_ckpt``.
     """
 
@@ -56,6 +61,7 @@ class Promotion:
     checkpoint_namer: CheckpointNamer
     max_checkpoint_name_len: int
     spend_guard: Callable[[], str | None] | None = None
+    adopt_since: datetime | None = None
 
     def __call__(self, session: TrainingSession, result: TrainResult) -> TrainResult:
         if not self.supports_promotion or result.best_epoch is None:
@@ -63,7 +69,7 @@ class Promotion:
         best = result.best_sampler_ckpt
         if best is None or best.created_in_session != session.session_id:
             best = self._recreate(session, result)
-        model = session.promote(best, self.model_id)
+        model = session.promote(best, self.model_id, adopt_since=self.adopt_since)
         return dataclasses.replace(result, promoted_model=model, deployable_ckpt=best)
 
     def record_deployable(self, result: TrainResult) -> TrainResult:

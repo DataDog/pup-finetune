@@ -277,7 +277,8 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   `create_training_client_from_state_with_optimizer`; `FireworksSession` (the validation loss
   computed from `forward`'s per-token logprobs, checkpoint names checked against the
   17-character limit before saving, `promote` picking the newest promotable sampler row
-  carrying the checkpoint's name (`promotable_row`), sampler checkpoints of an ended session
+  carrying the checkpoint's name (`promotable_row`) and adopting a model this run already
+  promoted whose response was lost (`adopt_since`, the run's start), sampler checkpoints of an ended session
   refused with a hint); and `FireworksSampler` (render, sample greedily to the renderer's stop
   tokens, parse; only sampling is retried, a bounded number of times). Deployment arrives
   later. See `docs/architecture.md`.

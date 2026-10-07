@@ -131,6 +131,15 @@ def test_the_client_resolves_its_account_and_registers_the_key() -> None:
     assert redaction.redact(f"key {API_KEY}") == "key ***"
 
 
+def test_the_client_reads_a_model_over_the_rest_api() -> None:
+    fake = FakeFireworksApi()
+    name = "accounts/my-team/models/ft-synthetic-run"
+    fake.account_models[name] = {"name": name}
+    client = FireworksTrainingClient(key(), account_id="my-team", transport=fake.transport)
+    assert client.get_model(name) == {"name": name}
+    assert client.get_model("accounts/my-team/models/ft-missing") is None
+
+
 def test_an_explicit_account_needs_no_lookup() -> None:
     fake = FakeFireworksApi()
     client = FireworksTrainingClient(key(), account_id="my-team", transport=fake.transport)

@@ -9,7 +9,8 @@
 Everything else in pup-finetune talks to the protocols defined here, never to the SDK:
 
 - :class:`FireworksTraining` is the account: it opens a :class:`TrainingService` (one
-  serverless training session), lists a session's checkpoints and promotes one to a model.
+  serverless training session), lists a session's checkpoints, promotes one to a model and
+  reads a model's record (over the REST API, :class:`~.api.FireworksApi`).
 - :class:`TrainingService` creates the :class:`TrainingRun` (one LoRA adapter being trained,
   fresh or from a saved training checkpoint) and :class:`TokenSampler`\\s for the session.
 - :class:`TrainingRun` takes :class:`~pup_finetune.rendering.tokens.TokenizedExample`\\s and
@@ -399,6 +400,11 @@ class FireworksTraining(Protocol):
         fully matches :data:`~pup_finetune.providers.base.MODEL_ID_PATTERN`. Works only while
         the session that saved the checkpoint is alive. Returns Fireworks' model record.
         """
+        ...
+
+    def get_model(self, model_name: str) -> dict[str, Any] | None:
+        """Fireworks' record of the model ``accounts/<a>/models/<id>``, or ``None`` when there
+        is no such model. A free, read-only call."""
         ...
 
     def close(self) -> None:
@@ -916,7 +922,8 @@ class FireworksTrainingClient:
     """:class:`FireworksTraining` on the Fireworks Training SDK. See the module docstring.
 
     ``account_id`` defaults to :func:`resolve_account_id` (``FIREWORKS_ACCOUNT_ID`` in
-    ``env``, else the key's first account, looked up over ``transport``). It is the id this
+    ``env``, else the key's first account, looked up over ``transport``, which also carries
+    :meth:`get_model`'s REST call). It is the id this
     client records and names sessions with; training itself runs in the key's own account,
     which the SDK resolves from the key (and refuses a key that sees several accounts).
     Building it checks the key's form and registers it for redaction; the SDK loads on the
@@ -938,6 +945,7 @@ class FireworksTrainingClient:
             else resolve_account_id(api_key, env=env, transport=transport)
         )
         self._headers = {CLIENT_SOURCE_HEADER: CLIENT_SOURCE}
+        self._transport = transport
         self._control_plane: _SdkControlPlane | None = None
 
     @property
@@ -988,6 +996,10 @@ class FireworksTrainingClient:
             ),
         )
         return dict(model)
+
+    def get_model(self, model_name: str) -> dict[str, Any] | None:
+        with FireworksApi(SecretStr(self._secret), transport=self._transport) as api:
+            return api.get_model(model_name)
 
     def close(self) -> None:
         control_plane, self._control_plane = self._control_plane, None

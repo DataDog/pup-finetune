@@ -24,7 +24,13 @@ leaves nothing running.
   saved them lives. Names are checked against the 17-character limit before saving, since
   Fireworks only enforces it when promoting.
 - ``promote`` finds the checkpoint in the session's listing, where Fireworks has renamed it
-  (``run-<hex>-<name>-<8 hex>``): the newest promotable sampler row carrying the name.
+  (``run-<hex>-<name>-<8 hex>``): the newest promotable sampler row carrying the name. It
+  first looks the model up: one that already exists is adopted when it can only be this
+  run's (the same base model, created since ``adopt_since``, the run's start), because an
+  earlier attempt's promotion succeeded but its response was lost; any other is refused
+  with a :class:`~pup_finetune.errors.StateError` rather than promoted into a conflict. A
+  promotion that fails in a way that can hide a success (a timeout, a dropped connection, a
+  server error, a conflict) looks the model up again and adopts it when it is there now.
 
 :class:`FireworksSampler` renders the prompt with the profile's renderer, samples greedily up
 to the renderer's stop tokens and parses the completion back into an OpenAI message; one cut
@@ -43,9 +49,10 @@ import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Final, Literal
 
-from pup_finetune.errors import ExternalError, StateError, UsageError
+from pup_finetune.errors import ExternalError, FinetuneError, StateError, UsageError
 from pup_finetune.providers.base import (
     MAX_MODEL_ID_LEN,
     MODEL_ID_PATTERN,
@@ -56,6 +63,8 @@ from pup_finetune.providers.base import (
     ModelProfile,
     ModelRef,
     PendingResult,
+    ProviderAuthError,
+    ProviderCapacityError,
     StepMetrics,
     TransientError,
     is_transient,
@@ -230,6 +239,40 @@ def _model_name(row: CheckpointRow, model_id: str) -> str:
             source=SOURCE,
         )
     return f"accounts/{match.group(1)}/models/{model_id}"
+
+
+def _session_model_name(session_name: str, model_id: str) -> str:
+    """The name ``model_id`` is promoted as from the session ``session_name``: in its account.
+
+    Raises :class:`ExternalError` when the session's resource name names no account.
+    """
+    match = re.fullmatch(r"accounts/([^/]+)/trainingSessions/[^/]+", session_name)
+    if match is None:
+        raise ExternalError(
+            f"the training session {session_name!r} names no account to promote into",
+            source=SOURCE,
+        )
+    return f"accounts/{match.group(1)}/models/{model_id}"
+
+
+def _record_base_model(record: dict[str, Any]) -> str | None:
+    """The base model a Fireworks model record names (a LoRA's ``peftDetails.baseModel``)."""
+    peft = record.get("peftDetails")
+    base = peft.get("baseModel") if isinstance(peft, dict) else None
+    base = base or record.get("baseModel")
+    return base if isinstance(base, str) and base else None
+
+
+def _record_time(record: dict[str, Any]) -> datetime | None:
+    """A Fireworks model record's ``createTime``, or ``None`` when missing or unreadable."""
+    value = record.get("createTime")
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def _checked_model_id(model_id: str) -> str:
@@ -457,17 +500,86 @@ class FireworksSession:
             )
         self._run.load_state(ckpt.uri).result()
 
-    def promote(self, ckpt: CheckpointRef, model_id: str) -> ModelRef:
+    def promote(
+        self, ckpt: CheckpointRef, model_id: str, *, adopt_since: datetime | None = None
+    ) -> ModelRef:
         self._require_open()
         _checked_model_id(model_id)
         session_name = self._live_session_name(ckpt, "promote")
+        expected = _session_model_name(session_name, model_id)
+        existing = self._client.get_model(expected)
+        if existing is not None:
+            # Taken before this call: an earlier attempt's promotion whose response was lost,
+            # or another run's model under the same id; adopt_since tells them apart.
+            return self._adopted(existing, expected, model_id, since=adopt_since, checked=False)
         row = promotable_row(self._client.list_session_checkpoints(session_name), ckpt)
-        model = self._client.promote_session_checkpoint(
-            row.resource_name, output_model_id=model_id, base_model=self._profile.base_model
-        )
+        try:
+            model = self._client.promote_session_checkpoint(
+                row.resource_name, output_model_id=model_id, base_model=self._profile.base_model
+            )
+        except (ProviderAuthError, ProviderCapacityError):
+            raise
+        except ExternalError as exc:
+            # A timeout, a dropped connection, a server error or a conflict can hide a
+            # promotion that took place. The model was absent just before, so one that is
+            # there now is this call's.
+            try:
+                existing = self._client.get_model(expected)
+            except FinetuneError:
+                raise exc from None
+            if existing is None:
+                raise
+            return self._adopted(existing, expected, model_id, since=None, checked=True)
         name = model.get("name")
         if not isinstance(name, str) or not name:
             name = _model_name(row, model_id)
+        return ModelRef(provider=PROVIDER_NAME, model_id=model_id, uri=name)
+
+    def _adopted(
+        self,
+        record: dict[str, Any],
+        expected: str,
+        model_id: str,
+        *,
+        since: datetime | None,
+        checked: bool,
+    ) -> ModelRef:
+        """The :class:`ModelRef` of ``record``, the existing model ``expected``, once it can
+        only be this run's; :class:`StateError` otherwise.
+
+        ``checked`` says the model was absent when this promotion started, so only its base
+        model is compared; otherwise it must also have been created no earlier than
+        ``since``, the run's start.
+        """
+        name = record.get("name")
+        name = name if isinstance(name, str) and name else expected
+        taken = (
+            f"the Fireworks model {name} already exists, so the best checkpoint cannot be "
+            f"promoted to the model id {model_id!r}"
+        )
+        hint = "train a new run under another run id, or delete that model in Fireworks"
+        base = _record_base_model(record)
+        if base is not None and base != self._profile.base_model:
+            raise StateError(
+                f"{taken}: it is a model of {base}, not of {self._profile.base_model}", hint=hint
+            )
+        if not checked:
+            if since is None:
+                raise StateError(taken, hint=hint)
+            created = _record_time(record)
+            if created is None:
+                raise StateError(
+                    f"{taken}, and Fireworks does not say when it was created, so it cannot "
+                    "be told apart from another run's",
+                    hint=hint,
+                )
+            if created < since:
+                raise StateError(
+                    f"{taken}: it was created at {created.isoformat()}, before this run "
+                    f"started at {since.isoformat()}",
+                    hint=hint,
+                )
+        _warn(f"adopting the Fireworks model {name}, which this run already promoted")
         return ModelRef(provider=PROVIDER_NAME, model_id=model_id, uri=name)
 
     def sampler(self, ckpt: CheckpointRef | None) -> FireworksSampler:

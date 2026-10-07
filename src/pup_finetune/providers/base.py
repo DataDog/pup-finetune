@@ -19,6 +19,7 @@ import re
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol, Self, runtime_checkable
 
 from pydantic import (
@@ -402,7 +403,9 @@ class TrainingSession(Protocol):
         """Replace the session's weights with ``ckpt``'s (e.g. the best epoch's)."""
         ...
 
-    def promote(self, ckpt: CheckpointRef, model_id: str) -> ModelRef:
+    def promote(
+        self, ckpt: CheckpointRef, model_id: str, *, adopt_since: datetime | None = None
+    ) -> ModelRef:
         """Turn a sampler checkpoint into a deployable model named ``model_id``.
 
         Only on a backend with :attr:`TrainingBackend.supports_promotion`. ``model_id``
@@ -410,6 +413,12 @@ class TrainingSession(Protocol):
         with a letter, at most :data:`MAX_MODEL_ID_LEN` characters), which every provider
         accepts. The returned :class:`ModelRef` carries ``model_id`` as given and the
         provider's fully qualified name for the model as ``uri``.
+
+        A promotion can succeed on the provider while its response is lost, and a retry then
+        finds ``model_id`` taken. ``adopt_since`` (when the run started) lets a provider that
+        can look models up return such a model instead: one named ``model_id``, of the same
+        base model, created no earlier than ``adopt_since``, so it is this run's and not an
+        earlier run's that used the same id. A provider that cannot tell ignores it.
         """
         ...
 

@@ -39,6 +39,7 @@ import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, NoReturn
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
@@ -737,7 +738,11 @@ class FakeSession:
             state = _State.from_ref(ckpt)
         self._state.trained = state.trained
 
-    def promote(self, ckpt: CheckpointRef, model_id: str) -> ModelRef:
+    def promote(
+        self, ckpt: CheckpointRef, model_id: str, *, adopt_since: datetime | None = None
+    ) -> ModelRef:
+        # The fake never refuses a model id it promoted before, so it has nothing to adopt.
+        del adopt_since
         self._require_open()
         if not self._backend.supports_promotion:
             raise UsageError("this fake backend is configured without promotion")

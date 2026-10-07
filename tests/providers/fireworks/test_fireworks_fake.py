@@ -266,6 +266,7 @@ def _operations(fw: FakeFireworksTrainingClient) -> dict[str, Callable[[], Any]]
         "promote_session_checkpoint": lambda: fw.promote_session_checkpoint(
             row.resource_name, "my-run", BASE_MODEL
         ),
+        "get_model": lambda: fw.get_model(f"accounts/{fw.account_id}/models/my-run"),
         "forward_backward": lambda: run.forward_backward(EXAMPLES).result(),
         "forward": lambda: run.forward(EXAMPLES).result(),
         "optim_step": lambda: run.optim_step(ADAM).result(),

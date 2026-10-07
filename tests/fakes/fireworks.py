@@ -32,6 +32,10 @@ What it mimics:
   per-token loss is ``loss_at(steps)``, which falls with each optimizer step that applied
   gradients, and is restored with the weights when a run resumes from a checkpoint.
 - Sampling returns :attr:`FakeFireworksTrainingClient.sample_tokens`.
+- A promoted model is kept, with a ``createTime`` from ``now``, and read back by
+  ``get_model``; promoting to a model id that exists fails with HTTP 409.
+  :attr:`FakeFireworksTrainingClient.lost_responses` makes a promotion take place and then
+  fail, as when its response is lost.
 
 Failures are injected per operation with :meth:`FakeFireworksTrainingClient.fail`, as raw
 SDK-shaped errors mapped by the real :func:`fireworks_error`, so they arrive as the wrapper
@@ -80,7 +84,9 @@ ACCOUNT = "synthetic-team"
 BASE_MODEL = "accounts/fireworks/models/qwen3p8-27b"
 DEFAULT_SAMPLE_TOKENS: tuple[int, ...] = (101, 102, 103, 248046)
 
-FailureKind = Literal["capacity", "rate_limit", "auth", "server", "connection", "bad_request"]
+FailureKind = Literal[
+    "capacity", "rate_limit", "auth", "server", "connection", "bad_request", "conflict"
+]
 OPERATIONS: frozenset[str] = frozenset(
     {
         "service",
@@ -89,6 +95,7 @@ OPERATIONS: frozenset[str] = frozenset(
         "create_sampling_client",
         "list_session_checkpoints",
         "promote_session_checkpoint",
+        "get_model",
         "forward_backward",
         "forward",
         "optim_step",
@@ -131,6 +138,7 @@ _FAILURES: dict[str, Callable[[], Exception]] = {
     "rate_limit": lambda: FakeSdkError("too many requests", status_code=429),
     "connection": lambda: APIConnectionError("Connection error."),
     "bad_request": lambda: FakeSdkError("invalid request", status_code=400),
+    "conflict": lambda: FakeSdkError("already exists", status_code=409),
 }
 
 
@@ -425,9 +433,17 @@ class FakeFireworksTrainingClient:
     """The Fireworks Training API in memory. See the module docstring."""
 
     def __init__(
-        self, *, account_id: str = ACCOUNT, sample_tokens: Sequence[int] = DEFAULT_SAMPLE_TOKENS
+        self,
+        *,
+        account_id: str = ACCOUNT,
+        sample_tokens: Sequence[int] = DEFAULT_SAMPLE_TOKENS,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._account_id = account_id
+        self.now = now
+        """Stamps a promoted model's ``createTime``."""
+        self.lost_responses: list[FailureKind] = []
+        """Failures raised by the next promotions after they took place: a lost response."""
         self.sample_tokens: tuple[int, ...] = tuple(sample_tokens)
         self.sessions: dict[str, FakeSessionState] = {}
         self.services: list[FakeService] = []
@@ -435,7 +451,7 @@ class FakeFireworksTrainingClient:
         self.promoted: dict[str, dict[str, Any]] = {}
         self.calls: list[tuple[Any, ...]] = []
         self.closed = False
-        self._failures: dict[str, list[FailureKind]] = {}
+        self._failures: dict[str, list[FailureKind | None]] = {}
         self._stalls: dict[str, list[tuple[Callable[[float | None], None], bool]]] = {}
         self.stalled: list[StalledResult] = []
         self._clock = 0
@@ -444,13 +460,14 @@ class FakeFireworksTrainingClient:
     def account_id(self) -> str:
         return self._account_id
 
-    def fail(self, operation: str, kind: FailureKind, *, times: int = 1) -> None:
-        """Fail the next ``times`` calls of ``operation`` (one of :data:`OPERATIONS`) with ``kind``."""
+    def fail(self, operation: str, kind: FailureKind, *, times: int = 1, after: int = 0) -> None:
+        """Fail the next ``times`` calls of ``operation`` (one of :data:`OPERATIONS`) with
+        ``kind``, once ``after`` calls of it have succeeded."""
         if operation not in OPERATIONS:
             raise ValueError(f"unknown operation {operation!r}; known: {sorted(OPERATIONS)}")
         if kind not in _FAILURES:
             raise ValueError(f"unknown failure kind {kind!r}")
-        self._failures.setdefault(operation, []).extend([kind] * times)
+        self._failures.setdefault(operation, []).extend([None] * after + [kind] * times)
 
     def stall(
         self,
@@ -524,9 +541,23 @@ class FakeFireworksTrainingClient:
             "kind": "HF_PEFT_ADDON",
             "state": "READY",
             "peftDetails": {"baseModel": base_model},
+            "createTime": self.now().isoformat().replace("+00:00", "Z"),
         }
         self.promoted[output_model_id] = model
+        if self.lost_responses:
+            raise fireworks_error(_FAILURES[self.lost_responses.pop(0)](), what=what)
         return dict(model)
+
+    def get_model(self, model_name: str) -> dict[str, Any] | None:
+        self.calls.append(("get_model", model_name))
+        failure = self._pending_failure("get_model", f"looking up the Fireworks model {model_name}")
+        if failure is not None:
+            raise failure
+        prefix = f"accounts/{self._account_id}/models/"
+        if not model_name.startswith(prefix):
+            return None
+        model = self.promoted.get(model_name.removeprefix(prefix))
+        return None if model is None else dict(model)
 
     def close(self) -> None:
         self.closed = True
@@ -549,7 +580,8 @@ class FakeFireworksTrainingClient:
         queue = self._failures.get(operation)
         if not queue:
             return None
-        return fireworks_error(_FAILURES[queue.pop(0)](), what=what)
+        kind = queue.pop(0)
+        return None if kind is None else fireworks_error(_FAILURES[kind](), what=what)
 
     def _save(
         self,

@@ -24,6 +24,7 @@ loop's reports in lists and can ask for cancellation after a number of steps.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import Any
 
 from pup_finetune.providers.base import (
@@ -194,8 +195,10 @@ class RecordingSession:
     def load_weights(self, ckpt: CheckpointRef) -> None:
         self.inner.load_weights(ckpt)
 
-    def promote(self, ckpt: CheckpointRef, model_id: str) -> ModelRef:
-        return self.inner.promote(ckpt, model_id)
+    def promote(
+        self, ckpt: CheckpointRef, model_id: str, *, adopt_since: datetime | None = None
+    ) -> ModelRef:
+        return self.inner.promote(ckpt, model_id, adopt_since=adopt_since)
 
     def sampler(self, ckpt: CheckpointRef | None) -> Sampler:
         return self.inner.sampler(ckpt)

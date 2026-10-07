@@ -6,10 +6,11 @@
 # Copyright 2026-present Datadog, Inc.
 """A fake Fireworks REST API, served through an ``httpx`` transport, with synthetic data.
 
-It answers the two routes the read-only client uses::
+It answers the routes the read-only client uses::
 
     api = FakeFireworksApi()  # qwen3p8-27b READY and tunable; one account
     api.models["qwen3p8-27b"]["state"] = "DEPLOYING"
+    api.account_models["accounts/synthetic-team/models/ft-run"] = {...}  # a tuned model
     api.status["/v1/accounts"] = 503  # answer that route with an HTTP error
     client = FireworksApi(SecretStr(KEY), transport=api.transport)
 
@@ -47,6 +48,8 @@ class FakeFireworksApi:
     def __init__(self, *, api_key: str = API_KEY) -> None:
         self.api_key = api_key
         self.models: dict[str, dict[str, Any]] = {"qwen3p8-27b": copy.deepcopy(QWEN3P8_27B)}
+        self.account_models: dict[str, dict[str, Any]] = {}
+        """Models of other accounts than ``fireworks``, by resource name."""
         self.accounts: list[dict[str, Any]] = [
             {"name": "accounts/synthetic-team", "displayName": "Synthetic team"}
         ]
@@ -70,6 +73,10 @@ class FakeFireworksApi:
             return _json(200, {"accounts": self.accounts, "totalSize": len(self.accounts)})
         if request.method == "GET" and path.startswith(_MODELS_PREFIX):
             model = self.models.get(path.removeprefix(_MODELS_PREFIX))
+            if model is not None:
+                return _json(200, model)
+        if request.method == "GET" and path.startswith("/v1/accounts/"):
+            model = self.account_models.get(path.removeprefix("/v1/"))
             if model is not None:
                 return _json(200, model)
         return _json(404, {"error": {"message": "not found"}})

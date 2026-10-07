@@ -8,7 +8,8 @@
 
 It answers the two questions asked before anything is paid for: what Fireworks says about a
 base model (:meth:`FireworksApi.model_info`, behind preflight) and whether an API key works
-(:meth:`FireworksApi.list_accounts`, behind ``auth login fireworks``).
+(:meth:`FireworksApi.list_accounts`, behind ``auth login fireworks``). It also reads a model's
+record when one may already exist (:meth:`FireworksApi.get_model`, behind promotion).
 
 The key is sent only as a ``Bearer`` header. It is registered for redaction when the client
 is built, and every error message is redacted, so it never reaches output or logs. Failures
@@ -155,6 +156,23 @@ class FireworksApi:
                 source=SOURCE,
             ) from exc
 
+    def get_model(self, model: str) -> dict[str, Any] | None:
+        """Fireworks' record of ``model`` (see :func:`model_path`), or ``None`` when it has none.
+
+        Unlike :meth:`model_info` the record is returned as Fireworks sends it, and a missing
+        model is not an error.
+        """
+        body = self._get(
+            model_path(model), what=f"looking up the Fireworks model {model}", allow_missing=True
+        )
+        if body is None:
+            return None
+        if not isinstance(body, dict):
+            raise ExternalError(
+                f"the Fireworks API returned an unreadable model for {model}", source=SOURCE
+            )
+        return body
+
     def list_accounts(self) -> list[str]:
         """The ids of the accounts the key can use (the first page), e.g. ``["my-team"]``."""
         body = self._get("/v1/accounts", what="listing Fireworks accounts")
@@ -170,7 +188,9 @@ class FireworksApi:
                 ids.append(name.removeprefix("accounts/"))
         return ids
 
-    def _get(self, path: str, *, what: str, missing: str | None = None) -> Any:
+    def _get(
+        self, path: str, *, what: str, missing: str | None = None, allow_missing: bool = False
+    ) -> Any:
         try:
             response = self._client.get(path)
         except httpx.TimeoutException as exc:
@@ -197,6 +217,8 @@ class FireworksApi:
                 source=SOURCE,
                 hint=f"{login_hint(CREDENTIALS)} to a valid key",
             )
+        if status == 404 and allow_missing:
+            return None
         if status == 404 and missing is not None:
             raise UsageError(missing, hint="check the model name and that your account can use it")
         if not response.is_success:
