@@ -11,17 +11,30 @@ the base model, and deploys it. You drive it step by step with the user. Every D
 write goes through Pup and its OAuth login; provider API keys (Fireworks, and Anthropic or
 OpenAI for judges) stay in the environment or the OS keychain.
 
+## Help and results under Pup
+
+- **Help:** run `pup finetune help <command>`, for example `pup finetune help dataset pull`.
+  Under a coding agent, Pup answers `pup finetune <command> --help` with its own help, which
+  never mentions `finetune`.
+- **Results:** Pup wraps each result in its envelope, `{status, data, metadata}`. That
+  `status` is Pup's own and always reads `success`, even for a failure or a preview. Read our
+  fields (`status`, `warnings`, `next_command`, ...) under `data`, and trust the exit code:
+  `0` done, `1` failed, `2` a usage error or a preview awaiting `--confirm`.
+- **Pup's flags** (`--jq`, `--output`) go before `finetune`: `pup --output yaml finetune
+  doctor`. After `finetune` they are refused as unknown options.
+
 ## Rules for every step
 
 1. **Parse the JSON result.** Every `pup finetune` command prints exactly one JSON document on
-   stdout; progress and warnings go to stderr. Read `status`, `warnings`, `hint` and
-   `next_command` from it. A preview's `next_command` (the same command with `--confirm`) and
-   the `status --watch` or `dataset show` that follows a step are exact: run them as written
-   (after the user's authorization when they add `--confirm`) instead of rebuilding them. Some
-   `next_command`s are templates with a placeholder, such as `<DIR>`, `--name ...` or a
-   trailing `...`: fill the placeholder in with a real value (and any file it names, such as
-   `labels.jsonl`, must exist first) before you run it. Exit codes: `0` success, `1` external or runtime failure, `2` usage, validation or a
-   preview that needs `--confirm`.
+   stdout; progress, the warnings and a one-line summary go to stderr (the JSON is the
+   source of truth). Read `status`, `warnings`, `hint`, `next_command` and `next_steps`
+   from it. `next_command` runs exactly as written: run it
+   instead of rebuilding it (after the user's authorization when it ends in `--confirm`). It
+   is `null` when no command can be chosen without the user, for example after a deployment.
+   `next_steps` lists alternatives as `{"command", "why"}`; a step's command may hold a
+   placeholder such as `<NAME>` or `<LABELS_FILE>`. Fill it in with a real value agreed with
+   the user, and write any file it names first. Exit codes: `0` success, `1` external or
+   runtime failure, `2` usage, validation or a preview that needs `--confirm`.
 2. **Preview before you pay or write remotely.** Training, triage, evaluation, dataset pushes,
    deployments and cancels preview by default: they exit `2` with
    `"status": "confirmation_required"`, a `preview` and a `next_command` that adds `--confirm`.
@@ -45,15 +58,16 @@ OpenAI for judges) stay in the environment or the OS keychain.
    `evaluate` send conversation content to a provider: Fireworks for training, generation
    and the default judges, and Anthropic or OpenAI for a judge named `anthropic/<model>` or
    `openai/<model>`. Before the first of them, tell the user what is sent and to whom (the
-   preview's `data_destination` names every provider), and get their consent. A judge on
+   preview's `data_recipients` lists every recipient, the evaluation judge of
+   `train --evaluate` included), and get their consent. A judge on
    another provider is a separate consent: never switch a judge to Anthropic or OpenAI
    without the user asking for it.
-8. **Respect read-only mode.** With `PUP_READ_ONLY` set, remote writes are refused:
-   `train`, `resume` and `evaluate` with `--confirm`, and `dataset push`, `deploy` and
-   `undeploy` even without it (their previews are refused too). The previews of `train`,
-   `resume` and `evaluate`, Datadog reads and local commands still work. `dataset triage`
-   is allowed, since it writes nothing to Datadog, but it still sends rows to the provider.
-   Do not unset `PUP_READ_ONLY` yourself; tell the user.
+8. **Respect read-only mode.** With `PUP_READ_ONLY` set (by `pup --read-only` or the
+   environment), `--confirm` is refused on `train`, `resume`, `evaluate`, `dataset push`,
+   `deploy` and `undeploy`. Their previews still run, carry `read_only`, and have
+   `next_command` null; Datadog reads and local commands still work. `dataset triage` is
+   allowed, since it writes nothing to Datadog, but it still sends rows to the provider.
+   Do not change `PUP_READ_ONLY` yourself; that is the user's call.
 
 ## Step 0: check the setup
 
@@ -109,9 +123,8 @@ pup finetune dataset show <dataset_dir>
 ```
 
 `dataset preview` writes nothing and prints the matching `dataset pull` command with the same
-flags as `next_command`, with a literal `<DIR>` placeholder for the dataset directory: replace
-it with a new directory path before you run it (a shell reads an unreplaced `<DIR>` as a
-redirection). Use `--query` for event search syntax, `--target-count` to cap rows
+flags as `next_command`, into a new directory under `./datasets` named after the ml_app. Use
+`--query` for event search syntax, `--target-count` to cap rows
 and `--max-candidates` to cap spans read. `dataset pull` is read-only on Datadog and resumes
 when rerun with the same flags. A relative `--from` is resolved once and frozen in the
 directory.
@@ -134,7 +147,8 @@ pup finetune dataset label <dataset_dir> --file labels.jsonl
 ```
 
 `labels.jsonl` holds one `{"id": "<row id>", "keep": true|false, "reason": "..."}` per line; a
-reason is required to drop. Pass `--by human` when the user made the decisions. Dropped rows
+reason is required to drop. Record your own decisions and the user's corrections the same way;
+the last label of a row wins, and `dataset triage` never relabels these rows. Dropped rows
 never train and are never pushed.
 
 For larger datasets, use a judge council with a rubric instead. It sends rows to Fireworks
@@ -148,7 +162,9 @@ pup finetune dataset triage <dataset_dir> --rubric rubric.md --max-rows 20 --con
 pup finetune dataset triage <dataset_dir> --rubric rubric.md
 ```
 
-Write the rubric (Task / Keep / Drop / Examples) with the user. When the user (or you, with
+Write the rubric (Task / Keep / Drop / Examples) with the user. A rubric whose Task section
+is still the template's gets a warning, and its `--confirm` is refused (unless
+`--allow-template-rubric`): describe what the agent is for first. When the user (or you, with
 their agreement) has labeled rows with `dataset label`, measure the council against them
 first:
 
@@ -194,15 +210,21 @@ Check:
 ```sh
 pup finetune train --provider fireworks --model qwen3p8-27b --dataset <dataset_dir> --run-dir <run_dir>
 pup finetune train --provider fireworks --model qwen3p8-27b --dataset <dataset_dir> --run-dir <run_dir> --detach --confirm
-pup finetune status <run_dir> --watch
+pup finetune status <run_dir> --watch --timeout 90s
 ```
 
 The preview shows the rendered tokens per split, rows left out (for example
 `exceeds_context`), the tokens per epoch and in total, and where the data goes. Show it to the
 user; training is paid. Cap spend with `--max-train-tokens`, or with `--max-spend-usd` and
-`--hourly-rate-usd`. Always train with `--detach` so the run survives the session, and follow
-it with `status --watch`. The best epoch by validation loss is promoted to a Fireworks model
-before the session ends.
+`--hourly-rate-usd`. Always train with `--detach` so the run survives the session. Follow it
+with `pup finetune status <run_dir> --watch --timeout 90s`, repeated while `phase` is
+`training`, or poll `pup finetune status <run_dir>` every few minutes. Never block on a watch
+without `--timeout`: a run takes hours, longer than a shell call may last. A watch that times
+out exits `0` with `watch_timed_out: true` and the same watch as `next_command`; the run
+keeps training, so it has not finished. `elapsed_seconds` and `approx_eta_seconds` (a rough
+estimate to `max_epochs`: early stopping can end the run sooner, and validation still to come
+can make it later) say how far along it is. The best epoch
+by validation loss is promoted to a Fireworks model before the session ends.
 
 If the run is interrupted (crash, lost network, stale worker), resume it from its last
 checkpoint. A resume bills training again: show the user its preview and run it with
@@ -236,8 +258,9 @@ pup finetune evaluate <run_dir> --confirm
 The preview counts cases, generations and judge calls, and names the judge's provider
 (`judge_provider`, `data_destination`). The default judge is a Fireworks serverless model;
 `--judge-model anthropic/<model>` or `openai/<model>` judges on Anthropic or OpenAI, with
-that provider's key (and, for Anthropic, the `anthropic` extra: `uv sync --extra anthropic`
-or `pip install 'pup-finetune[anthropic]'`). `--confirm` calibrates the judge,
+that provider's key (and, for Anthropic, the `anthropic` extra: `uv sync --all-extras` in a
+checkout, never a bare `uv sync --extra anthropic`, which removes the other extras, or
+`pip install 'pup-finetune[anthropic]'`). `--confirm` calibrates the judge,
 replays every held-out test conversation with the base and the tuned model, and publishes the
 result as two Agent Observability experiments on the pushed dataset. Rerun the same command
 to continue an evaluation that stopped.
@@ -269,8 +292,10 @@ pup finetune undeploy <run_dir> --confirm
 A deployment bills per GPU-second while a replica runs, until it is undeployed (it scales to
 zero when idle). Deploying needs the user's explicit authorization for this deployment; never
 deploy on your own initiative. `deploy --confirm` waits until the deployment serves, sends one
-chat completion as a smoke test and records `deployment.json` in the run directory. Tell the
-user how to undeploy, and undeploy when they are done.
+chat completion as a smoke test and records `deployment.json` in the run directory. Its
+`next_command` is `null`: show the user `usage` (the base URL, the model to request and an
+example `curl` that reads the key from `$FIREWORKS_API_KEY`, never the key itself) and
+`undeploy_command`, and run the undeploy only when they are done.
 
 Check:
 
@@ -297,13 +322,13 @@ Check:
 | Triage reports `too_long` rows | A row is longer than a judge's context window; it was dropped, never truncated | Tell the user; to review such rows, pick judges with a larger context window with them. |
 | `dataset preview` matches no spans | Wrong ml_app, filter or time range | Go back to step 1 and build the filter only from values seen in real spans; widen `--from`. |
 | Most rows are excluded | Spans that cannot train, by code | Read `excluded_by_code` in `dataset show`; `span_error` rows come back only with `--include-errors`, after the user agrees. |
-| `ReadOnlyError`: PUP_READ_ONLY is set | Read-only mode blocks remote writes | Tell the user; only they can unset `PUP_READ_ONLY`. The previews of `train`, `resume` and `evaluate` and local commands still work; `dataset push`, `deploy` and `undeploy` are refused even without `--confirm`. |
+| `ReadOnlyError`: PUP_READ_ONLY is set | Read-only mode blocks remote writes | Tell the user; changing `PUP_READ_ONLY` is their call. Every preview and local command still works; only `--confirm` on a remote write is refused. |
 | A different `--from`, filter or seed is refused | Settings are frozen per directory | Use a new dataset directory. |
 | `ProviderCapacityError` or HTTP 429 | The provider has no capacity right now | Wait and retry later; read the hint for whether anything is still running. |
 | `status` shows `worker.stale` or a run that is not running | The worker died or hung | Read `<run_dir>/worker.log`; `cancel` a live but stale worker, then preview `resume <run_dir>` and run `resume <run_dir> --detach --confirm` after authorization. |
 | `resume` is refused | The run already finished, or it is still running | Check `status`; resume only an `interrupted`, `failed` or `cancelled` run. |
 | `evaluate` fails with an identity mismatch | The evaluation directory holds results for other settings | Evaluate into a new `--out-dir`. |
 | The judge fails calibration | The judge model cannot tell references from corrupted answers | Pick another `--judge-model` with the user; skip calibration only if the user accepts the risk. |
-| The evaluation was not published | The dataset has no push receipt (`push.json`) | Run `dataset push` (step 4) with authorization, then rerun the same `evaluate` command. |
+| The evaluation was not published | The dataset has no push receipt (`push.json`), or the push did not cover the test split | `next_command` is `null`; follow `next_steps`: run `dataset push` (step 4) with authorization, then rerun the evaluation with `--confirm`, which reuses every finished result (a complete evaluation makes no new model calls) and publishes it. |
 | `deploy` times out, or the smoke test fails | The deployment did not serve in time, or did not answer | `deployment.json` records it and it may still bill: run `undeploy <run_dir> --confirm`. A run has one deployment at a time, so deploy again (with a longer `--timeout-minutes`) only after the undeploy and the user's authorization. |
 | `undeploy` refuses: the deployment is not the one the run requested | The create was interrupted before it was confirmed, and the deployment id holds another deployment | Nothing was deleted. Tell the user; never delete that deployment. With their OK, remove `deployment.json` as the error says and deploy with another `--deployment-id`. |

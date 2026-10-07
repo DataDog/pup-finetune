@@ -82,7 +82,7 @@ def test_the_body_has_the_rules_steps_and_debugging_table() -> None:
         "Never ask for API keys in chat",
         "Sending traces to a model provider needs consent",
         "Respect read-only mode",
-        "Do not unset `PUP_READ_ONLY` yourself",
+        "Do not change `PUP_READ_ONLY` yourself",
         "Deploying needs the user's explicit authorization",
         "per GPU-second",
     ],

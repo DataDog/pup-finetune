@@ -178,7 +178,11 @@ def test_a_missing_anthropic_extra_is_a_usage_error_with_the_install_hint(
         with pytest.raises(UsageError, match="'anthropic' package") as info:
             attempt()
         assert info.value.hint == ANTHROPIC_INSTALL_HINT
-        assert "uv sync --extra anthropic" in ANTHROPIC_INSTALL_HINT
+        # uv sync is exact: the hint never offers a bare --extra, which drops the others.
+        assert "`uv sync --all-extras`" in ANTHROPIC_INSTALL_HINT
+        assert "a bare `uv sync --extra anthropic` removes the other extras" in (
+            ANTHROPIC_INSTALL_HINT
+        )
         assert "pip install 'pup-finetune[anthropic]'" in ANTHROPIC_INSTALL_HINT
     with pytest.raises(UsageError, match="'anthropic' package"), open_client(config):
         pass

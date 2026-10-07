@@ -58,6 +58,12 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
     return fake
 
 
+@pytest.fixture(autouse=True)
+def _in_tmp_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run in an empty directory: the preview's pull command names a new one under it."""
+    monkeypatch.chdir(tmp_path)
+
+
 @pytest.fixture
 def use_pup(monkeypatch: pytest.MonkeyPatch) -> UsePup:
     """Make the dataset commands use a given Pup instead of the real one."""
@@ -180,9 +186,11 @@ def test_preview_reports_counts_samples_and_the_pull_command(api: FakeExportApi)
     assert errored["span_id"] == "synthetic-span-0201"
     assert data["stats"]["stopped"] == "exhausted"
     assert data["stats"]["pages_fetched"] == 2
+    # A new directory under ./datasets, and only the flags given (now-7d and now are the
+    # defaults).
     assert data["next_command"] == (
-        "pup finetune dataset pull <DIR> --ml-app synthetic-trip-planner --span-name chat "
-        "--tag env:synthetic --from now-7d --to now"
+        "pup finetune dataset pull ./datasets/synthetic-trip-planner --ml-app "
+        "synthetic-trip-planner --span-name chat --tag env:synthetic"
     )
     assert api.requests[0]["data"]["attributes"]["options"] == {"include_attachments": True}
 
@@ -269,10 +277,8 @@ def test_preview_passes_every_non_default_flag_to_the_pull_command(api: FakeExpo
     data = output_json(preview(*flags))
     assert data["query"]["filter"]["from"] == 1767225600000
     assert data["query"]["filter"]["to"] == NOW_MS - DAY_MS
-    command = data["next_command"]
-    assert command.startswith("pup finetune dataset pull <DIR> ")
-    words = shlex.split(command.replace("<DIR>", "DIR"))
-    assert words[:5] == ["pup", "finetune", "dataset", "pull", "DIR"]
+    words = shlex.split(data["next_command"])
+    assert words[:5] == ["pup", "finetune", "dataset", "pull", "./datasets/synthetic-trip-planner"]
     reparsed = dict(zip(words[5::2], words[6::2], strict=True))
     assert reparsed == {
         "--ml-app": "synthetic-trip-planner",
@@ -285,6 +291,24 @@ def test_preview_passes_every_non_default_flag_to_the_pull_command(api: FakeExpo
         "--validation-fraction": "0.2",
         "--test-fraction": "0.0",
     }
+
+
+def test_preview_names_a_new_directory_for_the_ml_app(api: FakeExportApi, tmp_path: Path) -> None:
+    (tmp_path / "datasets" / "synthetic-trip-planner").mkdir(parents=True)
+    (tmp_path / "datasets" / "synthetic-trip-planner-2").mkdir()
+    data = output_json(preview())
+    assert shlex.split(data["next_command"])[4] == "./datasets/synthetic-trip-planner-3"
+    result = invoke("preview", "--ml-app", " Trip Planner/EU ")
+    assert shlex.split(output_json(result)["next_command"])[4] == "./datasets/trip-planner-eu"
+
+
+def test_preview_s_pull_command_runs_as_written(api: FakeExportApi) -> None:
+    data = output_json(preview("--tag", "env:synthetic", "--target-count", "3"))
+    words = shlex.split(data["next_command"])
+    pulled = invoke(*words[3:])
+    assert pulled.exit_code == 0, pulled.stderr
+    assert output_json(pulled)["dataset_dir"] == str(Path(words[4]).resolve())
+    assert output_json(pulled)["accepted"] == 3
 
 
 def test_max_candidates_equal_to_every_span_is_not_a_short_read(api: FakeExportApi) -> None:
@@ -440,7 +464,8 @@ def test_pull_end_to_end(api: FakeExportApi, tmp_path: Path) -> None:
     assert data["pull"]["matched_spans"] == 10
     assert data["pull"]["added"] == FIXTURE_ROWS
     assert data["pull"]["pages_fetched"] == 2
-    assert data["next_command"] == f"pup finetune dataset show {shlex.quote(str(target))}"
+    assert data["next_command"] == f"pup finetune dataset sample {shlex.quote(str(target))} --n 20"
+    assert data["next_steps"][0]["command"].endswith(" --file <LABELS_FILE>")
     assert "review" in data["hint"]
 
     settings = json.loads((target / "settings.json").read_text())

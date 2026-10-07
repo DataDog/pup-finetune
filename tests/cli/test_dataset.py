@@ -76,7 +76,13 @@ def test_import_emits_counts_and_next_command(tmp_path: Path) -> None:
         "unchanged": 0,
         "excluded": 0,
     }
-    assert data["next_command"] == f"pup finetune dataset show {shlex.quote(str(target))}"
+    # Nothing is labeled yet: review a sample; labeling is a step, with a file to write first.
+    quoted = shlex.quote(str(target))
+    assert data["next_command"] == f"pup finetune dataset sample {quoted} --n 20"
+    assert [step["command"] for step in data["next_steps"]] == [
+        f"pup finetune dataset label {quoted} --file <LABELS_FILE>",
+        f"pup finetune dataset triage {quoted} --rubric <RUBRIC_FILE> --max-rows 20",
+    ]
 
 
 def test_import_records_invalid_rows_with_their_codes(tmp_path: Path, mixed_file: Path) -> None:
@@ -247,7 +253,7 @@ def test_show_emits_summary_settings_samples_and_next_command(
     assert data["sample_row_ids"] == {split: ids[:5] for split, ids in expected.items()}
     for split, ids in data["sample_row_ids"].items():
         assert len(ids) == min(5, imported["splits"][split])
-    assert data["next_command"] == f"pup finetune train --dataset {shlex.quote(str(target))} ..."
+    assert data["next_command"] == f"pup finetune dataset sample {shlex.quote(str(target))} --n 20"
 
 
 def test_show_on_a_missing_directory_is_a_usage_error(tmp_path: Path) -> None:
@@ -260,9 +266,11 @@ def test_show_on_a_missing_directory_is_a_usage_error(tmp_path: Path) -> None:
 def test_show_quotes_paths_in_next_command(tmp_path: Path) -> None:
     target = tmp_path / "my dataset"
     imported = output_json(import_rows(target, TOOL_USE))
-    assert imported["next_command"].endswith(shlex.quote(str(target)))
+    assert f" {shlex.quote(str(target))} " in imported["next_command"]
     shown = output_json(invoke("show", str(target)))
     assert shlex.split(shown["next_command"])[4] == str(target)
+    for step in shown["next_steps"]:
+        assert f" {shlex.quote(str(target))} " in step["command"]
 
 
 def test_dataset_without_a_subcommand_shows_help() -> None:

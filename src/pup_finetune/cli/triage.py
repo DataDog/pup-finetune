@@ -26,9 +26,13 @@ from typing import TYPE_CHECKING, Annotated, Any
 import typer
 
 from pup_finetune.cli._common import CommandResult, run_command
+from pup_finetune.cli._dirs import require_dataset_dir
+from pup_finetune.cli._flags import require_alone, require_enablers
+from pup_finetune.cli.dataset import dataset_next
 from pup_finetune.curation import triage
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.errors import UsageError, require_confirm
+from pup_finetune.next_steps import PROGRAM, step
 from pup_finetune.output import info
 
 if TYPE_CHECKING:
@@ -56,8 +60,8 @@ def _check_available(judges: Sequence[str]) -> None:
         check_available(triage.judge_config(spec))
 
 
-def _q(value: object) -> str:
-    return shlex.quote(str(value))
+TRIAGE_NEEDS: dict[str, str] = {"allow_template_rubric": "rubric"}
+"""``dataset triage``'s options that need another one (see :mod:`pup_finetune.cli._flags`)."""
 
 
 @run_command
@@ -132,29 +136,50 @@ def triage_rows(
         bool,
         typer.Option(
             "--print-template",
-            help="Print a rubric template (Task / Keep / Drop / Examples) and exit.",
+            help="Print a rubric template (Task / Keep / Drop / Examples) and exit; it takes "
+            "nothing else.",
+        ),
+    ] = False,
+    allow_template_rubric: Annotated[
+        bool,
+        typer.Option(
+            "--allow-template-rubric",
+            help="With --rubric: judge by a rubric whose Task section is still the "
+            "template's (refused otherwise: the judges would not know what the agent is for).",
         ),
     ] = False,
     confirm: Annotated[
         bool, typer.Option("--confirm", help="Run the judges (paid); without it, only preview.")
     ] = False,
 ) -> dict[str, Any] | CommandResult | None:
+    require_alone("print_template")
+    require_enablers(TRIAGE_NEEDS)
     if print_template:
         typer.echo(triage.rubric_template(), nl=False)
         return None
     if directory is None:
         raise UsageError("pass the dataset directory DIR", hint="or --print-template")
     rules = rule or []
-    criteria = triage.Criteria.build(
-        rubric.read_text(encoding="utf-8") if rubric is not None else None, rules
+    rubric_text = rubric.read_text(encoding="utf-8") if rubric is not None else None
+    criteria = triage.Criteria.build(rubric_text, rules)
+    template_task = None
+    if rubric is not None and rubric_text is not None and triage.has_template_task(rubric_text):
+        template_task = (
+            f"{rubric} still has the template's Task text; describe what the agent is for first"
+        )
+    template_hint = (
+        f"edit the Task section of {rubric}, or pass --allow-template-rubric to judge by it anyway"
     )
+    if template_task is not None and confirm and not allow_template_rubric:
+        raise UsageError(template_task, hint=template_hint)
     council = triage.parse_judges(judges)
     _check_available(council)
+    require_dataset_dir(directory)
     dataset = DatasetDir(directory)
     plan = triage.plan_triage(
         dataset, criteria, council, max_rows=max_rows, reset=reset_triage, agreement=agreement
     )
-    args = ["pup", "finetune", "dataset", "triage", str(directory)]
+    args = [*PROGRAM, "dataset", "triage", str(directory)]
     if rubric is not None:
         args += ["--rubric", str(rubric)]
     for text in rules:
@@ -165,12 +190,25 @@ def triage_rows(
         args += ["--concurrency", str(concurrency)]
     if agreement:
         args.append("--agreement")
+    if allow_template_rubric and template_task is not None:
+        args.append("--allow-template-rubric")
     every_row = list(args)
     if max_rows is not None:
         args += ["--max-rows", str(max_rows)]
     rerun = [*args, "--reset-triage"] if reset_triage else args
     preview = plan.preview()
-    require_confirm(confirm, preview, shlex.join([*rerun, "--confirm"]))
+    refused = None
+    if template_task is not None:
+        preview["warnings"] = [*preview.get("warnings", []), template_task]
+        if not allow_template_rubric:
+            refused = "--confirm is refused while the rubric's Task section is the template's"
+    require_confirm(
+        confirm,
+        preview,
+        shlex.join([*rerun, "--confirm"]),
+        refused=refused,
+        hint=template_hint if refused is not None else None,
+    )
     info(
         f"triage: {len(plan.pending)} judge calls for {len(plan.rows)} rows "
         f"({plan.votes_reused} votes reused)"
@@ -213,14 +251,8 @@ def triage_rows(
         },
         "judgments_file": str((dataset.path / triage.JUDGMENTS_FILE).resolve()),
     }
-    sample = f"pup finetune dataset sample {_q(directory)}"
     if complete:
-        data["next_command"] = sample
-        data["next_commands"] = [
-            sample,
-            f"pup finetune dataset push {_q(directory)} --name ...",
-            f"pup finetune train --dataset {_q(directory)} ...",
-        ]
+        data.update(dataset_next(dataset, directory, accepted=summary["accepted"]))
         data["hint"] = (
             "review a sample of the decisions with the user (`dataset sample "
             "--include-dropped`) before training; correct any with `dataset label`"
@@ -281,9 +313,12 @@ def _agreement_result(
         )
         return CommandResult(data, exit_code=1)
     data["next_command"] = shlex.join([*without, "--confirm"])
-    data["next_commands"] = [
-        shlex.join([*without, "--confirm"]),
-        shlex.join([*args, "--reset-triage", "--confirm"]),
+    data["next_steps"] = [
+        step(
+            shlex.join([*args, "--reset-triage"]),
+            "after sharpening the rubric, measure again: --reset-triage discards every vote "
+            "(it previews first)",
+        )
     ]
     data["hint"] = (
         "go through the disagreements with the user: where the labels are right, sharpen the "

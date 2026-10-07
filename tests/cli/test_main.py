@@ -21,7 +21,13 @@ import typer
 from typer.testing import CliRunner
 
 from pup_finetune import __version__, cli, redaction
-from pup_finetune.cli._common import CommandResult, get_runtime, run_app, run_command
+from pup_finetune.cli._common import (
+    CommandResult,
+    get_runtime,
+    invoked_command_path,
+    run_app,
+    run_command,
+)
 from pup_finetune.errors import (
     ConfirmRequired,
     ExternalError,
@@ -227,6 +233,63 @@ def test_under_pup_confirm_preview_goes_through_pup_format(fake_pup_on_path: Pat
     preview = json.loads(result.stdout.removeprefix(prefix))
     assert preview["status"] == "confirmation_required"
     assert "--confirm" in result.stderr
+
+
+@pytest.fixture
+def pup_format_args(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Put a fake `pup` on PATH that echoes its stdin and writes its arguments to a file."""
+    args_file = tmp_path / "args"
+    fake_pup = tmp_path / "pup"
+    fake_pup.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > "{args_file}"\ncat\n')
+    fake_pup.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}")
+    return args_file
+
+
+def test_under_pup_the_envelope_names_the_command_and_its_next_command(
+    pup_format_args: Path,
+) -> None:
+    result = runner.invoke(make_app(), ["ok", "--name", "x"], env={"PUP_OUTPUT": "json"})
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["name"] == "x"
+    assert pup_format_args.read_text().splitlines() == [
+        "format",
+        "--command=finetune ok",
+        "--next-action=pup finetune show x",
+    ]
+
+
+def test_under_pup_the_envelope_names_a_nested_command(pup_format_args: Path) -> None:
+    app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
+    group = typer.Typer()
+    app.add_typer(group, name="dataset")
+
+    @app.callback()
+    def root() -> None:
+        pass
+
+    @group.command()
+    @run_command
+    def show() -> Mapping[str, Any]:
+        return {"rows": 1}
+
+    result = runner.invoke(app, ["dataset", "show"], env={"PUP_OUTPUT": "json"})
+    assert result.exit_code == 0, result.stderr
+    assert pup_format_args.read_text().splitlines() == ["format", "--command=finetune dataset show"]
+
+
+def test_there_is_no_command_path_outside_a_command() -> None:
+    assert invoked_command_path() is None
+
+
+def test_under_pup_a_preview_names_its_confirm_as_the_next_action(pup_format_args: Path) -> None:
+    result = runner.invoke(make_app(), ["push"], env={"PUP_OUTPUT": "json"})
+    assert result.exit_code == 2
+    assert pup_format_args.read_text().splitlines() == [
+        "format",
+        "--command=finetune push",
+        "--next-action=pup finetune push --confirm",
+    ]
 
 
 def test_under_pup_without_pup_prints_json_with_one_note(

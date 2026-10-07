@@ -31,7 +31,7 @@ SHELL_STOP = {">", ">>", "|", "&&", "||", ";", "#", "\\"}
 
 # Flags of other tools the docs use: `pup llm-obs spans search` and `get-content` (as
 # `pup --no-agent llm-obs spans search --help` lists them in pup 1.10.7), `pup extension
-# install` and `uv sync`.
+# install`, pup's own global flags and `uv sync`.
 OTHER_TOOL_FLAGS = {
     "--ml-app",
     "--span-kind",
@@ -47,6 +47,10 @@ OTHER_TOOL_FLAGS = {
     "--field",
     "--local",
     "--link",
+    "--description",
+    "--jq",
+    "--output",
+    "--read-only",
     "--all-extras",
     "--extra",
 }
@@ -118,6 +122,14 @@ def every_option_name() -> set[str]:
     return names | option_names(command)
 
 
+def help_problems(snippet: str, words: list[str]) -> list[str]:
+    """What is wrong with ``pup finetune help <words>``: it must name a command, nothing more."""
+    _, path, rest = resolve(words)
+    if not path or rest:
+        return [f"{snippet!r}: pup finetune help names no command {words}"]
+    return []
+
+
 @pytest.mark.parametrize("doc", DOCS, ids=lambda path: path.name)
 def test_every_command_and_its_flags_exist(doc: Path) -> None:
     problems: list[str] = []
@@ -134,6 +146,9 @@ def test_every_command_and_its_flags_exist(doc: Path) -> None:
                 problems.append(f"{snippet!r}: {name} has no subcommand {rest[:1]}")
                 continue
             seen += 1
+            if path == ["help"] and rest and not rest[0].startswith("<"):
+                problems += help_problems(snippet, rest)
+                continue
             known = option_names(command)
             for word in rest:
                 flag = word.split("=", 1)[0]
@@ -163,6 +178,9 @@ def test_the_checker_catches_a_wrong_command_and_flag() -> None:
     assert list(invocations("pup finetune dataset triage --print-template > rubric.md")) == [
         ["dataset", "triage", "--print-template"]
     ]
+    assert help_problems("s", ["dataset", "pull"]) == []
+    assert help_problems("s", ["dataset", "nope"]) != []
+    assert help_problems("s", ["nope"]) != []
 
 
 def test_the_readme_names_the_minimum_pup_version() -> None:

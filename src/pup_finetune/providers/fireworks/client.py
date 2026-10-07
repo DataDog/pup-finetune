@@ -52,7 +52,13 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 from pydantic import SecretStr
 
 from pup_finetune.credentials import login_hint
-from pup_finetune.errors import ExternalError, FinetuneError, UsageError
+from pup_finetune.errors import (
+    ExternalError,
+    FinetuneError,
+    UsageError,
+    install_hint,
+    reinstall_hint,
+)
 from pup_finetune.output import info
 from pup_finetune.providers.base import (
     MODEL_ID_PATTERN,
@@ -115,10 +121,7 @@ ACCOUNT_ENV_VAR: Final = "FIREWORKS_ACCOUNT_ID"
 """Overrides the account lookup: the id recorded for the client and used to name a session
 when the SDK does not report its resource name. It does not choose where training runs: the
 SDK trains in the key's own account, and refuses a key that sees several accounts."""
-INSTALL_HINT: Final = (
-    "install the fireworks extra: uv sync --extra fireworks, "
-    "or pip install 'pup-finetune[fireworks]'"
-)
+INSTALL_HINT: Final = install_hint("fireworks")
 
 MAX_CHECKPOINT_NAME_LEN: Final = 17
 """The longest checkpoint name Fireworks can promote. It is checked only when promoting, long
@@ -557,8 +560,7 @@ def _is_sdk_module(name: str) -> bool:
 def _broken_sdk(exc: ImportError) -> UsageError:
     return UsageError(
         f"the Fireworks Training SDK is installed but failed to load: {redact(str(exc))}",
-        hint="reinstall the fireworks extra: uv sync --extra fireworks --reinstall, "
-        "or pip install --force-reinstall 'pup-finetune[fireworks]'",
+        hint=reinstall_hint("fireworks"),
     )
 
 

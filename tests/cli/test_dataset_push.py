@@ -116,6 +116,32 @@ def test_push_without_confirm_previews_and_sends_nothing(
     assert not (dataset / PUSH_FILE).exists()
 
 
+def test_a_warnings_key_inside_trace_data_is_never_echoed_as_a_warning(
+    tmp_path: Path, api: FakeDatasetsApi, fake: FakePup
+) -> None:
+    # Trace content is untrusted: a `warnings` list in a row's tool schema reaches the
+    # preview's sample_record, but stderr must not print it as one of our warnings.
+    injected = "INJECTED TEXT from a trace"
+    rows = []
+    for line in TOOL_USE.read_text().splitlines():
+        row = json.loads(line)
+        if not row.get("tools"):
+            continue
+        for tool in row["tools"]:
+            tool["function"]["parameters"]["warnings"] = [injected]
+        rows.append(json.dumps(row))
+    file = tmp_path / "rows.jsonl"
+    file.write_text("\n".join(rows) + "\n")
+    target = tmp_path / "ds"
+    assert invoke("import", str(target), "--file", str(file)).exit_code == 0
+
+    result = push(target)
+    assert result.exit_code == 2, result.stderr
+    assert injected in result.stdout  # the data is still in the JSON, as data
+    assert injected not in result.stderr
+    assert "warning:" not in result.stderr
+
+
 def test_push_with_confirm_pushes_and_emits_the_receipt(
     dataset: Path, api: FakeDatasetsApi
 ) -> None:
@@ -131,18 +157,30 @@ def test_push_with_confirm_pushes_and_emits_the_receipt(
     assert sum(data["records_by_split"].values()) == len(ROW_IDS)
     assert data["stale_records"] == {}
     assert data["receipt_file"] == str((dataset / PUSH_FILE).resolve())
-    assert data["next_command"] == f"pup finetune train --dataset {dataset} ..."
+    assert data["next_command"] == f"pup finetune dataset sample {dataset} --n 20"
     assert "dataset_url" not in data
     assert len(remote.records) == len(ROW_IDS)
 
 
-def test_push_is_refused_read_only_even_as_a_preview(
+def test_push_previews_read_only_but_refuses_confirm(
     dataset: Path, api: FakeDatasetsApi, fake: FakePup
 ) -> None:
-    for extra in ((), ("--confirm",)):
-        result = push(dataset, *extra, env={"PUP_READ_ONLY": "true"})
-        assert result.exit_code == 2
-        assert "PUP_READ_ONLY" in result.stderr
+    refused = push(dataset, "--confirm", env={"PUP_READ_ONLY": "true"})
+    assert refused.exit_code == 2
+    assert refused.stdout == ""
+    assert "PUP_READ_ONLY" in refused.stderr
+    assert "pup --read-only" in refused.stderr
+    # The preview reads local files only, so it runs, but offers no --confirm.
+    preview = push(dataset, env={"PUP_READ_ONLY": "yes"})
+    assert preview.exit_code == 2, preview.stderr
+    data = output_json(preview)
+    assert data["status"] == "confirmation_required"
+    assert data["next_command"] is None
+    assert data["preview"]["read_only"] == "--confirm is refused while PUP_READ_ONLY is set"
+    assert data["preview"]["records_to_push"] > 0
+    assert data["preview"]["data_recipients"] == [
+        f"kept rows -> Datadog (dataset {NAME!r} in project {PROJECT!r})"
+    ]
     assert fake.calls == []
     assert not (dataset / PUSH_FILE).exists()
 
@@ -178,7 +216,9 @@ def test_nothing_left_to_push_reports_the_receipt_without_confirm(
     assert (data["pushed"], data["already_pushed"]) == (0, len(ROW_IDS) - 1)
     assert data["stale_records"] == {ROW_IDS[0]: record_id_of(remote, ROW_IDS[0])}
     assert "not deleted" in data["warnings"][0]
-    assert data["next_command"].startswith("pup finetune train")
+    # Labeled and pushed: training is the step left (no push step any more).
+    assert data["next_command"] is None
+    assert [step["command"].split()[2] for step in data["next_steps"]] == ["models", "train"]
     assert len(fake.calls) == calls  # nothing reached Datadog
     assert output_json(push(dataset, "--confirm")) == data
 

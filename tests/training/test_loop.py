@@ -193,6 +193,30 @@ def test_step_events_number_steps_over_the_run() -> None:
     assert [e["epoch"] for e in events if e["type"] == "epoch"] == [1, 2]
 
 
+def test_the_loop_records_its_steps_per_epoch_and_the_most_steps_before_training() -> None:
+    state = MemoryState()
+    with recording(FakeOptions()) as session:
+        train(session, make_spec(max_epochs=3, batch_size=2), rows=row_examples(5), state=state)
+    assert state.plans == [(3, 9)]  # ceil(5 / 2) steps an epoch, for at most 3 epochs
+
+
+def test_the_loop_reports_its_plan_first_for_progress_lines() -> None:
+    events: list[dict[str, Any]] = []
+    spec = make_spec(max_epochs=3, batch_size=2, checkpoint_every_minutes=20)
+    with recording(FakeOptions()) as session:
+        train(session, spec, rows=row_examples(5), on_event=events.append)
+    assert events[0] == {
+        "type": "plan",
+        "steps_per_epoch": 3,
+        "max_steps": 9,
+        "max_epochs": 3,
+        "checkpoint_every_minutes": 20.0,
+        "epoch": 1,
+        "step": 0,
+    }
+    assert [event for event in events if event["type"] == "plan"] == [events[0]]
+
+
 def test_the_step_loss_is_a_token_mean_over_its_microbatches() -> None:
     rows = row_examples(2)
     budget = rows[0].num_tokens  # one row per microbatch

@@ -36,10 +36,11 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.push import (
+    PUSH_FILE,
     PushState,
     dataset_record,
     push_path,
@@ -48,7 +49,9 @@ from pup_finetune.data.push import (
 )
 from pup_finetune.datadog.pup import Pup
 from pup_finetune.errors import FinetuneError, StateError, UsageError
+from pup_finetune.next_steps import PROGRAM, command, step, template
 from pup_finetune.output import info
+from pup_finetune.progress import EvaluationProgress
 from pup_finetune.providers import get_provider
 from pup_finetune.providers.base import (
     CheckpointRef,
@@ -73,6 +76,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CALIBRATION_CASES",
+    "CALIBRATION_FAILURES_SHOWN",
     "DEFAULT_CONCURRENCY",
     "DEFAULT_MAX_CASES_PER_TRAJECTORY",
     "DEFAULT_MAX_TOKENS",
@@ -87,6 +91,7 @@ __all__ = [
     "Publishing",
     "StandaloneEvaluation",
     "calibration_failed",
+    "calibration_line",
     "cancel_on_signals",
     "evaluation_exit_code",
     "finished_result",
@@ -137,7 +142,19 @@ def _q(value: object) -> str:
     return shlex.quote(str(value))
 
 
+def _free_dir(path: Path) -> Path:
+    """``path`` with ``-2``, ``-3``, ... added: the first that does not exist or is empty."""
+    n = 2
+    while True:
+        candidate = path.with_name(f"{path.name}-{n}")
+        if not candidate.exists() or (candidate.is_dir() and not any(candidate.iterdir())):
+            return candidate
+        n += 1
+
+
 # --- publishing ---------------------------------------------------------------------------
+
+Remedy = Literal["push", "push_again", "new_dataset"]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -155,10 +172,45 @@ class Publishing:
     push: PushState | None = None
     records: dict[str, dict[str, Any]] = field(default_factory=dict)
     skipped: str | None = None
+    remedy: Remedy | None = None
+    """What makes a skipped evaluation publishable: ``push`` the dataset (it never was),
+    ``push_again`` to the same dataset (the last push did not finish, or left test rows
+    out), or push to a ``new_dataset`` (test rows changed after they were pushed)."""
 
     @property
     def ready(self) -> bool:
         return self.enabled and self.skipped is None and self.push is not None
+
+    def push_step(self) -> dict[str, str] | None:
+        """The ``dataset push`` that makes a skipped evaluation publishable, as a step."""
+        push = self.push
+        if self.remedy == "push_again" and push is not None:
+            return step(
+                command(
+                    "dataset",
+                    "push",
+                    self.dataset_dir,
+                    "--name",
+                    push.dataset_name,
+                    "--project",
+                    push.project,
+                ),
+                "finish pushing the dataset's rows, the test split's included, to the dataset "
+                "the evaluation publishes on (a remote write; it previews first)",
+            )
+        if self.remedy == "push":
+            why = "push the dataset, so the evaluation can be published as experiments on it"
+        elif self.remedy == "new_dataset":
+            why = (
+                f"after moving {PUSH_FILE} aside, push the rows as they are now to a new "
+                "dataset, since test rows changed after they were pushed"
+            )
+        else:
+            return None
+        return step(
+            template("dataset", "push", self.dataset_dir, "--name", "<NAME>"),
+            f"{why} (a remote write; it previews first)",
+        )
 
     def status(self) -> dict[str, Any]:
         """What a preview, or a result without a publication, says of publishing."""
@@ -175,38 +227,51 @@ class Publishing:
         }
 
 
-def _push_hint(dataset_dir: Path) -> str:
+NO_PUBLISH: Final = "--no-publish"
+"""``evaluate``'s flag that skips publishing; ``train --evaluate`` spells it
+:data:`EVAL_NO_PUBLISH`."""
+EVAL_NO_PUBLISH: Final = "--eval-no-publish"
+
+
+def _push_hint(dataset_dir: Path, no_publish: str) -> str:
     return (
-        f"run `pup finetune dataset push {_q(dataset_dir)} --name NAME` first to publish the "
-        "evaluation as experiments, or pass --no-publish"
+        f"run `pup finetune dataset push {_q(dataset_dir)} --name <NAME>` to publish the "
+        f"evaluation as experiments, or pass {no_publish}"
     )
 
 
-def plan_publishing(dataset: DatasetDir, *, enabled: bool) -> Publishing:
+def plan_publishing(
+    dataset: DatasetDir, *, enabled: bool, no_publish: str = NO_PUBLISH
+) -> Publishing:
     """What publishing an evaluation of ``dataset``'s test split needs, read from local files.
 
-    Raises :class:`StateError` when ``push.json`` cannot be read, with a hint to push again
-    or pass ``--no-publish``.
+    ``no_publish`` is how the command running it spells the flag that skips publishing
+    (:data:`NO_PUBLISH`, or :data:`EVAL_NO_PUBLISH` for ``train --evaluate``), which the
+    reasons and hints name. Raises :class:`StateError` when ``push.json`` cannot be read,
+    with a hint to push again or pass that flag.
     """
     if not enabled:
         return Publishing(enabled=False, dataset_dir=dataset.path)
     try:
         push = read_push_state(dataset)
     except StateError as exc:
-        raise StateError(exc.message, hint=_push_hint(dataset.path)) from exc
+        raise StateError(exc.message, hint=_push_hint(dataset.path, no_publish)) from exc
     if push is None:
         return Publishing(
             enabled=True,
             dataset_dir=dataset.path,
             skipped=f"{dataset.path} has no push receipt ({push_path(dataset).name}), and "
-            "experiments attach to the pushed dataset; " + _push_hint(dataset.path),
+            "experiments attach to the pushed dataset; " + _push_hint(dataset.path, no_publish),
+            remedy="push",
         )
     if push.dataset_id is None or push.in_flight:
         return Publishing(
             enabled=True,
             dataset_dir=dataset.path,
             push=push,
-            skipped=f"the last push of {dataset.path} did not finish; " + _push_hint(dataset.path),
+            skipped=f"the last push of {dataset.path} did not finish; "
+            + _push_hint(dataset.path, no_publish),
+            remedy="push_again",
         )
     rows = dataset.rows_for_split("test")
     missing = [row.id for row in rows if row.id not in push.record_ids]
@@ -216,7 +281,8 @@ def plan_publishing(dataset: DatasetDir, *, enabled: bool) -> Publishing:
             dataset_dir=dataset.path,
             push=push,
             skipped=f"{len(missing)} test row(s) of {dataset.path} were not pushed (e.g. "
-            f"{missing[0]}); " + _push_hint(dataset.path),
+            f"{missing[0]}); " + _push_hint(dataset.path, no_publish),
+            remedy="push_again",
         )
     records = {row.id: dataset_record(row, "test") for row in rows}
     # A row pushed by a receipt that predates digests has none and counts as unchanged.
@@ -233,7 +299,8 @@ def plan_publishing(dataset: DatasetDir, *, enabled: bool) -> Publishing:
             skipped=f"{len(changed)} test row(s) of {dataset.path} changed after they were "
             f"pushed (e.g. {changed[0]}), so their remote records hold the content pushed "
             f"earlier, not what is evaluated; to publish, move {push_path(dataset).name} aside "
-            "and push to a new --name, or pass --no-publish",
+            f"and push to a new --name, or pass {no_publish}",
+            remedy="new_dataset",
         )
     return Publishing(enabled=True, dataset_dir=dataset.path, push=push, records=records)
 
@@ -269,6 +336,9 @@ class EvalPlan:
     settings: EvalSettings
     publishing: Publishing
     runtime: Runtime
+    standalone: bool = False
+    """``evaluate`` (not ``train --evaluate``): its commands repeat only the settings that
+    differ from the defaults, and the judge (see :meth:`evaluate_command`)."""
 
     @property
     def out_dir(self) -> Path:
@@ -295,29 +365,53 @@ class EvalPlan:
         return 3 * min(CALIBRATION_CASES, len(self.cases))
 
     def evaluate_command(self) -> list[str]:
-        """The standalone ``evaluate`` command for this plan, every setting pinned."""
-        settings = self.settings
-        words = ["pup", "finetune", "evaluate", str(self.run_dir)]
-        words += ["--out-dir", str(settings.out_dir)]
-        words += ["--max-cases-per-trajectory", str(settings.max_cases_per_trajectory)]
+        """The standalone ``evaluate`` command for this plan, without ``--confirm``.
+
+        For ``evaluate`` it repeats the settings that differ from the defaults, and always
+        the judge, which decides where the data goes; the identity check of
+        ``evaluation.json`` refuses any drift. After ``train --evaluate`` every setting is
+        pinned, so the command continues the evaluation that run started.
+        """
+        settings, defaults = self.settings, EvalSettings(out_dir=self.default_out_dir)
+        pin = not self.standalone
+        words = [*PROGRAM, "evaluate", str(self.run_dir)]
+        if pin or settings.out_dir != defaults.out_dir:
+            words += ["--out-dir", str(settings.out_dir)]
+        if pin or settings.max_cases_per_trajectory != defaults.max_cases_per_trajectory:
+            words += ["--max-cases-per-trajectory", str(settings.max_cases_per_trajectory)]
         words += ["--judge-model", self.judge.spec]
-        words += ["--concurrency", str(settings.concurrency)]
-        words += ["--max-tokens", str(settings.max_tokens), "--seed", str(settings.seed)]
+        if pin or settings.concurrency != defaults.concurrency:
+            words += ["--concurrency", str(settings.concurrency)]
+        if pin or settings.max_tokens != defaults.max_tokens:
+            words += ["--max-tokens", str(settings.max_tokens)]
+        if pin or settings.seed != defaults.seed:
+            words += ["--seed", str(settings.seed)]
         if settings.skip_calibration:
             words.append("--skip-calibration")
         if not settings.publish:
             words.append("--no-publish")
         return words
 
+    @property
+    def default_out_dir(self) -> Path:
+        return self.run_dir / DEFAULT_OUT_DIR_NAME
+
     def train_flags(self) -> list[str]:
-        """The ``train --evaluate`` flags for this plan, every setting pinned."""
-        settings = self.settings
-        words = ["--evaluate", "--eval-out-dir", str(settings.out_dir)]
-        words += ["--eval-max-cases-per-trajectory", str(settings.max_cases_per_trajectory)]
+        """The ``train --evaluate`` flags for this plan: ``--evaluate``, the judge, and the
+        settings that differ from the defaults."""
+        settings, defaults = self.settings, EvalSettings(out_dir=self.default_out_dir)
+        words = ["--evaluate"]
+        if settings.out_dir != defaults.out_dir:
+            words += ["--eval-out-dir", str(settings.out_dir)]
+        if settings.max_cases_per_trajectory != defaults.max_cases_per_trajectory:
+            words += ["--eval-max-cases-per-trajectory", str(settings.max_cases_per_trajectory)]
         words += ["--eval-judge-model", self.judge.spec]
-        words += ["--eval-concurrency", str(settings.concurrency)]
-        words += ["--eval-max-tokens", str(settings.max_tokens)]
-        words += ["--eval-seed", str(settings.seed)]
+        if settings.concurrency != defaults.concurrency:
+            words += ["--eval-concurrency", str(settings.concurrency)]
+        if settings.max_tokens != defaults.max_tokens:
+            words += ["--eval-max-tokens", str(settings.max_tokens)]
+        if settings.seed != defaults.seed:
+            words += ["--eval-seed", str(settings.seed)]
         if settings.skip_calibration:
             words.append("--eval-skip-calibration")
         if not settings.publish:
@@ -357,11 +451,32 @@ class EvalPlan:
             progress=info,
         )
 
+    def recipients(self) -> list[str]:
+        """Who receives the evaluation's data, one entry per kind of data, e.g.
+        ``test split -> fireworks (generate), Anthropic api.anthropic.com (judge)``."""
+        from pup_finetune.judges import recipient
+
+        judge = (
+            "the offline fake judge (judge; nothing is sent)"
+            if self.judge.provider == "fake"
+            else f"{recipient(self.judge)} (judge)"
+        )
+        found = [f"test split -> {self.provider} (generate), {judge}"]
+        if self.publishing.ready:
+            found.append("test cases, generated answers and scores -> Datadog (experiments)")
+        return found
+
     def preview(self, *, tuned: str, tuned_checkpoint: CheckpointRef | None) -> dict[str, Any]:
         """The calls the evaluation makes. With ``tuned_checkpoint`` (a standalone run), what
         ``--out-dir`` already holds under the same settings is left out of the counts."""
         from pup_finetune.datadog.experiments import experiment_name
-        from pup_finetune.evaluation.replay import CAVEAT, TARGETS, EvalDir, remaining_work
+        from pup_finetune.evaluation.replay import (
+            CAVEAT,
+            TARGETS,
+            EvalDir,
+            identity_changes,
+            remaining_work,
+        )
 
         settings = self.settings
         warnings: list[str] = []
@@ -371,14 +486,19 @@ class EvalPlan:
         eval_dir = EvalDir(self.out_dir)
         stored = eval_dir.stored_identity() if tuned_checkpoint is not None else None
         if tuned_checkpoint is not None and stored is not None:
-            if finite_json(self.identity(tuned_checkpoint)) == stored:
+            wanted = finite_json(self.identity(tuned_checkpoint))
+            if wanted == stored:
                 remaining = remaining_work(eval_dir, self.cases)
                 if (eval_dir.read_calibration() or {}).get("ok"):
                     calibration = 0
             elif eval_dir.has_work():
-                warnings.append(
-                    f"{self.out_dir} holds an evaluation with other settings: "
-                    "--confirm will refuse; pass a new --out-dir"
+                # --confirm would refuse (EvalDir.check_identity): fail now, never offer it.
+                raise UsageError(
+                    f"{self.out_dir} holds an evaluation with other settings (changed: "
+                    f"{', '.join(identity_changes(stored, wanted))}), so its results cannot be "
+                    "reused",
+                    hint="evaluate into a new directory: pass --out-dir "
+                    f"{_q(_free_dir(self.out_dir))}",
                 )
         from pup_finetune.judges import destination as judge_destination
 
@@ -422,6 +542,7 @@ class EvalPlan:
             "max_cases_per_trajectory": settings.max_cases_per_trajectory,
             "publish": publish,
             "data_destination": destination,
+            "data_recipients": self.recipients(),
             "caveat": CAVEAT,
             "warnings": warnings,
         }
@@ -464,8 +585,12 @@ def plan_evaluation(
     rendering: Mapping[str, Any],
     settings: EvalSettings,
     promoted: ModelRef | None = None,
+    no_publish: str = NO_PUBLISH,
 ) -> EvalPlan:
     """The evaluation of the run ``run_id`` on ``dataset``'s test split.
+
+    ``no_publish`` is the running command's flag that skips publishing (see
+    :func:`plan_publishing`).
 
     Raises :class:`UsageError` when the test split has no case, or the judge is the model
     being trained or the run's tuned model: the model id the run promotes to
@@ -501,7 +626,7 @@ def plan_evaluation(
         cases=cases,
         judge=judge_config,
         settings=settings,
-        publishing=plan_publishing(dataset, enabled=settings.publish),
+        publishing=plan_publishing(dataset, enabled=settings.publish, no_publish=no_publish),
         runtime=runtime,
     )
 
@@ -532,12 +657,49 @@ def run_calibration(plan: EvalPlan, client: ChatCompleter) -> dict[str, Any] | N
         return None
     info(f"calibrating the judge {plan.judge.spec} on {plan.calibration_calls() // 3} cases")
     report = calibrate(plan.cases, client, plan.judge, n=CALIBRATION_CASES).to_json()
+    info(calibration_line(report))
     return {**report, "judge": plan.judge.identity()}
+
+
+CALIBRATION_FAILURES_SHOWN: Final = 3
+"""How many failed checks the calibration line names."""
+
+
+def calibration_line(report: Mapping[str, Any]) -> str:
+    """The progress line for a calibration report: ``calibration passed: 12/12 checks``, or
+    the checks it failed."""
+    checks = [check for check in report.get("checks") or [] if isinstance(check, Mapping)]
+    passed = sum(1 for check in checks if check.get("ok"))
+    if report.get("ok"):
+        return f"calibration passed: {passed}/{len(checks)} checks"
+    failed = []
+    for check in checks:
+        if check.get("ok"):
+            continue
+        judgment = check.get("judgment") or {}
+        if judgment.get("error"):
+            got = f"no verdict ({judgment['error']})"
+        else:
+            got = "judged pass" if judgment.get("passed") else "judged fail"
+        what = check.get("kind")
+        if check.get("corruption"):
+            what = f"{what} ({check['corruption']})"
+        failed.append(f"{check.get('case_id')} {what}: {got}")
+    shown = "; ".join(failed[:CALIBRATION_FAILURES_SHOWN])
+    if len(failed) > CALIBRATION_FAILURES_SHOWN:
+        shown += f"; +{len(failed) - CALIBRATION_FAILURES_SHOWN} more"
+    return f"calibration failed: {passed}/{len(checks)} checks passed; {shown}"
 
 
 def calibration_failed(plan: EvalPlan, report: Mapping[str, Any]) -> dict[str, Any]:
     """What a command emits (exit 1, see :func:`evaluation_exit_code`) when calibration
-    failed: nothing was generated."""
+    failed: nothing was generated. The hint spells the flags of the command that ran it
+    (``evaluate``, or ``train --evaluate``, whose calibration runs before training)."""
+    judge_flag, skip_flag = (
+        ("--judge-model", "--skip-calibration")
+        if plan.standalone
+        else ("--eval-judge-model", "--eval-skip-calibration")
+    )
     return {
         "status": "calibration_failed",
         "run_id": plan.run_id,
@@ -545,8 +707,8 @@ def calibration_failed(plan: EvalPlan, report: Mapping[str, Any]) -> dict[str, A
         "judge_model": plan.judge.spec,
         "calibration": dict(report),
         "hint": "the judge passed a corrupted action or failed a recorded one, so its "
-        "verdicts cannot be trusted; pick another --judge-model (or rerun with "
-        "--skip-calibration to evaluate anyway)",
+        f"verdicts cannot be trusted; pick another {judge_flag} (or rerun with "
+        f"{skip_flag} to evaluate anyway)",
     }
 
 
@@ -613,13 +775,6 @@ def cancel_on_signals(cancel: threading.Event) -> contextlib.AbstractContextMana
     return _cancel_on_signals(cancel, _CANCEL_NOTICE)
 
 
-def _progress(event: Mapping[str, Any]) -> None:
-    info(
-        f"evaluated {event['done']}/{event['total']}: {event['target']} {event['case_id']} "
-        f"({event['status']})"
-    )
-
-
 def replay(
     plan: EvalPlan,
     samplers: Mapping[str, Sampler],
@@ -647,7 +802,7 @@ def replay(
         concurrency=plan.settings.concurrency,
         cancel=cancel,
         publisher=plan.publisher(tuned_checkpoint, cancel=cancel),
-        on_progress=_progress,
+        on_progress=EvaluationProgress(),
     )
 
 
@@ -739,6 +894,7 @@ def replay_result(
             "status": status,
             "run_id": plan.run_id,
             "out_dir": str(outcome.out_dir),
+            "judge_model": plan.judge.spec,
             "summary": summary,
             "pending": outcome.pending,
             "cancelled": outcome.cancelled,
@@ -752,9 +908,59 @@ def replay_result(
             "tuned_checkpoint": None
             if tuned_sampler is None
             else dataclasses.asdict(tuned_sampler),
-            "next_command": shlex.join(plan.evaluate_command()) if retry else None,
+            **_replay_next(plan, status=status, publication=publication, retry=retry),
         }
     )
+
+
+def _replay_next(
+    plan: EvalPlan, *, status: str, publication: Mapping[str, Any], retry: bool
+) -> dict[str, Any]:
+    """``next_command`` and ``next_steps`` after an evaluation.
+
+    One that stopped, has errors or whose publishing failed is continued by the evaluate
+    command (a free preview first). A complete one is deployed (a free preview), unless the
+    run has a deployment already. One that could not be published has no next command:
+    the steps push the dataset, then rerun the evaluation, which then publishes; a complete
+    evaluation's rerun reuses every result, so it makes no new model calls.
+    """
+    steps: list[dict[str, str]] = []
+    rerun = plan.evaluate_command()
+    if publication["status"] == "skipped" and (push := plan.publishing.push_step()) is not None:
+        steps.append(push)
+        if status == "complete":
+            why = (
+                "then rerun the evaluation to publish it: every result is reused, so it "
+                "makes no new model calls (it writes to Datadog: ask the user)"
+            )
+        else:
+            why = (
+                "then rerun the evaluation: it finishes the cases left and publishes it "
+                "(paid: ask the user)"
+            )
+        steps.append(step(shlex.join([*rerun, "--confirm"]), why))
+    if retry:
+        next_command: str | None = shlex.join(rerun)
+    elif publication["status"] == "skipped":
+        next_command = None
+    else:
+        next_command = _deploy_command(plan.run_dir)
+    return {"next_command": next_command, "next_steps": steps}
+
+
+def _deploy_command(run_dir: Path) -> str | None:
+    """``deploy`` for the run (a free preview), or ``None`` while it is deployed already.
+
+    An unreadable ``deployment.json`` still gets ``deploy``, which reports it, rather than
+    hiding a deployment that may be live.
+    """
+    try:
+        receipt = RunDir(run_dir).read_deployment()
+    except FinetuneError:
+        return command("deploy", run_dir)
+    if receipt is not None and not receipt.get("deleted_at"):
+        return None
+    return command("deploy", run_dir)
 
 
 def evaluation_exit_code(result: Mapping[str, Any]) -> int:
@@ -1033,6 +1239,7 @@ def plan_standalone(
         settings=settings,
         promoted=result.promoted_model,
     )
+    plan = dataclasses.replace(plan, standalone=True)
     return StandaloneEvaluation(
         plan=plan, provider=provider, run=run, result=result, training=training
     )

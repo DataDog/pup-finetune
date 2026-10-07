@@ -78,35 +78,55 @@ def test_label_applies_labels_and_emits_the_report(dataset: Path, tmp_path: Path
     assert (data["accepted"], data["kept"], data["dropped"]) == (len(FIXTURE_IDS), 13, 1)
     assert data["drop_reasons"] == [{"reason": "wrong tool", "count": 1}]
     assert sum(data["splits"].values()) == 13
-    train = f"pup finetune train --dataset {shlex.quote(str(dataset))} ..."
-    assert data["next_command"] == train
-    assert data["next_commands"] == [
-        train,
-        f"pup finetune dataset push {shlex.quote(str(dataset))} --name ...",
+    # Training needs a provider, a model and a run directory nobody chose yet: steps only.
+    quoted = shlex.quote(str(dataset))
+    assert data["next_command"] is None
+    assert [step["command"] for step in data["next_steps"]] == [
+        "pup finetune models list --provider <PROVIDER>",
+        f"pup finetune train --provider <PROVIDER> --model <MODEL> --dataset {quoted} "
+        "--run-dir <RUN_DIR>",
+        f"pup finetune dataset push {quoted} --name <NAME>",
     ]
     assert FIXTURE_IDS[0] not in {row.id for row in DatasetDir(dataset).kept_rows()}
     show = output_json(invoke("show", str(dataset)))
     assert show["summary"]["dropped"] == 1
 
 
-def test_label_fills_in_by_and_at(dataset: Path, tmp_path: Path) -> None:
+def test_labels_are_manual_and_at_is_filled_in(dataset: Path, tmp_path: Path) -> None:
     file = label_file(
         tmp_path,
         {"id": FIXTURE_IDS[0], "keep": True},
-        {"id": FIXTURE_IDS[1], "keep": True, "by": "judge", "at": "2026-01-02T03:04:05+01:00"},
+        {"id": FIXTURE_IDS[1], "keep": True, "at": "2026-01-02T03:04:05+01:00"},
     )
-    output_json(label(dataset, file, "--by", "human"))
+    output_json(label(dataset, file))
     records = [json.loads(line) for line in (dataset / "labels.jsonl").read_text().splitlines()]
-    assert records[0]["by"] == "human"
+    assert [record["by"] for record in records] == ["manual", "manual"]
     assert records[0]["at"].endswith("Z")
-    assert (records[1]["by"], records[1]["at"]) == ("judge", "2026-01-02T02:04:05Z")
+    assert records[1]["at"] == "2026-01-02T02:04:05Z"
 
 
-def test_label_defaults_to_by_agent(dataset: Path, tmp_path: Path) -> None:
-    file = label_file(tmp_path, {"id": FIXTURE_IDS[0], "keep": True})
+@pytest.mark.parametrize("old", ["agent", "human"])
+def test_a_label_file_from_before_says_agent_or_human_and_reads_as_manual(
+    dataset: Path, tmp_path: Path, old: str
+) -> None:
+    file = label_file(tmp_path, {"id": FIXTURE_IDS[0], "keep": True, "by": old})
     output_json(label(dataset, file))
     [record] = [json.loads(line) for line in (dataset / "labels.jsonl").read_text().splitlines()]
-    assert record["by"] == "agent"
+    assert record["by"] == "manual"
+
+
+def test_a_label_file_cannot_claim_the_judge_council(dataset: Path, tmp_path: Path) -> None:
+    file = label_file(tmp_path, {"id": FIXTURE_IDS[0], "keep": True, "by": "judge"})
+    result = label(dataset, file)
+    assert result.exit_code == 2
+    assert "judge" in result.stderr
+    assert not (dataset / "labels.jsonl").exists()
+
+
+def test_label_has_no_by_option(dataset: Path, tmp_path: Path) -> None:
+    file = label_file(tmp_path, {"id": FIXTURE_IDS[0], "keep": True})
+    result = label(dataset, file, "--by", "human")
+    assert result.exit_code == 2
 
 
 def test_label_last_label_wins_across_runs(dataset: Path, tmp_path: Path) -> None:
@@ -181,13 +201,6 @@ def test_label_rejects_an_empty_file(dataset: Path, tmp_path: Path) -> None:
     assert "has no labels" in result.stderr
 
 
-def test_label_by_accepts_only_agent_or_human(dataset: Path, tmp_path: Path) -> None:
-    file = label_file(tmp_path, {"id": FIXTURE_IDS[0], "keep": True})
-    result = label(dataset, file, "--by", "judge")
-    assert result.exit_code == 2
-    assert "--by" in _ANSI.sub("", result.stderr)
-
-
 def test_label_needs_a_dataset_directory(tmp_path: Path) -> None:
     file = label_file(tmp_path, {"id": "a", "keep": True})
     result = label(tmp_path / "missing", file)
@@ -219,8 +232,11 @@ def test_sample_shows_rows_in_brief(dataset: Path) -> None:
         }
         assert row["label"] == "none"
     assert data["rows_file"] == str((dataset / "rows.jsonl").resolve())
-    expected = f"pup finetune dataset label {shlex.quote(str(dataset))} --file labels.jsonl"
-    assert data["next_command"] == expected
+    # Labels come from a file the reader writes, so labeling is a step, not next_command.
+    assert data["next_command"] is None
+    assert data["next_steps"][0]["command"] == (
+        f"pup finetune dataset label {shlex.quote(str(dataset))} --file <LABELS_FILE>"
+    )
 
 
 def test_sample_is_deterministic_for_a_seed(dataset: Path) -> None:

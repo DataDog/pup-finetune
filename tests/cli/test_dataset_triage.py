@@ -77,10 +77,19 @@ def dataset(tmp_path: Path) -> Path:
     return path
 
 
+def edited_rubric() -> str:
+    """The rubric template with its Task section filled in, as a user would."""
+    template = rubric_template()
+    start = template.index("## Task") + len("## Task")
+    end = template.index("## Keep")
+    task = "\n\nA synthetic support agent that answers order questions with the order tool.\n\n"
+    return template[:start] + task + template[end:]
+
+
 @pytest.fixture
 def rubric(tmp_path: Path) -> Path:
     path = tmp_path / "rubric.md"
-    path.write_text(rubric_template(), encoding="utf-8")
+    path.write_text(edited_rubric(), encoding="utf-8")
     return path
 
 
@@ -119,6 +128,46 @@ def test_the_preview_counts_the_calls_and_calls_nothing(
     assert not (dataset / JUDGMENTS_FILE).exists()
 
 
+def test_an_unedited_template_rubric_warns_and_offers_no_confirm(
+    dataset: Path, tmp_path: Path, chat: FakeChatApi
+) -> None:
+    template = tmp_path / "rubric.md"
+    template.write_text(rubric_template(), encoding="utf-8")
+    args = ["dataset", "triage", str(dataset), "--rubric", str(template), "--max-rows", "2"]
+    result = invoke(*args)
+    assert result.exit_code == 2, result.stderr
+    data = output(result)
+    warning = f"{template} still has the template's Task text; describe what the agent is for first"
+    assert warning in data["preview"]["warnings"]
+    assert data["next_command"] is None
+    assert "--allow-template-rubric" in result.stderr
+
+    refused = invoke(*args, "--confirm")
+    assert refused.exit_code == 2
+    assert refused.stdout == ""
+    assert warning in refused.stderr
+    assert chat.requests == []
+    assert not (dataset / JUDGMENTS_FILE).exists()
+
+    allowed = invoke(*args, "--allow-template-rubric")
+    assert allowed.exit_code == 2, allowed.stderr
+    assert warning in output(allowed)["preview"]["warnings"]
+    next_command = output(allowed)["next_command"]
+    assert "--allow-template-rubric" in shlex.split(next_command)
+    assert shlex.split(next_command)[-1] == "--confirm"
+    judged = invoke(*shlex.split(next_command)[2:])
+    assert judged.exit_code == 0, judged.stderr
+    assert chat.requests
+
+
+def test_an_edited_rubric_has_no_template_warning(
+    dataset: Path, rubric: Path, chat: FakeChatApi
+) -> None:
+    result = invoke("dataset", "triage", str(dataset), "--rubric", str(rubric))
+    assert result.exit_code == 2, result.stderr
+    assert "warnings" not in output(result)["preview"]
+
+
 def test_auto_approve_does_not_confirm(
     dataset: Path, rubric: Path, chat: FakeChatApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -144,11 +193,13 @@ def test_triage_labels_rows_and_is_allowed_read_only(
     assert data["dropped"] > 0
     assert data["top_drop_reasons"] == [{"reason": "off topic", "count": data["dropped"]}]
     assert data["calls_made"] == rows * 3
-    assert data["next_command"] == f"pup finetune dataset sample {dataset}"
-    assert data["next_commands"] == [
-        f"pup finetune dataset sample {dataset}",
-        f"pup finetune dataset push {dataset} --name ...",
-        f"pup finetune train --dataset {dataset} ...",
+    # Every row is labeled now: training (and a push) are the steps; no command is guessed.
+    assert data["next_command"] is None
+    assert [step["command"] for step in data["next_steps"]] == [
+        "pup finetune models list --provider <PROVIDER>",
+        f"pup finetune train --provider <PROVIDER> --model <MODEL> --dataset {dataset} "
+        "--run-dir <RUN_DIR>",
+        f"pup finetune dataset push {dataset} --name <NAME>",
     ]
     assert data["stale_judge_labels"] == 0
     assert data["dataset"]["dropped"] == data["dropped"]
@@ -328,7 +379,8 @@ def test_agreement_compares_the_council_with_the_user_s_labels(
             for row_id, (keep, reason) in rows.items()
         )
     )
-    assert invoke("dataset", "label", str(dataset), "--file", str(labels)).exit_code == 0
+    labeled = invoke("dataset", "label", str(dataset), "--file", str(labels))
+    assert labeled.exit_code == 0
     labels_before = (dataset / "labels.jsonl").read_text()
     args = ["dataset", "triage", str(dataset), "--rule", "stay on topic"]
     args += ["--judges", "judge-a,judge-b", "--agreement"]
@@ -351,7 +403,7 @@ def test_agreement_compares_the_council_with_the_user_s_labels(
         "drop_keep": 1,
         "drop_drop": 1,
     }
-    assert agreement["by"] == {"agent": {"rows_compared": 4, "rate": 0.5}}
+    assert "by" not in agreement
     assert set(agreement["judges"]) == {"judge-a", "judge-b"}
     assert sorted(item["row_id"] for item in agreement["disagreements_shown"]) == [
         "row-calendar-002",
@@ -361,7 +413,12 @@ def test_agreement_compares_the_council_with_the_user_s_labels(
     assert (dataset / "labels.jsonl").read_text() == labels_before  # nothing labeled
     without = [word for word in args if word != "--agreement"]
     assert data["next_command"] == shlex.join(["pup", "finetune", *without, "--confirm"])
-    assert "--reset-triage" in data["next_commands"][1]
+    assert data["next_steps"] == [
+        {
+            "command": shlex.join(["pup", "finetune", *args, "--reset-triage"]),
+            "why": data["next_steps"][0]["why"],
+        }
+    ]
 
     # Labeling the rest afterwards reviews only the unlabeled rows.
     labeled = invoke(*without, "--confirm")

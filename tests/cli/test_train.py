@@ -27,6 +27,7 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from pup_finetune.cli import app
+from pup_finetune.cli import train as train_module
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.runs import RunDir
 from pup_finetune.storage import atomic_write_json
@@ -137,6 +138,7 @@ def test_the_preview_counts_rows_examples_and_tokens(dataset: Path, tmp_path: Pa
     assert preview["max_tokens_total"] == preview["tokens_per_epoch"] * 4
     assert preview["spec"]["max_epochs"] == 4
     assert preview["data_destination"] == "training data is sent to fake"
+    assert preview["data_recipients"] == ["training rows -> fake"]
 
 
 def test_the_spend_flags_reach_the_spec_and_the_rerun(dataset: Path, tmp_path: Path) -> None:
@@ -283,8 +285,20 @@ def test_confirm_trains_in_the_foreground(dataset: Path, tmp_path: Path) -> None
     assert data["next_command"] == f"pup finetune evaluate {run_dir}"
     on_disk = json.loads((run_dir / "result.json").read_text())
     assert on_disk["promoted_model"] == data["promoted_model"]
-    assert "epoch 1 step 1: loss" in result.stderr
-    assert "epoch 2 done" in result.stderr
+    # Off a terminal (as here), the steps of these one-step epochs get no lines of their own,
+    # each epoch line names its checkpoint, and the outcome closes stderr in one line.
+    lines = result.stderr.splitlines()
+    assert "18:03:16 epoch 1/2 done: train 2.000, val 2.100 (new best), checkpoint t1s1-" in (
+        result.stderr
+    )
+    assert "18:03:16 promoting epoch 2 (val 1.600) ..." in lines
+    assert f"18:03:16 promoted {data['run_id']}" in lines
+    assert not [line for line in lines if " step " in line or "saved " in line]
+    assert lines[-1] == (
+        f"run {data['run_id']} completed in {train_module.format_duration(data['elapsed_seconds'])}"
+        ": 2 epochs, best epoch 2 (validation loss 2.10 -> 1.60); promoted model: "
+        f"{data['run_id']} (fake). Next: pup finetune evaluate {run_dir}"
+    )
 
 
 # --- status ------------------------------------------------------------------------------
@@ -295,6 +309,10 @@ STATUS_FIELDS = {
     "phase",
     "epoch",
     "step",
+    "steps_per_epoch",
+    "max_steps",
+    "elapsed_seconds",
+    "approx_eta_seconds",
     "last_train_loss",
     "val_losses",
     "best_epoch",
@@ -389,6 +407,26 @@ def test_a_training_run_whose_process_died_is_resumable(trained: Path) -> None:
     assert data["next_command"] == f"pup finetune resume {trained}"
 
 
+def test_a_cancelled_run_is_evaluated_once_its_best_epoch_was_promoted(trained: Path) -> None:
+    _set_state(trained, phase="cancelled")
+    data = output(invoke("status", str(trained)))
+    assert data["next_command"] == f"pup finetune evaluate {trained}"
+    assert data["next_steps"] == [
+        {
+            "command": f"pup finetune resume {trained}",
+            "why": "to train the remaining epochs (paid; it previews first)",
+        }
+    ]
+    # Cancelled before any epoch: nothing was promoted, so resuming is all there is.
+    result = json.loads((trained / "result.json").read_text())
+    atomic_write_json(
+        trained / "result.json", {**result, "promoted_model": None, "deployable_checkpoint": None}
+    )
+    data = output(invoke("status", str(trained)))
+    assert data["next_command"] == f"pup finetune resume {trained}"
+    assert data["next_steps"] == []
+
+
 def test_non_finite_numbers_are_emitted_as_null(
     trained: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -477,6 +515,266 @@ def test_a_worker_starting_for_too_long_is_stale(trained: Path) -> None:
     assert any("has not begun training" in w for w in data["warnings"])
 
 
+# --- status: progress numbers and a bounded watch -------------------------------------
+
+
+def _training(run_dir: Path, **fields: Any) -> None:
+    """Make ``run_dir`` look mid-training in this (live) process, with a fresh heartbeat."""
+    _set_state(run_dir, phase="training", pid=os.getpid(), heartbeat_at=_ago(0), **fields)
+
+
+def test_status_reports_steps_elapsed_time_and_no_eta_once_completed(trained: Path) -> None:
+    data = output(invoke("status", str(trained)))
+    assert (data["steps_per_epoch"], data["max_steps"]) == (1, 2)
+    assert isinstance(data["elapsed_seconds"], int)
+    assert data["approx_eta_seconds"] is None
+    assert "estimated_spend_usd" not in data  # the run records no hourly rate
+
+
+def test_status_estimates_the_time_left_from_the_measured_step_time(trained: Path) -> None:
+    _training(trained, epoch=1, step=10, epochs=0, steps_per_epoch=10, max_steps=40)
+    _set_state(trained, elapsed_seconds=100.0)
+    data = output(invoke("status", str(trained)))
+    # 10 s a step, 30 steps left to max_epochs (a rough estimate: it may stop early).
+    assert data["approx_eta_seconds"] == 300
+    assert 100 <= data["elapsed_seconds"] <= 102  # plus the time since the last save
+
+
+def test_status_prices_the_elapsed_time_when_the_run_has_an_hourly_rate(
+    dataset: Path, tmp_path: Path
+) -> None:
+    run_dir = tmp_path / "run"
+    spend = ("--max-spend-usd", "5", "--hourly-rate-usd", "3.6")
+    assert invoke(*train_args(dataset, run_dir, *spend, "--confirm")).exit_code == 0
+    _set_state(run_dir, elapsed_seconds=1000.0)
+    data = output(invoke("status", str(run_dir)))
+    assert data["estimated_spend_usd"] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    ("text", "seconds"),
+    [("90s", 90.0), ("10m", 600.0), ("2h", 7200.0), ("45", 45.0), ("0.5", 0.5), ("1.5m", 90.0)],
+)
+def test_watch_timeouts_take_seconds_minutes_hours_or_a_bare_number(
+    text: str, seconds: float
+) -> None:
+    assert train_module.parse_duration(text) == seconds
+
+
+@pytest.mark.parametrize("text", ["0", "0s", "-5", "5x", "m", "1d", "ten", "", "1e3"])
+def test_a_watch_timeout_that_is_not_a_positive_duration_is_a_usage_error(
+    trained: Path, text: str
+) -> None:
+    result = invoke("status", str(trained), "--watch", "--timeout", text)
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "--timeout" in result.stderr
+
+
+@pytest.mark.parametrize("flags", [("--timeout", "90s"), ("--interval", "5")])
+def test_timeout_and_interval_need_watch(trained: Path, flags: tuple[str, str]) -> None:
+    result = invoke("status", str(trained), *flags)
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert f"{flags[0]} needs --watch" in result.stderr
+
+
+def test_a_watch_that_times_out_returns_the_status_with_the_same_watch_next(
+    trained: Path,
+) -> None:
+    _training(trained, epoch=1, step=1, epochs=0)
+    result = invoke("status", str(trained), "--watch", "--interval", "0.1", "--timeout", "0.3")
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["phase"] == "training"
+    assert data["watch_timed_out"] is True
+    again = f"pup finetune status {trained} --watch --interval 0.1 --timeout 0.3"
+    assert data["next_command"] == again
+    assert f"stopped watching after 0.3s; the run keeps training (pid {os.getpid()})" in (
+        result.stderr
+    )
+    assert f"Watch again: {again}" in result.stderr
+
+
+def test_a_watch_that_ends_with_training_has_not_timed_out(trained: Path) -> None:
+    data = output(invoke("status", str(trained), "--watch", "--timeout", "1h"))
+    assert data["watch_timed_out"] is False
+    assert data["next_command"] == f"pup finetune evaluate {trained}"
+
+
+def test_status_without_watch_has_no_watch_field(trained: Path) -> None:
+    assert "watch_timed_out" not in output(invoke("status", str(trained)))
+
+
+@pytest.mark.parametrize(
+    "env", [{"PUP_AGENT_MODE": "true"}, {"AI_AGENT": "an-agent"}, {"CLAUDECODE": "1"}]
+)
+def test_a_watch_under_a_coding_agent_times_out_by_default(
+    trained: Path, monkeypatch: pytest.MonkeyPatch, env: dict[str, str]
+) -> None:
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(train_module, "AGENT_WATCH_TIMEOUT_S", 0.2)
+    _training(trained, epoch=1, step=1, epochs=0)
+    result = invoke("status", str(trained), "--watch", "--interval", "0.1")
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert (data["phase"], data["watch_timed_out"]) == ("training", True)
+    # The default is not pinned: the same watch under an agent times out again.
+    assert data["next_command"] == f"pup finetune status {trained} --watch --interval 0.1"
+
+
+def test_the_agent_default_is_90_seconds() -> None:
+    assert train_module.AGENT_WATCH_TIMEOUT_S == 90.0
+
+
+def test_a_watch_off_an_agent_has_no_default_timeout(
+    trained: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Without an agent and --timeout the watch only ends with training: here, when a
+    # (simulated) step finishes the run while it sleeps.
+    monkeypatch.setattr(train_module, "AGENT_WATCH_TIMEOUT_S", 0.0)
+    _training(trained, epoch=1, step=1, epochs=0)
+    naps: list[float] = []
+
+    def nap(seconds: float) -> None:
+        naps.append(seconds)
+        if len(naps) == 3:
+            _set_state(trained, phase="completed")
+
+    monkeypatch.setattr(train_module.time, "sleep", nap)
+    data = output(invoke("status", str(trained), "--watch", "--interval", "0.1"))
+    assert (data["phase"], data["watch_timed_out"]) == ("completed", False)
+    assert naps == [0.1, 0.1, 0.1]
+
+
+def test_a_watch_prints_a_line_when_the_run_moves_not_when_only_time_passes(
+    trained: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _training(trained, epoch=1, step=1, epochs=0, elapsed_seconds=10.0)
+    naps: list[float] = []
+
+    def nap(seconds: float) -> None:
+        naps.append(seconds)
+        if len(naps) < 3:  # time passes since the last save, nothing else
+            _set_state(trained, heartbeat_at=_ago(5 * len(naps)))
+        elif len(naps) == 3:
+            _set_state(trained, step=2, heartbeat_at=_ago(0))
+        else:
+            _set_state(trained, phase="completed")
+
+    monkeypatch.setattr(train_module.time, "sleep", nap)
+    result = invoke("status", str(trained), "--watch", "--interval", "0.1")
+    *lines, summary = result.stderr.splitlines()
+    assert [line.split(" loss")[0] for line in lines] == [
+        "18:03:16 training: epoch 1/2 step 1/2",
+        "18:03:16 training: epoch 1/2 step 2/2",
+        "18:03:16 completed: epoch 1/2 step 2/2",
+    ]
+    assert summary.startswith("completed: epoch 1/2 step 2/2")
+
+
+def test_ctrl_c_stops_only_the_watch_and_prints_the_status(
+    trained: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _training(trained, epoch=1, step=1, epochs=0)
+
+    def interrupted(seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(train_module.time, "sleep", interrupted)
+    result = invoke("status", str(trained), "--watch", "--timeout", "10m")
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert (data["phase"], data["watch_timed_out"]) == ("training", False)
+    again = f"pup finetune status {trained} --watch --timeout 10m"
+    assert data["next_command"] == again
+    assert (
+        f"stopped watching; the run keeps training (pid {os.getpid()}). Watch again: {again}"
+        in result.stderr
+    )
+
+
+def test_ctrl_c_after_training_stopped_says_so_and_points_at_the_next_step(
+    trained: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _training(trained, epoch=1, step=1, epochs=0)
+
+    def interrupted(seconds: float) -> None:
+        _set_state(trained, pid=_dead_pid())  # the training process died meanwhile
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(train_module.time, "sleep", interrupted)
+    result = invoke("status", str(trained), "--watch")
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["next_command"] == f"pup finetune resume {trained}"
+    assert "the run is training and no process is training it" in result.stderr
+    assert f"Next: pup finetune resume {trained}" in result.stderr
+
+
+def _line(**overrides: Any) -> str:
+    data: dict[str, Any] = {
+        "phase": "training",
+        "epoch": 3,
+        "max_epochs": 5,
+        "step": 21,
+        "max_steps": 35,
+        "steps_per_epoch": 7,
+        "epochs_completed": 2,
+        "last_train_loss": 1.1,
+        "val_losses": [1.5, 1.35],
+        "best_epoch": 2,
+        "elapsed_seconds": 252,
+        "approx_eta_seconds": 361,
+        "worker": {"running": True, "pid": 42},
+    }
+    return train_module.status_line({**data, **overrides})
+
+
+def test_the_watch_line_shows_steps_losses_best_epoch_elapsed_and_eta() -> None:
+    assert _line(step=17) == (
+        "training: epoch 3/5 step 17/35 loss 1.10 val 1.35 (best e2) 4m12s elapsed, eta ~6m"
+    )
+
+
+def test_the_watch_line_says_when_the_epoch_is_validating() -> None:
+    assert _line().startswith("training: epoch 3/5 step 21/35 loss 1.10 val 1.35 validating ")
+    assert "validating" not in _line(epochs_completed=3)
+
+
+def test_the_watch_line_leaves_out_what_is_not_known_yet() -> None:
+    line = _line(
+        epoch=0,
+        step=0,
+        max_steps=None,
+        steps_per_epoch=None,
+        epochs_completed=0,
+        last_train_loss=None,
+        val_losses=[],
+        best_epoch=None,
+        elapsed_seconds=0,
+        approx_eta_seconds=None,
+    )
+    assert line == "training: epoch 0/5 step 0"
+
+
+def test_the_watch_line_says_when_the_training_process_is_gone() -> None:
+    assert _line(worker={"running": False, "pid": 42}).endswith("(pid 42 not running)")
+    assert _line(phase="completed", worker={"running": False, "pid": 42}).endswith("eta ~6m")
+
+
+@pytest.mark.parametrize(
+    ("seconds", "exact", "rough"),
+    [(0, "0s", "0s"), (45.4, "45s", "45s"), (252, "4m12s", "4m"), (7500, "2h05m", "2h05m")],
+)
+def test_durations_read_as_seconds_minutes_and_hours(
+    seconds: float, exact: str, rough: str
+) -> None:
+    assert train_module.format_duration(seconds) == exact
+    assert train_module.format_duration(seconds, rough=True) == rough
+
+
 def test_status_of_a_missing_run_is_an_error(tmp_path: Path) -> None:
     result = invoke("status", str(tmp_path / "nothing"))
     assert result.exit_code == 1
@@ -494,10 +792,13 @@ def test_resume_after_a_crash_completes(dataset: Path, tmp_path: Path) -> None:
     )
     assert crashed.exit_code == 1
     assert "crashed (fail_at_step)" in crashed.stderr
+    # The error itself says how to go on, as status does.
+    assert f"Next: pup finetune resume {run_dir}\n" in crashed.stderr
     status = output(invoke("status", str(run_dir)))
     assert status["phase"] == "interrupted"
     assert status["error"]["type"] == "FakeCrash"
     assert status["next_command"] == f"pup finetune resume {run_dir}"
+    assert status["next_steps"] == []
 
     preview = invoke("resume", str(run_dir))
     assert preview.exit_code == 2
@@ -506,6 +807,7 @@ def test_resume_after_a_crash_completes(dataset: Path, tmp_path: Path) -> None:
     assert data["preview"]["resume_from"]["epoch"] == 1
     assert data["preview"]["remaining_epochs"] == 1
     assert data["preview"]["action"].startswith("continue training with epoch 2")
+    assert data["preview"]["data_recipients"] == ["training rows -> fake"]
     assert data["next_command"] == f"pup finetune resume {run_dir} --confirm"
 
     resumed = rerun(data["next_command"])
@@ -514,6 +816,7 @@ def test_resume_after_a_crash_completes(dataset: Path, tmp_path: Path) -> None:
     assert result["phase"] == "completed"
     assert result["promoted_model"]["model_id"] == result["run_id"]
     assert [epoch["epoch"] for epoch in result["epochs"]] == [1, 2]
+    assert result["next_command"] == f"pup finetune evaluate {run_dir}"
 
 
 def test_a_finalize_only_resume_only_promotes(trained: Path) -> None:
@@ -537,6 +840,7 @@ def test_a_finalize_only_resume_only_promotes(trained: Path) -> None:
     assert result["promoted_model"]["model_id"] == result["run_id"]
     assert "epoch 1 step" not in resumed.stderr  # nothing was trained again
     assert (trained / "epochs.json").read_text() == epochs_before
+    assert result["next_command"] == f"pup finetune evaluate {trained}"
 
 
 def test_the_worker_retries_only_the_promotion(trained: Path) -> None:

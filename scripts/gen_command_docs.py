@@ -37,6 +37,7 @@ EXCLUSIONS_END = "<!-- END GENERATED: exclusion codes -->"
 # Commands in workflow order; any command not listed follows, sorted by name.
 ORDER: tuple[str, ...] = (
     "doctor",
+    "help",
     "auth login",
     "auth status",
     "auth logout",
@@ -157,7 +158,8 @@ def usage(name: str, command: Any) -> str:
         if param.param_type_name != "argument":
             continue
         metavar = str(param.metavar or param.name.upper())
-        words.append(metavar if param.required else f"[{metavar}]")
+        word = metavar if param.required else f"[{metavar}]"
+        words.append(f"{word}..." if param.nargs == -1 else word)
     return " ".join(words)
 
 
@@ -216,7 +218,15 @@ def render_commands() -> str:
         "result on stdout and its progress on stderr, and exits `0` on success, `1` on an "
         "external or runtime failure and `2` on a usage or validation error or a preview that "
         "needs `--confirm`. Paid and remote-changing commands preview unless you pass "
-        "`--confirm`. Run any command with `--help` for the same text in your terminal.",
+        "`--confirm`. A result's `next_command` is a command that runs exactly as written "
+        "(after your yes, when it ends in `--confirm`), or `null`; it never holds a "
+        "placeholder or `...`. Alternatives, and commands that need a value only you can "
+        'supply, are in `next_steps`, a list of `{"command", "why"}` whose commands mark '
+        "such a value as `<UPPER_CASE>`, for example `--name <NAME>`. "
+        "Run `pup finetune help <command>` for the same text in your terminal "
+        "(under a coding agent, Pup answers `--help` after `pup finetune` with its own help). "
+        "Three print text on stdout instead of JSON: `help`, `--help` and "
+        "`dataset triage --print-template`.",
         "",
         "Outside Pup, run the same commands as `pup-finetune <command>`.",
         "",

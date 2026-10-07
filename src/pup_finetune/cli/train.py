@@ -27,7 +27,9 @@ the cap is reached already and stops, partial, once it is.
 from __future__ import annotations
 
 import dataclasses
+import math
 import os
+import re
 import shlex
 import time
 from collections.abc import Mapping, Sequence
@@ -38,6 +40,9 @@ import typer
 from pydantic import ValidationError
 
 from pup_finetune.cli._common import CommandResult, get_runtime, run_command
+from pup_finetune.cli._dirs import require_dataset_dir, require_new_run_dir, require_run_dir
+from pup_finetune.cli._flags import require_enablers
+from pup_finetune.cli._summary import format_duration, status_line
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.errors import (
     FinetuneError,
@@ -47,7 +52,9 @@ from pup_finetune.errors import (
     require_writable,
 )
 from pup_finetune.evaluation import runner as evaluation
+from pup_finetune.next_steps import PROGRAM, command, step
 from pup_finetune.output import info
+from pup_finetune.progress import TrainingProgress
 from pup_finetune.providers import get_provider
 from pup_finetune.providers.base import ModelProfile, Provider, TrainSpec
 from pup_finetune.rendering.base import Renderer
@@ -57,6 +64,8 @@ from pup_finetune.runs import (
     check_run_id,
     new_run_id,
     require_resumable,
+    resume_command,
+    resume_hint,
 )
 from pup_finetune.storage import finite_json
 from pup_finetune.training.inputs import RunInputs, build_inputs, load_run_inputs
@@ -95,6 +104,23 @@ _FLAGS: dict[str, str] = {
     "microbatch_token_budget": "--microbatch-token-budget",
 }
 
+TRAIN_NEEDS: dict[str, str] = {
+    "spend_reserve_fraction": "max_spend_usd",
+    "eval_out_dir": "evaluate",
+    "eval_max_cases_per_trajectory": "evaluate",
+    "eval_judge_model": "evaluate",
+    "eval_concurrency": "evaluate",
+    "eval_max_tokens": "evaluate",
+    "eval_seed": "evaluate",
+    "eval_skip_calibration": "evaluate",
+    "eval_no_publish": "evaluate",
+}
+"""``train``'s options that do nothing without another one: each needs the one it maps to
+(see :mod:`pup_finetune.cli._flags`)."""
+
+STATUS_NEEDS: dict[str, str] = {"interval": "watch", "timeout": "watch"}
+"""``status``'s options that need ``--watch``."""
+
 RunDirArgument = Annotated[
     Path, typer.Argument(metavar="RUN_DIR", help="The run directory.", show_default=False)
 ]
@@ -108,6 +134,12 @@ DetachOption = Annotated[
 ConfirmOption = Annotated[
     bool, typer.Option("--confirm", help="Run it (paid); without it, only preview what runs.")
 ]
+CancelConfirmOption = Annotated[
+    bool,
+    typer.Option(
+        "--confirm", help="Send the stop signal; without it, preview which process gets it."
+    ),
+]
 
 
 def _q(value: object) -> str:
@@ -116,48 +148,6 @@ def _q(value: object) -> str:
 
 def _default(field: str) -> object:
     return TrainSpec.model_fields[field].get_default(call_default_factory=True)
-
-
-# --- Progress ----------------------------------------------------------------------------
-
-
-def _num(value: object) -> str:
-    return f"{value:.4f}" if isinstance(value, int | float) else "n/a"
-
-
-def describe_event(event: Mapping[str, Any]) -> str | None:
-    """One progress line for a training loop event, or ``None`` for an unknown one."""
-    kind = event.get("type")
-    if kind == "step":
-        return (
-            f"epoch {event.get('epoch')} step {event.get('step')}: loss {_num(event.get('loss'))}"
-        )
-    if kind == "epoch":
-        best = " (new best)" if event.get("new_best") else ""
-        return (
-            f"epoch {event.get('epoch')} done: train loss {_num(event.get('train_loss'))}, "
-            f"validation loss {_num(event.get('val_loss'))}{best}"
-        )
-    if kind == "checkpoint":
-        return (
-            f"saved {event.get('kind')} checkpoint {event.get('name')} "
-            f"(epoch {event.get('epoch')}, step {event.get('step')}, {event.get('reason')})"
-        )
-    if kind == "stopped":
-        detail = f": {event['detail']}" if event.get("detail") else ""
-        return f"stopping: {event.get('reason')}{detail}"
-    if kind == "retry":
-        return (
-            f"retrying {event.get('call')} (attempt {event.get('attempt')}) after "
-            f"{event.get('error')}, in {event.get('delay_s')}s"
-        )
-    return None
-
-
-def _progress(event: dict[str, Any]) -> None:
-    line = describe_event(event)
-    if line is not None:
-        info(line)
 
 
 # --- train -------------------------------------------------------------------------------
@@ -195,7 +185,7 @@ def _spec(values: Mapping[str, Any], provider_options: Mapping[str, Any]) -> Tra
             problems.append(f"{name}: {message}" if name else message)
         raise UsageError(
             f"invalid training settings: {'; '.join(problems)}",
-            hint="see `pup finetune train --help`",
+            hint="see `pup finetune help train`",
         ) from None
 
 
@@ -229,6 +219,7 @@ def _preview(
         "max_tokens_total": inputs.tokens_per_epoch * spec.max_epochs,
         "spec": spec.model_dump(mode="json"),
         "data_destination": f"training data is sent to {provider.name}",
+        "data_recipients": [f"training rows -> {provider.name}"],
         "warnings": warnings,
     }
 
@@ -239,7 +230,12 @@ def _finished(run_dir: RunDir, result: Mapping[str, Any]) -> dict[str, Any]:
         {
             **result,
             "run_dir": str(run_dir.path),
-            "next_command": _next_command(run_dir.path, str(result.get("phase")), running=False),
+            **run_next(
+                run_dir.path,
+                str(result.get("phase")),
+                promoted=_promoted(result),
+                running=False,
+            ),
         }
     )
 
@@ -255,7 +251,12 @@ def _in_foreground(
     """Train ``run`` in this process (Ctrl-C cancels gracefully) and return what to emit."""
     try:
         result = run_in_dir(
-            provider, run, mode, inputs, on_event=_progress, after_finalize=after_finalize
+            provider,
+            run,
+            mode,
+            inputs,
+            on_event=TrainingProgress(),
+            after_finalize=after_finalize,
         )
     except KeyboardInterrupt:
         # A second Ctrl-C stops at once; the run recorded where it stopped.
@@ -265,7 +266,7 @@ def _in_foreground(
             phase = "interrupted"
         raise FinetuneError(
             f"training stopped at once (Ctrl-C): the run in {run.path} is {phase}",
-            hint=f"resume it with `pup finetune resume {_q(run.path)}`",
+            hint=resume_hint(run.path, "it is resumable from its last training checkpoint"),
         ) from None
     return _finished(run, result)
 
@@ -277,7 +278,7 @@ def _detached(run_dir: RunDir, run_id: str, pid: int) -> dict[str, Any]:
         "pid": pid,
         "status": "started",
         "worker_log": str(run_dir.worker_log_path),
-        "next_command": f"pup finetune status {_q(run_dir.path)} --watch",
+        "next_command": command("status", run_dir.path, "--watch"),
     }
 
 
@@ -359,8 +360,8 @@ def train(
     spend_reserve_fraction: Annotated[
         float | None,
         typer.Option(
-            help="The share of --max-spend-usd kept for the checkpoint and promotion at the "
-            "stop; training stops that much short of the cap "
+            help="With --max-spend-usd: the share of it kept for the checkpoint and promotion "
+            "at the stop; training stops that much short of the cap "
             f"(default: {_default('spend_reserve_fraction')})."
         ),
     ] = None,
@@ -434,6 +435,7 @@ def train(
     detach: DetachOption = False,
     confirm: ConfirmOption = False,
 ) -> dict[str, Any] | CommandResult:
+    require_enablers(TRAIN_NEEDS)
     runtime = get_runtime()
     if detach:
         require_detach_supported()
@@ -444,7 +446,9 @@ def train(
             "completed",
         )
     run_id = check_run_id(run_id) if run_id is not None else new_run_id()
+    require_new_run_dir(run_dir)
     RunDir(run_dir).require_empty()
+    require_dataset_dir(dataset_dir)
     provider = get_provider(provider_name, runtime)
     profile = provider.resolve_model(model)
     raw_options = _provider_options(provider_option or [])
@@ -501,12 +505,16 @@ def train(
             dataset=dataset,
             rendering=renderer.identity(),
             settings=settings,
+            no_publish=evaluation.EVAL_NO_PUBLISH,
         )
         preview["evaluation"] = plan.preview(
             tuned="the best epoch of this run", tuned_checkpoint=None
         )
+        # The consent fields name every recipient, the evaluation's judge included.
+        preview["data_destination"] += f"; {preview['evaluation']['data_destination']}"
+        preview["data_recipients"] += preview["evaluation"]["data_recipients"]
     # The rerun pins the run id and directory, so it trains exactly what was previewed.
-    rerun = ["pup", "finetune", "train", "--provider", provider.name]
+    rerun = [*PROGRAM, "train", "--provider", provider.name]
     rerun += ["--dataset", str(dataset_dir), "--model", model]
     rerun += ["--run-dir", str(run_dir), "--run-id", run_id]
     for field, value in flags.items():
@@ -520,7 +528,9 @@ def train(
         rerun += plan.train_flags()
     if confirm:
         require_writable(runtime, f"training on {provider.name}")
-    require_confirm(confirm, preview, shlex.join([*rerun, "--confirm"]))
+    require_confirm(
+        confirm, preview, shlex.join([*rerun, "--confirm"]), read_only=runtime.read_only
+    )
     if plan is not None:
         with evaluation.open_judge_client(plan.judge) as client:
             # Before anything is trained: a judge that fails calibration stops the run here.
@@ -537,6 +547,13 @@ def train(
             info(f"training run {run_id} in {run_dir} on {provider.name}, then evaluating it")
             result = _in_foreground(provider, run, "train", inputs, after_finalize=hook)
             data = {**result, "evaluation": hook.outcome}
+            if hook.outcome is not None and "next_command" in hook.outcome:
+                # What follows is the evaluation's next step: continue it, publish it, deploy.
+                data["next_command"] = hook.outcome["next_command"]
+                data["next_steps"] = [
+                    *hook.outcome.get("next_steps", []),
+                    *result.get("next_steps", []),
+                ]
             code = 0 if hook.outcome is None else evaluation.evaluation_exit_code(hook.outcome)
             # The trained run is kept either way; a failed evaluation still fails the command.
             return CommandResult(data, exit_code=code) if code else data
@@ -619,6 +636,7 @@ def resume(
     runtime = get_runtime()
     if detach:
         require_detach_supported()
+    require_run_dir(run_dir, "resume")
     run = RunDir(run_dir)
     manifest = run.manifest()
     state = run.load_state()
@@ -639,11 +657,14 @@ def resume(
         "remaining_epochs": 0 if mode == "finalize" else max(max_epochs - state.epochs, 0),
         "tokens_per_epoch": inputs.tokens_per_epoch,
         "data_destination": f"training data is sent to {provider.name}",
+        "data_recipients": [f"training rows -> {provider.name}"],
     }
-    rerun = ["pup", "finetune", "resume", str(run_dir), *(["--detach"] if detach else [])]
+    rerun = [*PROGRAM, "resume", str(run_dir), *(["--detach"] if detach else [])]
     if confirm:
         require_writable(runtime, f"training on {provider.name}")
-    require_confirm(confirm, preview, shlex.join([*rerun, "--confirm"]))
+    require_confirm(
+        confirm, preview, shlex.join([*rerun, "--confirm"]), read_only=runtime.read_only
+    )
     if detach:
         return _detached(run, str(manifest["run_id"]), spawn_worker(run, mode))
     info(f"resuming run {manifest['run_id']} in {run_dir}: {action} (Ctrl-C cancels)")
@@ -653,14 +674,69 @@ def resume(
 # --- status ------------------------------------------------------------------------------
 
 
-def _next_command(path: Path, phase: str, *, running: bool, stale: bool = False) -> str:
+def run_next(
+    path: Path, phase: str, *, promoted: bool, running: bool, stale: bool = False
+) -> dict[str, Any]:
+    """``next_command`` and ``next_steps`` for the run in ``path``, from its state.
+
+    A running run is watched, a stale one cancelled, a completed one evaluated (a free
+    preview), and so is a cancelled one whose best epoch was promoted (``promoted``: it has
+    a promoted model or a deployable checkpoint), with resuming it as a step; anything
+    else (interrupted, failed, or cancelled before any epoch) is resumed.
+    """
+    steps: list[dict[str, str]] = []
     if running:
-        return f"pup finetune status {_q(path)} --watch"
-    if phase == "completed":
-        return f"pup finetune evaluate {_q(path)}"
-    if phase == "training" and stale:
-        return f"pup finetune cancel {_q(path)}"
-    return f"pup finetune resume {_q(path)}"
+        next_command = command("status", path, "--watch")
+    elif phase == "completed":
+        next_command = command("evaluate", path)
+    elif phase == "cancelled" and promoted:
+        next_command = command("evaluate", path)
+        steps.append(
+            step(resume_command(path), "to train the remaining epochs (paid; it previews first)")
+        )
+    elif phase == "training" and stale:
+        next_command = command("cancel", path)
+    else:
+        next_command = resume_command(path)
+    return {"next_command": next_command, "next_steps": steps}
+
+
+def _promoted(result: Mapping[str, Any]) -> bool:
+    """Whether ``result`` (``result.json`` or a status) has a model to evaluate and deploy."""
+    return bool(result.get("promoted_model") or result.get("deployable_checkpoint"))
+
+
+def _rounded(value: float | None, digits: int = 0) -> float | int | None:
+    if value is None or not math.isfinite(value):
+        return None
+    return round(value) if digits == 0 else round(value, digits)
+
+
+def _timing(summary: Mapping[str, Any], *, live_s: float) -> dict[str, Any]:
+    """``elapsed_seconds``, ``approx_eta_seconds`` and, with a rate, ``estimated_spend_usd``.
+
+    ``live_s`` is the time since the state was saved while training is under way (else 0):
+    it counts as elapsed. The ETA is the measured seconds per step as of that save
+    (validation and checkpoints included) times the steps left to ``max_epochs``, so it is a
+    rough estimate, neither bound: early stopping can end the run sooner, and the validation
+    still to come (none measured yet in the first epoch) can make it later; ``None`` before
+    the first step, once every step ran (only the last epoch's end and the promotion are
+    left), or when the run is not training.
+    """
+    recorded = float(summary["elapsed_seconds"] or 0.0)
+    step, max_steps = summary["step"], summary["max_steps"]
+    eta = None
+    if summary["phase"] == "training" and max_steps is not None and 0 < step < max_steps:
+        eta = recorded / step * (max_steps - step)
+    elapsed = recorded + live_s
+    timing: dict[str, Any] = {
+        "elapsed_seconds": _rounded(elapsed),
+        "approx_eta_seconds": _rounded(eta),
+    }
+    rate = summary["hourly_rate_usd"]
+    if isinstance(rate, int | float):
+        timing["estimated_spend_usd"] = _rounded(elapsed / 3600 * rate, 2)
+    return timing
 
 
 def run_status(run: RunDir) -> dict[str, Any]:
@@ -677,6 +753,8 @@ def run_status(run: RunDir) -> dict[str, Any]:
     warnings = list(summary["warnings"])
     if worker.problem is not None:
         warnings.append(worker.problem)
+    live = summary["phase"] == "training" and worker.running
+    live_s = (worker.heartbeat_age_s or 0.0) if live else 0.0
     return finite_json(
         {
             "run_id": summary["run_id"],
@@ -688,10 +766,13 @@ def run_status(run: RunDir) -> dict[str, Any]:
             "step": summary["step"],
             "epochs_completed": summary["epochs_completed"],
             "max_epochs": summary["max_epochs"],
+            "steps_per_epoch": summary["steps_per_epoch"],
+            "max_steps": summary["max_steps"],
             "last_train_loss": summary["last_train_loss"],
             "val_losses": summary["val_losses"],
             "best_epoch": best.get("epoch"),
             "best_val_loss": best.get("val_loss"),
+            **_timing(summary, live_s=live_s),
             "stopped_reason": summary["stopped_reason"],
             "promoted_model": summary["promoted_model"],
             "deployable_checkpoint": summary["deployable_checkpoint"],
@@ -701,22 +782,67 @@ def run_status(run: RunDir) -> dict[str, Any]:
             "error": summary["error"] or worker.error,
             "finalize_error": summary["finalize_error"],
             "warnings": warnings,
-            "next_command": _next_command(
-                run.path, summary["phase"], running=worker.running, stale=stale_alive
+            **run_next(
+                run.path,
+                summary["phase"],
+                promoted=_promoted(summary),
+                running=worker.running,
+                stale=stale_alive,
             ),
         }
     )
 
 
-def _status_line(data: Mapping[str, Any]) -> str:
+DURATION_UNITS = {"": 1.0, "s": 1.0, "m": 60.0, "h": 3600.0}
+"""What a ``--timeout`` suffix multiplies the number by: none or ``s``, ``m`` and ``h``."""
+
+AGENT_WATCH_TIMEOUT_S = 90.0
+"""The default ``--timeout`` of a watch under a coding agent: below the 120 s that agents'
+shell tools commonly allow a command."""
+
+_DURATION = re.compile(r"(\d+(?:\.\d+)?)([smh]?)")
+
+
+def parse_duration(text: str) -> float:
+    """Seconds in ``90s``, ``10m``, ``2h`` or a bare number of seconds; else :class:`UsageError`."""
+    match = _DURATION.fullmatch(text.strip())
+    seconds = float(match[1]) * DURATION_UNITS[match[2]] if match else 0.0
+    if seconds <= 0 or not math.isfinite(seconds):
+        raise UsageError(
+            f"invalid --timeout {text!r}",
+            hint="pass a positive duration such as 90s, 10m, 2h, or a number of seconds",
+        )
+    return seconds
+
+
+def _watch_command(run_dir: Path, *, interval: float | None, timeout: str | None) -> str:
+    """The `status --watch` command as typed: the run, then ``--interval`` and ``--timeout``."""
+    words = [*PROGRAM, "status", str(run_dir), "--watch"]
+    if interval is not None:
+        words += ["--interval", f"{interval:g}"]
+    if timeout is not None:
+        words += ["--timeout", timeout]
+    return shlex.join(words)
+
+
+def _watched(data: Mapping[str, Any], *, timed_out: bool, next_command: str) -> dict[str, Any]:
+    """``data`` from a watch: with ``watch_timed_out`` and the given ``next_command``."""
+    return {**data, "watch_timed_out": timed_out, "next_command": next_command}
+
+
+def _stopped_watching(data: Mapping[str, Any], why: str, again: str) -> tuple[str, str]:
+    """The stderr line for a watch that stops before training ends, and the next command."""
     worker = data["worker"]
-    process = "running" if worker["running"] else "not running"
-    if worker["pid"] is not None:
-        process = f"pid {worker['pid']} {process}"
+    if worker["running"]:
+        pid = f" (pid {worker['pid']})" if worker["pid"] is not None else ""
+        what = (
+            "the run keeps training" if data["phase"] == "training" else "its worker keeps starting"
+        )
+        return f"{why}; {what}{pid}. Watch again: {again}", again
+    next_command = str(data["next_command"])
     return (
-        f"{data['phase']}: epoch {data['epoch']}/{data['max_epochs']}, step {data['step']}, "
-        f"loss {_num(data['last_train_loss'])}, best epoch {data['best_epoch'] or 'n/a'} "
-        f"({process})"
+        f"{why}; the run is {data['phase']} and no process is training it. Next: {next_command}",
+        next_command,
     )
 
 
@@ -727,34 +853,78 @@ def status(
         bool,
         typer.Option(
             "--watch",
-            help="Print progress to stderr until training ends, then print the final status.",
+            help="Print progress to stderr until training ends (or --timeout), then print "
+            "the status. Ctrl-C stops watching, never the training.",
         ),
     ] = False,
     interval: Annotated[
-        float, typer.Option(min=0.1, help="Seconds between checks with --watch.")
-    ] = 10.0,
+        float | None,
+        typer.Option(
+            min=0.1,
+            help="With --watch: seconds between checks (default 10).",
+            show_default=False,
+        ),
+    ] = None,
+    timeout: Annotated[
+        str | None,
+        typer.Option(
+            "--timeout",
+            metavar="DURATION",
+            help="With --watch: stop watching after DURATION (90s, 10m, 2h, or seconds) and "
+            "print the status with watch_timed_out true; training keeps going. Default: "
+            "90s under a coding agent (PUP_AGENT_MODE, AI_AGENT or CLAUDECODE), else none.",
+            show_default=False,
+        ),
+    ] = None,
 ) -> dict[str, Any]:
+    require_enablers(STATUS_NEEDS)
+    require_run_dir(run_dir, "status")
+    limit = parse_duration(timeout) if timeout is not None else None
+    if limit is None and watch and get_runtime().under_agent:
+        limit = AGENT_WATCH_TIMEOUT_S
     run = RunDir(run_dir)
     data = run_status(run)
     if not watch:
         return data
+    again = _watch_command(run_dir, interval=interval, timeout=timeout)
+    pause = 10.0 if interval is None else interval
+    deadline = None if limit is None else time.monotonic() + limit
+    limit_s = limit or 0.0
+    # Always with a unit (`--timeout 10` reads "10s"); a sub-second limit keeps its fraction.
+    shown_limit = format_duration(limit_s) if limit_s >= 1 else f"{limit_s:g}s"
+    timed_out = f"stopped watching after {shown_limit}"
     shown = None
-    while True:
-        line = _status_line(data)
-        if line != shown:
-            info(line)
-            shown = line
-        if not data["worker"]["running"]:
-            return data
-        time.sleep(interval)
+    try:
+        while True:
+            # A new line only when the run moved: the elapsed time alone does not count.
+            progress = status_line({**data, "elapsed_seconds": 0})
+            if progress != shown:
+                info(status_line(data))
+                shown = progress
+            if not data["worker"]["running"]:
+                return _watched(data, timed_out=False, next_command=data["next_command"])
+            left = None if deadline is None else deadline - time.monotonic()
+            if left is not None and left <= 0:
+                message, next_command = _stopped_watching(data, timed_out, again)
+                info(message)
+                return _watched(data, timed_out=True, next_command=next_command)
+            time.sleep(pause if left is None else min(pause, left))
+            data = run_status(run)
+    except KeyboardInterrupt:
+        # Only this watch stops: the training process runs in its own session, and nothing
+        # here signals it.
         data = run_status(run)
+        message, next_command = _stopped_watching(data, "stopped watching", again)
+        info(message)
+        return _watched(data, timed_out=False, next_command=next_command)
 
 
 # --- cancel ------------------------------------------------------------------------------
 
 
 @run_command
-def cancel(run_dir: RunDirArgument, confirm: ConfirmOption = False) -> dict[str, Any]:
+def cancel(run_dir: RunDirArgument, confirm: CancelConfirmOption = False) -> dict[str, Any]:
+    require_run_dir(run_dir, "cancel")
     run = RunDir(run_dir)
     run_id = run.run_id
     pid = cancellable_pid(run)
@@ -765,16 +935,14 @@ def cancel(run_dir: RunDirArgument, confirm: ConfirmOption = False) -> dict[str,
         "action": f"send SIGTERM to process {pid}: training stops after the current step, "
         "saves a resumable checkpoint and promotes the best epoch so far",
     }
-    require_confirm(
-        confirm, preview, shlex.join(["pup", "finetune", "cancel", str(run_dir), "--confirm"])
-    )
+    require_confirm(confirm, preview, command("cancel", run_dir, "--confirm"))
     pid = cancel_training(run)
     return {
         "run_id": run_id,
         "run_dir": str(run_dir),
         "pid": pid,
         "status": "cancelling",
-        "next_command": f"pup finetune status {_q(run_dir)} --watch",
+        "next_command": command("status", run_dir, "--watch"),
     }
 
 
@@ -798,7 +966,7 @@ def worker(
         require_writable(runtime, f"training on {run.manifest()['provider']}")
         info(f"worker {os.getpid()} started: {mode} {run_dir}")
         provider, inputs = load_run_inputs(run, runtime, finalize_only=mode == "finalize")
-        result = run_in_dir(provider, run, mode, inputs, on_event=_progress)
+        result = run_in_dir(provider, run, mode, inputs, on_event=TrainingProgress())
     except BaseException as exc:
         record_worker_exit(run, mode, exc)
         raise
@@ -834,9 +1002,11 @@ def register(app: typer.Typer) -> None:
         "status",
         short_help="Show a run's phase, progress, losses and worker.",
         help=(
-            "Show a run's phase, epoch and step, losses, best epoch, promoted model and "
-            "whether its training process is alive. With --watch, prints progress to "
-            "stderr until training ends, then the final status."
+            "Show a run's phase, epoch and step, losses, best epoch, elapsed time and an "
+            "approximate ETA, promoted model and whether its training process is alive. "
+            "With --watch, prints progress to stderr until training ends, then the final "
+            "status; --timeout bounds the watch (90s by default under a coding agent). "
+            "Ctrl-C or the timeout stops only the watch, prints the status and exits 0."
         ),
     )(status)
     app.command(

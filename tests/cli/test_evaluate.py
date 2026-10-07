@@ -201,10 +201,39 @@ def test_the_preview_exits_2_with_the_calls_and_pins_the_rerun(run_dir: Path) ->
     assert preview["out_dir"] == str(run_dir / "eval")
     assert "task success" in preview["caveat"]
     assert not (run_dir / "eval").exists()  # a preview writes nothing
-    words = shlex.split(data["next_command"])
-    assert words[-1] == "--confirm"
-    assert words[words.index("--out-dir") + 1] == str(run_dir / "eval")
-    assert words[words.index("--judge-model") + 1] == FAKE_JUDGE_MODEL
+    # The settings typed (none) and the judge, which decides where the data goes.
+    assert data["next_command"] == shlex.join(
+        [
+            "pup",
+            "finetune",
+            "evaluate",
+            str(run_dir),
+            "--judge-model",
+            FAKE_JUDGE_MODEL,
+            "--confirm",
+        ]
+    )
+
+
+def test_the_preview_repeats_only_the_settings_given(run_dir: Path) -> None:
+    out_dir = run_dir.parent / "elsewhere"
+    result = invoke("evaluate", str(run_dir), "--out-dir", str(out_dir), "--max-tokens", "512")
+    assert result.exit_code == 2, result.stderr
+    assert output(result)["next_command"] == shlex.join(
+        [
+            "pup",
+            "finetune",
+            "evaluate",
+            str(run_dir),
+            "--out-dir",
+            str(out_dir),
+            "--judge-model",
+            FAKE_JUDGE_MODEL,
+            "--max-tokens",
+            "512",
+            "--confirm",
+        ]
+    )
 
 
 def test_the_preview_names_the_judge_s_provider_and_pins_its_spec(run_dir: Path) -> None:
@@ -395,10 +424,16 @@ def test_evaluating_again_generates_nothing(run_dir: Path) -> None:
 
 def test_other_settings_in_the_same_out_dir_are_refused(run_dir: Path) -> None:
     assert invoke("evaluate", str(run_dir), "--confirm").exit_code == 0
-    preview = output(invoke("evaluate", str(run_dir), "--max-tokens", "512"))["preview"]
-    assert preview["warnings"]
+    # The preview knows --confirm would refuse, so it fails instead of offering it.
+    preview = invoke("evaluate", str(run_dir), "--max-tokens", "512")
+    assert preview.exit_code == 2
+    assert preview.stdout == ""
+    assert "holds an evaluation with other settings (changed: max_tokens)" in preview.stderr
+    assert f"Hint: evaluate into a new directory: pass --out-dir {run_dir / 'eval-2'}" in (
+        preview.stderr
+    )
     result = invoke("evaluate", str(run_dir), "--max-tokens", "512", "--confirm")
-    assert result.exit_code == 1
+    assert result.exit_code == 2
     assert "--out-dir" in result.stderr
     elsewhere = invoke(
         "evaluate",
@@ -423,6 +458,17 @@ def test_a_failed_calibration_generates_nothing(
     assert data["status"] == "calibration_failed"
     assert data["calibration"]["ok"] is False
     assert judge.calls == 3 * 4  # calibration only
+    # The progress line names the checks that failed: every corruption was judged a pass.
+    lines = result.stderr.splitlines()
+    [line] = [line for line in lines if line.startswith("18:03:16 calibration failed: ")]
+    assert line.startswith("18:03:16 calibration failed: 4/12 checks passed; ")
+    assert " corrupted (" in line and "): judged pass" in line and line.endswith(" more")
+    assert result.stderr.splitlines()[-1] == (
+        "calibration failed: the judge fireworks/some-judge got 8 of 12 checks wrong, so "
+        "nothing was evaluated; the judge passed a corrupted action or failed a recorded "
+        "one, so its verdicts cannot be trusted; pick another --judge-model (or rerun with "
+        "--skip-calibration to evaluate anyway)"
+    )
     assert not (run_dir / "eval" / "generations.jsonl").exists()
     assert not (run_dir / "eval" / "results.jsonl").exists()
     # With a sound judge, the same directory takes it: nothing was generated yet.
@@ -554,6 +600,65 @@ def test_train_previews_the_evaluation_calls(dataset: Path, tmp_path: Path) -> N
     assert not run.exists()
 
 
+def test_train_evaluate_names_every_recipient_the_judge_included(
+    dataset: Path, tmp_path: Path
+) -> None:
+    run = tmp_path / "run"
+    extra = ("--evaluate", "--eval-judge-model", "anthropic/claude-opus-5-5")
+    result = invoke(*train_args(dataset, run, *extra))
+    assert result.exit_code == 2, result.stderr
+    preview = output(result)["preview"]
+    assert preview["data_recipients"] == [
+        "training rows -> fake",
+        "test split -> fake (generate), Anthropic api.anthropic.com (judge)",
+    ]
+    assert preview["data_destination"].startswith("training data is sent to fake; ")
+    assert "Anthropic (api.anthropic.com) to judge" in preview["data_destination"]
+    assert preview["evaluation"]["data_recipients"] == preview["data_recipients"][1:]
+
+
+def test_train_evaluate_names_its_own_flag_to_skip_publishing(
+    dataset: Path, tmp_path: Path
+) -> None:
+    result = invoke(*train_args(dataset, tmp_path / "run", "--evaluate"))
+    assert result.exit_code == 2, result.stderr
+    (warning,) = output(result)["preview"]["evaluation"]["warnings"]
+    assert "will not be published" in warning
+    assert warning.endswith("or pass --eval-no-publish")
+    assert "--no-publish" not in warning.replace("--eval-no-publish", "")
+
+
+def test_evaluate_names_its_recipients_and_its_flag_to_skip_publishing(run_dir: Path) -> None:
+    result = invoke("evaluate", str(run_dir))
+    assert result.exit_code == 2, result.stderr
+    preview = output(result)["preview"]
+    assert preview["data_recipients"] == [
+        "test split -> fake (generate), the offline fake judge (judge; nothing is sent)"
+    ]
+    (warning,) = preview["warnings"]
+    assert warning.endswith("or pass --no-publish")
+
+
+def test_read_only_previews_offer_no_confirm(
+    dataset: Path, run_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PUP_READ_ONLY", "true")
+    for args in (
+        train_args(dataset, tmp_path / "other", "--evaluate"),
+        ["evaluate", str(run_dir)],
+    ):
+        result = invoke(*args)
+        assert result.exit_code == 2, result.stderr
+        data = output(result)
+        assert data["status"] == "confirmation_required"
+        assert data["next_command"] is None
+        assert data["preview"]["read_only"] == "--confirm is refused while PUP_READ_ONLY is set"
+        assert "Next:" not in result.stderr
+        assert "pup --read-only" in result.stderr
+    assert not (tmp_path / "other").exists()
+    assert not (run_dir / "eval").exists()
+
+
 def test_train_evaluate_evaluates_in_the_training_session(dataset: Path, tmp_path: Path) -> None:
     run = tmp_path / "run"
     preview = output(invoke(*train_args(dataset, run, "--evaluate")))
@@ -603,8 +708,12 @@ def test_train_evaluate_trains_nothing_when_calibration_fails(
         *train_args(dataset, run, "--evaluate", "--eval-judge-model", "fireworks/x-y", "--confirm")
     )
     assert result.exit_code == 1, result.stderr
-    assert output(result)["status"] == "calibration_failed"
+    data = output(result)
+    assert data["status"] == "calibration_failed"
     assert not run.exists()
+    # train spells the judge and calibration flags with --eval-, in the hint and the summary.
+    for text in (data["hint"], result.stderr.splitlines()[-1]):
+        assert "pick another --eval-judge-model (or rerun with --eval-skip-calibration" in text
 
 
 def test_a_failed_evaluation_keeps_the_trained_run_and_exits_1(
@@ -624,6 +733,37 @@ def test_a_failed_evaluation_keeps_the_trained_run_and_exits_1(
     assert "evaluate" in data["evaluation"]["next_command"]
     assert any("after training failed" in warning for warning in data["warnings"])
     assert RunDir(run).load_state().phase == "completed"
+
+
+def test_the_retry_after_a_failed_train_evaluate_pins_its_settings(
+    dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("no sampler today")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(targets_module, "session_samplers", broken)
+        run = tmp_path / "run"
+        settings = (
+            "--eval-max-tokens",
+            "256",
+            "--eval-seed",
+            "3",
+            "--eval-max-cases-per-trajectory",
+            "2",
+        )
+        result = invoke(*train_args(dataset, run, "--evaluate", *settings, "--confirm"))
+    assert result.exit_code == 1, result.stderr
+    retry = output(result)["evaluation"]["next_command"]
+    words = shlex.split(retry)
+    for flag, value in (("--max-tokens", "256"), ("--seed", "3")):
+        assert words[words.index(flag) + 1] == value, retry
+    assert words[words.index("--max-cases-per-trajectory") + 1] == "2", retry
+    assert "--judge-model" in words
+    # Followed as written (with --confirm), evaluation.json's identity check accepts it.
+    followed = invoke(*words[2:], "--confirm")
+    assert followed.exit_code == 0, followed.stderr
+    assert output(followed)["status"] == "complete"
 
 
 @pytest.mark.parametrize("where", ["file", "earlier", "run_dir"])

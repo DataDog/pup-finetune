@@ -54,7 +54,7 @@ from importlib import metadata
 from types import MappingProxyType
 from typing import Any, Protocol
 
-from pup_finetune.errors import ExternalError, UsageError
+from pup_finetune.errors import ExternalError, UsageError, install_hint
 from pup_finetune.redaction import redact
 from pup_finetune.rendering.base import (
     ChatMessage,
@@ -72,8 +72,7 @@ RENDERER = "hf-chat-template"
 RENDERER_VERSION = "1"
 """Bumped whenever the tokens rendered for some conversation change."""
 
-INSTALL_HINT = "install the hf extra: uv sync --extra hf, or pip install 'pup-finetune[hf]'"
-
+INSTALL_HINT = install_hint("hf")
 COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
 """A full, lowercase git commit SHA: how tokenizer revisions are pinned (match with fullmatch)."""
 

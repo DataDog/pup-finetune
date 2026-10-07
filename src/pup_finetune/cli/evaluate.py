@@ -32,6 +32,7 @@ from typing import Annotated, Any
 import typer
 
 from pup_finetune.cli._common import CommandResult, get_runtime, run_command
+from pup_finetune.cli._dirs import require_run_dir
 from pup_finetune.errors import require_confirm, require_writable
 from pup_finetune.evaluation import runner
 
@@ -95,6 +96,7 @@ def evaluate(
     ] = False,
 ) -> dict[str, Any] | CommandResult:
     runtime = get_runtime()
+    require_run_dir(run_dir, "evaluate")
     settings = runner.EvalSettings(
         out_dir=out_dir if out_dir is not None else run_dir / runner.DEFAULT_OUT_DIR_NAME,
         max_cases_per_trajectory=max_cases_per_trajectory,
@@ -109,7 +111,7 @@ def evaluate(
     if confirm:
         require_writable(runtime, f"evaluating on {evaluation.provider.name}")
     rerun = [*evaluation.plan.evaluate_command(), "--confirm"]
-    require_confirm(confirm, evaluation.preview(), shlex.join(rerun))
+    require_confirm(confirm, evaluation.preview(), shlex.join(rerun), read_only=runtime.read_only)
     data = evaluation.execute()
     code = runner.evaluation_exit_code(data)
     return CommandResult(data, exit_code=code) if code else data

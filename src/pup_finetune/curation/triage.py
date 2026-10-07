@@ -64,6 +64,7 @@ from __future__ import annotations
 import hashlib
 import importlib.resources
 import os
+import re
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, wait
@@ -113,6 +114,7 @@ __all__ = [
     "build_messages",
     "decide",
     "failures_shown",
+    "has_template_task",
     "judge_config",
     "measure_agreement",
     "parse_judges",
@@ -120,6 +122,7 @@ __all__ = [
     "plan_triage",
     "read_votes",
     "row_digest",
+    "rubric_sections",
     "rubric_template",
     "run_triage",
 ]
@@ -169,6 +172,35 @@ def rubric_template() -> str:
     """The rubric template shipped with the package (Task / Keep / Drop / Examples)."""
     resource = importlib.resources.files("pup_finetune.curation").joinpath(TEMPLATE_FILE)
     return resource.read_text(encoding="utf-8")
+
+
+_HEADING = re.compile(r"^#{2,}\s+(.+?)\s*#*\s*$")
+
+
+def rubric_sections(text: str) -> dict[str, str]:
+    """The sections of a Markdown rubric by lowercased ``##`` heading, each body with its
+    whitespace collapsed (so rewrapping a line changes nothing). The first of a repeated
+    heading wins."""
+    sections: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    for line in text.splitlines():
+        match = _HEADING.match(line.strip())
+        if match:
+            current = sections.setdefault(match[1].strip().lower(), [])
+            continue
+        if current is not None:
+            current.append(line)
+    return {name: " ".join(" ".join(lines).split()) for name, lines in sections.items()}
+
+
+def has_template_task(rubric: str) -> bool:
+    """Whether ``rubric``'s Task section still holds the template's placeholder text (the
+    Task section of :func:`rubric_template`), so the judges would not know what the agent
+    is for. Only that section counts: a rubric that keeps the template's Keep and Drop
+    lists but describes its own task is edited."""
+    placeholder = rubric_sections(rubric_template()).get("task", "")
+    task = rubric_sections(rubric).get("task")
+    return bool(placeholder) and task is not None and placeholder in task
 
 
 # --- criteria and judges ------------------------------------------------------------------
@@ -463,7 +495,7 @@ class TriagePlan:
 
     def preview(self) -> dict[str, Any]:
         """What :func:`run_triage` would do, and every provider the rows are sent to."""
-        from pup_finetune.judges import destination
+        from pup_finetune.judges import destination, recipient
 
         endpoints: dict[str, dict[str, Any]] = {}
         for spec in self.judges:
@@ -478,7 +510,9 @@ class TriagePlan:
                 },
             )
             entry["judges"].append(spec)
-        places = [destination(judge_config(entry["judges"][0])) for entry in endpoints.values()]
+        firsts = [judge_config(entry["judges"][0]) for entry in endpoints.values()]
+        places = [destination(config) for config in firsts]
+        judged_at = ", ".join(f"{recipient(config)} (judge)" for config in firsts)
         preview: dict[str, Any] = {
             "dataset_dir": str(self.dataset.path),
             "mode": self.mode,
@@ -493,6 +527,7 @@ class TriagePlan:
             "judge_endpoints": list(endpoints.values()),
             "data_destination": f"each row's full content is sent to {_and(places)} for "
             "judging (paid, per token)",
+            "data_recipients": [f"full rows -> {judged_at}"],
         }
         if self.references is not None:
             preview["agreement_note"] = (
@@ -699,15 +734,14 @@ class Failure:
 
 @dataclass(frozen=True, slots=True)
 class Agreement:
-    """How often the council agrees with the agent's or a person's labels of the same rows.
+    """How often the council agrees with the manual labels (``dataset label``) of the same rows.
 
     Rows the council left undecided, and rows dropped as ``too_long`` (no judgment on the
     rubric), are counted apart, not compared. ``confusion`` counts the compared rows by
     label and decision (``keep_keep`` is labeled keep, kept by the council). ``kappa`` is
     Cohen's kappa, ``None`` when it is undefined (every label and decision the same way).
-    ``judges`` has each judge's own votes against the labels, ``by`` the agreement per
-    labeler (``agent``, ``human``), and ``disagreements`` every row they differ on, in
-    review order.
+    ``judges`` has each judge's own votes against the labels, and ``disagreements`` every row
+    they differ on, in review order.
     """
 
     compared: int
@@ -717,7 +751,6 @@ class Agreement:
     confusion: dict[str, int]
     kappa: float | None
     judges: dict[str, dict[str, Any]]
-    by: dict[str, dict[str, Any]]
     disagreements: tuple[dict[str, Any], ...]
 
     @property
@@ -734,7 +767,6 @@ class Agreement:
             "rows_undecided": self.undecided,
             "rows_too_long": self.too_long,
             "judges": self.judges,
-            "by": self.by,
             "disagreements": len(self.disagreements),
             "disagreements_shown": list(self.disagreements[:DISAGREEMENTS_SHOWN]),
         }
@@ -769,11 +801,10 @@ def measure_agreement(
     judges: Sequence[str],
 ) -> Agreement:
     """The council's ``decisions`` (and each judge's ``votes``) against ``references``, the
-    agent's or a person's label of each row (see :class:`Agreement`)."""
+    manual label of each row (see :class:`Agreement`)."""
     pairs: list[tuple[bool, bool]] = []
     confusion = Counter[str]()
     undecided = too_long = 0
-    by: dict[str, list[bool]] = {}
     disagreements: list[dict[str, Any]] = []
     for decision in decisions:
         label = references.get(decision.row_id)
@@ -787,13 +818,11 @@ def measure_agreement(
             continue
         pairs.append((label.keep, decision.keep))
         confusion[f"{_word(label.keep)}_{_word(decision.keep)}"] += 1
-        by.setdefault(label.by, []).append(label.keep == decision.keep)
         if label.keep != decision.keep:
             disagreements.append(
                 {
                     "row_id": decision.row_id,
                     "label": _word(label.keep),
-                    "label_by": label.by,
                     "label_reason": label.reason,
                     "council": _word(decision.keep),
                     "council_reason": decision.reason,
@@ -829,10 +858,6 @@ def measure_agreement(
         },
         kappa=_kappa(pairs),
         judges=per_judge,
-        by={
-            source: {"rows_compared": len(matches), "rate": _rate(sum(matches), len(matches))}
-            for source, matches in sorted(by.items())
-        },
         disagreements=tuple(disagreements),
     )
 

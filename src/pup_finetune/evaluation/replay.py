@@ -89,6 +89,7 @@ __all__ = [
     "Target",
     "cases_sha256",
     "evaluation_identity",
+    "identity_changes",
     "paired_bootstrap_ci",
     "remaining_work",
     "run_replay",
@@ -173,6 +174,15 @@ def evaluation_identity(
     }
 
 
+def identity_changes(stored: Mapping[str, Any], wanted: Mapping[str, Any]) -> list[str]:
+    """The keys of two :func:`evaluation_identity` records that differ, sorted."""
+    return sorted(
+        key
+        for key in set(stored) | set(wanted)
+        if canonical_json(stored.get(key)) != canonical_json(wanted.get(key))
+    )
+
+
 # --- the evaluation directory -------------------------------------------------------------
 
 
@@ -243,11 +253,7 @@ class EvalDir:
             self.calibration_path.unlink(missing_ok=True)
             atomic_write_json(self.identity_path, wanted)
             return
-        changed = sorted(
-            key
-            for key in set(stored) | set(wanted)
-            if canonical_json(stored.get(key)) != canonical_json(wanted.get(key))
-        )
+        changed = identity_changes(stored, wanted)
         raise StateError(
             f"{self.path} holds an evaluation with other settings "
             f"(changed: {', '.join(changed)}), so its results cannot be reused",
@@ -568,7 +574,9 @@ def run_replay(
     its ``max_tokens``, and its ``seed`` seeds the summary's bootstrap. A target's sampler
     is needed only while one of its pairs still needs a generation, so a rerun with nothing
     left to generate may pass fewer. Holds the directory's lock throughout. ``on_progress``
-    receives ``{"done", "total", "target", "case_id", "status"}`` per finished pair.
+    receives ``{"done", "total", "target", "case_id", "status", "passed", "no_verdict",
+    "error"}`` per finished pair (``no_verdict`` the judge's answer's flaw, if it held no
+    verdict; ``error`` the error result's ``{"stage", "type", "message"}``).
     ``publisher`` gets the evaluation once every pair has a result, and what it reports is
     the outcome's ``publication``. Returns the summary also written to ``summary.json``.
     """
@@ -652,6 +660,8 @@ def _run_pool(
         if outcome is not None and "status" in outcome:
             done_count += 1
             if on_progress is not None:
+                judgment = outcome.get("judgment")
+                judgment = judgment if isinstance(judgment, Mapping) else {}
                 on_progress(
                     {
                         "done": done_count,
@@ -659,6 +669,9 @@ def _run_pool(
                         "target": target,
                         "case_id": case.id,
                         "status": outcome["status"],
+                        "passed": bool(judgment.get("passed")),
+                        "no_verdict": judgment.get("error"),
+                        "error": outcome.get("error"),
                     }
                 )
 

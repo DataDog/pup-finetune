@@ -42,6 +42,7 @@ from datetime import datetime
 from typing import Any, Literal, get_args
 
 from pup_finetune.errors import StateError, UsageError
+from pup_finetune.next_steps import command
 from pup_finetune.providers.base import Provider
 from pup_finetune.runs import Clock, RunDir, error_json, utcnow
 from pup_finetune.storage import atomic_write_json, read_json
@@ -445,7 +446,7 @@ def cancellable_pid(run_dir: RunDir) -> int:
     one holding the run's lock (so it is not the one training it).
     """
     state = run_dir.load_state()
-    resume = f"pup finetune resume {run_dir.path}"
+    resume = command("resume", run_dir.path)
     if state.phase != "training":
         why = (
             "it has not started training yet; retry once `status` shows it training"

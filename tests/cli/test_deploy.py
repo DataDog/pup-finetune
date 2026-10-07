@@ -127,7 +127,18 @@ def test_deploy_previews_then_deploys_and_undeploys(fake_run: Path) -> None:
     assert result["state"] == "READY"
     assert result["inference_model"] == model_id_for_run(RUN_ID)
     assert result["smoke_test"]["ok"] is True
-    assert result["next_command"] == undeploy
+    # Deleting what was just made is never the next command; how to call it is in usage.
+    assert result["next_command"] is None
+    assert result["undeploy_command"] == undeploy
+    assert result["usage"] == {
+        "base_url": "http://fake-inference.invalid/v1",
+        "model": model_id_for_run(RUN_ID),
+        "api_key_env": None,
+        "example": "curl http://fake-inference.invalid/v1/chat/completions -H "
+        "'Content-Type: application/json' -d "
+        f'\'{{"model": "{model_id_for_run(RUN_ID)}", "messages": [{{"role": '
+        '"user", "content": "Hello"}]}\'',
+    }
     receipt = RunDir(fake_run).read_deployment()
     assert receipt is not None
     assert receipt["deployment_id"] == model_id_for_run(RUN_ID)
@@ -149,6 +160,8 @@ def test_deploy_previews_then_deploys_and_undeploys(fake_run: Path) -> None:
     assert removed_data["state"] == "DELETED"
     assert removed_data["deleted_at"]
     assert removed_data["model_kept"] == receipt["model"]
+    assert removed_data["next_command"] is None
+    assert removed_data["next_steps"][0]["command"] == f"pup finetune deploy {fake_run}"
     # Undeploying again changes nothing and needs no confirmation.
     twice = invoke("undeploy", str(fake_run))
     assert twice.exit_code == 0, twice.stderr
@@ -185,15 +198,52 @@ def test_an_invalid_deployment_id_is_refused(fake_run: Path) -> None:
     assert "not a valid deployment id" in result.stderr
 
 
-def test_deploy_and_undeploy_are_refused_read_only(
+def _no_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail the test if the command reaches the provider (the only way to a remote call)."""
+
+    def refuse(*_args: Any, **_kwargs: Any) -> Provider:
+        raise AssertionError("a read-only preview must not reach the provider")
+
+    monkeypatch.setattr(deploy_module, "get_provider", refuse)
+
+
+def test_deploy_is_refused_read_only_but_previews(
     fake_run: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("PUP_READ_ONLY", "true")
-    for command in ("deploy", "undeploy"):
-        result = invoke(command, str(fake_run), "--confirm")
-        assert result.exit_code == 2, command
-        assert "PUP_READ_ONLY" in result.stderr
+    monkeypatch.setenv("PUP_READ_ONLY", "1")
+    _no_provider(monkeypatch)
+    refused = invoke("deploy", str(fake_run), "--confirm")
+    assert refused.exit_code == 2
+    assert refused.stdout == ""
+    assert "PUP_READ_ONLY" in refused.stderr
+    assert "pup --read-only" in refused.stderr
+    preview = invoke("deploy", str(fake_run))
+    assert preview.exit_code == 2, preview.stderr
+    data = output(preview)
+    assert data["next_command"] is None
+    assert data["preview"]["read_only"] == "--confirm is refused while PUP_READ_ONLY is set"
+    assert data["preview"]["deployment_id"] == model_id_for_run(RUN_ID)
+    assert "Next:" not in preview.stderr
     assert not RunDir(fake_run).deployment_path.exists()
+
+
+def test_undeploy_is_refused_read_only_but_previews(
+    fake_run: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert invoke("deploy", str(fake_run), "--confirm").exit_code == 0
+    receipt = RunDir(fake_run).deployment_path.read_text()
+    monkeypatch.setenv("PUP_READ_ONLY", "true")
+    _no_provider(monkeypatch)
+    refused = invoke("undeploy", str(fake_run), "--confirm")
+    assert refused.exit_code == 2
+    assert "PUP_READ_ONLY" in refused.stderr
+    preview = invoke("undeploy", str(fake_run))
+    assert preview.exit_code == 2, preview.stderr
+    data = output(preview)
+    assert data["next_command"] is None
+    assert data["preview"]["read_only"] == "--confirm is refused while PUP_READ_ONLY is set"
+    assert data["preview"]["action"].startswith("delete the deployment")
+    assert RunDir(fake_run).deployment_path.read_text() == receipt
 
 
 def test_auto_approve_does_not_confirm(fake_run: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -306,7 +356,21 @@ def test_fireworks_deploy_reports_the_inference_model(
     assert data["inference_model"] == f"accounts/{ACCOUNT}/deployments/{model_id}"
     assert data["url"] == "https://api.fireworks.ai/inference/v1"
     assert data["smoke_test"]["ok"] is True
-    assert data["next_command"] == f"pup finetune undeploy {fireworks_run} --confirm"
+    assert data["next_command"] is None
+    assert data["undeploy_command"] == f"pup finetune undeploy {fireworks_run} --confirm"
+    inference = data["inference_model"]
+    # The key is named as a variable for the shell to expand, never as its value.
+    assert data["usage"] == {
+        "base_url": "https://api.fireworks.ai/inference/v1",
+        "model": inference,
+        "api_key_env": "FIREWORKS_API_KEY",
+        "example": "curl https://api.fireworks.ai/inference/v1/chat/completions "
+        '-H "Authorization: Bearer $FIREWORKS_API_KEY" '
+        "-H 'Content-Type: application/json' -d "
+        f'\'{{"model": "{inference}", "messages": [{{"role": "user", '
+        '"content": "Hello"}]}\'',
+    }
+    assert RunDir(fireworks_run).read_deployment()["api_key_env"] == "FIREWORKS_API_KEY"  # type: ignore[index]
     (create,) = [kwargs for name, kwargs in world.sdk.calls if name == "create"]
     assert create["base_model"] == data["model"]
     assert create["enable_hot_load"] is False
@@ -318,6 +382,21 @@ def test_fireworks_deploy_reports_the_inference_model(
     assert removed.exit_code == 0, removed.stderr
     assert world.sdk.deleted == [model_id]
     assert output(removed)["already_deleted"] is False
+
+
+def test_a_read_only_fireworks_deploy_preview_makes_no_call(
+    world: FireworksWorld, fireworks_run: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = list(world.sdk.calls)
+    monkeypatch.setenv("PUP_READ_ONLY", "true")
+    preview = invoke("deploy", str(fireworks_run))
+    assert preview.exit_code == 2, preview.stderr
+    data = output(preview)
+    assert data["next_command"] is None
+    assert data["preview"]["read_only"] == "--confirm is refused while PUP_READ_ONLY is set"
+    # No shape matching, no create: the preview is built from the run alone.
+    assert world.sdk.calls == calls
+    assert not RunDir(fireworks_run).deployment_path.exists()
 
 
 def test_a_timed_out_deploy_leaves_a_receipt(world: FireworksWorld, fireworks_run: Path) -> None:

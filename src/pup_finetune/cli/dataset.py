@@ -8,17 +8,19 @@
 
 from __future__ import annotations
 
+import re
 import shlex
 import time
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Final
 
 import typer
 
 from pup_finetune.cli._common import get_runtime, run_command
+from pup_finetune.cli._dirs import require_dataset_dir
 from pup_finetune.curation.labels import Label, apply_labels, parse_labels
 from pup_finetune.curation.samples import (
     DEFAULT_SAMPLE_SEED,
@@ -60,7 +62,8 @@ from pup_finetune.data.split import (
 from pup_finetune.datadog.datasets import DEFAULT_PROJECT
 from pup_finetune.datadog.pup import Pup
 from pup_finetune.datadog.spans import Clock, SpanQuery, TimeBound, epoch_ms
-from pup_finetune.errors import UsageError, require_confirm, require_writable
+from pup_finetune.errors import StateError, UsageError, require_confirm, require_writable
+from pup_finetune.next_steps import command, step, template
 from pup_finetune.output import info
 
 SAMPLE_IDS_PER_SPLIT = 5
@@ -71,6 +74,11 @@ EXPLAINED_CODES = 5
 
 DEFAULT_FROM = "now-7d"
 DEFAULT_TO = "now"
+
+REVIEW_SAMPLE_SIZE = 20
+"""How many rows the ``dataset sample`` a dataset's ``next_command`` names shows."""
+DATASETS_DIR = Path("datasets")
+"""Where ``dataset preview`` proposes to pull into: ``datasets/<ml_app>`` under the cwd."""
 
 clock: Clock = time.time
 """What ``now`` in ``--from`` and ``--to`` is resolved against; tests replace it."""
@@ -178,6 +186,87 @@ def _quoted(path: Path) -> str:
     return shlex.quote(str(path))
 
 
+def dataset_next(
+    dataset: DatasetDir, directory: Path, *, accepted: int, sampled: bool = False
+) -> dict[str, Any]:
+    """``next_command`` and ``next_steps`` for a dataset directory, from its state.
+
+    With accepted rows and none labeled, the next command is a ``dataset sample`` to
+    review (``None`` right after one, ``sampled``), and labeling them, by hand or with a
+    judge council, are the steps. Once rows are labeled, training is: its preview needs a
+    provider, a model and a run directory that cannot be chosen without guessing, so it
+    is a step, with a ``dataset push`` while the dataset was never pushed. ``directory``
+    is the directory as the user typed it.
+    """
+    if not accepted:
+        return {"next_command": None, "next_steps": []}
+    label_step = step(
+        template("dataset", "label", directory, "--file", "<LABELS_FILE>"),
+        'record keep/drop decisions: write <LABELS_FILE> first, one {"id", "keep", '
+        '"reason"} object per line (a reason is required to drop)',
+    )
+    if not dataset.labels():
+        triage_step = step(
+            template(
+                "dataset",
+                "triage",
+                directory,
+                "--rubric",
+                "<RUBRIC_FILE>",
+                "--max-rows",
+                REVIEW_SAMPLE_SIZE,
+            ),
+            "or have a council of judge models label the rows against a rubric (paid; it "
+            "previews first; `pup finetune dataset triage --print-template` prints a rubric "
+            "to start from)",
+        )
+        sample = command("dataset", "sample", directory, "--n", REVIEW_SAMPLE_SIZE)
+        return {
+            "next_command": None if sampled else sample,
+            "next_steps": [label_step, triage_step],
+        }
+    steps = [label_step] if sampled else []
+    steps += [
+        step(
+            template("models", "list", "--provider", "<PROVIDER>"),
+            "see the models a provider can fine-tune",
+        ),
+        step(
+            template(
+                "train",
+                "--provider",
+                "<PROVIDER>",
+                "--model",
+                "<MODEL>",
+                "--dataset",
+                directory,
+                "--run-dir",
+                "<RUN_DIR>",
+            ),
+            "preview a training run on the kept rows (free); choose the provider and model "
+            "with the user, and a new run directory",
+        ),
+    ]
+    pushed = _push_receipt(dataset)
+    if pushed is None:
+        steps.append(
+            step(
+                template("dataset", "push", directory, "--name", "<NAME>"),
+                "push the kept rows to Datadog so an evaluation can be published as "
+                "experiments (a remote write; it previews first)",
+            )
+        )
+    elif pushed is _UNREADABLE:
+        steps.append(
+            step(
+                command("dataset", "show", directory),
+                f"{PUSH_FILE} cannot be read, so whether the dataset was pushed is unknown; "
+                "show reports why",
+            )
+        )
+    return {"next_command": None, "next_steps": steps}
+
+
 @dataset_app.command(
     "import",
     short_help="Import canonical rows from a local JSONL file.",
@@ -209,6 +298,7 @@ def import_rows(
     test_fraction: TestFractionOption = DEFAULT_TEST_FRACTION,
 ) -> dict[str, Any]:
     params = SplitParams(seed, validation_fraction, test_fraction)
+    require_dataset_dir(directory)
     rows, exclusions = read_import_file(file)
     dataset = DatasetDir(directory)
     result = dataset.add(rows, exclusions, settings=DatasetSettings("import", params))
@@ -226,7 +316,7 @@ def import_rows(
             "unchanged": result.unchanged,
             "excluded": result.excluded,
         },
-        "next_command": f"pup finetune dataset show {_quoted(directory)}",
+        **dataset_next(dataset, directory, accepted=summary["accepted"]),
     }
 
 
@@ -240,18 +330,20 @@ def import_rows(
 )
 @run_command
 def show(directory: DirArgument) -> dict[str, Any]:
+    require_dataset_dir(directory)
     dataset = DatasetDir(directory)
     settings = dataset.settings()
     by_split = dataset.rows_by_split()
+    summary = dataset.summary()
     return {
         "dataset_dir": str(dataset.path.resolve()),
         "settings": settings,
-        "summary": dataset.summary(),
+        "summary": summary,
         "sample_row_ids": {
             split: [row.id for row in by_split[split][:SAMPLE_IDS_PER_SPLIT]] for split in SPLITS
         },
         "push": _push_brief(dataset),
-        "next_command": f"pup finetune train --dataset {_quoted(directory)} ...",
+        **dataset_next(dataset, directory, accepted=summary["accepted"]),
     }
 
 
@@ -272,7 +364,7 @@ def show(directory: DirArgument) -> dict[str, Any]:
         "error. Rows labeled drop after they were pushed are reported as stale_records and "
         "are not deleted from the dataset; kept rows that changed after they were pushed "
         "are reported as changed_records and their records are not updated. A remote "
-        "write: refused when PUP_READ_ONLY is set."
+        "write: with PUP_READ_ONLY set, it previews (from local files) but refuses --confirm."
     ),
 )
 @run_command
@@ -292,14 +384,24 @@ def push(
         ),
     ] = False,
 ) -> dict[str, Any]:
-    require_writable(get_runtime(), "dataset push")
+    runtime = get_runtime()
+    require_dataset_dir(directory)
     dataset = DatasetDir(directory)
     plan = plan_push(dataset, project=project, name=name)
     plan.require_rows()
     if plan.needs_remote:
-        rerun = ["pup", "finetune", "dataset", "push", str(directory), "--name", name]
-        rerun += ["--project", project, "--confirm"]
-        require_confirm(confirm, _push_preview(plan), shlex.join(rerun))
+        rerun = ["dataset", "push", directory, "--name", name]
+        if project != DEFAULT_PROJECT:
+            rerun += ["--project", project]
+        if confirm:
+            require_writable(runtime, "dataset push")
+        # The preview reads local files only, so it is allowed under PUP_READ_ONLY.
+        require_confirm(
+            confirm,
+            _push_preview(plan),
+            command(*rerun, "--confirm"),
+            read_only=runtime.read_only,
+        )
         receipt = push_dataset(dataset, project=project, name=name, pup=Pup(), progress=info)
     else:
         info("nothing to push: every kept row was pushed already")
@@ -308,7 +410,7 @@ def push(
     result["receipt_file"] = str(push_path(dataset).resolve())
     if warnings := _receipt_warnings(receipt.stale_records, receipt.changed_records):
         result["warnings"] = warnings
-    result["next_command"] = f"pup finetune train --dataset {_quoted(directory)} ..."
+    result.update(dataset_next(dataset, directory, accepted=dataset.summary()["accepted"]))
     return result
 
 
@@ -339,6 +441,9 @@ def _push_preview(plan: PushPlan) -> dict[str, Any]:
         "stale_records": plan.stale_records,
         "changed_records": plan.changed_records,
         "sample_record": plan.pending[0].record if plan.pending else None,
+        "data_recipients": [
+            f"kept rows -> Datadog (dataset {plan.dataset_name!r} in project {plan.project!r})"
+        ],
     }
     warnings: list[str] = []
     if plan.in_flight:
@@ -378,7 +483,8 @@ def _receipt_warnings(stale: Mapping[str, str], changed: Mapping[str, str]) -> l
         "Export LLM spans from Datadog, check and convert them into training rows, and "
         "assign splits, all in memory: nothing is written. Shows the time range it read, how "
         "many spans matched, how many rows would be accepted, why the rest would be excluded, a few samples, and the "
-        f"`dataset pull` command with the same flags. {_PULL_FLAGS} {_DATADOG_READ}"
+        "`dataset pull` command with the same flags, into a new directory under ./datasets "
+        f"named after --ml-app. {_PULL_FLAGS} {_DATADOG_READ}"
     ),
 )
 @run_command
@@ -432,7 +538,7 @@ def preview(
         "sample_accepted": [row_brief(row) for row in collection.rows[:SAMPLE_SIZE]],
         "sample_excluded": _sample_exclusions(collection.exclusions),
         "stats": collection.stats(),
-        "next_command": _pull_command("<DIR>", options, params),
+        "next_command": _pull_command(_new_dataset_dir(ml_app), options, params),
     }
 
 
@@ -484,6 +590,7 @@ def pull_rows(
         reasoning=reasoning,
         include_errors=include_errors,
     )
+    require_dataset_dir(directory)
     dataset = DatasetDir(directory)
     options = resolve_window(options, dataset, clock)
     collection, added = pull(Pup(), options, dataset, params, progress=info)
@@ -508,7 +615,7 @@ def pull_rows(
             "updated": added.updated,
             **collection.stats(),
         },
-        "next_command": f"pup finetune dataset show {_quoted(directory)}",
+        **dataset_next(dataset, directory, accepted=summary["accepted"]),
         "hint": (
             "review a sample of the accepted rows (`pup finetune dataset sample "
             f"{_quoted(directory)}`) and the exclusions ({dataset.excluded_path.name}) with "
@@ -523,8 +630,9 @@ def pull_rows(
     short_help="Apply keep/drop labels to a dataset's rows.",
     help=(
         "Record keep/drop decisions on accepted rows of DIR from a JSONL file of "
-        '{"id", "keep", "reason"} objects; "by" and "at" may be given per line and default '
-        "to --by and the current time. A reason is required to drop a row. Every id must be "
+        '{"id", "keep", "reason"} objects ("at" may be given per line and defaults to the '
+        "current time). A reason is required to drop a row. Rows labeled here are never "
+        "relabeled by `dataset triage`. Every id must be "
         "an accepted row, or nothing is written. Labels are appended to labels.jsonl and the "
         "last label of an id wins; rows.jsonl is never changed. A dropped row is left out of "
         f"training and of the split files. {_LOCAL_ONLY}"
@@ -544,16 +652,12 @@ def label(
             show_default=False,
         ),
     ],
-    by: Annotated[
-        Literal["agent", "human"],
-        typer.Option(help="Who made the decisions, for lines that do not say."),
-    ] = "agent",
 ) -> dict[str, Any]:
+    require_dataset_dir(directory)
     dataset = DatasetDir(directory)
-    labels = _read_label_file(file, by=by, at=datetime.now(UTC))
+    labels = _read_label_file(file, at=datetime.now(UTC))
     report = apply_labels(dataset, labels)
     summary = report.summary
-    train = f"pup finetune train --dataset {_quoted(directory)} ..."
     return {
         "dataset_dir": str(dataset.path.resolve()),
         "label": {
@@ -570,11 +674,7 @@ def label(
         "drop_reasons": summary["drop_reasons"],
         "splits": summary["splits"],
         "warnings": summary["warnings"],
-        "next_command": train,
-        "next_commands": [
-            train,
-            f"pup finetune dataset push {_quoted(directory)} --name ...",
-        ],
+        **dataset_next(dataset, directory, accepted=summary["accepted"]),
     }
 
 
@@ -603,6 +703,7 @@ def sample(
         typer.Option("--include-dropped", help="Also sample rows labeled drop."),
     ] = False,
 ) -> dict[str, Any]:
+    require_dataset_dir(directory)
     dataset = DatasetDir(directory)
     dataset.settings()  # A UsageError when this is not a dataset directory.
     rows, eligible = sample_rows(
@@ -616,12 +717,25 @@ def sample(
         "eligible": eligible,
         "rows": rows,
         "rows_file": str(dataset.rows_path.resolve()),
-        "next_command": f"pup finetune dataset label {_quoted(directory)} --file labels.jsonl",
+        **dataset_next(dataset, directory, accepted=len(dataset.rows()), sampled=True),
         "hint": (
             "review these rows with the user, then record decisions as JSON lines of "
             '{"id": ..., "keep": true|false, "reason": ...}; a reason is required to drop'
         ),
     }
+
+
+_UNREADABLE: Final = object()
+"""What :func:`_push_receipt` returns for a ``push.json`` that cannot be read."""
+
+
+def _push_receipt(dataset: DatasetDir) -> object | None:
+    """``dataset``'s push receipt, ``None`` when it was never pushed, or
+    :data:`_UNREADABLE` when ``push.json`` cannot be read."""
+    try:
+        return read_push_state(dataset)
+    except StateError:
+        return _UNREADABLE
 
 
 def _push_brief(dataset: DatasetDir) -> dict[str, Any] | None:
@@ -639,16 +753,25 @@ def _push_brief(dataset: DatasetDir) -> dict[str, Any] | None:
     }
 
 
-def _read_label_file(path: Path, *, by: str, at: datetime) -> list[Label]:
-    """The labels in ``path``; ``by`` and ``at`` fill in lines that leave them out."""
+def _read_label_file(path: Path, *, at: datetime) -> list[Label]:
+    """The labels in ``path``, all ``manual``; ``at`` fills in lines that leave it out.
+
+    A line claiming ``"by": "judge"`` is refused: judge labels come only from the council."""
     labels = parse_labels(
         path,
-        defaults={"by": by, "at": at},
+        defaults={"at": at},
         error=UsageError,
         hint='each line must be {"id": ..., "keep": true|false, "reason": ...}',
     )
     if not labels:
         raise UsageError(f"{path} has no labels")
+    judged = next((label.id for label in labels if label.by == "judge"), None)
+    if judged is not None:
+        raise UsageError(
+            f"{path} labels {judged!r} as decided by the judge council",
+            hint='leave "by" out: `dataset label` records your decisions, and judge labels '
+            "come only from `pup finetune dataset triage`",
+        )
     return labels
 
 
@@ -730,8 +853,18 @@ def _utc(bound: TimeBound) -> str | None:
     return moment.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def _new_dataset_dir(ml_app: str) -> str:
+    """``./datasets/<ml_app>`` (made safe for a path), with ``-2``, ``-3``, ... when taken."""
+    slug = re.sub(r"[^a-z0-9._-]+", "-", ml_app.strip().lower()).strip("-.") or "dataset"
+    candidate, n = DATASETS_DIR / slug, 2
+    while candidate.exists():
+        candidate, n = DATASETS_DIR / f"{slug}-{n}", n + 1
+    return f"./{candidate}"
+
+
 def _pull_command(directory: str, options: PullOptions, params: SplitParams) -> str:
-    """The ``dataset pull`` command with the same flags; ``directory`` is used as is."""
+    """The ``dataset pull`` command into ``directory`` with the flags that differ from the
+    defaults (the filter, and the time range as written)."""
     query = options.query
     args: list[str] = ["--ml-app", query.ml_app or ""]
     if query.span_name:
@@ -740,7 +873,10 @@ def _pull_command(directory: str, options: PullOptions, params: SplitParams) -> 
         args += ["--query", query.query]
     for key, value in sorted(query.tags.items()):
         args += ["--tag", f"{key}:{value}"]
-    args += ["--from", str(query.from_), "--to", str(query.to)]
+    if str(query.from_) != DEFAULT_FROM:
+        args += ["--from", str(query.from_)]
+    if str(query.to) != DEFAULT_TO:
+        args += ["--to", str(query.to)]
     if options.target_count != DEFAULT_TARGET_COUNT:
         args += ["--target-count", str(options.target_count)]
     if options.max_candidates != DEFAULT_MAX_CANDIDATES:
@@ -758,7 +894,7 @@ def _pull_command(directory: str, options: PullOptions, params: SplitParams) -> 
             "--test-fraction",
             str(params.test_fraction),
         ]
-    return f"pup finetune dataset pull {directory} {shlex.join(args)}"
+    return command("dataset", "pull", directory, *args)
 
 
 def _count_codes(codes: Iterable[str]) -> dict[str, int]:

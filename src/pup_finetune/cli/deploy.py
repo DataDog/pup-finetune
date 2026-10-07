@@ -7,7 +7,8 @@
 """`pup finetune deploy` and `undeploy`: serve a run's model on its provider, and stop.
 
 Deploying creates paid, billing infrastructure, so without ``--confirm`` both commands only
-preview, and both are refused with ``PUP_READ_ONLY`` set. ``--confirm`` is never implied by
+preview. The previews are built from the run directory alone, so they run with
+``PUP_READ_ONLY`` set; only ``--confirm`` is refused then. ``--confirm`` is never implied by
 ``PUP_AUTO_APPROVE`` or agent mode.
 
 Fireworks' own command-line tool refuses to create deployments when an AI agent runs it.
@@ -27,11 +28,13 @@ from typing import Annotated, Any
 import typer
 
 from pup_finetune.cli._common import CommandResult, get_runtime, run_command
+from pup_finetune.cli._dirs import require_run_dir
 from pup_finetune.deployment import (
     BILLING,
     deploy_preview,
     deploy_target,
     deployment_id_for,
+    deployment_usage,
     execute_deploy,
     execute_undeploy,
     require_not_deployed,
@@ -39,6 +42,7 @@ from pup_finetune.deployment import (
     undeploy_preview,
 )
 from pup_finetune.errors import StateError, UsageError, require_confirm, require_writable
+from pup_finetune.next_steps import PROGRAM, command, step
 from pup_finetune.providers import get_provider
 from pup_finetune.providers.base import DeployOptions
 from pup_finetune.runs import RunDir
@@ -86,7 +90,7 @@ def deploy(
     ] = False,
 ) -> dict[str, Any] | CommandResult:
     runtime = get_runtime()
-    require_writable(runtime, "deploy")
+    require_run_dir(run_dir, "deploy")
     run = RunDir(run_dir)
     target = deploy_target(run)
     require_not_deployed(run)
@@ -99,22 +103,34 @@ def deploy(
         )
     except ValueError as exc:
         raise UsageError(str(exc)) from exc
-    rerun = ["pup", "finetune", "deploy", str(run_dir)]
+    rerun = [*PROGRAM, "deploy", str(run_dir)]
     if deployment_id is not None:
         rerun += ["--deployment-id", deployment_id]
     if shape:
         rerun += ["--shape", shape]
     if timeout_minutes != DEFAULT_TIMEOUT_MINUTES:
         rerun += ["--timeout-minutes", f"{timeout_minutes:g}"]
-    require_confirm(confirm, deploy_preview(target, options), shlex.join([*rerun, "--confirm"]))
+    if confirm:
+        require_writable(runtime, "deploy")
+    # The preview is built from the run alone (no provider call), so it is allowed under
+    # PUP_READ_ONLY.
+    require_confirm(
+        confirm,
+        deploy_preview(target, options),
+        shlex.join([*rerun, "--confirm"]),
+        read_only=runtime.read_only,
+    )
     provider = get_provider(target.provider, runtime)
     receipt, smoke_ok = execute_deploy(provider, target, options)
+    # Deleting what was just created is never the next command: it is a field of its own.
     data: dict[str, Any] = {
         **receipt,
         "run_dir": str(run.path),
         "receipt_file": str(run.deployment_path),
         "billing": BILLING,
-        "next_command": undeploy_command(run),
+        "usage": deployment_usage(receipt),
+        "undeploy_command": undeploy_command(run),
+        "next_command": None,
     }
     if not smoke_ok:
         data["hint"] = (
@@ -134,7 +150,7 @@ def undeploy(
     ] = False,
 ) -> dict[str, Any]:
     runtime = get_runtime()
-    require_writable(runtime, "undeploy")
+    require_run_dir(run_dir, "undeploy")
     run = RunDir(run_dir)
     receipt = run.read_deployment()
     if receipt is None:
@@ -143,10 +159,13 @@ def undeploy(
             hint=f"deploy it with `pup finetune deploy {shlex.quote(str(run_dir))}`",
         )
     if not receipt.get("deleted_at"):
+        if confirm:
+            require_writable(runtime, "undeploy")
         require_confirm(
             confirm,
             undeploy_preview(run, receipt),
-            shlex.join(["pup", "finetune", "undeploy", str(run_dir), "--confirm"]),
+            command("undeploy", run_dir, "--confirm"),
+            read_only=runtime.read_only,
         )
         provider = get_provider(str(receipt.get("provider")), runtime)
         receipt = execute_undeploy(provider, run)
@@ -155,7 +174,10 @@ def undeploy(
         "run_dir": str(run.path),
         "receipt_file": str(run.deployment_path),
         "model_kept": receipt.get("model"),
-        "next_command": f"pup finetune deploy {shlex.quote(str(run_dir))}",
+        "next_command": None,
+        "next_steps": [
+            step(command("deploy", run_dir), "deploy the kept model again (it previews first)")
+        ],
     }
 
 
@@ -170,10 +192,13 @@ def register(app: typer.Typer) -> None:
             "(--timeout-minutes), and send one chat completion as a smoke test. The receipt, "
             "deployment.json in RUN_DIR, is written as soon as the deployment exists, so a "
             "failed or timed-out wait still records it. Without --confirm, previews what "
-            f"would be created. {BILLING[0].upper()}{BILLING[1:]}: run `pup finetune undeploy "
+            "would be created. The result says how to call the model (usage: the base URL, "
+            "the model to request and an example request that reads the key from its "
+            "environment variable) and how to delete it (undeploy_command). "
+            f"{BILLING[0].upper()}{BILLING[1:]}: run `pup finetune undeploy "
             "RUN_DIR --confirm`. "
-            "A failed smoke test exits 1 and keeps the deployment. A remote write: refused "
-            f"when PUP_READ_ONLY is set. {_AGENT_RULE}"
+            "A failed smoke test exits 1 and keeps the deployment. A remote write: with "
+            f"PUP_READ_ONLY set, it previews but refuses --confirm. {_AGENT_RULE}"
         ),
     )(deploy)
     app.command(
@@ -183,6 +208,6 @@ def register(app: typer.Typer) -> None:
             "Delete the deployment recorded in RUN_DIR/deployment.json and record when; the "
             "promoted model is kept and can be deployed again. Deleting a deployment that is "
             "already gone succeeds. Without --confirm, previews what would be deleted. A "
-            "remote write: refused when PUP_READ_ONLY is set."
+            "remote write: with PUP_READ_ONLY set, it previews but refuses --confirm."
         ),
     )(undeploy)

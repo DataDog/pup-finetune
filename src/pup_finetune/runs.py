@@ -12,11 +12,12 @@ Files, all ``0600`` in a ``0700`` directory, written atomically:
   :class:`~pup_finetune.providers.base.TrainSpec`, dataset directory and content hash,
   rendering identity, the hash of those settings, and when it was created.
 - ``state.json`` - :class:`RunState`, rewritten at every step: the phase, epoch and step,
-  the last step's training loss, every checkpoint, the resume point of the last training
-  checkpoint, the best epoch, the loop's warnings, what a resume would do, the wall-clock
-  seconds the spend guard counted over every attempt, a heartbeat and the training process
-  id. With ``heartbeat_s``, :func:`execute_run` also rewrites it on a timer, so the
-  heartbeat and the elapsed time stay fresh through slow steps, validation and promotion.
+  the steps an epoch and the whole run take, the last step's training loss, every
+  checkpoint, the resume point of the last training checkpoint, the best epoch, the loop's
+  warnings, what a resume would do, the wall-clock seconds the spend guard counted over
+  every attempt, a heartbeat and the training process id. With ``heartbeat_s``,
+  :func:`execute_run` also rewrites it on a timer, so the heartbeat and the elapsed time
+  stay fresh through slow steps, validation and promotion.
 - ``epochs.json`` - one record per finished epoch, with the training checkpoint saved at its
   end.
 - ``result.json`` - how the run ended; :func:`execute_run` writes it on every exit, also on
@@ -60,6 +61,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Any, Literal, cast, get_args
 
+from pup_finetune import next_steps
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.schema import TrainingRow, row_content_hash
 from pup_finetune.data.split import SplitName
@@ -120,7 +122,17 @@ _MODEL_ID_HASHED_PREFIX = MAX_MODEL_ID_LEN - 9  # room for a dash and 8 hex digi
 
 STALE_TRAINING = "the training process stopped without recording why (it may have been killed)"
 
-RESUME_HINT = "the run is resumable from its last training checkpoint: resume it to continue"
+
+def resume_command(run_dir: Path) -> str:
+    """The command that resumes the run in ``run_dir`` (a free preview first)."""
+    return next_steps.command("resume", run_dir)
+
+
+def resume_hint(run_dir: Path, hint: str | None = None) -> str:
+    """``hint`` (by default, that the run can be resumed) with the resume command after it."""
+    said = (hint or "the run is resumable from its last training checkpoint").rstrip(". ")
+    return f"{said}. Next: {resume_command(run_dir)}"
+
 
 Clock = Callable[[], datetime]
 
@@ -156,6 +168,11 @@ def _promotions_json(data: Mapping[str, Any]) -> list[dict[str, Any]]:
     if legacy is None:
         return []
     return [{"model_id": None, "epoch": None, "step": None, "requested_at": legacy}]
+
+
+def _int(value: object) -> int:
+    """``value`` as an ``int`` when it is one (not a bool), else ``0``."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 def _optional_str(value: object) -> str | None:
@@ -406,13 +423,28 @@ class RunDir:
         """A summary of the run: what it trains, where it is, and how it ended if it did.
 
         ``val_losses`` lists each finished epoch's validation loss, in order (``None`` for an
-        epoch without validation). While the run is ``created`` or ``training`` (e.g. resumed),
-        nothing is reported from ``result.json``, which then describes an earlier attempt.
+        epoch without validation). Everything about progress comes from one ``state.json``
+        snapshot: an epoch ``epochs.json`` already holds but that snapshot has not recorded
+        yet (it is written first) is left out, so the epochs, the best epoch and the step
+        always agree. ``steps_per_epoch`` and ``max_steps`` are ``None`` until training
+        started (a state saved before they were recorded takes them from the first finished
+        epoch). ``elapsed_seconds`` is the spend guard's time over every attempt, as of the
+        snapshot, and ``hourly_rate_usd`` the rate the run prices it at, if any. While the run
+        is ``created`` or ``training`` (e.g. resumed), nothing is reported from
+        ``result.json``, which then describes an earlier attempt.
         """
         manifest = self.manifest()
         state = self.load_state()
         result = None if state.phase in ("created", "training") else self.read_result()
         epochs = self.read_epochs()
+        if state.phase == "training":
+            epochs = [row for row in epochs if _int(row.get("epoch")) <= state.epochs]
+        spec = manifest["spec"]
+        per_epoch, max_steps = state.steps_per_epoch, state.max_steps
+        if per_epoch is None and epochs and _int(epochs[0].get("steps")) > 0:
+            per_epoch = _int(epochs[0].get("steps"))
+        if max_steps is None and per_epoch is not None:
+            max_steps = per_epoch * int(spec["max_epochs"])
         return {
             "run_id": manifest["run_id"],
             "path": str(self.path),
@@ -422,10 +454,14 @@ class RunDir:
             "epoch": state.epoch,
             "step": state.step,
             "epochs_completed": state.epochs,
-            "max_epochs": manifest["spec"]["max_epochs"],
+            "max_epochs": spec["max_epochs"],
+            "steps_per_epoch": per_epoch,
+            "max_steps": max_steps,
             "last_train_loss": state.last_train_loss,
             "val_losses": [epoch.get("val_loss") for epoch in epochs],
             "best": state.best,
+            "elapsed_seconds": state.elapsed_seconds,
+            "hourly_rate_usd": spec.get("hourly_rate_usd"),
             "heartbeat_at": state.heartbeat_at,
             "pid": state.pid,
             "error": state.error,
@@ -476,7 +512,10 @@ class RunState:
     ``phase`` moves ``created`` -> ``training`` -> ``completed``, ``failed``, ``cancelled`` or
     ``interrupted``, and from the last three back to ``training`` on :meth:`resume`; other
     moves raise :class:`StateError`. ``step`` counts optimizer steps over the run and
-    ``last_train_loss`` is the last step's training loss. ``resume_point`` is the last
+    ``last_train_loss`` is the last step's training loss. ``steps_per_epoch`` and
+    ``max_steps`` are the optimizer steps an epoch and the whole run take (at most), as the
+    loop planned them when training last started; ``None`` before that, and in a state saved
+    before they were recorded. ``resume_point`` is the last
     training checkpoint with where training stood (a
     :class:`~pup_finetune.training.records.ResumePoint` as JSON); ``resume_mode`` says what a
     resume does. :meth:`request_cancel` (e.g. from a signal handler) makes the loop stop at
@@ -506,6 +545,8 @@ class RunState:
         epoch: int = 0,
         step: int = 0,
         epochs: int = 0,
+        steps_per_epoch: int | None = None,
+        max_steps: int | None = None,
         last_train_loss: float | None = None,
         checkpoints: Sequence[Mapping[str, Any]] = (),
         resume_point: Mapping[str, Any] | None = None,
@@ -528,6 +569,8 @@ class RunState:
         self.epoch = epoch
         self.step = step
         self.epochs = epochs
+        self.steps_per_epoch = steps_per_epoch
+        self.max_steps = max_steps
         self.last_train_loss = last_train_loss
         self.checkpoints = [dict(ckpt) for ckpt in checkpoints]
         self.resume_point = None if resume_point is None else dict(resume_point)
@@ -555,6 +598,7 @@ class RunState:
         if mode not in RESUME_MODES:
             raise StateError(f"{run_dir.state_path}: unknown resume mode {mode!r}")
         loss = data.get("last_train_loss")
+        per_epoch, max_steps = data.get("steps_per_epoch"), data.get("max_steps")
         try:
             return cls(
                 run_dir,
@@ -562,6 +606,8 @@ class RunState:
                 epoch=int(data.get("epoch", 0)),
                 step=int(data.get("step", 0)),
                 epochs=int(data.get("epochs", 0)),
+                steps_per_epoch=None if per_epoch is None else int(per_epoch),
+                max_steps=None if max_steps is None else int(max_steps),
                 last_train_loss=None if loss is None else float(loss),
                 checkpoints=list(data.get("checkpoints") or []),
                 resume_point=data.get("resume_point"),
@@ -584,6 +630,8 @@ class RunState:
             "epoch": self.epoch,
             "step": self.step,
             "epochs": self.epochs,
+            "steps_per_epoch": self.steps_per_epoch,
+            "max_steps": self.max_steps,
             "last_train_loss": self.last_train_loss,
             "checkpoints": self.checkpoints,
             "resume_point": self.resume_point,
@@ -701,6 +749,10 @@ class RunState:
 
     def cancel_requested(self) -> bool:
         return self._cancel.is_set()
+
+    def record_plan(self, *, steps_per_epoch: int, max_steps: int) -> None:
+        self.steps_per_epoch, self.max_steps = steps_per_epoch, max_steps
+        self.save()
 
     def record_step(self, *, epoch: int, step: int, loss: float | None = None) -> None:
         self.epoch, self.step = epoch, step
@@ -1077,9 +1129,21 @@ def _recorded_phase(
     return error
 
 
-def _for_cli(error: BaseException) -> BaseException:
+def _for_cli(error: BaseException, resumable: Path | None) -> BaseException:
     """The error to raise for ``error``: a :class:`FinetuneError` the CLI reports, or an
-    interrupt as it came. The original is chained as the cause, its message redacted."""
+    interrupt as it came. The original is chained as the cause, its message redacted.
+
+    ``resumable`` is the run directory when the error left the run ``interrupted`` or
+    ``failed``: every :class:`FinetuneError` returned then ends its hint with the resume
+    command (:func:`resume_hint`).
+    """
+    converted = _converted(error)
+    if resumable is not None and isinstance(converted, FinetuneError):
+        converted.hint = resume_hint(resumable, converted.hint)
+    return converted
+
+
+def _converted(error: BaseException) -> BaseException:
     if isinstance(error, TerminationRequested):
         hint = "; ".join(getattr(error, "__notes__", [])) or None
         return TrainingTerminated("training stopped: the process received SIGTERM", hint=hint)
@@ -1087,15 +1151,15 @@ def _for_cli(error: BaseException) -> BaseException:
         # Ctrl-C or SIGTERM stopped the promotion: report the interrupt, not a failure.
         for note in getattr(error, "__notes__", []):
             error.cause.add_note(note)
-        return _for_cli(error.cause)
+        return _converted(error.cause)
     if isinstance(error, FinetuneError) or not isinstance(error, Exception):
         return error
     detail = redact(str(error))
     message = f"training stopped: {type(error).__name__}{': ' + detail if detail else ''}"
     # A dropped connection or a timeout is the provider's failure, not the run directory's.
     if isinstance(error, OSError) and not isinstance(error, ConnectionError | TimeoutError):
-        return StateError(f"{message} (writing the run directory)", hint=RESUME_HINT)
-    return ExternalError(message, source="training", hint=RESUME_HINT)
+        return StateError(f"{message} (writing the run directory)")
+    return ExternalError(message, source="training")
 
 
 def execute_run(
@@ -1160,7 +1224,8 @@ def execute_run(
         with _interrupts_ignored():
             result, error = _record_end(run_dir, state, run_id, outcome, error, now())
     if error is not None:
-        raised = _for_cli(error)
+        resumable = run_dir.path if state.phase in ("interrupted", "failed") else None
+        raised = _for_cli(error, resumable)
         if raised is error or raised is error.__cause__:
             raise raised
         raise raised from error

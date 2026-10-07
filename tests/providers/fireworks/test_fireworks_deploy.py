@@ -177,6 +177,7 @@ def test_deploy_creates_with_hot_load_off_and_scale_to_zero(
         url=INFERENCE_URL,
         name=NAME,
         shape=f"{SHAPE}/versions/v2",
+        api_key_env="FIREWORKS_API_KEY",
     )
     (connection,) = sdk.connections
     assert connection["account_id"] == ACCOUNT

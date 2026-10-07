@@ -92,6 +92,7 @@ if TYPE_CHECKING:
 __all__ = [
     "BASE_ANSWER",
     "FAKE_PROFILE",
+    "INFERENCE_URL",
     "MAX_CHECKPOINT_NAME_LEN",
     "PROVIDER_NAME",
     "TUNED_FALLBACK_ANSWER",
@@ -107,6 +108,9 @@ __all__ = [
 
 PROVIDER_NAME: Final = "fake"
 MAX_CHECKPOINT_NAME_LEN: Final = 17
+INFERENCE_URL: Final = "http://fake-inference.invalid/v1"
+"""The base URL a fake deployment reports: a reserved name that never resolves, since the
+fake serves nothing over the network (its smoke test answers in memory)."""
 BASE_ANSWER: Final = "I can help with that."
 """What the base model (a sampler without a checkpoint) answers to every prompt."""
 TUNED_FALLBACK_ANSWER: Final = "Here is the answer you need."
@@ -1123,6 +1127,7 @@ class FakeProvider:
             deployment_id=options.deployment_id,
             model_id=model.model_id,
             inference_model=model.model_id,
+            url=INFERENCE_URL,
             name=request.name,
             shape=request.shape,
         )

@@ -19,6 +19,7 @@ from pup_finetune.cli import (
     deploy,
     doctor,
     evaluate,
+    help,
     models,
     skill,
     train,
@@ -66,6 +67,7 @@ triage.register(dataset.dataset_app)
 dataset.register(app)
 deploy.register(app)
 doctor.register(app)
+help.register(app)
 evaluate.register(app)
 models.register(app)
 skill.register(app)

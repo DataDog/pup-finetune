@@ -220,6 +220,7 @@ class _Run:
                 supports_promotion=backend.supports_promotion,
                 checkpoint_namer=checkpoint_namer(run_id),
                 max_checkpoint_name_len=backend.max_checkpoint_name_len,
+                on_event=on_event,
             ),
             clock=clock,
             sleep=sleep,

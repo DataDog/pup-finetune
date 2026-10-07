@@ -386,7 +386,8 @@ waiting still records what exists and bills; a smoke test that raises is recorde
 with an undeploy hint. It is updated once the deployment serves, with the
 `smoke_test` result, and with `deleted_at` by `undeploy`. A run has one deployment at a time.
 `undeploy` is idempotent and keeps the model. Both are remote writes: they preview without
-`--confirm` and are refused with `PUP_READ_ONLY`.
+`--confirm`, from the run directory alone (no provider call), and with `PUP_READ_ONLY` set
+only their `--confirm` is refused.
 
 On Fireworks, [`providers/fireworks/deploy.py`](../src/pup_finetune/providers/fireworks/deploy.py)
 drives the SDK's `Fireworks` client through `client.py`: the first validated, latest-validated
@@ -489,7 +490,7 @@ by the full run. A rubric template ships with the package (`--print-template`).
 `--agreement` measures a council before it labels anything: it reviews the rows the agent or
 a person labeled instead, writes no label, and reports how often the council's decisions agree
 with those labels (`Agreement`: the rate, Cohen's kappa, the confusion counts, each judge's own
-agreement, per labeler, and the rows they disagree on). Its votes are stored and frozen like
+agreement, and the rows they disagree on). Its votes are stored and frozen like
 any other, so the same rubric then labels the remaining rows.
 
 ## How a new provider plugs in

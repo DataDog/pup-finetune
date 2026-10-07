@@ -39,11 +39,13 @@ refused until it is undeployed. Both hold the run directory's lock.
 
 from __future__ import annotations
 
+import json
 import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 
+from pup_finetune import next_steps
 from pup_finetune.errors import FinetuneError, StateError, UsageError
 from pup_finetune.output import info
 from pup_finetune.providers.base import (
@@ -69,6 +71,7 @@ __all__ = [
     "deploy_preview",
     "deploy_target",
     "deployment_id_for",
+    "deployment_usage",
     "endpoint_from_receipt",
     "execute_deploy",
     "execute_undeploy",
@@ -95,7 +98,32 @@ def _q(value: object) -> str:
 
 def undeploy_command(run_dir: RunDir) -> str:
     """The exact command that deletes the run's deployment."""
-    return f"pup finetune undeploy {_q(run_dir.path)} --confirm"
+    return next_steps.command("undeploy", run_dir.path, "--confirm")
+
+
+def deployment_usage(receipt: Mapping[str, Any]) -> dict[str, Any] | None:
+    """How to call a ready deployment: its OpenAI-compatible ``base_url``, the ``model`` to
+    request, the environment variable that holds the API key, and an ``example`` request.
+
+    The example names the key only as that variable (``$FIREWORKS_API_KEY``), never its
+    value. ``None`` when the receipt records no base URL or inference model.
+    """
+    base_url, model = receipt.get("url"), receipt.get("inference_model")
+    if not isinstance(base_url, str) or not base_url or not isinstance(model, str) or not model:
+        return None
+    key_env = receipt.get("api_key_env")
+    key_env = key_env if isinstance(key_env, str) and key_env else None
+    body = json.dumps({"model": model, "messages": [{"role": "user", "content": "Hello"}]})
+    words = ["curl", _q(f"{base_url.rstrip('/')}/chat/completions")]
+    if key_env is not None:
+        words += ["-H", f'"Authorization: Bearer ${key_env}"']
+    words += ["-H", _q("Content-Type: application/json"), "-d", _q(body)]
+    return {
+        "base_url": base_url,
+        "model": model,
+        "api_key_env": key_env,
+        "example": " ".join(words),
+    }
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -120,7 +148,7 @@ def deploy_target(run_dir: RunDir) -> DeployTarget:
     provider = str(manifest["provider"])
     state = run_dir.load_state()
     result = run_dir.read_result()
-    status = f"pup finetune status {_q(run_dir.path)}"
+    status = next_steps.command("status", run_dir.path)
     if state.phase not in DEPLOYABLE_PHASES or result is None:
         raise StateError(
             f"run {run_id} is {state.phase}, not completed: there is no final model to deploy",
@@ -226,6 +254,7 @@ def _receipt(target: DeployTarget, endpoint: Endpoint, state: str, now: Clock) -
         "model_id": endpoint.model_id,
         "inference_model": endpoint.inference_model,
         "url": endpoint.url,
+        "api_key_env": endpoint.api_key_env,
         "created_at": now().isoformat(timespec="seconds"),
         "state": state,
         "ready_at": None,
@@ -264,6 +293,7 @@ def endpoint_from_receipt(receipt: Mapping[str, Any]) -> Endpoint:
             url=receipt.get("url"),
             name=receipt.get("deployment_name"),
             shape=receipt.get("shape"),
+            api_key_env=receipt.get("api_key_env"),
         )
     except KeyError as exc:
         raise StateError(f"the deployment receipt lacks {exc}") from exc
@@ -330,6 +360,7 @@ def execute_deploy(
                 "shape": endpoint.shape,
                 "inference_model": endpoint.inference_model,
                 "url": endpoint.url,
+                "api_key_env": endpoint.api_key_env,
                 "state": "READY",
                 "ready_at": now().isoformat(timespec="seconds"),
             }
@@ -399,7 +430,7 @@ def execute_undeploy(provider: Provider, run_dir: RunDir, *, now: Clock = utcnow
         if receipt is None:
             raise StateError(
                 f"run {run_dir.path} has no deployment ({run_dir.deployment_path} does not exist)",
-                hint=f"deploy it with `pup finetune deploy {_q(run_dir.path)}`",
+                hint=f"deploy it with `{next_steps.command('deploy', run_dir.path)}`",
             )
         if receipt.get("deleted_at"):
             return receipt

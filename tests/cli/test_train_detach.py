@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
 import signal
 import stat
 import subprocess
@@ -98,9 +100,13 @@ def watch(run_dir: Path) -> dict[str, Any]:
     watched = cli("status", str(run_dir), "--watch", "--interval", "0.2")
     assert watched.returncode == 0, watched.stderr
     final = one_json(watched.stdout)
-    lines = watched.stderr.splitlines()
-    assert lines, "no progress lines on stderr"
-    assert lines[-1].startswith(f"{final['phase']}: epoch "), lines[-1]
+    *progress, summary = watched.stderr.splitlines()
+    assert progress, "no progress lines on stderr"
+    # Off a terminal each progress line starts with the time of day; the closing summary,
+    # the run's status line and the next command, comes last.
+    assert re.fullmatch(rf"\d\d:\d\d:\d\d {final['phase']}: epoch .*", progress[-1]), progress[-1]
+    assert summary.startswith(f"{final['phase']}: epoch "), summary
+    assert summary.endswith(f". Next: {final['next_command']}"), summary
     return final
 
 
@@ -136,7 +142,12 @@ def test_a_detached_run_completes_and_status_watch_follows_it(
     log = run_dir / "worker.log"
     assert stat.S_IMODE(log.stat().st_mode) == 0o600
     text = log.read_text()
-    assert "epoch 2 done" in text
+    # The log is not a terminal: every line is stamped, and each epoch line names its
+    # checkpoint instead of a line of its own.
+    assert all(re.match(r"\d\d:\d\d:\d\d ", line) for line in text.splitlines()), text
+    assert re.search(r"epoch 2/2 done: train [\d.]+, val [\d.]+ \(new best\), checkpoint t2s", text)
+    assert "saved training checkpoint" not in text
+    assert f"promoted {data['run_id']}" in text
     assert "finished: the run is completed" in text
     for path in run_dir.iterdir():
         assert SECRET not in path.read_text(errors="replace"), path.name
@@ -145,7 +156,12 @@ def test_a_detached_run_completes_and_status_watch_follows_it(
 def test_cancel_stops_a_slow_worker_gracefully_and_promotes(dataset: Path, tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     slow = ("--batch-size", "1", "--provider-option", "step_delay_s=0.2")
-    started = cli(*train_args(dataset, run_dir, *slow, "--detach", "--confirm"))
+    # The --detach preview's next_command runs as written: it starts the worker.
+    previewed = cli(*train_args(dataset, run_dir, *slow, "--detach"))
+    assert previewed.returncode == 2, previewed.stderr
+    detach = shlex.split(one_json(previewed.stdout)["next_command"])
+    assert detach[:2] == ["pup", "finetune"] and detach[-2:] == ["--detach", "--confirm"]
+    started = cli(*detach[2:])
     assert started.returncode == 0, started.stderr
     pid = one_json(started.stdout)["pid"]
     # Wait until the first epoch's best checkpoint exists, so there is something to promote.
@@ -158,9 +174,13 @@ def test_cancel_stops_a_slow_worker_gracefully_and_promotes(dataset: Path, tmp_p
 
     preview = cli("cancel", str(run_dir))
     assert preview.returncode == 2
-    assert one_json(preview.stdout)["preview"]["pid"] == pid
+    cancel = one_json(preview.stdout)
+    assert cancel["preview"]["pid"] == pid
+    # Its next_command runs as written too.
+    words = shlex.split(cancel["next_command"])
+    assert words == ["pup", "finetune", "cancel", str(run_dir), "--confirm"]
 
-    cancelled = cli("cancel", str(run_dir), "--confirm")
+    cancelled = cli(*words[2:])
     assert cancelled.returncode == 0, cancelled.stderr
     assert one_json(cancelled.stdout)["status"] == "cancelling"
 
@@ -168,8 +188,60 @@ def test_cancel_stops_a_slow_worker_gracefully_and_promotes(dataset: Path, tmp_p
     assert final["phase"] == "cancelled"
     assert final["stopped_reason"] == "cancelled"
     assert final["promoted_model"] is not None
-    assert final["next_command"] == f"pup finetune resume {run_dir}"
+    # The best epoch was promoted: evaluate it; training the remaining epochs is a step.
+    assert final["next_command"] == f"pup finetune evaluate {run_dir}"
+    assert final["next_steps"][0]["command"] == f"pup finetune resume {run_dir}"
     assert "finished: the run is cancelled" in (run_dir / "worker.log").read_text()
+
+
+def test_ctrl_c_stops_watching_a_detached_run_but_never_its_training(
+    dataset: Path, tmp_path: Path
+) -> None:
+    run_dir = tmp_path / "run"
+    slow = ("--batch-size", "1", "--provider-option", "step_delay_s=0.2")
+    # The --detach preview's next_command runs as written: it starts the worker.
+    previewed = cli(*train_args(dataset, run_dir, *slow, "--detach"))
+    assert previewed.returncode == 2, previewed.stderr
+    detach = shlex.split(one_json(previewed.stdout)["next_command"])
+    assert detach[:2] == ["pup", "finetune"] and detach[-2:] == ["--detach", "--confirm"]
+    started = cli(*detach[2:])
+    assert started.returncode == 0, started.stderr
+    pid = one_json(started.stdout)["pid"]
+    wait_until(lambda: state(run_dir).get("phase") == "training", "training to start")
+    watcher = subprocess.Popen(  # noqa: S603 - our own interpreter and module, list args
+        [
+            sys.executable,
+            "-m",
+            "pup_finetune",
+            "status",
+            str(run_dir),
+            "--watch",
+            "--interval",
+            "0.2",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=_env(),
+    )
+    try:
+        assert watcher.stderr is not None
+        first = watcher.stderr.readline()  # the watch is under way: its first progress line
+        watcher.send_signal(signal.SIGINT)
+        stdout, rest = watcher.communicate(timeout=TIMEOUT_S)
+        stderr = first + rest
+    finally:
+        if watcher.poll() is None:
+            watcher.kill()
+            watcher.wait()
+    assert watcher.returncode == 0, stderr
+    data = one_json(stdout)
+    assert (data["phase"], data["watch_timed_out"]) == ("training", False)
+    assert f"stopped watching; the run keeps training (pid {pid})" in stderr
+    # The worker trains on and completes.
+    final = watch(run_dir)
+    assert final["phase"] == "completed"
+    assert "cancel" not in (run_dir / "worker.log").read_text()
 
 
 def test_ctrl_c_cancels_a_foreground_run_gracefully(dataset: Path, tmp_path: Path) -> None:

@@ -276,9 +276,11 @@ class ModelRef:
 class Endpoint:
     """A deployment serving a model. ``inference_model`` is what chat requests name.
 
-    ``url`` is the base URL of the OpenAI-compatible API that serves it, when it has one;
-    ``name`` is the provider's full resource name for the deployment and ``shape`` the
-    hardware configuration it runs on, when the provider has those.
+    ``url`` is the base URL of the OpenAI-compatible API that serves it, when it has one,
+    and ``api_key_env`` the environment variable a client conventionally reads the key it
+    sends as its bearer token from (never the key itself), when it needs one; ``name`` is
+    the provider's full resource name for the deployment and ``shape`` the hardware
+    configuration it runs on, when the provider has those.
     """
 
     provider: str
@@ -288,6 +290,7 @@ class Endpoint:
     url: str | None = None
     name: str | None = None
     shape: str | None = None
+    api_key_env: str | None = None
 
 
 DEFAULT_DEPLOY_TIMEOUT_S: Final = 30 * 60.0

@@ -29,12 +29,14 @@ write goes through Pup and its OAuth login.
 git clone https://github.com/DataDog/pup-finetune.git
 cd pup-finetune
 uv sync --all-extras
-pup extension install --local bin/pup-finetune --link
-pup finetune --help
+pup extension install --local bin/pup-finetune --link \
+  --description "Fine-tune a model on your Agent Observability traces"
+pup finetune doctor
 ```
 
 `bin/pup-finetune` runs the checkout through uv from any directory, so your changes take effect
-without reinstalling.
+without reinstalling. `pup finetune help <command>` prints any command's help (under a coding
+agent, Pup answers `--help` after `pup finetune` with its own help instead).
 
 ## Credentials
 
@@ -66,12 +68,13 @@ pup finetune dataset triage ./ds --rubric rubric.md \
   --judges accounts/fireworks/models/deepseek-v4p1-flash,openai/gpt-6-astra
 ```
 
-Anthropic judges use the official Anthropic SDK, an optional extra: install it with
-`uv sync --extra anthropic` in a checkout, or `pip install 'pup-finetune[anthropic]'`. Without
+Anthropic judges use the official Anthropic SDK, an optional extra: `uv sync --all-extras`
+installs it in a checkout (a bare `uv sync --extra anthropic` removes the other extras), or
+`pip install 'pup-finetune[anthropic]'`. Without
 an `ANTHROPIC_API_KEY` or a stored key, they sign in the way the Anthropic SDK does on its own
 (`ANTHROPIC_AUTH_TOKEN`, or a profile from `ant auth login`), which `auth status` and `doctor`
 report as the source `anthropic-sdk`. Every preview names each provider the rows or
-conversations are sent to.
+conversations are sent to (`data_recipients`).
 
 ## Quickstart
 
@@ -121,6 +124,13 @@ pup finetune train --provider fireworks --model qwen3p8-27b --dataset ./ds --run
 pup finetune status ./run --watch
 ```
 
+The watch prints a progress line to stderr (`epoch 3/5 step 21/35 loss 1.10 val 1.35 (best e2)
+4m12s elapsed, eta ~6m`) until training ends, then the status. Every command ends its stderr
+with the result's warnings and a short summary of the outcome (one line when stderr is not a
+terminal; `PUP_FINETUNE_QUIET=1` turns the summary off). Ctrl-C stops only the watch:
+the run keeps training, and the status is printed. `--timeout 10m` bounds the watch (90s by
+default under a coding agent); it then exits `0` with `watch_timed_out: true`.
+
 If the run is interrupted, `pup finetune resume ./run --confirm` continues it from its last
 checkpoint, and `pup finetune cancel ./run --confirm` stops it while keeping the best epoch.
 
@@ -143,6 +153,10 @@ pup finetune deploy ./run
 pup finetune deploy ./run --confirm
 pup finetune undeploy ./run --confirm
 ```
+
+The deploy result's `usage` gives the base URL, the model to request and an example request
+that reads your key from `$FIREWORKS_API_KEY`; `undeploy_command` is the command that deletes
+it.
 
 See the [command reference](docs/commands.md) for every command and flag.
 
@@ -176,10 +190,12 @@ Training, `dataset triage` and `evaluate` send conversation content to the model
 you choose (Fireworks). `dataset preview`, `dataset pull` and every local command read from
 Datadog or your disk only.
 
-Set `PUP_READ_ONLY=true` to refuse remote writes: `train`, `resume` and `evaluate` with
-`--confirm`, and `dataset push`, `deploy` and `undeploy` (also their previews). Read-only mode
-does not stop data from leaving: `dataset triage` writes nothing to Datadog, so it is still
-allowed and still sends rows to the provider.
+Set `PUP_READ_ONLY=true` (or run `pup --read-only`) to refuse remote writes: `--confirm` on
+`train`, `resume`, `evaluate`, `dataset push`, `deploy` and `undeploy` is refused, while their
+previews still run and say so (`read_only`). Any value but `0`, `false`, `no`, `off` or empty
+counts as read-only, so `PUP_READ_ONLY=yes` is read-only too. Read-only mode does not stop
+data from leaving: `dataset triage` writes nothing to Datadog, so it is still allowed and still
+sends rows to the provider.
 
 [docs/data-format.md](docs/data-format.md) describes the row format, the exclusion codes and
 the files in a dataset directory.

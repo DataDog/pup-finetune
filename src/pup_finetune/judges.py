@@ -44,7 +44,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal, cast
 
-from pup_finetune.errors import UsageError
+from pup_finetune.errors import UsageError, install_hint
 from pup_finetune.inference import (
     DEFAULT_JUDGE_BASE_URL,
     ChatClient,
@@ -70,6 +70,7 @@ __all__ = [
     "open_client",
     "open_clients",
     "parse_judge",
+    "recipient",
 ]
 
 RemoteProvider = Literal["fireworks", "anthropic", "openai"]
@@ -81,10 +82,7 @@ SPEC_FORMS: Final = (
 )
 """How a judge spec may be written, for help texts and errors."""
 
-ANTHROPIC_INSTALL_HINT: Final = (
-    "install the anthropic extra: `uv sync --extra anthropic` in a checkout, or "
-    "`pip install 'pup-finetune[anthropic]'`"
-)
+ANTHROPIC_INSTALL_HINT: Final = install_hint("anthropic")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -184,11 +182,23 @@ def parse_judge(spec: str) -> JudgeConfig:
     )
 
 
-def destination(config: JudgeConfig) -> str:
-    """Where ``config``'s judge sends what it judges, e.g. ``Anthropic (api.anthropic.com)``."""
+def _name_and_host(config: JudgeConfig) -> tuple[str, str]:
     host = config.base_url.split("//", 1)[-1].split("/", 1)[0]
     defaults = PROVIDERS.get(cast(RemoteProvider, config.provider))
-    return f"{defaults.name if defaults is not None else config.provider} ({host})"
+    return (defaults.name if defaults is not None else config.provider), host
+
+
+def destination(config: JudgeConfig) -> str:
+    """Where ``config``'s judge sends what it judges, e.g. ``Anthropic (api.anthropic.com)``."""
+    name, host = _name_and_host(config)
+    return f"{name} ({host})"
+
+
+def recipient(config: JudgeConfig) -> str:
+    """``config``'s judge as a ``data_recipients`` entry names it, e.g.
+    ``Anthropic api.anthropic.com``."""
+    name, host = _name_and_host(config)
+    return f"{name} {host}"
 
 
 def check_available(config: JudgeConfig) -> None:
