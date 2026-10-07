@@ -322,6 +322,55 @@ def test_a_stored_prefix_of_a_duplicate_of_an_accepted_row_is_retired(tmp_path: 
     assert "synthetic-trace-b:synthetic-span-b1" in detail
 
 
+def test_a_lower_target_count_does_not_add_back_a_prefix_retired_into_a_duplicate(
+    tmp_path: Path,
+) -> None:
+    pages = [page([b_long(), a_prefix()], after="cursor-2"), page([a_long()])]
+    dataset = DatasetDir(tmp_path / "ds")
+
+    def pull_pages(**options: Any) -> Any:
+        api = FakeExportApi(pages)
+        pup = api.install(FakePup()).client()
+        query = SpanQuery(ml_app="synthetic")
+        return pull(pup, PullOptions(query, **options), dataset, SplitParams())
+
+    pull_pages(target_count=2)
+    pull_pages()
+    rows = dataset.rows_path.read_bytes()
+    excluded = dataset.excluded()
+    assert [row.id for row in dataset.rows()] == ["synthetic-trace-b:synthetic-span-b1"]
+
+    # The smaller pull stops on page 1 again, before trace A's longer conversation, so no
+    # stored row of trace A contains the prefix it produces again.
+    collection, added = pull_pages(target_count=2)
+    assert "synthetic-trace-a:synthetic-span-a1" in [row.id for row in collection.rows]
+    assert (added.added, added.retired) == (0, 0)
+    assert dataset.rows_path.read_bytes() == rows
+    assert dataset.excluded() == excluded
+
+
+def test_contained_honours_a_stored_contained_conversation_exclusion() -> None:
+    collection, _ = collected([page([a_prefix()])])
+    row_id = "synthetic-trace-a:synthetic-span-a1"
+    record = {
+        "code": "contained_conversation",
+        "detail": "a prefix of 'synthetic-trace-a:synthetic-span-a2', the same conversation",
+        "row_id": row_id,
+        "trace_id": "synthetic-trace-a",
+        "span_id": "synthetic-span-a1",
+    }
+    kept, excluded = contained(collection.rows, [], [], [record])
+    assert kept == []
+    assert [(e.code, e.row_id, e.detail) for e in excluded] == [
+        (ExclusionCode.CONTAINED_CONVERSATION, row_id, record["detail"])
+    ]
+    # Another code is the dataset's to replace when the row is accepted.
+    other = {**record, "code": "no_assistant_message"}
+    assert contained(collection.rows, [], [], [other]) == (collection.rows, [])
+    # A stored row is left to the dataset whatever its exclusions say.
+    assert contained(collection.rows, collection.rows, [], [record]) == (collection.rows, [])
+
+
 def test_a_stored_prefix_is_kept_while_the_row_its_duplicate_repeats_is_over_the_target() -> None:
     stored, _ = collected([page([a_prefix()])])
     other = item("synthetic-span-z1", [SYSTEM, Q2, A2], trace_id="synthetic-trace-z")

@@ -30,7 +30,8 @@ with higher limits to read further. When it does, a trace an earlier pull read o
 may now show that a stored row is a prefix of a longer conversation: :func:`pull` retires
 such a row as ``contained_conversation`` (see :func:`retirements`), so the latest conversion
 of every span it read is what the dataset holds. A re-run with lower limits, which stops before
-that longer conversation, does not add the shorter row back (see :func:`contained`). With
+that longer conversation, does not add the shorter row back, also when the longer
+conversation repeats another trace's row and so was never stored (see :func:`contained`). With
 ``reasoning="preserve"`` a stored row a re-run reads more reasoning for takes that reasoning,
 and one a re-run reads less for keeps its own (see :func:`reasoning_updates`).
 
@@ -368,28 +369,46 @@ def contained(
     rows: Sequence[TrainingRow],
     stored_rows: Sequence[TrainingRow],
     retired: Iterable[Exclusion] = (),
+    stored_exclusions: Iterable[dict[str, object]] = (),
 ) -> tuple[list[TrainingRow], list[Exclusion]]:
     """``rows`` minus those a stored row contains, and an exclusion for each one left out.
 
     The limits are not frozen, so a pull re-run with a lower ``target_count`` than the last
     one can stop before the page that showed a conversation continues, and produce again the
     shorter row an earlier pull already replaced by its longer version (:func:`retirements`).
-    Such a row, new to the dataset and contained in a stored row of its trace that is not
-    being ``retired``, is excluded as ``contained_conversation`` instead of being added beside
-    the longer one. Rows already stored are left to the dataset.
+    Such a row, new to the dataset, is excluded as ``contained_conversation`` instead of being
+    added beside the longer one when a stored row of its trace that is not being ``retired``
+    contains it, or when ``stored_exclusions`` already exclude its id as
+    ``contained_conversation`` (re-recorded with the stored detail). The second covers a row
+    retired because its trace's longer conversation repeats another trace's row: that longer
+    conversation is a duplicate and never stored, so no stored row of the trace contains the
+    row. Honouring the stored exclusion is safe because a container is only ever retired into
+    a longer row that still contains it. Rows already stored are left to the dataset.
     """
     retired_ids = {exclusion.row_id for exclusion in retired}
     stored_ids = {row.id for row in stored_rows}
     containers = _Containers(row for row in stored_rows if row.id not in retired_ids)
+    code = ExclusionCode.CONTAINED_CONVERSATION
+    excluded_as_contained = {
+        str(record["row_id"]): str(record.get("detail") or "")
+        for record in stored_exclusions
+        if record.get("code") == code.value and isinstance(record.get("row_id"), str)
+    }
     kept: list[TrainingRow] = []
     excluded: list[Exclusion] = []
     for row in rows:
-        container = None if row.id in stored_ids else containers.find(row)
-        if container is None:
+        if row.id in stored_ids:
             kept.append(row)
             continue
-        detail = f"a prefix of row {container.id!r}, read by an earlier pull"
-        excluded.append(Exclusion.for_row(row, ExclusionCode.CONTAINED_CONVERSATION, detail))
+        container = containers.find(row)
+        if container is not None:
+            detail = f"a prefix of row {container.id!r}, read by an earlier pull"
+            excluded.append(Exclusion.for_row(row, code, detail))
+        elif row.id in excluded_as_contained:
+            detail = excluded_as_contained[row.id] or "contained in a longer conversation"
+            excluded.append(Exclusion.for_row(row, code, detail))
+        else:
+            kept.append(row)
     return kept, excluded
 
 
@@ -527,9 +546,10 @@ def pull(
         except ExternalError as exc:
             raise _with_resume_note(exc, raw) from exc
         stored = dataset.rows()
-        retired = retirements(collection, stored, dataset.excluded())
+        stored_exclusions = dataset.excluded()
+        retired = retirements(collection, stored, stored_exclusions)
         rows, updated = reasoning_updates(collection.rows, stored)
-        rows, exclusions = contained(rows, stored, retired)
+        rows, exclusions = contained(rows, stored, retired, stored_exclusions)
         added = dataset.add(
             rows,
             [*collection.exclusions, *exclusions],
