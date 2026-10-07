@@ -1,0 +1,218 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Unless explicitly stated otherwise all files in this repository are licensed under the Apache License Version 2.0.
+#
+# This product includes software developed at Datadog (https://www.datadoghq.com/).
+# Copyright 2026-present Datadog, Inc.
+"""The bundled `datadog-finetune` skill: where it is found, its frontmatter, and installing it."""
+
+from __future__ import annotations
+
+import os
+import re
+import stat
+from collections.abc import Callable
+from pathlib import Path
+
+import pytest
+
+from pup_finetune import skill
+from pup_finetune.errors import StateError, UsageError
+
+REPO_SKILL = Path(__file__).resolve().parents[1] / "skills" / "datadog-finetune" / "SKILL.md"
+
+
+def frontmatter(text: str) -> dict[str, str]:
+    """The ``key: value`` lines between the leading ``---`` fences (plain YAML scalars)."""
+    lines = text.splitlines()
+    assert lines[0] == "---", "the frontmatter must be the first thing in SKILL.md"
+    end = lines.index("---", 1)
+    fields: dict[str, str] = {}
+    for line in lines[1:end]:
+        key, sep, value = line.partition(": ")
+        assert sep, f"not a single-line `key: value` field: {line!r}"
+        fields[key] = value
+    return fields
+
+
+def test_the_skill_is_found_and_is_the_repository_file() -> None:
+    # An editable install (the test run) has no packaged copy, so the repo's file is used.
+    assert skill.skill_path().read_bytes() == REPO_SKILL.read_bytes()
+    assert skill.skill_text() == REPO_SKILL.read_text(encoding="utf-8")
+    assert skill.bundled_skills_dir().name in {skill.PACKAGED_DIR, skill.REPO_DIR}
+
+
+def test_frontmatter_has_a_valid_name_and_description() -> None:
+    fields = frontmatter(skill.skill_text())
+    assert set(fields) == {"name", "description"}
+    assert fields["name"] == skill.SKILL_NAME == REPO_SKILL.parent.name
+    assert re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", fields["name"])
+    description = fields["description"]
+    assert 50 <= len(description) <= 1024
+    # A plain YAML scalar: nothing that would end it early or change its type.
+    assert ": " not in description
+    assert " #" not in description
+    assert description[0].isalpha()
+    for trigger in ("Agent Observability", "ml_app", "pup finetune", "train", "evaluate"):
+        assert trigger in description
+
+
+def test_the_body_has_the_rules_steps_and_debugging_table() -> None:
+    text = skill.skill_text()
+    assert "## Rules for every step" in text
+    for step in range(8):
+        assert re.search(rf"^## Step {step}\b", text, re.MULTILINE), f"step {step} is missing"
+    sections = re.split(r"^## ", text, flags=re.MULTILINE)
+    for section in sections:
+        if section.startswith("Step "):
+            assert "\nCheck:\n" in section, f"no Check: list in {section.splitlines()[0]!r}"
+    assert "## End state" in text
+    assert "| Symptom | Cause | Fix |" in text
+    assert "pup finetune auth login fireworks" in text
+    assert "untrusted data" in text
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        # The safety rules.
+        "Never add `--confirm` without the user's explicit authorization",
+        "`PUP_AUTO_APPROVE`",
+        "are not authorization",
+        "Never ask for API keys in chat",
+        "Sending traces to a model provider needs consent",
+        "Respect read-only mode",
+        "Do not unset `PUP_READ_ONLY` yourself",
+        "Deploying needs the user's explicit authorization",
+        "per GPU-second",
+    ],
+)
+def test_the_body_keeps_each_safety_rule(phrase: str) -> None:
+    assert phrase in skill.skill_text()
+
+
+def test_the_debugging_table_covers_each_failure() -> None:
+    table = skill.skill_text().split("## Debugging", 1)[1]
+    rows = [line for line in table.splitlines() if line.startswith("| ") and "---" not in line]
+    for term in (
+        "datadog_auth",  # Datadog auth
+        "fireworks",  # provider auth
+        "matches no spans",  # empty pulls
+        "excluded_by_code",  # exclusions
+        "ReadOnlyError",  # read-only mode
+        "ProviderCapacityError",  # capacity
+        "worker.stale",  # stale worker
+        "`resume` is refused",  # resume
+        "identity mismatch",  # evaluation identity
+        "calibration",  # judge calibration
+        "push.json",  # publishing without a push receipt
+        "times out",  # deployment timeouts
+    ):
+        assert any(term in row for row in rows), f"no debugging row mentions {term!r}"
+
+
+def _fake_files(root: Path) -> Callable[[str], Path]:
+    return lambda package: root / package
+
+
+def test_bundled_skills_dir_prefers_the_packaged_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    packaged = tmp_path / "pup_finetune" / skill.PACKAGED_DIR
+    (packaged / skill.SKILL_NAME).mkdir(parents=True)
+    (packaged / skill.SKILL_NAME / skill.SKILL_FILE).write_text("packaged\n")
+    monkeypatch.setattr(skill.importlib.resources, "files", _fake_files(tmp_path))
+    assert skill.bundled_skills_dir() == packaged
+    assert skill.skill_text() == "packaged\n"
+
+
+def test_bundled_skills_dir_falls_back_to_the_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(skill.importlib.resources, "files", _fake_files(tmp_path))
+    assert skill.bundled_skills_dir() == REPO_SKILL.parent.parent
+
+
+def test_bundled_skills_dir_without_either_copy_is_a_state_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(skill.importlib.resources, "files", _fake_files(tmp_path))
+    monkeypatch.setattr(skill, "__file__", str(tmp_path / "src" / "pup_finetune" / "skill.py"))
+    with pytest.raises(StateError, match="missing from this install"):
+        skill.bundled_skills_dir()
+
+
+def test_npx_env_drops_datadog_secrets_and_provider_keys() -> None:
+    environ = {
+        "PATH": "/usr/bin",
+        "HOME": "/home/someone",
+        "DD_ACCESS_TOKEN": "synthetic",
+        "DD_API_KEY": "synthetic",
+        "DD_APP_KEY": "synthetic",
+        "DD_APPLICATION_KEY": "synthetic",
+        "FIREWORKS_API_KEY": "synthetic",
+    }
+    assert skill.npx_env(environ) == {"PATH": "/usr/bin", "HOME": "/home/someone"}
+    assert "DD_API_KEY" in environ  # the parent's mapping is left alone
+
+
+def test_npx_argv_installs_only_this_skill_and_passes_options_on() -> None:
+    source = Path("/opt/skills")
+    assert skill.npx_argv("npx", source) == [
+        "npx",
+        "--yes",
+        "skills",
+        "add",
+        "/opt/skills",
+        "--skill",
+        "datadog-finetune",
+    ]
+    argv = skill.npx_argv("npx", source, agents=["claude-code", "codex"], global_=True, yes=True)
+    assert argv[7:] == ["--global", "--yes", "--agent", "claude-code", "--agent", "codex"]
+
+
+def test_install_files_writes_both_locations(tmp_path: Path) -> None:
+    installed = skill.install_files(tmp_path, text="skill v1\n")
+    assert [entry.to_json() for entry in installed] == [
+        {"path": str(tmp_path / ".agents/skills/datadog-finetune/SKILL.md"), "state": "created"},
+        {"path": str(tmp_path / ".claude/skills/datadog-finetune/SKILL.md"), "state": "created"},
+    ]
+    for entry in installed:
+        assert entry.path.read_text() == "skill v1\n"
+        assert stat.S_IMODE(entry.path.stat().st_mode) == 0o644
+    again = skill.install_files(tmp_path, text="skill v1\n")
+    assert [entry.state for entry in again] == ["unchanged", "unchanged"]
+
+
+def test_install_files_replaces_a_different_copy_only_when_asked(tmp_path: Path) -> None:
+    skill.install_files(tmp_path, text="skill v1\n")
+    claude = tmp_path / ".claude/skills/datadog-finetune/SKILL.md"
+    claude.write_text("edited locally\n")
+    with pytest.raises(UsageError, match="different copy") as raised:
+        skill.install_files(tmp_path, text="skill v2\n")
+    assert str(claude) in str(raised.value)
+    # Nothing was written: the copy that matched v1 is still v1.
+    assert (tmp_path / ".agents/skills/datadog-finetune/SKILL.md").read_text() == "skill v1\n"
+    states = [
+        entry.state for entry in skill.install_files(tmp_path, text="skill v2\n", replace=True)
+    ]
+    assert states == ["updated", "updated"]
+    assert claude.read_text() == "skill v2\n"
+
+
+def test_install_files_that_cannot_read_a_target_is_a_state_error(tmp_path: Path) -> None:
+    (tmp_path / ".agents/skills/datadog-finetune/SKILL.md").mkdir(parents=True)
+    with pytest.raises(StateError, match="cannot read"):
+        skill.install_files(tmp_path, text="skill v1\n")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_install_files_that_cannot_write_a_target_is_a_state_error(tmp_path: Path) -> None:
+    locked = tmp_path / ".claude/skills/datadog-finetune"
+    locked.mkdir(parents=True)
+    locked.chmod(0o500)
+    try:
+        with pytest.raises(StateError, match="cannot write"):
+            skill.install_files(tmp_path, text="skill v1\n")
+    finally:
+        locked.chmod(0o700)

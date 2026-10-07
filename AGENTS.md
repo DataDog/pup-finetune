@@ -8,7 +8,10 @@ Guide for contributors and coding agents working in this repository.
 traces, fine-tunes an open-weight model on it, evaluates the tuned model against the base model,
 and deploys it. It ships as a `pup` extension, so users run it as `pup finetune ...`; the
 standalone executable is `pup-finetune`. All Datadog reads and writes go through `pup` and its
-OAuth login. The project is in early development: most commands arrive in later PRs.
+OAuth login. The project is in early development: commands and file formats may change.
+User-facing docs: `README.md` (install, quickstart), `docs/commands.md` (every command and
+flag), `docs/data-format.md` (rows, exclusion codes, dataset files) and the agent skill in
+`skills/datadog-finetune/SKILL.md`.
 
 ## Commands
 
@@ -20,6 +23,8 @@ uv run ruff format                   # format (check only: uv run ruff format --
 uv run mypy src                      # type-check (strict)
 uv run python scripts/check_headers.py  # license header on every tracked .py and shell script
 uv run python scripts/check_3rdparty.py # LICENSE-3rdparty.csv covers every dependency
+uv run python scripts/gen_command_docs.py  # regenerate docs/commands.md (and the exclusion
+                                     # table in docs/data-format.md); a test fails when stale
 uv run pre-commit install            # run the hooks above on every commit
 uv run pup-finetune --help           # run the CLI from the checkout
 ```
@@ -52,6 +57,9 @@ uv run pup-finetune evaluate /tmp/run          # preview only (exit 2): cases an
 uv run pup-finetune evaluate /tmp/run --confirm
                                      # replays the test split with base and tuned into
                                      # /tmp/run/eval; rerun to resume; summary.json at the end
+uv run pup-finetune deploy /tmp/run  # preview only (exit 2): what is created, how to undeploy
+uv run pup-finetune deploy /tmp/run --confirm    # receipt in /tmp/run/deployment.json
+uv run pup-finetune undeploy /tmp/run --confirm  # deletes it; the model is kept
 ```
 
 A complete evaluation is also published to Datadog as two Agent Observability experiments
@@ -79,7 +87,8 @@ be new or empty and is checked before training, `--eval-max-cases-per-trajectory
 starts, so a crash during it keeps the trained, promoted run; a failed evaluation exits 1
 with the trained run and the `evaluate` command to retry it. A cancelled or budget-capped
 training is not evaluated in its session (the evaluation would spend the session's time past
-the cap); `evaluate` evaluates it on request. Evaluating a real run is paid and needs the
+the cap). A budget-capped run still ends `completed`, so `evaluate` evaluates it on request;
+`evaluate` refuses a `cancelled` run, which must be resumed to `completed` first. Evaluating a real run is paid and needs the
 judge's key (`FIREWORKS_API_KEY` for the default judge); the preview is free and allowed with
 `PUP_READ_ONLY` set, evaluating is not. A changed `--max-tokens`, judge, seed or cap needs a
 new `--out-dir`. An evaluation whose pairs ended in errors (a sampler or judge outage) reports
@@ -96,6 +105,10 @@ uv run pup-finetune dataset pull /tmp/ds --ml-app my-app --from now-7d
 uv run pup-finetune dataset show /tmp/ds
 uv run pup-finetune dataset sample /tmp/ds --n 20            # rows in brief, to review
 uv run pup-finetune dataset label /tmp/ds --file labels.jsonl  # {id, keep, reason} per line
+uv run pup-finetune dataset triage --print-template > rubric.md  # Task / Keep / Drop / Examples
+uv run pup-finetune dataset triage /tmp/ds --rubric rubric.md --max-rows 20
+                                     # preview only (exit 2): rows, judge calls, rubric hash;
+                                     # add --confirm to have the judge council label them (paid)
 uv run pup-finetune dataset push /tmp/ds --name my-dataset --project pup-finetune-dev
                                      # preview only (exit 2); add --confirm to push the kept rows
 ```
@@ -107,6 +120,19 @@ the frozen window, so a resumed pull reads the same spans.
 
 `dataset push` is a remote write: it is refused with `PUP_READ_ONLY` set. Push test data to
 the `pup-finetune-dev` project, never to a shared one.
+
+`dataset triage` (`--rubric FILE` and/or `--rule TEXT`, repeated) has each judge model
+(`--judges m1,m2`; by default two Fireworks serverless models, with the Fireworks key) review
+each whole row and vote keep or drop: a strict majority of keep votes keeps a row, a tie
+drops it, a row missing a vote stays undecided. Votes go to `judgments.jsonl` as they arrive,
+so rerunning the same command resumes and retries only failed calls; the rubric hash and
+judges are frozen in `triage.json` once votes exist (`--reset-triage` discards them). Decided
+rows are labeled `by: judge`; rows the agent or a person labeled are skipped. A label cannot be
+withdrawn, so judge labels the current votes do not back (after a reset with `--max-rows`, or
+on undecided rows) are reported as `stale_judge_labels`, and the triage stays `incomplete`
+until a run over every row replaces them. It is paid, so
+it needs `--confirm`, but it writes nothing to Datadog, so `PUP_READ_ONLY` does not block it.
+Tests replace the judges' client (`cli/triage.py`'s `open_client`) with a fake.
 
 To see the models a provider can fine-tune (both are read-only, so they work with
 `PUP_READ_ONLY` set):
@@ -129,8 +155,15 @@ uv run pup-finetune train --provider fireworks --model qwen3p8-27b --dataset /tm
 ```
 
 The best epoch is promoted to a Fireworks model (named after the run id) before the session
-ends, and `result.json` records it as `promoted_model`; deployment on Fireworks arrives in a
-later PR. `--provider-option max_seq_len=<n>` cuts the profile's context to `n` tokens: the
+ends, and `result.json` records it as `promoted_model`. `deploy /tmp/fw-run` previews an
+on-demand Fireworks deployment of it (paid per GPU-second while a replica runs, until
+`undeploy`); `--confirm` creates it (first validated shape unless `--shape`, at most one
+replica, scaling to zero when idle, hot loading off), waits until it is `READY`
+(`--timeout-minutes`, default 30), smoke-tests one chat completion and prints the inference
+model (`accounts/<account>/deployments/<id>`). Fireworks' own CLI refuses to create
+deployments when an AI agent runs it; we use the API, so an agent must pass `--confirm` only
+with the user's explicit authorization. Always `undeploy` what you deploy while developing.
+`--provider-option max_seq_len=<n>` cuts the profile's context to `n` tokens: the
 run records the cut profile, and the preview already leaves longer rows out (`exceeds_context`).
 Training runs in the key's own account (Fireworks refuses a key that sees several accounts);
 `FIREWORKS_ACCOUNT_ID` only overrides the account lookup, i.e. the account id pup-finetune
@@ -152,20 +185,53 @@ Environment variables for development and unusual setups:
 - `PUP_FINETUNE_DEV=1` - development mode: enables dev-only providers such as the offline
   `fake` provider (`--provider fake`).
 
+The `datadog-finetune` agent skill (`skills/datadog-finetune/SKILL.md`, the one source, in the
+layout the skills CLI discovers) ships in the wheel as `pup_finetune/_skills/` through
+`[tool.hatch.build.targets.wheel.force-include]`; an editable install reads the repository's
+copy. `skill show` prints it; `skill install` runs `npx --yes skills add <bundled dir> --skill
+datadog-finetune` (passing on `-a`, `-g` and `-y`, its stdout sent to stderr, and its
+environment without the Datadog secrets or any provider key variable, since npx downloads and
+runs the skills CLI from npm) when `npx` is on `PATH` and `--dir` is not given, and otherwise
+copies it to `.agents/skills/` and `.claude/skills/` under the project (or the home directory
+with `-g`). Neither makes a Datadog or provider call, so both work with `PUP_READ_ONLY` set.
+When you change a command the skill names, keep the skill in step:
+`tests/test_doc_commands.py` checks every `pup finetune` command and flag in it (and in the
+README) against the app. `SKILL.md` has no license header: its frontmatter must come first,
+and `scripts/check_headers.py` checks only code.
+
 Opt-in test suites: `PUP_FINETUNE_LIVE=1` runs `live` tests (real external services);
 `PUP_FINETUNE_TOKENIZER_TESTS=1` runs `tokenizer` tests (downloads real tokenizers, needs the
 `hf` extra): `PUP_FINETUNE_TOKENIZER_TESTS=1 uv run pytest -m tokenizer`.
 
 ## Layout
 
-Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later PRs.
+Source lives under `src/pup_finetune/`.
 
 - `cli/` - the Typer app; one module per command group. `dataset.py` has `dataset import`,
   `preview`, `pull`, `show`, `sample`, `label` and `push`; `train.py` has `train`, `resume`,
   `status`, `cancel` and the hidden `_worker` a detached run executes (and `train
   --evaluate`); `models.py` has `models list` (with `--check`, a preflight per profile);
   `evaluate.py` has `evaluate`, which only parses its flags and emits what
-  `evaluation/runner.py` returns.
+  `evaluation/runner.py` returns; `deploy.py` has `deploy` and `undeploy` (over
+  `deployment.py`); `triage.py` has `dataset triage` (over `curation/triage.py`; its
+  `open_client` builds the judges' chat client); `skill.py` has `skill show` and `skill
+  install` (its `find_npx` and `run_npx` are what tests replace).
+- `skill.py` - the bundled agent skill: `bundled_skills_dir` (the package's `_skills/`, else
+  the repository's `skills/`), `npx_argv`, `npx_env` (the environment without
+  `datadog/pup.py`'s `SECRET_ENV` and every registered provider key variable) and
+  `install_files` (the fallback copy; a different copy is replaced only when asked).
+- `deployment.py` - what `deploy` and `undeploy` run, provider-neutral: `deploy_target` (a
+  finished run's promoted model, else its deployable checkpoint), `deployment_id_for` (the
+  run id made safe, or `--deployment-id`), `execute_deploy` (writes `deployment.json` as
+  `REQUESTED`, with the deployment's resource name and what the create sends (`request`),
+  from the provider's `on_creating` callback right before the create, removed again if the
+  provider refused; then
+  from the provider's `on_created` callback, before the wait, on `READY` and with the smoke
+  test; a failure once it may exist, a smoke test that raises included, is recorded with an
+  undeploy hint; one deployment per run)
+  and `execute_undeploy` (idempotent; records `deleted_at`; the model is kept; a `REQUESTED`
+  receipt's deployment is read back with `Provider.owns_deployment` and deleted only when it
+  is the one requested).
 - `runtime.py` - non-secret settings from the environment (`PUP_OUTPUT`, `PUP_READ_ONLY`, ...).
 - `errors.py` - expected failures and their exit codes; the `--confirm` and read-only guards.
 - `output.py` - the one stdout result (through `pup format` under pup), progress on stderr.
@@ -261,8 +327,17 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
 - `curation/` - deciding which accepted rows to train on. `labels.py` has `apply_labels`
   (every id an accepted row, last label per id wins, repeats skipped, appended through
   `DatasetDir.append_labels`); `samples.py` picks a seeded, readable sample of rows for
-  review. Judge-based triage is *later*. Curation builds on `data/`; `data/` never imports
-  `curation/`.
+  review. `triage.py` is the judge council behind `dataset triage`: `Criteria` (rubric and/or
+  rules, hashed), `build_messages` (the untrusted-data system prompt with the rubric, the
+  whole row JSON-encoded in blocks), `parse_vote` (strict `{"keep", "reason"}`), `Vote`s in
+  `judgments.jsonl` (counted only for the row content, rubric and judge they were cast for),
+  `decide` (strict majority keeps, a tie drops, a missing vote is undecided), `plan_triage`
+  (rows not labeled by the agent or a person, in a fixed pseudo-random order for
+  `--max-rows`; settings frozen in `triage.json` once votes exist) and `run_triage` (a thread
+  pool, votes appended as they arrive, failed calls reported and retried next run, labels
+  `by: judge` for decided rows, judge labels the votes do not back reported as stale; a torn
+  last vote line is cut before appending). `rubric_template.md` ships in the wheel. Curation builds on
+  `data/`; `data/` never imports `curation/`.
 - `training/` - the shared, provider-neutral SFT loop. `datums.py` renders rows into
   `TokenizedExample`s (per turn when a renderer is not prefix-stable) and rejects rows that
   exceed the context or train on nothing; `batching.py` shuffles rows per epoch and packs
@@ -283,7 +358,8 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   `python -P -m pup_finetune _worker` in a new session, in the run directory, output in
   `worker.log`, the environment inherited and no secret passed on; the worker notes how it
   ended in `worker.json`), and has the liveness checks behind `status` and `cancel`.
-- `runs.py` - the run directory (`run.json`, `state.json`, `epochs.json`, `result.json`),
+- `runs.py` - the run directory (`run.json`, `state.json`, `epochs.json`, `result.json`,
+  `deployment.json`),
   `RunState`, which the loop reports into, and `execute_run`, which holds the directory lock
   while training and always writes `result.json`, also on Ctrl-C or SIGTERM (reported as
   `TrainingTerminated`, a `FinetuneError`). Any error during training leaves the run
@@ -380,9 +456,17 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   carrying the checkpoint's name (`promotable_row`) and adopting a model this run already
   promoted whose response was lost (`adopt_since`: the run's first promotion request, saved
   in `state.json` as `promotion_requested_at`, less a minute's clock allowance), sampler
-  checkpoints of an ended session refused with a hint); and `FireworksSampler` (render, sample greedily to the renderer's stop
-  tokens, parse; only sampling is retried, a bounded number of times). Deployment arrives
-  later. See `docs/architecture.md`.
+  checkpoints of an ended session refused with a hint); and `FireworksSampler` (render, sample
+  greedily to the renderer's stop tokens, parse; only sampling is retried, a bounded number of
+  times). `client.py` also wraps
+  the SDK's `Fireworks` client for deployments (`FireworksDeployments`,
+  `FireworksDeploymentsClient`: `match_shapes`, `create_deployment`, `get_deployment` and
+  `delete_deployment` with plain `ShapeVersion` and `DeploymentRecord` results, 404 as gone,
+  409 as a taken id). `deploy.py` has `FireworksDeployer` (shape choice, create with hot
+  loading off and 0 to 1 replicas, polling every 15 s until `READY`, `DeploymentNotReady`
+  for a bad state or timeout, the smoke test through the inference API retried while it
+  scales from zero, idempotent delete; injectable clock and sleep), which
+  `FireworksProvider(deployer=...)` replaces in tests. See `docs/architecture.md`.
 
 Tests live under `tests/` and mirror `src/`. Shared fakes live in `tests/fakes/` (import them
 as `tests.fakes...`); `tests/fakes/pup.py` has `FakePup`, a fake pup runner that answers by
@@ -406,6 +490,11 @@ that fails once a session has expired, deterministic losses, canned samples, inj
 capacity, auth, 5xx and connection failures); `FireworksProvider(training_client=...)` trains
 against it (see `tests/providers/fireworks/test_fireworks_backend.py` and
 `tests/cli/test_train_fireworks.py`).
+`tests/fakes/fireworks_deploy.py` has `FakeSdkFireworks`, the SDK's `Fireworks` client as far as
+deployments use it (shape matching, deployments that report scripted states, injectable
+failures), `FakeClock`, and `fake_deployer`, the provider's `deployer` factory on them and a
+`FakeChatApi` (see `tests/providers/fireworks/test_fireworks_deploy.py` and
+`tests/cli/test_deploy.py`).
 `tests/fakes/keyring.py` has in-memory, failing and locked keyring backends; every test starts
 on the failing one, so none touches the real keychain.
 `tests/providers/contract/` has the `RendererContract`, `BackendContract` and

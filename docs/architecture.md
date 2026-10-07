@@ -100,7 +100,7 @@ an assistant message. `transformers` comes from the optional `hf` extra and load
 credentials, validation of provider-specific `provider_options`, `training_profile` (the
 profile as those options train it, e.g. with a shorter context: rows are rendered against
 it and the run records it, so a preview shows its effect and a resume renders the same rows),
-and `deploy` / `undeploy`.
+and `deploy` / `smoke_test` / `undeploy`.
 
 ## Training matches inference
 
@@ -171,6 +171,7 @@ Renderers receive rows in the OpenAI form that
 [`data/jsonl.py`](../src/pup_finetune/data/jsonl.py)'s `to_provider_dict` produces, and adapt
 it to their template (for example, decoding `arguments` for templates that expect an object).
 Rows are validated once, when they enter a dataset, so renderers can rely on this shape.
+[data-format.md](data-format.md) has the full format, an example and the exclusion codes.
 
 ## The registry
 
@@ -334,6 +335,75 @@ offline judge that passes the same tool calls with consistent arguments, or text
 the same words. So a development-mode `evaluate` of a fake run shows the tuned model ahead
 of the base model.
 
+## Deploying
+
+[`deployment.py`](../src/pup_finetune/deployment.py) is what `deploy` and `undeploy` run, and
+it is provider-neutral: it deploys a finished run's promoted model (or, on a provider without
+promotion, its deployable checkpoint) through `Provider.deploy`, with `DeployOptions` (the
+deployment id, derived from the run id unless `--deployment-id` is given; the shape; at most
+one replica, none when idle; the wait's timeout). The receipt, `deployment.json` in the run
+directory, is first written as `REQUESTED` from the provider's `on_creating` callback, right
+before the create is sent and after any lookup it needs (the shape), so a failure before
+that leaves no receipt and a Ctrl-C while the deployment is created still leaves its id to
+undeploy, with the resource name it gets (`Provider.deployment_name`, on Fireworks
+`accounts/<account>/deployments/<id>`), so an undeploy under another account is refused, and
+what the create sends (`DeploymentRequest`: the base model, display name and shape), as its
+creation is never confirmed: `undeploy` reads the deployment under the id back
+(`Provider.owns_deployment`) and deletes it only when it is the one requested, takes it as
+gone when there is none, and refuses when the id holds another deployment (the receipt is
+removed again when the provider refused the request). The `on_created` callback rewrites it as soon as the provider
+accepted the deployment and before the wait, so a failure, a timeout or a Ctrl-C while
+waiting still records what exists and bills; a smoke test that raises is recorded as failed,
+with an undeploy hint. It is updated once the deployment serves, with the
+`smoke_test` result, and with `deleted_at` by `undeploy`. A run has one deployment at a time.
+`undeploy` is idempotent and keeps the model. Both are remote writes: they preview without
+`--confirm` and are refused with `PUP_READ_ONLY`.
+
+On Fireworks, [`providers/fireworks/deploy.py`](../src/pup_finetune/providers/fireworks/deploy.py)
+drives the SDK's `Fireworks` client through `client.py`: the first validated, latest-validated
+shape `deployment_shape_versions.match_for_model` returns (unless `--shape`), then
+`deployments.create` (sent once, without the SDK's retries: the API takes no idempotency key,
+so a retried create that had succeeded would answer HTTP 409; after a 409, a timeout or a
+server error the deployment is read back and adopted only when it is this deploy's own:
+the requested model, display name, shape and replica counts; any other is refused as a
+taken `--deployment-id`, so it is never recorded, or undeployed, as the run's)
+with the promoted model as the base model, `min_replica_count` 0,
+`max_replica_count` 1, a five-minute scale-to-zero window and hot loading off (the SDK's own
+deployment helper defaults it on, for training rollouts). It reads the deployment every 15
+seconds until `READY` (`FAILED`, `DELETING` or `DELETED` stop at once, as
+`DeploymentNotReady`), then smoke-tests one chat completion through
+`https://api.fireworks.ai/inference/v1` naming the deployment
+(`accounts/<account>/deployments/<id>`), retrying HTTP 503, 429 and dropped connections
+while a replica starts from zero. `undeploy` refuses a deployment whose resource name places it
+in another account than the key resolves to, where a 404 would not mean it is gone.
+Fireworks' own CLI refuses to create deployments when an AI agent runs it; pup-finetune uses
+the API and relies on `--confirm`, so an agent confirms only with the user's explicit
+authorization.
+
+## Triage
+
+[`curation/triage.py`](../src/pup_finetune/curation/triage.py) is `dataset triage`, the paid
+alternative to agent or human labels: a council of judge models (two Fireworks serverless
+models by default, through the same OpenAI-compatible client as the replay judge) votes keep
+or drop on each **whole** row against a rubric or rules, since training imitates every
+assistant turn of a kept row. The prompt follows the replay judge's conventions: the system
+message holds the rubric and says that everything recorded is untrusted data, and the row
+travels JSON-encoded in tagged blocks it cannot close. The answer is parsed strictly as
+`{"keep": bool, "reason": str}`.
+
+A row is kept only on a strict majority of keep votes; a tie drops it; a row missing a vote
+is undecided and left unlabeled. A failed call, or an answer without a vote, is not a vote:
+it is reported and retried by the next run. Votes are appended to `judgments.jsonl` as they
+arrive, and count only for the row content, rubric and judge they were cast for, so an
+interrupted triage resumes. The rubric's hash and the judges are frozen in `triage.json`
+once votes exist (`--reset-triage` discards them). Decisions are recorded as labels with
+`by: judge` through `apply_labels`; rows the agent or a person labeled are not reviewed. A
+label cannot be withdrawn, so a judge label the current votes do not back (cast under a
+discarded rubric, outside a `--max-rows` sample, or on a row left undecided) is reported as
+stale, and the triage is `incomplete` until a run over every row replaces it.
+`--max-rows` reviews a fixed pseudo-random sample, so a calibration run's votes are reused
+by the full run. A rubric template ships with the package (`--print-template`).
+
 ## How a new provider plugs in
 
 Using Baseten as the example:
@@ -366,8 +436,13 @@ Using Baseten as the example:
    `from pup_finetune.providers import baseten as _baseten  # noqa: E402, F401`, so
    `auth login baseten`, `auth status` and `doctor` work without new code. Pass the resolved
    key explicitly to the SDK; never copy it into the environment.
-6. **Deploy.** Implement `deploy` and `undeploy` for a promoted `ModelRef`. Callers gate them
-   behind `--confirm` and `PUP_READ_ONLY`.
+6. **Deploy.** Implement `deploy` (call `on_creating` with what the create sends right
+   before sending it, `on_created` once the deployment exists, then wait
+   until it serves, raising `DeploymentNotReady` when it fails or the wait runs out),
+   `smoke_test` (one short chat completion, retried while it scales up; a failed answer is a
+   result, not an exception), `owns_deployment` (whether the deployment under an id is the
+   one a `DeploymentRequest` creates) and an idempotent `undeploy` for a promoted `ModelRef`. Callers
+   gate them behind `--confirm` and `PUP_READ_ONLY`.
 7. **Registration and install.** Call `register_provider("baseten",
    "pup_finetune.providers.baseten.provider:BasetenProvider")` in the registry (the
    implementation lives in `provider.py`, so the package `__init__.py` stays light), and add a `baseten`

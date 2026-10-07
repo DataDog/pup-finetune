@@ -13,6 +13,7 @@ here. :func:`apply_labels` checks a batch of labels against a dataset and record
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -58,10 +59,14 @@ class LabelReport:
     summary: dict[str, Any]
 
 
-def apply_labels(dataset: DatasetDir, labels: Iterable[Label]) -> LabelReport:
+def apply_labels(
+    dataset: DatasetDir, labels: Iterable[Label], *, locked: bool = False
+) -> LabelReport:
     """Record ``labels`` on ``dataset``'s accepted rows and refresh its summary.
 
-    Holds the dataset's directory lock. Every label must name an accepted row, or
+    Holds the dataset's directory lock, or with ``locked`` relies on the caller holding it
+    (the lock is not reentrant), so a caller can read the labels in force and record new
+    ones under one lock. Every label must name an accepted row, or
     :class:`UsageError` lists the unknown ids and nothing is written. Within ``labels`` and
     across earlier ones, the last label of an id wins: only the last label of each id in
     ``labels`` is considered, and it is not appended when it repeats the decision in force
@@ -71,7 +76,10 @@ def apply_labels(dataset: DatasetDir, labels: Iterable[Label]) -> LabelReport:
     """
     batch = list(labels)
     dataset.settings()  # A UsageError when this is not a dataset directory.
-    with DirectoryLock(dataset.path):
+    lock: contextlib.AbstractContextManager[object] = (
+        contextlib.nullcontext() if locked else DirectoryLock(dataset.path)
+    )
+    with lock:
         row_ids = {row.id for row in dataset.rows()}
         _check_known(batch, row_ids)
         current = dataset.labels()

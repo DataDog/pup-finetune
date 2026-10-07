@@ -87,6 +87,11 @@ version-file = "src/pup_finetune/_version.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/pup_finetune"]
 
+# The agent skill's one source is skills/ at the repository root (where the skills CLI finds
+# it); the wheel ships a copy that `pup finetune skill` reads with importlib.resources.
+[tool.hatch.build.targets.wheel.force-include]
+"skills/datadog-finetune/SKILL.md" = "pup_finetune/_skills/datadog-finetune/SKILL.md"
+
 # An explicit allowlist, so untracked local files (scratch notes, files hidden only by
 # .git/info/exclude) never end up in a published sdist. Paths that do not exist are skipped.
 [tool.hatch.build.targets.sdist]
@@ -96,6 +101,7 @@ include = [
   "/scripts",
   "/bin",
   "/docs",
+  "/skills",
   "/README.md",
   "/LICENSE",
   "/NOTICE",

@@ -27,6 +27,7 @@ them against the real service by overriding the fixtures.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import uuid
@@ -40,6 +41,8 @@ from pup_finetune.providers.base import (
     AdamConfig,
     Check,
     CheckpointRef,
+    DeploymentRequest,
+    DeployOptions,
     Endpoint,
     Generation,
     LoraConfig,
@@ -653,8 +656,8 @@ class ProviderContract:
         )
 
     @pytest.fixture
-    def deploy_options(self) -> dict[str, Any]:
-        return {}
+    def deploy_options(self) -> DeployOptions:
+        return DeployOptions(deployment_id="pft-contract-deployment")
 
     def test_is_a_provider(self, provider: Provider) -> None:
         assert isinstance(provider, Provider)
@@ -704,15 +707,46 @@ class ProviderContract:
         with pytest.raises(UsageError):
             provider.validate_options({"no_such_option_pft_contract": "1"})
 
-    def test_deploy_and_undeploy(
-        self, provider: Provider, model_ref: ModelRef, deploy_options: dict[str, Any]
+    def test_deploy_smoke_test_and_undeploy(
+        self, provider: Provider, model_ref: ModelRef, deploy_options: DeployOptions
     ) -> None:
-        endpoint = provider.deploy(model_ref, deploy_options)
+        events: list[str] = []
+        requests: list[DeploymentRequest] = []
+        created: list[tuple[Endpoint, str]] = []
+
+        def on_creating(request: DeploymentRequest) -> None:
+            events.append("creating")
+            requests.append(request)
+
+        def on_created(endpoint: Endpoint, state: str) -> None:
+            events.append("created")
+            created.append((endpoint, state))
+
+        endpoint = provider.deploy(
+            model_ref, deploy_options, on_creating=on_creating, on_created=on_created
+        )
         try:
             assert isinstance(endpoint, Endpoint)
             assert endpoint.provider == provider.name
             assert endpoint.model_id == model_ref.model_id
-            assert endpoint.deployment_id and endpoint.inference_model
+            assert endpoint.deployment_id == deploy_options.deployment_id
+            assert endpoint.inference_model
+            # What the create sends is reported before it is sent, then the creation before
+            # the wait, with the same deployment.
+            assert events == ["creating", "created"]
+            [request] = requests
+            assert request.deployment_id == endpoint.deployment_id
+            assert request.base_model == model_ref.uri
+            assert request.name == provider.deployment_name(endpoint.deployment_id)
+            assert [e.deployment_id for e, _ in created] == [endpoint.deployment_id]
+            # The deployment under the id is the one requested; another request's is not.
+            assert provider.owns_deployment(request) is True
+            other = dataclasses.replace(request, base_model=f"{request.base_model}-other")
+            assert provider.owns_deployment(other) is False
+            smoke = provider.smoke_test(endpoint)
+            assert smoke.ok, smoke.detail
+            assert smoke.latency_s is not None and smoke.latency_s >= 0
         finally:
             # A live run deploys for real; never leave the deployment behind.
-            provider.undeploy(endpoint)
+            assert provider.undeploy(endpoint) is True
+        assert provider.undeploy(endpoint) is False  # already gone: idempotent

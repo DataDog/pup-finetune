@@ -13,14 +13,24 @@ from typing import Annotated
 import typer
 
 from pup_finetune import __version__
-from pup_finetune.cli import auth, dataset, doctor, evaluate, models, train
+from pup_finetune.cli import (
+    auth,
+    dataset,
+    deploy,
+    doctor,
+    evaluate,
+    models,
+    skill,
+    train,
+    triage,
+)
 from pup_finetune.cli._common import PROG_NAME, run_app
 
 app = typer.Typer(
     name=PROG_NAME,
     help=(
         "Curate a dataset from your Datadog Agent Observability traces, fine-tune an "
-        "open-weight model, and evaluate it against the base model. "
+        "open-weight model, evaluate it against the base model, and deploy it. "
         "Runs as the pup extension `pup finetune`."
     ),
     no_args_is_help=True,
@@ -52,10 +62,13 @@ def root(
 
 
 auth.register(app)
+triage.register(dataset.dataset_app)
 dataset.register(app)
+deploy.register(app)
 doctor.register(app)
 evaluate.register(app)
 models.register(app)
+skill.register(app)
 train.register(app)
 
 

@@ -4,9 +4,10 @@
 #
 # This product includes software developed at Datadog (https://www.datadoghq.com/).
 # Copyright 2026-present Datadog, Inc.
-"""The Fireworks Training SDK, behind a small typed interface. The only module that loads it.
+"""The Fireworks SDKs, behind a small typed interface. The only module that loads them.
 
-Everything else in pup-finetune talks to the protocols defined here, never to the SDK:
+Everything else in pup-finetune talks to the protocols defined here, never to the SDK. For
+training, on the Fireworks Training SDK:
 
 - :class:`FireworksTraining` is the account: it opens a :class:`TrainingService` (one
   serverless training session), lists a session's checkpoints, promotes one to a model and
@@ -29,6 +30,11 @@ Every SDK failure surfaces as an :class:`~pup_finetune.errors.ExternalError` wit
 :class:`~pup_finetune.providers.base.ProviderAuthError`, and a server error or dropped
 connection :class:`~pup_finetune.providers.base.TransientError`. The API key is registered for
 redaction when the client is built and is never part of a message.
+
+For deployments, on the ``Fireworks`` client of the ``fireworks-ai`` package:
+:class:`FireworksDeployments` matches deployment shapes to a model and creates, reads and
+deletes on-demand deployments, returning plain :class:`ShapeVersion` and
+:class:`DeploymentRecord` values; :class:`FireworksDeploymentsClient` implements it.
 """
 
 from __future__ import annotations
@@ -47,6 +53,7 @@ from pydantic import SecretStr
 
 from pup_finetune.credentials import login_hint
 from pup_finetune.errors import ExternalError, FinetuneError, UsageError
+from pup_finetune.output import info
 from pup_finetune.providers.base import (
     MODEL_ID_PATTERN,
     AdamConfig,
@@ -80,11 +87,16 @@ __all__ = [
     "TRAINING_CHECKPOINT",
     "TRAINING_URL",
     "CheckpointRow",
+    "CreateRequest",
+    "DeploymentRecord",
+    "FireworksDeployments",
+    "FireworksDeploymentsClient",
     "FireworksTraining",
     "FireworksTrainingClient",
     "ForwardOutput",
     "OptimStepOutput",
     "SampledTokens",
+    "ShapeVersion",
     "StopTokenDecoder",
     "TokenSampler",
     "TrainingRun",
@@ -521,17 +533,19 @@ class _Pending[T]:
 # --- Conversions --------------------------------------------------------------------------
 
 
-def _import(module: str) -> Any:
-    """Import ``module`` from the Fireworks extra, or raise :class:`UsageError` to install it."""
+def _import(
+    module: str, *, needs: str = "training on Fireworks needs the Fireworks Training SDK"
+) -> Any:
+    """Import ``module`` from the Fireworks extra, or raise :class:`UsageError` to install it.
+
+    ``needs`` says what is missing, e.g. ``"training on Fireworks needs the ... SDK"``.
+    """
     try:
         return importlib.import_module(module)
     except ModuleNotFoundError as exc:
         if not _is_sdk_module(exc.name or module):
             raise _broken_sdk(exc) from exc
-        raise UsageError(
-            "training on Fireworks needs the Fireworks Training SDK, which is not installed",
-            hint=INSTALL_HINT,
-        ) from exc
+        raise UsageError(f"{needs}, which is not installed", hint=INSTALL_HINT) from exc
     except ImportError as exc:
         raise _broken_sdk(exc) from exc
 
@@ -1037,6 +1051,406 @@ def _refuse_forwarded_credentials() -> None:
         )
 
 
+# --- Deployments --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ShapeVersion:
+    """One deployment shape version Fireworks matched to a model.
+
+    ``shape`` is the shape's name, what :meth:`FireworksDeployments.create_deployment` takes
+    (Fireworks records the version it resolves to); ``name`` is the version's own name.
+    """
+
+    name: str
+    shape: str
+    validated: bool
+    latest_validated: bool
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DeploymentRecord:
+    """A Fireworks deployment, as the API reports it.
+
+    ``name`` is its resource name, ``accounts/<account>/deployments/<id>``; ``state`` one of
+    ``CREATING``, ``READY``, ``UPDATING``, ``FAILED``, ``DELETING``, ``DELETED`` (or
+    ``STATE_UNSPECIFIED``); ``detail`` the server's status message, when it sent one.
+    ``shape`` is the shape version Fireworks resolved the requested shape to;
+    ``display_name`` and the replica counts are as the deployment was created, and ``None``
+    when the API did not report them.
+    """
+
+    name: str
+    state: str
+    base_model: str
+    shape: str | None = None
+    create_time: str | None = None
+    detail: str = ""
+    display_name: str | None = None
+    min_replica_count: int | None = None
+    max_replica_count: int | None = None
+
+
+class FireworksDeployments(Protocol):
+    """A Fireworks account's on-demand deployments."""
+
+    @property
+    def account_id(self) -> str:
+        """The account the deployments are made in, e.g. ``my-team``."""
+        ...
+
+    def match_shapes(self, model: str) -> list[ShapeVersion]:
+        """The deployment shape versions the account can deploy ``model`` on, as listed."""
+        ...
+
+    def create_deployment(
+        self,
+        *,
+        base_model: str,
+        deployment_id: str,
+        shape: str,
+        display_name: str,
+        min_replica_count: int,
+        max_replica_count: int,
+        scale_to_zero_window: str,
+        enable_hot_load: bool,
+    ) -> DeploymentRecord:
+        """Create the deployment ``deployment_id`` of ``base_model`` on ``shape``.
+
+        Sent once, never retried by the SDK (the API takes no idempotency key, so a retried
+        create that had succeeded would answer HTTP 409). When the create fails in a way that
+        may hide a success (a 409, a timeout, a server error or a dropped connection), the
+        deployment is read back: an existing deployment under that id is returned as the one
+        created only when it is this create's own, of ``base_model`` with ``display_name``,
+        on ``shape`` and with the replica counts asked for (as far as the API reports them).
+        Raises :class:`UsageError` when the id is taken by any other deployment, so one this
+        create did not make is never recorded (and later undeployed) as its own, and
+        :class:`TransientError` when the create succeeded but its answer cannot be read (no
+        deployment name), as the deployment exists.
+        """
+        ...
+
+    def get_deployment(self, deployment_id: str) -> DeploymentRecord | None:
+        """The deployment ``deployment_id``, or ``None`` when Fireworks has none (HTTP 404)."""
+        ...
+
+    def delete_deployment(self, deployment_id: str) -> bool:
+        """Delete the deployment; ``False`` when it was already gone (HTTP 404)."""
+        ...
+
+    def close(self) -> None:
+        """Release the HTTP client. Closing twice is a no-op."""
+        ...
+
+
+class _SdkDeploymentsResource(Protocol):
+    def create(self, **kwargs: Any) -> Any: ...
+
+    def get(self, deployment_id: str) -> Any: ...
+
+    def delete(self, deployment_id: str) -> Any: ...
+
+
+class _SdkShapeVersionsResource(Protocol):
+    def match_for_model(self, model: str) -> Any: ...
+
+
+class _SdkFireworks(Protocol):
+    @property
+    def deployments(self) -> _SdkDeploymentsResource: ...
+
+    @property
+    def deployment_shape_versions(self) -> _SdkShapeVersionsResource: ...
+
+    def with_options(self, *, max_retries: int) -> _SdkFireworks: ...
+
+    def close(self) -> None: ...
+
+
+SdkFireworksFactory = Callable[..., _SdkFireworks]
+"""Builds the SDK's ``Fireworks`` client from its keyword arguments (tests pass a fake)."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CreateRequest:
+    """What a create asked for, to tell a deployment it made from one already there."""
+
+    base_model: str
+    shape: str
+    display_name: str
+    min_replica_count: int
+    max_replica_count: int
+
+    def mismatch(self, existing: DeploymentRecord) -> str | None:
+        """How ``existing`` differs from this request, or ``None`` when it matches.
+
+        Fireworks records the shape version it resolves the shape to, so a shape matches
+        itself or any of its versions. A field the API did not report is not compared.
+        """
+        if existing.display_name != self.display_name:
+            return f"its display name is {existing.display_name or 'empty'!r}"
+        shape = existing.shape
+        if (
+            shape is not None
+            and shape != self.shape
+            and not shape.startswith(f"{self.shape}/versions/")
+        ):
+            return f"it runs on the shape {shape}"
+        for label, theirs, ours in (
+            ("minimum", existing.min_replica_count, self.min_replica_count),
+            ("maximum", existing.max_replica_count, self.max_replica_count),
+        ):
+            if theirs is not None and theirs != ours:
+                return f"its {label} replica count is {theirs}, not {ours}"
+        return None
+
+    def made(self, existing: DeploymentRecord) -> bool:
+        """Whether ``existing`` is the deployment this request creates: of its base model,
+        and with nothing :meth:`mismatch` finds."""
+        return existing.base_model == self.base_model and self.mismatch(existing) is None
+
+
+def _deployment_record(raw: Any) -> DeploymentRecord:
+    name = getattr(raw, "name", None)
+    if not isinstance(name, str) or not name:
+        raise ExternalError("Fireworks returned a deployment without its name", source=SOURCE)
+    state = getattr(raw, "state", None)
+    created = getattr(raw, "create_time", None)
+    status = getattr(raw, "status", None)
+    message = getattr(status, "message", None)
+    shape = getattr(raw, "deployment_shape", None)
+    base_model = getattr(raw, "base_model", None)
+    display_name = getattr(raw, "display_name", None)
+    return DeploymentRecord(
+        name=name,
+        state=str(state) if state else "STATE_UNSPECIFIED",
+        base_model=str(base_model or ""),
+        shape=str(shape) if shape else None,
+        create_time=created.isoformat() if isinstance(created, datetime) else created or None,
+        detail=redact(str(message))[:_DETAIL_LIMIT] if message else "",
+        display_name=display_name if isinstance(display_name, str) else None,
+        min_replica_count=_count(getattr(raw, "min_replica_count", None)),
+        max_replica_count=_count(getattr(raw, "max_replica_count", None)),
+    )
+
+
+def _count(value: Any) -> int | None:
+    return value if type(value) is int else None
+
+
+def _shape_versions(raw: Any) -> list[ShapeVersion]:
+    versions: list[ShapeVersion] = []
+    for version in getattr(raw, "deployment_shape_versions", None) or []:
+        name = getattr(version, "name", None)
+        snapshot_name = getattr(getattr(version, "snapshot", None), "name", None)
+        shape = snapshot_name or (name.split("/versions/", 1)[0] if name else None)
+        if not isinstance(shape, str) or not shape:
+            continue
+        versions.append(
+            ShapeVersion(
+                name=str(name or shape),
+                shape=shape,
+                validated=getattr(version, "validated", None) is True,
+                latest_validated=getattr(version, "latest_validated", None) is True,
+            )
+        )
+    return versions
+
+
+def _has_status(exc: BaseException, status: int) -> bool:
+    return any(_status_of(item) == status for item in _chain(exc))
+
+
+class FireworksDeploymentsClient:
+    """:class:`FireworksDeployments` on the SDK's ``Fireworks`` client. See the module docstring.
+
+    ``account_id`` defaults to :func:`resolve_account_id` (``FIREWORKS_ACCOUNT_ID`` in
+    ``env``, else the key's first account). ``sdk`` builds the SDK client (default: the
+    ``fireworks`` package's ``Fireworks``, loaded on first use). Every request carries
+    ``X-Fireworks-Client-Source: pup-finetune/<version>``.
+    """
+
+    def __init__(
+        self,
+        api_key: SecretStr,
+        *,
+        account_id: str | None = None,
+        env: Mapping[str, str] | None = None,
+        transport: httpx.BaseTransport | None = None,
+        sdk: SdkFireworksFactory | None = None,
+    ) -> None:
+        self._secret = checked_key(api_key)
+        self._account_id = (
+            checked_account_id(account_id)
+            if account_id is not None
+            else resolve_account_id(api_key, env=env, transport=transport)
+        )
+        self._factory = sdk
+        self._client: _SdkFireworks | None = None
+
+    @property
+    def account_id(self) -> str:
+        return self._account_id
+
+    def match_shapes(self, model: str) -> list[ShapeVersion]:
+        client = self._sdk()
+        raw = _call(
+            f"matching Fireworks deployment shapes to {model}",
+            lambda: client.deployment_shape_versions.match_for_model(model),
+        )
+        return _shape_versions(raw)
+
+    def create_deployment(
+        self,
+        *,
+        base_model: str,
+        deployment_id: str,
+        shape: str,
+        display_name: str,
+        min_replica_count: int,
+        max_replica_count: int,
+        scale_to_zero_window: str,
+        enable_hot_load: bool,
+    ) -> DeploymentRecord:
+        if not MODEL_ID_PATTERN.fullmatch(deployment_id):
+            raise UsageError(f"{deployment_id!r} is not a valid Fireworks deployment id")
+        # The SDK retries a POST on a timeout, 408, 409, 429 or 5xx; a create must be sent once.
+        client = self._sdk().with_options(max_retries=0)
+        what = f"creating the Fireworks deployment {deployment_id}"
+        try:
+            raw = client.deployments.create(
+                base_model=base_model,
+                deployment_id=deployment_id,
+                deployment_shape=shape,
+                display_name=display_name,
+                min_replica_count=min_replica_count,
+                max_replica_count=max_replica_count,
+                autoscaling_policy={"scale_to_zero_window": scale_to_zero_window},
+                enable_hot_load=enable_hot_load,
+            )
+        except FinetuneError:
+            raise
+        except Exception as exc:
+            error = fireworks_error(exc, what=what)
+            conflict = _has_status(exc, 409)
+            if not (conflict or isinstance(error, TransientError)):
+                raise error from exc
+            requested = CreateRequest(
+                base_model=base_model,
+                shape=shape,
+                display_name=display_name,
+                min_replica_count=min_replica_count,
+                max_replica_count=max_replica_count,
+            )
+            existing = self._created_anyway(deployment_id, requested, error)
+            if existing is not None:
+                return existing
+            if conflict and not isinstance(error, ProviderCapacityError):
+                raise UsageError(
+                    f"Fireworks reports the deployment id {deployment_id} as taken (HTTP 409)",
+                    hint="pass another --deployment-id, or delete the existing deployment",
+                ) from exc
+            raise error from exc
+        try:
+            return _deployment_record(raw)
+        except ExternalError as exc:
+            # The create was accepted, so the deployment exists and may bill: transient, so
+            # the caller keeps its receipt and says how to undeploy it, rather than treating
+            # it as refused.
+            raise TransientError(
+                f"{what} succeeded, but its answer could not be read: {exc.message}",
+                source=SOURCE,
+                hint=f"the deployment {deployment_id} was created",
+            ) from exc
+
+    def _created_anyway(
+        self, deployment_id: str, requested: CreateRequest, error: FinetuneError
+    ) -> DeploymentRecord | None:
+        """The deployment a failed create may have made anyway, read back; ``None`` when
+        there is none. Raises :class:`UsageError` when the id holds a deployment this create
+        did not make: of another model, under another display name, or on another shape or
+        replica counts."""
+        try:
+            existing = self.get_deployment(deployment_id)
+        except FinetuneError as read_error:
+            raise error from read_error
+        if existing is None:
+            return None
+        hint = "pass another --deployment-id, or delete the existing deployment"
+        if existing.base_model != requested.base_model:
+            raise UsageError(
+                f"the account already has a Fireworks deployment named {deployment_id}, "
+                f"serving {existing.base_model or 'another model'}",
+                hint=hint,
+            )
+        mismatch = requested.mismatch(existing)
+        if mismatch is not None:
+            raise UsageError(
+                f"the account already has a Fireworks deployment named {deployment_id} that "
+                f"this deploy did not create ({mismatch})",
+                hint=hint,
+            )
+        info(
+            f"creating {deployment_id} reported a failure ({error.message}), but the "
+            f"deployment of {requested.base_model} exists: using it"
+        )
+        return existing
+
+    def get_deployment(self, deployment_id: str) -> DeploymentRecord | None:
+        client = self._sdk()
+        try:
+            raw = client.deployments.get(deployment_id)
+        except FinetuneError:
+            raise
+        except Exception as exc:
+            if _has_status(exc, 404):
+                return None
+            raise fireworks_error(
+                exc, what=f"reading the Fireworks deployment {deployment_id}"
+            ) from exc
+        return _deployment_record(raw)
+
+    def delete_deployment(self, deployment_id: str) -> bool:
+        client = self._sdk()
+        try:
+            client.deployments.delete(deployment_id)
+        except FinetuneError:
+            raise
+        except Exception as exc:
+            if _has_status(exc, 404):
+                return False
+            raise fireworks_error(
+                exc, what=f"deleting the Fireworks deployment {deployment_id}"
+            ) from exc
+        return True
+
+    def close(self) -> None:
+        client, self._client = self._client, None
+        if client is not None:
+            _call("closing the Fireworks client", client.close)
+
+    def _sdk(self) -> _SdkFireworks:
+        if self._client is None:
+            factory = self._factory
+            if factory is None:
+                factory = _import(
+                    "fireworks", needs="deploying on Fireworks needs the Fireworks SDK"
+                ).Fireworks
+            build = factory
+
+            def create() -> _SdkFireworks:
+                client: _SdkFireworks = build(
+                    api_key=self._secret,
+                    account_id=self._account_id,
+                    base_url=API_URL,
+                    default_headers={CLIENT_SOURCE_HEADER: CLIENT_SOURCE},
+                )
+                return client
+
+            self._client = _call("connecting to the Fireworks API", create)
+        return self._client
+
+
 if TYPE_CHECKING:
     # mypy checks that the implementations satisfy the protocols.
     def _conforms(client: FireworksTrainingClient) -> FireworksTraining:
@@ -1050,3 +1464,6 @@ if TYPE_CHECKING:
 
     def _sampler_conforms(sampler: _Sampler) -> TokenSampler:
         return sampler
+
+    def _deployments_conform(client: FireworksDeploymentsClient) -> FireworksDeployments:
+        return client

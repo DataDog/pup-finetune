@@ -9,16 +9,18 @@
 :class:`FireworksProvider` serves the profiles in :mod:`.models`, checks with the Fireworks
 API that a model can be fine-tuned right now (:meth:`FireworksProvider.preflight`), renders
 each profile with its model family's Hugging Face chat template, and trains through
-:class:`~.backend.FireworksBackend` (:meth:`~FireworksProvider.backend`). Deployment on
-Fireworks lands in a later release; until then :meth:`~FireworksProvider.deploy` and
-:meth:`~FireworksProvider.undeploy` refuse with a :class:`UsageError`.
+:class:`~.backend.FireworksBackend` (:meth:`~FireworksProvider.backend`). It deploys a promoted
+model on an on-demand deployment, smoke-tests it and deletes it through
+:class:`~.deploy.FireworksDeployer` (:meth:`~FireworksProvider.deploy`,
+:meth:`~FireworksProvider.smoke_test`, :meth:`~FireworksProvider.undeploy`).
 
 Building the provider is cheap: the HTTP client is imported on the first API call,
 ``transformers`` only when a renderer first needs its tokenizer, and the training backend
 (and through it the Fireworks Training SDK) only when :meth:`~FireworksProvider.backend` is
-called and a session opens. The API key is resolved (``FIREWORKS_API_KEY``, then the OS
-keychain) on the first API call or session, never earlier, and is handed to the clients
-directly, never through the environment.
+called and a session opens, and the deployment client on the first deployment call. The
+API key is resolved (``FIREWORKS_API_KEY``, then the OS keychain) on the first API call or
+session, never earlier, and is handed to the clients directly, never through the
+environment.
 
 Provider options (``TrainSpec.provider_options``, from ``--provider-option key=value``) are
 listed on :class:`FireworksOptions`; string values are decoded as JSON.
@@ -30,7 +32,7 @@ import dataclasses
 import importlib.util
 import os
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Any, Final, NoReturn
+from typing import TYPE_CHECKING, Any, Final
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
@@ -38,7 +40,15 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from pup_finetune import credentials
 from pup_finetune.doctor import error_detail
 from pup_finetune.errors import FinetuneError, UsageError
-from pup_finetune.providers.base import Check, Endpoint, ModelProfile, ModelRef
+from pup_finetune.providers.base import (
+    Check,
+    DeploymentRequest,
+    DeployOptions,
+    Endpoint,
+    ModelProfile,
+    ModelRef,
+    SmokeTest,
+)
 from pup_finetune.providers.fireworks import PROVIDER_NAME
 from pup_finetune.providers.fireworks.models import PROFILES
 from pup_finetune.providers.options import parse_options
@@ -54,9 +64,11 @@ if TYPE_CHECKING:
     from pup_finetune.providers.fireworks.api import FireworksApi, ModelInfo
     from pup_finetune.providers.fireworks.backend import FireworksBackend
     from pup_finetune.providers.fireworks.client import FireworksTraining
+    from pup_finetune.providers.fireworks.deploy import FireworksDeployer
 
 __all__ = [
     "MAX_SEQ_LEN",
+    "DeployerFactory",
     "FireworksOptions",
     "FireworksProvider",
     "TrainingClientFactory",
@@ -66,14 +78,14 @@ __all__ = [
 TrainingClientFactory = Callable[[SecretStr], "FireworksTraining"]
 """Builds the account's training client from the resolved API key."""
 
+DeployerFactory = Callable[[SecretStr], "FireworksDeployer"]
+"""Builds the deployer (deployments and the smoke test's chat client) from the API key."""
+
 MAX_SEQ_LEN: Final = max(profile.max_seq_len for profile in PROFILES)
 """The largest training context of any profile: the bound on the ``max_seq_len`` option."""
 
 READY: Final = "READY"
 _HF_HOSTS: Final = frozenset({"huggingface.co", "www.huggingface.co"})
-_LATER_RELEASE: Final = (
-    "is not available in this version of pup-finetune; it lands in a later release"
-)
 
 
 class FireworksOptions(BaseModel):
@@ -137,7 +149,10 @@ class FireworksProvider:
     Face tokenizer. ``training_client`` builds the training client from the API key when a
     session opens (default: a
     :class:`~pup_finetune.providers.fireworks.client.FireworksTrainingClient` on the SDK), so
-    tests can train against an in-memory Fireworks. :meth:`validate_options` also makes the
+    tests can train against an in-memory Fireworks; ``deployer`` likewise builds the
+    :class:`~pup_finetune.providers.fireworks.deploy.FireworksDeployer` (default: on the SDK's
+    deployment client and an inference :class:`~pup_finetune.inference.ChatClient`).
+    :meth:`validate_options` also makes the
     validated options this provider's configuration, which :meth:`preflight` and
     :meth:`backend` use.
     """
@@ -150,6 +165,7 @@ class FireworksProvider:
         transport: httpx.BaseTransport | None = None,
         tokenizer: ChatTokenizer | None = None,
         training_client: TrainingClientFactory | None = None,
+        deployer: DeployerFactory | None = None,
     ) -> None:
         self.runtime = runtime
         self.options = FireworksOptions()
@@ -157,6 +173,8 @@ class FireworksProvider:
         self._transport = transport
         self._tokenizer = tokenizer
         self._training_client = training_client
+        self._deployer_factory = deployer
+        self._deployer: FireworksDeployer | None = None
         self._api_key: SecretStr | None = None
 
     @property
@@ -255,11 +273,40 @@ class FireworksProvider:
         self.options = parsed
         return parsed.model_dump(exclude_unset=True)
 
-    def deploy(self, model: ModelRef, options: Mapping[str, Any]) -> Endpoint:
-        _later("deploying on Fireworks")
+    def deploy(
+        self,
+        model: ModelRef,
+        options: DeployOptions,
+        *,
+        on_creating: Callable[[DeploymentRequest], None] | None = None,
+        on_created: Callable[[Endpoint, str], None] | None = None,
+    ) -> Endpoint:
+        """Create an on-demand deployment of ``model`` and wait until it is ``READY``.
 
-    def undeploy(self, endpoint: Endpoint) -> None:
-        _later("removing a Fireworks deployment")
+        See :mod:`pup_finetune.providers.fireworks.deploy`. Needs the API key. It bills per
+        GPU-second while a replica runs, until :meth:`undeploy`.
+        """
+        return self._deployments().deploy(
+            model, options, on_creating=on_creating, on_created=on_created
+        )
+
+    def deployment_name(self, deployment_id: str) -> str:
+        """``accounts/<account>/deployments/<id>``, in the account the key resolves to."""
+        return self._deployments().deployment_name(deployment_id)
+
+    def smoke_test(self, endpoint: Endpoint) -> SmokeTest:
+        """One chat completion to the deployment, retried while it scales up from zero."""
+        self._own_endpoint(endpoint)
+        return self._deployments().smoke_test(endpoint)
+
+    def undeploy(self, endpoint: Endpoint) -> bool:
+        """Delete the deployment (idempotent); the promoted model is kept."""
+        self._own_endpoint(endpoint)
+        return self._deployments().undeploy(endpoint)
+
+    def owns_deployment(self, request: DeploymentRequest) -> bool | None:
+        """Whether the deployment under the requested id is the one ``request`` creates."""
+        return self._deployments().owns_deployment(request)
 
     # Internals.
 
@@ -268,6 +315,34 @@ class FireworksProvider:
             raise UsageError(
                 f"the fireworks provider does not serve {profile.provider}/{profile.alias}"
             )
+
+    def _own_endpoint(self, endpoint: Endpoint) -> None:
+        if endpoint.provider != PROVIDER_NAME:
+            raise UsageError(
+                f"the fireworks provider does not serve a {endpoint.provider} endpoint"
+            )
+
+    def _deployments(self) -> FireworksDeployer:
+        if self._deployer is None:
+            if self._deployer_factory is not None:
+                self._deployer = self._deployer_factory(self._key())
+            else:
+                self._deployer = self._default_deployer()
+        return self._deployer
+
+    def _default_deployer(self) -> FireworksDeployer:
+        from pup_finetune.inference import ChatClient
+        from pup_finetune.providers.fireworks.client import FireworksDeploymentsClient
+        from pup_finetune.providers.fireworks.deploy import INFERENCE_URL, FireworksDeployer
+
+        key = self._key()
+        client = FireworksDeploymentsClient(key, env=self._environ(), transport=self._transport)
+
+        def chat() -> ChatClient:
+            # One attempt per call: the deployer retries on its own clock while it scales up.
+            return ChatClient(INFERENCE_URL, key, credential=PROVIDER_NAME, max_attempts=1)
+
+        return FireworksDeployer(client, chat=chat)
 
     def _environ(self) -> Mapping[str, str]:
         return self._env if self._env is not None else os.environ
@@ -315,14 +390,6 @@ def _transformers_installed() -> bool:
         return importlib.util.find_spec("transformers") is not None
     except (ImportError, ValueError):
         return False
-
-
-def _later(action: str) -> NoReturn:
-    raise UsageError(
-        f"{action} {_LATER_RELEASE}",
-        hint="meanwhile, check model readiness with "
-        "`pup finetune models list --provider fireworks --check`",
-    )
 
 
 if TYPE_CHECKING:

@@ -73,6 +73,7 @@ jobs:
           uv venv /tmp/v
           uv pip install --python /tmp/v dist/*.whl
           /tmp/v/bin/pup-finetune --version
+          /tmp/v/bin/pup-finetune skill show | grep -q '_skills/datadog-finetune/SKILL.md'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist

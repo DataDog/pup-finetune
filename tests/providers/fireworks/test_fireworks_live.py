@@ -125,3 +125,35 @@ def test_train_checkpoint_promote_and_sample(api_key: str) -> None:
                 sampler.close()
             assert generation.message["role"] == "assistant"
             assert 0 < generation.completion_tokens <= 16
+
+
+def test_deploy_smoke_test_and_undeploy(api_key: str) -> None:
+    """Paid: an on-demand deployment of a promoted model, always deleted at the end.
+
+    Needs ``PUP_FINETUNE_LIVE_DEPLOY_MODEL``, a promoted model of the key's account
+    (``accounts/<account>/models/<id>``), for example one the training test promoted.
+    """
+    from pup_finetune.providers.base import DeployOptions, Endpoint, ModelRef
+
+    uri = os.environ.get("PUP_FINETUNE_LIVE_DEPLOY_MODEL", "").strip()
+    if not uri:
+        pytest.skip("set PUP_FINETUNE_LIVE_DEPLOY_MODEL to a promoted model to test deploying")
+    provider = FireworksProvider(Runtime(), env={"FIREWORKS_API_KEY": api_key})
+    model = ModelRef(provider="fireworks", model_id=uri.rsplit("/", 1)[-1], uri=uri)
+    options = DeployOptions(deployment_id=f"pft-live-{uuid.uuid4().hex[:8]}")
+    try:
+        endpoint = provider.deploy(model, options)
+        smoke = provider.smoke_test(endpoint)
+        print(f"deployed {endpoint.inference_model}: smoke test {smoke.to_json()}")
+        assert smoke.ok, smoke.detail
+    finally:
+        # By id, so a deployment whose create failed after Fireworks accepted it is deleted
+        # too; deleting one that does not exist succeeds.
+        provider.undeploy(
+            Endpoint(
+                provider="fireworks",
+                deployment_id=options.deployment_id,
+                model_id=model.model_id,
+                inference_model="",
+            )
+        )
