@@ -173,11 +173,13 @@ def fake_deployer(
     clock: FakeClock,
     *,
     smoke_timeout_s: float = 600.0,
+    account_id: str = ACCOUNT,
 ) -> Callable[[SecretStr], FireworksDeployer]:
-    """The provider's ``deployer`` factory, on ``sdk``, ``chat`` and ``clock``."""
+    """The provider's ``deployer`` factory, on ``sdk``, ``chat`` and ``clock``, for the key's
+    account ``account_id``."""
 
     def build(key: SecretStr) -> FireworksDeployer:
-        client = FireworksDeploymentsClient(key, account_id=ACCOUNT, sdk=sdk.connect)
+        client = FireworksDeploymentsClient(key, account_id=account_id, sdk=sdk.connect)
 
         def open_chat() -> ChatClient:
             return ChatClient(

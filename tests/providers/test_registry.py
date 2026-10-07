@@ -44,6 +44,7 @@ _PROVIDER_SOURCE = textwrap.dedent(
         def backend(self): raise NotImplementedError
         def validate_options(self, options): return dict(options)
         def deploy(self, model, options, *, on_created=None): raise NotImplementedError
+        def deployment_name(self, deployment_id): return None
         def smoke_test(self, endpoint): raise NotImplementedError
         def undeploy(self, endpoint): raise NotImplementedError
 

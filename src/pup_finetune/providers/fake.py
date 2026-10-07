@@ -1099,13 +1099,16 @@ class FakeProvider:
             deployment_id=options.deployment_id,
             model_id=model.model_id,
             inference_model=model.model_id,
-            name=f"fake://deployments/{options.deployment_id}",
+            name=self.deployment_name(options.deployment_id),
             shape=options.shape or "fake-shape",
         )
         if on_created is not None:
             on_created(endpoint, "CREATING")
         self.deployments[endpoint.deployment_id] = endpoint
         return endpoint
+
+    def deployment_name(self, deployment_id: str) -> str:
+        return f"fake://deployments/{deployment_id}"
 
     def smoke_test(self, endpoint: Endpoint) -> SmokeTest:
         """Passes at once (no request is sent); records the endpoint."""

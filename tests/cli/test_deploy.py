@@ -249,11 +249,17 @@ class FireworksWorld:
         self.chat = FakeChatApi(api_key=API_KEY)
         self.clock = FakeClock()
         self.smoke_timeout_s = 600.0
+        self.account = ACCOUNT
+        """The account the key resolves to, for the commands run from now on."""
 
     def provider(self, runtime: Runtime) -> FireworksProvider:
         def deployer(key: SecretStr) -> FireworksDeployer:
             build = fake_deployer(
-                self.sdk, self.chat, self.clock, smoke_timeout_s=self.smoke_timeout_s
+                self.sdk,
+                self.chat,
+                self.clock,
+                smoke_timeout_s=self.smoke_timeout_s,
+                account_id=self.account,
             )
             return build(key)
 
@@ -416,6 +422,27 @@ def test_a_ctrl_c_while_creating_leaves_a_receipt_to_undeploy(
     assert removed.exit_code == 0, removed.stderr
     assert output(removed)["already_deleted"] is False
     assert world.sdk.deleted == [model_id_for_run(RUN_ID)]
+
+
+def test_a_receipt_left_while_creating_names_its_account(
+    world: FireworksWorld, fireworks_run: Path
+) -> None:
+    world.sdk.lost["create"] = KeyboardInterrupt()
+    assert invoke("deploy", str(fireworks_run), "--confirm").exit_code == 130
+    receipt = RunDir(fireworks_run).read_deployment()
+    assert receipt is not None
+    assert receipt["state"] == "REQUESTED"
+    deployment_id = model_id_for_run(RUN_ID)
+    assert receipt["deployment_name"] == f"accounts/{ACCOUNT}/deployments/{deployment_id}"
+    # Under another account, a deployment of the same id there is never deleted, nor a 404
+    # there taken for this one being gone.
+    world.account = "other-team"
+    refused = invoke("undeploy", str(fireworks_run), "--confirm")
+    assert refused.exit_code == 2, refused.stderr
+    assert f"FIREWORKS_ACCOUNT_ID={ACCOUNT}" in refused.stderr
+    stored = RunDir(fireworks_run).read_deployment() or {}
+    assert stored["deleted_at"] is None
+    assert world.sdk.deleted == []
 
 
 def test_a_lost_create_answer_is_adopted(world: FireworksWorld, fireworks_run: Path) -> None:

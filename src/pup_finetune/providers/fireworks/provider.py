@@ -286,6 +286,10 @@ class FireworksProvider:
         """
         return self._deployments().deploy(model, options, on_created=on_created)
 
+    def deployment_name(self, deployment_id: str) -> str:
+        """``accounts/<account>/deployments/<id>``, in the account the key resolves to."""
+        return self._deployments().deployment_name(deployment_id)
+
     def smoke_test(self, endpoint: Endpoint) -> SmokeTest:
         """One chat completion to the deployment, retried while it scales up from zero."""
         self._own_endpoint(endpoint)

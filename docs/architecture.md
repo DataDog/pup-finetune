@@ -343,8 +343,10 @@ promotion, its deployable checkpoint) through `Provider.deploy`, with `DeployOpt
 deployment id, derived from the run id unless `--deployment-id` is given; the shape; at most
 one replica, none when idle; the wait's timeout). The receipt, `deployment.json` in the run
 directory, is first written as `REQUESTED` before the provider is called, so a Ctrl-C while
-the deployment is created still leaves its id to undeploy (it is removed again when the
-provider refused the request). The `on_created` callback rewrites it as soon as the provider
+the deployment is created still leaves its id to undeploy, with the resource name it gets
+(`Provider.deployment_name`, on Fireworks `accounts/<account>/deployments/<id>`), so an
+undeploy under another account is refused (it is removed again when the provider refused
+the request). The `on_created` callback rewrites it as soon as the provider
 accepted the deployment and before the wait, so a failure, a timeout or a Ctrl-C while
 waiting still records what exists and bills; a smoke test that raises is recorded as failed,
 with an undeploy hint. It is updated once the deployment serves, with the

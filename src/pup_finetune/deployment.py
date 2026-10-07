@@ -12,8 +12,11 @@ provider's deployable checkpoint. :func:`execute_deploy` deploys it through the 
 in the run directory:
 
 - before the provider is asked to create anything (``state`` ``REQUESTED``), so a Ctrl-C or
-  a lost answer while it is created still leaves the id to undeploy; it is removed again
-  when the provider refused the deployment, so nothing exists;
+  a lost answer while it is created still leaves the id to undeploy, with the resource name
+  the deployment gets (:meth:`~pup_finetune.providers.base.Provider.deployment_name`, e.g.
+  ``accounts/<account>/deployments/<id>``), so undeploying it under another account is
+  refused rather than deleting, or taking as gone, a deployment of the same id there; it is
+  removed again when the provider refused the deployment, so nothing exists;
 - as soon as the provider accepted the deployment, before waiting for it to serve, so a
   failure or timeout while waiting (or a Ctrl-C) still leaves a record of what exists and
   bills;
@@ -224,13 +227,16 @@ def _receipt(target: DeployTarget, endpoint: Endpoint, state: str, now: Clock) -
     }
 
 
-def _requested_receipt(target: DeployTarget, options: DeployOptions, now: Clock) -> dict[str, Any]:
-    """The receipt written before the provider is asked to create the deployment."""
+def _requested_receipt(
+    target: DeployTarget, options: DeployOptions, name: str | None, now: Clock
+) -> dict[str, Any]:
+    """The receipt written before the provider is asked to create the deployment ``name``."""
     endpoint = Endpoint(
         provider=target.provider,
         deployment_id=options.deployment_id,
         model_id=target.model.model_id,
         inference_model="",
+        name=name,
         shape=options.shape,
     )
     receipt = _receipt(target, endpoint, REQUESTED, now)
@@ -272,7 +278,8 @@ def execute_deploy(
     with run_dir.lock():
         require_not_deployed(run_dir)
         previous = run_dir.read_deployment()
-        receipt = _requested_receipt(target, options, now)
+        name = provider.deployment_name(options.deployment_id)
+        receipt = _requested_receipt(target, options, name, now)
         run_dir.write_deployment(receipt)
         created = False
 

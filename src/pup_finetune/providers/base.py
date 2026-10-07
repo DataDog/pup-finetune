@@ -626,6 +626,16 @@ class Provider(Protocol):
         """
         ...
 
+    def deployment_name(self, deployment_id: str) -> str | None:
+        """The full resource name the deployment ``deployment_id`` gets, before it exists.
+
+        ``None`` when the provider names deployments by id alone. The caller records it
+        before asking for the deployment, so a receipt left by an interrupted create still
+        says where it was made (e.g. which account), and :meth:`undeploy` can refuse to
+        delete in another one.
+        """
+        ...
+
     def smoke_test(self, endpoint: Endpoint) -> SmokeTest:
         """Send one short chat completion to ``endpoint``; never raises for a failed answer.
 

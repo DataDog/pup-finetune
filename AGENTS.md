@@ -223,7 +223,8 @@ Source lives under `src/pup_finetune/`.
 - `deployment.py` - what `deploy` and `undeploy` run, provider-neutral: `deploy_target` (a
   finished run's promoted model, else its deployable checkpoint), `deployment_id_for` (the
   run id made safe, or `--deployment-id`), `execute_deploy` (writes `deployment.json` as
-  `REQUESTED` before the provider is called, removed again if the provider refused; then
+  `REQUESTED`, with the deployment's resource name, before the provider is called, removed
+  again if the provider refused; then
   from the provider's `on_created` callback, before the wait, on `READY` and with the smoke
   test; a failure once it may exist, a smoke test that raises included, is recorded with an
   undeploy hint; one deployment per run)

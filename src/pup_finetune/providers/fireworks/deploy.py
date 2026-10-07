@@ -149,6 +149,10 @@ class FireworksDeployer:
     def close(self) -> None:
         self._deployments.close()
 
+    def deployment_name(self, deployment_id: str) -> str:
+        """The resource name the deployment ``deployment_id`` gets: in this key's account."""
+        return deployment_name(self.account_id, deployment_id)
+
     def deploy(
         self,
         model: ModelRef,
@@ -228,7 +232,7 @@ class FireworksDeployer:
     def _endpoint(
         self, model: ModelRef, deployment_id: str, record: DeploymentRecord, shape: str
     ) -> Endpoint:
-        name = record.name or deployment_name(self.account_id, deployment_id)
+        name = record.name or self.deployment_name(deployment_id)
         return Endpoint(
             provider=PROVIDER_NAME,
             deployment_id=deployment_id,
