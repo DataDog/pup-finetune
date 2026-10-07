@@ -152,7 +152,9 @@ Source lives under `src/pup_finetune/`. Packages marked *later* arrive in later 
   back (`contained`); both compare messages as conversion collapses them
   (`comparable_messages` in `trajectories.py`). With `--reasoning preserve`, a stored row a
   re-run reads more reasoning for is updated in place, never losing reasoning it has
-  (`reasoning_updates`, `DatasetDir.add(updated=...)`). `push.py` is `dataset push`: `dataset_record`
+  (`reasoning_updates`, `DatasetDir.add(updated=...)`), and a stored row that update makes
+  repeat another stored row is retired as `duplicate_conversation` (`repeat_retirements`).
+  `push.py` is `dataset push`: `dataset_record`
   (input = the messages before the final assistant message plus tools, expected output = that
   message, metadata = row id, split and source, tags `split:*` and `source:pup-finetune`),
   `plan_push` (what would be sent, from local files only) and `push_dataset`, which sends only

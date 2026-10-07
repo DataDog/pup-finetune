@@ -643,6 +643,63 @@ def test_a_re_run_reading_more_reasoning_updates_the_stored_row(tmp_path: Path) 
     assert stored_reasoning(dataset) == [None, None, "Think one.", None, None]
 
 
+def test_reasoning_that_makes_two_stored_rows_one_conversation_retires_the_repeat(
+    tmp_path: Path,
+) -> None:
+    def in_trace(trace_id: str, entry: dict[str, Any]) -> dict[str, Any]:
+        entry["attributes"]["trace_id"] = trace_id
+        return entry
+
+    # Two traces of the same text. Trace A reads its reasoning only on page 2; trace B has it
+    # on page 1 already, so the first pull stores the two as different conversations.
+    pages = [
+        page(
+            [
+                item("synthetic-span-a2", [SYSTEM, Q1, A1, Q2, A2], trace_id="synthetic-trace-a"),
+                item("synthetic-span-b2", [SYSTEM, Q1, A1, Q2, A2], trace_id="synthetic-trace-b"),
+                in_trace(
+                    "synthetic-trace-b", thinking_item("synthetic-span-b1", [SYSTEM, Q1, A1], "Hm.")
+                ),
+            ],
+            after="cursor-2",
+        ),
+        page(
+            [
+                in_trace(
+                    "synthetic-trace-a", thinking_item("synthetic-span-a1", [SYSTEM, Q1, A1], "Hm.")
+                )
+            ]
+        ),
+    ]
+
+    def run(**options: Any) -> Any:
+        pup = FakeExportApi(pages).install(FakePup()).client()
+        query = SpanQuery(ml_app="synthetic")
+        return pull(
+            pup, PullOptions(query, reasoning="preserve", **options), dataset, SplitParams()
+        )
+
+    dataset = DatasetDir(tmp_path / "ds")
+    _, first = run(target_count=2)
+    a, b = "synthetic-trace-a:synthetic-span-a2", "synthetic-trace-b:synthetic-span-b2"
+    assert first.added == 2
+
+    # Page 2 fills in A's reasoning, which makes it B's conversation: B is retired.
+    collection, added = run()
+    assert [(row.id, other) for row, other in collection.duplicates] == [(b, a)]
+    assert (added.added, added.updated, added.retired) == (0, 1, 1)
+    [row] = dataset.rows()
+    assert row.id == a
+    assert row.messages[2].reasoning_content == "Hm."
+    assert [(r["row_id"], r["code"]) for r in dataset.excluded()] == [(b, "duplicate_conversation")]
+
+    # Re-runs, reading further or not, keep the one row.
+    for options in ({}, {"target_count": 2}):
+        _, again = run(**options)
+        assert (again.added, again.updated, again.retired) == (0, 0, 0)
+        assert [row.id for row in dataset.rows()] == [a]
+
+
 def test_reasoning_updates_fill_in_reasoning_and_never_replace_it() -> None:
     [row] = collected([page([item("synthetic-span-1", [SYSTEM, Q1, A1, Q2, A2])])])[0].rows
 

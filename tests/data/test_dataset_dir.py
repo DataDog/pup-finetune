@@ -475,6 +475,22 @@ def test_an_update_must_name_a_stored_row_and_change_only_reasoning(tmp_path: Pa
     assert snapshot(dataset.path) == before
 
 
+def test_an_update_must_not_repeat_another_stored_conversation(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    bare = make_row("bare", "one", trace_id="t1")
+    thought = with_reasoning(make_row("thought", "one", trace_id="t2"), "Think.")
+    dataset.add([bare, thought], settings=IMPORT)
+    before = snapshot(dataset.path)
+    with pytest.raises(ValueError, match="same conversation after the update"):
+        dataset.add([], settings=IMPORT, updated=[with_reasoning(bare, "Think.")])
+    assert snapshot(dataset.path) == before
+    # Retiring the other row in the same add is how a pull resolves it.
+    dataset.add(
+        [], settings=IMPORT, retired=[retire(thought)], updated=[with_reasoning(bare, "Think.")]
+    )
+    assert [row.id for row in dataset.rows()] == ["bare"]
+
+
 def test_rows_of_one_trace_share_a_split(tmp_path: Path) -> None:
     dataset = DatasetDir(tmp_path / "ds")
     rows = [make_row(f"row-{i}", f"text {i}", trace_id=f"trace-{i // 3}") for i in range(60)]

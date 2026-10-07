@@ -306,7 +306,8 @@ class DatasetDir:
         differ from it only in ``reasoning_content``, such as reasoning a later pull read for
         a row it already stored (see :func:`~pup_finetune.data.pull.reasoning_updates`). Its
         split assignment is unchanged. An id that is not stored, that ``rows`` or ``retired``
-        also holds, or a change to anything but reasoning raises :class:`ValueError`.
+        also holds, a change to anything but reasoning, or an update that leaves the row
+        holding the same conversation as another stored row raises :class:`ValueError`.
 
         A validation error (a conflicting id, changed settings) leaves existing dataset files
         unchanged. If writing fails part-way, re-running the same add repairs the directory;
@@ -458,8 +459,8 @@ def _apply_updates(
     """``existing`` with each of ``updated`` in place of the stored row of its id.
 
     Returns the rows and how many of them changed. Raises :class:`ValueError` for an update
-    of an id that is not stored, that is ``taken`` (added or retired in the same add), or
-    that changes anything but reasoning.
+    of an id that is not stored, that is ``taken`` (added or retired in the same add), that
+    changes anything but reasoning, or that leaves the row with the content hash of another.
     """
     if not updated:
         return existing, 0
@@ -480,6 +481,15 @@ def _apply_updates(
                 raise ValueError(f"row {row.id!r} updated in more than its reasoning")
             changed += 1
         rows.append(replacement)
+    # Filling in reasoning can make a row equal to another one that already had it: the two
+    # would then be one conversation stored twice, which the caller must retire one of.
+    by_hash: dict[str, str] = {}
+    for row in rows:
+        other = by_hash.setdefault(row_content_hash(row), row.id)
+        if other != row.id and (row.id in replacements or other in replacements):
+            raise ValueError(
+                f"rows {other!r} and {row.id!r} hold the same conversation after the update"
+            )
     return rows, changed
 
 

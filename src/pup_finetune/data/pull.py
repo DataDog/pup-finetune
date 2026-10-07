@@ -33,7 +33,9 @@ of every span it read is what the dataset holds. A re-run with lower limits, whi
 that longer conversation, does not add the shorter row back, also when the longer
 conversation repeats another trace's row and so was never stored (see :func:`contained`). With
 ``reasoning="preserve"`` a stored row a re-run reads more reasoning for takes that reasoning,
-and one a re-run reads less for keeps its own (see :func:`reasoning_updates`).
+and one a re-run reads less for keeps its own (see :func:`reasoning_updates`); a stored row
+that reasoning makes repeat another stored row is retired as a duplicate (see
+:func:`repeat_retirements`).
 
 A relative ``--from`` or ``--to`` (``now-7d``) is resolved to epoch milliseconds once, when a
 collection or a dataset's first pull starts (:meth:`PullOptions.resolved`), and the export
@@ -365,6 +367,30 @@ def retirements(
     return retired
 
 
+def repeat_retirements(
+    collection: Collection, stored_rows: Sequence[TrainingRow]
+) -> list[Exclusion]:
+    """The stored rows ``collection`` shows repeat another stored row, as exclusions.
+
+    With ``reasoning="preserve"`` two traces can be stored with the same messages and
+    different reasoning, so different content hashes, until a re-run reads more reasoning for
+    one of them (:func:`reasoning_updates`) and the two become one conversation. Conversion
+    then excludes the later one as ``duplicate_conversation``, but its id is still produced,
+    so :func:`retirements` keeps it, and the dataset would hold the same conversation twice. A
+    stored row conversion now finds repeating another stored row is retired as a duplicate
+    instead. One repeating a row new to the dataset is left to the dataset, which keeps the
+    stored row and excludes the new one when the two hash the same.
+    """
+    stored = {row.id: row for row in stored_rows}
+    retired: list[Exclusion] = []
+    for row, other in collection.duplicates:
+        known = stored.get(row.id)
+        if known is not None and other in stored:
+            detail = f"same conversation as row {other!r}, read by a later pull"
+            retired.append(Exclusion.for_row(known, ExclusionCode.DUPLICATE_CONVERSATION, detail))
+    return retired
+
+
 def contained(
     rows: Sequence[TrainingRow],
     stored_rows: Sequence[TrainingRow],
@@ -524,7 +550,8 @@ def pull(
     pull with other settings fails fast with :class:`~pup_finetune.errors.StateError`, and
     an interrupted first pull leaves a dataset its re-run resumes; an :class:`ExternalError`
     part-way says so in its hint. Stored rows the new conversion collapsed are retired
-    (:func:`retirements`), stored rows it read more reasoning for are updated
+    (:func:`retirements`), as are stored rows it found repeating another stored row
+    (:func:`repeat_retirements`), stored rows it read more reasoning for are updated
     (:func:`reasoning_updates`), and new rows a stored row contains are excluded instead of
     added (:func:`contained`); the returned collection is what the export read and
     converted, before any of these.
@@ -547,7 +574,10 @@ def pull(
             raise _with_resume_note(exc, raw) from exc
         stored = dataset.rows()
         stored_exclusions = dataset.excluded()
-        retired = retirements(collection, stored, stored_exclusions)
+        retired = [
+            *retirements(collection, stored, stored_exclusions),
+            *repeat_retirements(collection, stored),
+        ]
         rows, updated = reasoning_updates(collection.rows, stored)
         rows, exclusions = contained(rows, stored, retired, stored_exclusions)
         added = dataset.add(
