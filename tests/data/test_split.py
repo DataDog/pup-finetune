@@ -22,6 +22,7 @@ from pup_finetune.data.split import (
     SplitParams,
     assign_split,
     check_isolation,
+    split_counts,
     split_position,
     split_warnings,
 )
@@ -215,6 +216,37 @@ def test_check_isolation_rejects_a_conversation_in_two_splits() -> None:
         check_isolation({"train": [train], "validation": [], "test": [test]})
 
 
+def tool_row(row_id: str, call_id: str, trace_id: str) -> TrainingRow:
+    return validate_row(
+        {
+            "id": row_id,
+            "messages": [
+                {"role": "user", "content": "Weather in Northvale?"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"city": "N"}'},
+                        }
+                    ],
+                },
+                {"role": "tool", "content": "14°C", "tool_call_id": call_id},
+                {"role": "assistant", "content": "It's 14°C."},
+            ],
+            "source": {"trace_id": trace_id},
+        }
+    )
+
+
+def test_check_isolation_rejects_a_conversation_that_differs_only_in_tool_call_ids() -> None:
+    train = tool_row("row-a", "call_1f2e", "synthetic-trace-1")
+    validation = tool_row("row-b", "call_8c4d", "synthetic-trace-2")
+    with pytest.raises(StateError, match=r"'row-a' \(train\) and 'row-b' \(validation\)"):
+        check_isolation({"train": [train], "validation": [validation], "test": []})
+
+
 def test_split_warnings_for_healthy_counts_are_empty() -> None:
     assert split_warnings({"train": 3, "validation": 1, "test": 1}) == []
 
@@ -225,3 +257,12 @@ def test_split_warnings_flag_empty_splits_and_few_train_rows() -> None:
     assert "only 2 training rows" in warnings[0]
     assert "validation split is empty" in warnings[1]
     assert "test split is empty" in warnings[2]
+
+
+def test_split_counts_follow_the_params_by_trace() -> None:
+    rows = [make_row(f"row-{i}", f"Q{i}", trace_id=KEYS[i // 2]) for i in range(40)]
+    counts = split_counts(rows, SplitParams())
+    assert sum(counts.values()) == 40
+    assert set(counts) == set(SPLITS)
+    assert all(count % 2 == 0 for count in counts.values())  # two rows per trace
+    assert split_counts(rows, SplitParams(1, 0.0, 0.0)) == {"train": 40, "validation": 0, "test": 0}

@@ -16,6 +16,8 @@ from typing import Any
 
 import pytest
 
+from pup_finetune.data import dataset_dir
+from pup_finetune.data import jsonl as jsonl_module
 from pup_finetune.data.dataset_dir import DatasetDir, DatasetSettings, read_import_file
 from pup_finetune.data.exclusions import Exclusion, ExclusionCode
 from pup_finetune.data.jsonl import read_rows, to_provider_dict
@@ -266,6 +268,30 @@ def test_duplicate_conversations_are_excluded(tmp_path: Path) -> None:
     assert (again.summary["total"], again.summary["excluded"]) == (3, 1)
 
 
+def test_conversations_that_differ_only_in_tool_call_ids_are_duplicates(tmp_path: Path) -> None:
+    def tool_row(row_id: str, call_id: str) -> TrainingRow:
+        call = {"id": call_id, "type": "function", "function": {"name": "f", "arguments": "{}"}}
+        return validate_row(
+            {
+                "id": row_id,
+                "messages": [
+                    {"role": "user", "content": "Look it up."},
+                    {"role": "assistant", "tool_calls": [call]},
+                    {"role": "tool", "content": "Found.", "tool_call_id": call_id},
+                    {"role": "assistant", "content": "Here it is."},
+                ],
+            }
+        )
+
+    dataset = DatasetDir(tmp_path / "ds")
+    result = dataset.add(
+        [tool_row("row-a", "call_3e1a"), tool_row("row-b", "call_b70c")], settings=IMPORT
+    )
+    assert (result.added, result.excluded) == (1, 1)
+    assert [row.id for row in dataset.rows()] == ["row-a"]
+    assert dataset.excluded()[0]["code"] == "duplicate_conversation"
+
+
 def test_a_fixed_row_reimported_under_its_id_replaces_its_exclusion(tmp_path: Path) -> None:
     broken = json.loads(INVALID.read_text().splitlines()[0])
     assert broken["id"] == "bad-no-assistant"
@@ -327,6 +353,144 @@ def test_a_stale_exclusion_of_an_accepted_row_is_not_counted(tmp_path: Path) -> 
     assert (summary["total"], summary["accepted"], summary["excluded"]) == (1, 1, 0)
 
 
+# --- retiring rows --------------------------------------------------------------------------
+
+
+class Interrupted(Exception):
+    """The failure a test injects to stop an add part-way."""
+
+
+def interrupt_writes_of(
+    monkeypatch: pytest.MonkeyPatch, path: Path, *, after: int = 0
+) -> list[Path]:
+    """Make the write of ``path`` that follows ``after`` earlier ones fail; returns every write."""
+    real = dataset_dir.atomic_write_text
+    writes: list[Path] = []
+
+    def write(target: Path, text: str) -> None:
+        earlier = sum(1 for written in writes if written == path)
+        writes.append(Path(target))
+        if Path(target) == path and earlier == after:
+            raise Interrupted(str(target))
+        real(target, text)
+
+    # rows.jsonl is written through the jsonl module, the other files directly.
+    monkeypatch.setattr(dataset_dir, "atomic_write_text", write)
+    monkeypatch.setattr(jsonl_module, "atomic_write_text", write)
+    return writes
+
+
+def retire(row: TrainingRow) -> Exclusion:
+    return Exclusion.for_row(row, ExclusionCode.CONTAINED_CONVERSATION, "a prefix of row 'long'")
+
+
+def test_a_retired_row_is_removed_and_recorded(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    short, long = make_row("short", "one"), make_row("long", "two")
+    dataset.add([short], settings=IMPORT)
+    added = dataset.add([long], settings=IMPORT, retired=[retire(short)])
+    assert [row.id for row in dataset.rows()] == ["long"]
+    assert dataset.excluded() == [retire(short).to_json()]
+    assert (added.added, added.retired) == (1, 1)
+
+
+def test_retirements_are_recorded_before_the_rows_are_rewritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    short, long = make_row("short", "one"), make_row("long", "two")
+    other = Exclusion(RowErrorCode.INVALID_ROW, "bad", "broken")
+    dataset.add([short], settings=IMPORT)
+    # Stop after rows.jsonl is rewritten, before the final excluded.jsonl.
+    writes = interrupt_writes_of(monkeypatch, dataset.excluded_path, after=1)
+    with pytest.raises(Interrupted):
+        dataset.add([long], [other], settings=IMPORT, retired=[retire(short)])
+    assert writes.index(dataset.excluded_path) < writes.index(dataset.rows_path)
+    # The retired row is gone, but its record is not: nothing is lost.
+    assert [row.id for row in dataset.rows()] == ["long"]
+    assert dataset.excluded() == [retire(short).to_json()]
+    assert dataset.summary()["excluded_by_code"] == {"contained_conversation": 1}
+
+    # A retry no longer sees the row to retire (it is gone and already recorded), and keeps
+    # the record while it adds what the interrupted add did not.
+    monkeypatch.undo()
+    added = dataset.add([long], [other], settings=IMPORT)
+    assert (added.added, added.unchanged) == (0, 1)
+    assert dataset.excluded() == [retire(short).to_json(), other.to_json()]
+
+
+def test_an_add_stopped_before_its_rows_leaves_the_retired_row_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    short, long = make_row("short", "one"), make_row("long", "two")
+    dataset.add([short], settings=IMPORT)
+    interrupt_writes_of(monkeypatch, dataset.rows_path)
+    with pytest.raises(Interrupted):
+        dataset.add([long], settings=IMPORT, retired=[retire(short)])
+    # The row is still stored, so its staged record is not counted, and the retry retires it.
+    assert [row.id for row in dataset.rows()] == ["short"]
+    assert dataset.summary()["excluded"] == 0
+    monkeypatch.undo()
+    dataset.add([long], settings=IMPORT, retired=[retire(short)])
+    assert [row.id for row in dataset.rows()] == ["long"]
+    assert dataset.excluded() == [retire(short).to_json()]
+
+
+def with_reasoning(row: TrainingRow, text: str) -> TrainingRow:
+    """``row`` with ``text`` as the reasoning of its last (assistant) message."""
+    *before, last = row.messages
+    thought = last.model_copy(update={"reasoning_content": text})
+    return row.model_copy(update={"messages": [*before, thought]})
+
+
+def test_an_updated_row_replaces_the_stored_one_in_place(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    first, second = make_row("first", "one", trace_id="t1"), make_row("second", "two")
+    dataset.add([first, second], settings=IMPORT)
+    splits = dataset.splits_path.read_bytes()
+    thinking = with_reasoning(first, "Think.")
+    added = dataset.add([], settings=IMPORT, updated=[thinking, second])
+    assert (added.added, added.unchanged, added.updated) == (0, 0, 1)
+    assert dataset.rows() == [thinking, second]
+    assert dataset.splits_path.read_bytes() == splits
+    assert dataset.summary()["accepted"] == 2
+
+
+def test_an_update_must_name_a_stored_row_and_change_only_reasoning(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    stored = make_row("stored", "one")
+    dataset.add([stored], settings=IMPORT)
+    before = snapshot(dataset.path)
+    other = make_row("stored", "changed text")
+    with pytest.raises(ValueError, match="more than its reasoning"):
+        dataset.add([], settings=IMPORT, updated=[other])
+    with pytest.raises(ValueError, match="not stored"):
+        dataset.add([], settings=IMPORT, updated=[make_row("unknown", "one")])
+    thinking = with_reasoning(stored, "Think.")
+    with pytest.raises(ValueError, match="both updated and added or retired"):
+        dataset.add([], settings=IMPORT, retired=[retire(stored)], updated=[thinking])
+    with pytest.raises(ValueError, match="both updated and added or retired"):
+        dataset.add([thinking], settings=IMPORT, updated=[thinking])
+    assert snapshot(dataset.path) == before
+
+
+def test_an_update_must_not_repeat_another_stored_conversation(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    bare = make_row("bare", "one", trace_id="t1")
+    thought = with_reasoning(make_row("thought", "one", trace_id="t2"), "Think.")
+    dataset.add([bare, thought], settings=IMPORT)
+    before = snapshot(dataset.path)
+    with pytest.raises(ValueError, match="same conversation after the update"):
+        dataset.add([], settings=IMPORT, updated=[with_reasoning(bare, "Think.")])
+    assert snapshot(dataset.path) == before
+    # Retiring the other row in the same add is how a pull resolves it.
+    dataset.add(
+        [], settings=IMPORT, retired=[retire(thought)], updated=[with_reasoning(bare, "Think.")]
+    )
+    assert [row.id for row in dataset.rows()] == ["bare"]
+
+
 def test_rows_of_one_trace_share_a_split(tmp_path: Path) -> None:
     dataset = DatasetDir(tmp_path / "ds")
     rows = [make_row(f"row-{i}", f"text {i}", trace_id=f"trace-{i // 3}") for i in range(60)]
@@ -362,6 +526,10 @@ def test_summary_counts(tmp_path: Path, fixture_rows: list[TrainingRow]) -> None
         "accepted": len(fixture_rows),
         "excluded": 3,
         "excluded_by_code": {"invalid_row": 2, "system_not_first": 1},
+        "kept": len(fixture_rows),
+        "labeled": 0,
+        "dropped": 0,
+        "drop_reasons": [],
         "splits": split_counts,
         "warnings": summary["warnings"],
     }

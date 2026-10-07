@@ -1,0 +1,716 @@
+{
+  "data": [
+    {
+      "id": "synthetic-span-0101",
+      "type": "span",
+      "attributes": {
+        "span_id": "synthetic-span-0101",
+        "trace_id": "synthetic-trace-0101",
+        "parent_id": "synthetic-span-0100",
+        "name": "chat",
+        "span_kind": "llm",
+        "ml_app": "synthetic-trip-planner",
+        "model_name": "example-model-large",
+        "model_provider": "example-provider",
+        "status": "ok",
+        "start_ns": 1767225601000000000,
+        "duration": 1834000000.0,
+        "input": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "You are a trip-planning assistant. Use the tools to check the weather and find hotels, then answer briefly."
+            },
+            {
+              "role": "user",
+              "content": "I'm visiting Northvale this weekend. What's the weather like, and can you find a hotel under 150 a night?"
+            }
+          ]
+        },
+        "tool_definitions": [
+          {
+            "name": "get_weather",
+            "description": "Current conditions for a city.",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "city": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "city"
+              ]
+            }
+          },
+          {
+            "name": "search_hotels",
+            "description": "Hotels in a city under a nightly price.",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "city": {
+                  "type": "string"
+                },
+                "max_price": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "city",
+                "max_price"
+              ]
+            }
+          },
+          {
+            "name": "summarize_options",
+            "description": "Ask the summarizer sub-agent to compare options.",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "options": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "options"
+              ]
+            }
+          }
+        ],
+        "metadata": {
+          "temperature": 0.2,
+          "max_tokens": 1024
+        },
+        "tags": [
+          "env:synthetic",
+          "ml_app:synthetic-trip-planner",
+          "service:synthetic-trip-planner",
+          "version:0.1.0"
+        ],
+        "metrics": {
+          "input_tokens": 412,
+          "output_tokens": 38,
+          "total_tokens": 450
+        },
+        "output": {
+          "messages": [
+            {
+              "role": "assistant",
+              "content": "",
+              "tool_calls": [
+                {
+                  "name": "get_weather",
+                  "arguments": {
+                    "city": "Northvale"
+                  },
+                  "tool_id": "call_0101a",
+                  "type": "function"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "synthetic-span-0102",
+      "type": "span",
+      "attributes": {
+        "span_id": "synthetic-span-0102",
+        "trace_id": "synthetic-trace-0101",
+        "parent_id": "synthetic-span-0100",
+        "name": "chat",
+        "span_kind": "llm",
+        "ml_app": "synthetic-trip-planner",
+        "model_name": "example-model-large",
+        "model_provider": "example-provider",
+        "status": "ok",
+        "start_ns": 1767225603000000000,
+        "duration": 1834000000.0,
+        "input": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "You are a trip-planning assistant. Use the tools to check the weather and find hotels, then answer briefly."
+            },
+            {
+              "role": "user",
+              "content": "I'm visiting Northvale this weekend. What's the weather like, and can you find a hotel under 150 a night?"
+            },
+            {
+              "role": "assistant",
+              "content": "",
+              "tool_calls": [
+                {
+                  "name": "get_weather",
+                  "arguments": {
+                    "city": "Northvale"
+                  },
+                  "tool_id": "call_0101a",
+                  "type": "function"
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "content": "",
+              "tool_results": [
+                {
+                  "result": "{\"city\": \"Northvale\", \"temp_c\": 12, \"conditions\": \"cloudy\"}",
+                  "tool_id": "call_0101a",
+                  "type": "tool_result"
+                }
+              ]
+            }
+          ]
+        },
+        "tool_definitions": [
+          {
+            "name": "get_weather",
+            "description": "Current conditions for a city.",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "city": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "city"
+              ]
+            }
+          },
+          {
+            "name": "search_hotels",
+            "description": "Hotels in a city under a nightly price.",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "city": {
+                  "type": "string"
+                },
+                "max_price": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "city",
+                "max_price"
+              ]
+            }
+          },
+          {
+            "name": "summarize_options",
+            "description": "Ask the summarizer sub-agent to compare options.",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "options": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "options"
+              ]
+            }
+          }
+        ],
+        "metadata": {
+          "temperature": 0.2,
+          "max_tokens": 1024
+        },
+        "tags": [
+          "env:synthetic",
+          "ml_app:synthetic-trip-planner",
+          "service:synthetic-trip-planner",
+          "version:0.1.0"
+        ],
+        "metrics": {
+          "input_tokens": 412,
+          "output_tokens": 38,
+          "total_tokens": 450
+        },
+        "output": {
+          "messages": [
+            {
+              "role": "assistant",
+              "content": "It's 12°C and cloudy there. Let me look for hotels.",
+              "tool_calls": [
+                {
+                  "name": "search_hotels",
+                  "arguments": {
+                    "city": "Northvale",
+                    "max_price": 150
+                  },
+                  "tool_id": "call_0101b",
+                  "type": "function"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "synthetic-span-0103",
+      "type": "span",
+      "attributes": {
+        "span_id": "synthetic-span-0103",
+        "trace_id": "synthetic-trace-0101",
+        "parent_id": "synthetic-span-0100",
+        "name": "chat",
+        "span_kind": "llm",
+        "ml_app": "synthetic-trip-planner",
+        "model_name": "example-model-large",
+        "model_provider": "example-provider",
+        "status": "ok",
+        "start_ns": 1767225605000000000,
+        "duration": 1834000000.0,
+        "input": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "You are a trip-planning assistant. Use the tools to check the weather and find hotels, then answer briefly."
+            },
+            {
+              "role": "user",
+              "content": "I'm visiting Northvale this weekend. What's the weather like, and can you find a hotel under 150 a night?"
+            },
+            {
+              "role": "assistant",
+              "content": "",
+              "tool_calls": [
+                {
+                  "name": "get_weather",
+                  "arguments": {
+                    "city": "Northvale"
+                  },
+                  "tool_id": "call_0101a",
+                  "type": "function"
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "content": "",
+              "tool_results": [
+                {
+                  "result": "{\"city\": \"Northvale\", \"temp_c\": 12, \"conditions\": \"cloudy\"}",
+                  "tool_id": "call_0101a",
+                  "type": "tool_result"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": "It's 12°C and cloudy there. Let me look for hotels.",
+              "tool_calls": [
+                {
+                  "name": "search_hotels",
+                  "arguments": {
+                    "city": "Northvale",
+                    "max_price": 150
+                  },
+                  "tool_id": "call_0101b",
+                  "type": "function"
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "content": "",
+              "tool_results": [
+                {
+                  "result": "[{\"name\": \"Harbor Inn\", \"price\": 120, \"rating\": 4.2}, {\"name\": \"Pine Lodge\", \"price\": 140, \"rating\": 4.6}]",
+                  "tool_id": "call_0101b",
+                  "type": "tool_result"
+                }
+              ]
+            }
+          ]
+        },
+        "tool_definitions": [
+          {
+            "name": "get_weather",
+            "description": "Current conditions for a city.",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "city": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "city"
+              ]
+            }
+          },
+          {
+            "name": "search_hotels",
+            "description": "Hotels in a city under a nightly price.",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "city": {
+                  "type": "string"
+                },
+                "max_price": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "city",
+                "max_price"
+              ]
+            }
+          },
+          {
+            "name": "summarize_options",
+            "description": "Ask the summarizer sub-agent to compare options.",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "options": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "options"
+              ]
+            }
+          }
+        ],
+        "metadata": {
+          "temperature": 0.2,
+          "max_tokens": 1024
+        },
+        "tags": [
+          "env:synthetic",
+          "ml_app:synthetic-trip-planner",
+          "service:synthetic-trip-planner",
+          "version:0.1.0"
+        ],
+        "metrics": {
+          "input_tokens": 412,
+          "output_tokens": 38,
+          "total_tokens": 450
+        },
+        "output": {
+          "messages": [
+            {
+              "role": "assistant",
+              "content": "",
+              "tool_calls": [
+                {
+                  "name": "summarize_options",
+                  "arguments": {
+                    "options": "Harbor Inn 120 rated 4.2; Pine Lodge 140 rated 4.6"
+                  },
+                  "tool_id": "call_0101c",
+                  "type": "function"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "synthetic-span-0111",
+      "type": "span",
+      "attributes": {
+        "span_id": "synthetic-span-0111",
+        "trace_id": "synthetic-trace-0101",
+        "parent_id": "synthetic-span-0110",
+        "name": "summarizer",
+        "span_kind": "llm",
+        "ml_app": "synthetic-trip-planner",
+        "model_name": "example-model-small",
+        "model_provider": "example-provider",
+        "status": "ok",
+        "start_ns": 1767225606000000000,
+        "duration": 1834000000.0,
+        "input": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "You compare hotel options in one sentence."
+            },
+            {
+              "role": "user",
+              "content": "Harbor Inn 120 rated 4.2; Pine Lodge 140 rated 4.6"
+            }
+          ]
+        },
+        "tool_definitions": [],
+        "metadata": {
+          "temperature": 0.2,
+          "max_tokens": 1024
+        },
+        "tags": [
+          "env:synthetic",
+          "ml_app:synthetic-trip-planner",
+          "service:synthetic-trip-planner",
+          "version:0.1.0"
+        ],
+        "metrics": {
+          "input_tokens": 412,
+          "output_tokens": 38,
+          "total_tokens": 450
+        },
+        "output": {
+          "messages": [
+            {
+              "role": "assistant",
+              "content": "Pine Lodge costs 20 more but is rated higher; Harbor Inn is the budget pick."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "synthetic-span-0104",
+      "type": "span",
+      "attributes": {
+        "span_id": "synthetic-span-0104",
+        "trace_id": "synthetic-trace-0101",
+        "parent_id": "synthetic-span-0100",
+        "name": "chat",
+        "span_kind": "llm",
+        "ml_app": "synthetic-trip-planner",
+        "model_name": "example-model-large",
+        "model_provider": "example-provider",
+        "status": "ok",
+        "start_ns": 1767225608000000000,
+        "duration": 1834000000.0,
+        "input": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "You are a trip-planning assistant. Use the tools to check the weather and find hotels, then answer briefly."
+            },
+            {
+              "role": "user",
+              "content": "I'm visiting Northvale this weekend. What's the weather like, and can you find a hotel under 150 a night?"
+            },
+            {
+              "role": "assistant",
+              "content": "",
+              "tool_calls": [
+                {
+                  "name": "get_weather",
+                  "arguments": {
+                    "city": "Northvale"
+                  },
+                  "tool_id": "call_0101a",
+                  "type": "function"
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "content": "",
+              "tool_results": [
+                {
+                  "result": "{\"city\": \"Northvale\", \"temp_c\": 12, \"conditions\": \"cloudy\"}",
+                  "tool_id": "call_0101a",
+                  "type": "tool_result"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": "It's 12°C and cloudy there. Let me look for hotels.",
+              "tool_calls": [
+                {
+                  "name": "search_hotels",
+                  "arguments": {
+                    "city": "Northvale",
+                    "max_price": 150
+                  },
+                  "tool_id": "call_0101b",
+                  "type": "function"
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "content": "",
+              "tool_results": [
+                {
+                  "result": "[{\"name\": \"Harbor Inn\", \"price\": 120, \"rating\": 4.2}, {\"name\": \"Pine Lodge\", \"price\": 140, \"rating\": 4.6}]",
+                  "tool_id": "call_0101b",
+                  "type": "tool_result"
+                }
+              ]
+            },
+            {
+              "role": "assistant",
+              "content": "",
+              "tool_calls": [
+                {
+                  "name": "summarize_options",
+                  "arguments": {
+                    "options": "Harbor Inn 120 rated 4.2; Pine Lodge 140 rated 4.6"
+                  },
+                  "tool_id": "call_0101c",
+                  "type": "function"
+                }
+              ]
+            },
+            {
+              "role": "tool",
+              "content": "",
+              "tool_results": [
+                {
+                  "result": "Pine Lodge costs 20 more but is rated higher; Harbor Inn is the budget pick.",
+                  "tool_id": "call_0101c",
+                  "type": "tool_result"
+                }
+              ]
+            }
+          ]
+        },
+        "tool_definitions": [
+          {
+            "name": "get_weather",
+            "description": "Current conditions for a city.",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "city": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "city"
+              ]
+            }
+          },
+          {
+            "name": "search_hotels",
+            "description": "Hotels in a city under a nightly price.",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "city": {
+                  "type": "string"
+                },
+                "max_price": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "city",
+                "max_price"
+              ]
+            }
+          },
+          {
+            "name": "summarize_options",
+            "description": "Ask the summarizer sub-agent to compare options.",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "options": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "options"
+              ]
+            }
+          }
+        ],
+        "metadata": {
+          "temperature": 0.2,
+          "max_tokens": 1024
+        },
+        "tags": [
+          "env:synthetic",
+          "ml_app:synthetic-trip-planner",
+          "service:synthetic-trip-planner",
+          "version:0.1.0"
+        ],
+        "metrics": {
+          "input_tokens": 412,
+          "output_tokens": 38,
+          "total_tokens": 450
+        },
+        "output": {
+          "messages": [
+            {
+              "role": "assistant",
+              "content": "Expect about 12°C and clouds. Pine Lodge (140 a night, rated 4.6) is the best pick under 150; Harbor Inn (120) is cheaper."
+            }
+          ]
+        },
+        "evaluation": {
+          "helpfulness": "good"
+        }
+      }
+    },
+    {
+      "id": "synthetic-span-0201",
+      "type": "span",
+      "attributes": {
+        "span_id": "synthetic-span-0201",
+        "trace_id": "synthetic-trace-0102",
+        "parent_id": "undefined",
+        "name": "chat",
+        "span_kind": "llm",
+        "ml_app": "synthetic-unit-converter",
+        "model_name": "example-model-large",
+        "model_provider": "example-provider",
+        "status": "error",
+        "start_ns": 1767225620000000000,
+        "duration": 1834000000.0,
+        "input": {
+          "messages": [
+            {
+              "role": "system",
+              "content": "You convert units."
+            },
+            {
+              "role": "user",
+              "content": "How many kilometres is 30 miles?"
+            }
+          ]
+        },
+        "tool_definitions": [],
+        "metadata": {
+          "temperature": 0.2,
+          "max_tokens": 1024
+        },
+        "tags": [
+          "env:synthetic",
+          "ml_app:synthetic-unit-converter",
+          "service:synthetic-unit-converter",
+          "version:0.1.0"
+        ],
+        "metrics": {
+          "input_tokens": 21,
+          "output_tokens": 0,
+          "total_tokens": 21
+        },
+        "output": {
+          "messages": [
+            {
+              "role": "assistant",
+              "content": ""
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "meta": {
+    "page": {
+      "after": "synthetic-cursor-page-2"
+    },
+    "status": "done",
+    "elapsed": 412,
+    "request_id": "synthetic-request-0001"
+  }
+}

@@ -243,6 +243,34 @@ def test_the_last_step_loss_is_saved_and_a_non_finite_one_as_null(tmp_path: Path
     assert run_dir.status()["last_train_loss"] is None
 
 
+def test_every_save_records_the_elapsed_time_and_it_never_decreases(tmp_path: Path) -> None:
+    run_dir = create(tmp_path / "run")
+    state = run_dir.load_state()
+    assert state.elapsed_seconds == 0.0
+    elapsed = [90.0]
+    state.track_elapsed(lambda: elapsed[0])
+    state.save()  # as a heartbeat does, with no step reported
+    assert read(run_dir.state_path)["elapsed_seconds"] == 90.0
+    elapsed[0] = 120.0
+    state.record_step(epoch=1, step=1)
+    reloaded = run_dir.load_state()
+    assert reloaded.elapsed_seconds == 120.0
+    # A budget that knows less (e.g. one not resumed yet) does not lower what was recorded.
+    reloaded.track_elapsed(lambda: 5.0)
+    reloaded.record_step(epoch=1, step=2)
+    assert run_dir.load_state().elapsed_seconds == 120.0
+
+
+@pytest.mark.parametrize("elapsed", [-1.0, "soon"])
+def test_an_invalid_elapsed_time_on_disk_is_an_error(tmp_path: Path, elapsed: Any) -> None:
+    run_dir = create(tmp_path / "run")
+    run_dir.state_path.write_text(
+        json.dumps(read(run_dir.state_path) | {"elapsed_seconds": elapsed})
+    )
+    with pytest.raises(StateError, match="invalid run state"):
+        run_dir.load_state()
+
+
 def _ticking_clock() -> Any:
     """A clock that moves one second per call, from 13:00:00."""
     seconds = iter(range(10_000))

@@ -230,6 +230,16 @@ def test_empty_validation_selects_by_training_loss_with_a_warning() -> None:
     assert result.best_sampler_ckpt == result.epochs[1].sampler_ckpt
 
 
+@pytest.mark.parametrize("losses", [[2.0, 1.4, 1.1], [2.0, 2.5, 1.1]])
+def test_without_validation_the_training_loss_follows_each_epoch(losses: list[float]) -> None:
+    # In the second curve epoch 2 is no new best: no sampler checkpoint marks its end either.
+    spec = make_spec(max_epochs=3, patience=3)
+    with recording(FakeOptions(loss_curve=losses)) as session:
+        result = train(session, spec, validation=[])
+    assert [e.train_loss for e in result.epochs] == losses
+    assert (result.stopped_reason, result.best_epoch) == ("completed", 3)
+
+
 def test_finalize_runs_last_with_the_open_session() -> None:
     seen: list[tuple[TrainingSession, TrainResult]] = []
 
@@ -468,6 +478,32 @@ def test_the_validation_loss_is_a_token_mean_over_its_microbatches() -> None:
         result = train(session, spec, validation=validation)
     assert len(session.validation_batches) == 2
     assert result.epochs[0].val_loss == 1.0  # (3 + 1) / (1 + 3), not the mean of 3.0 and 0.33
+
+
+def test_a_validation_retry_is_not_started_once_the_backoff_spent_the_budget() -> None:
+    clock = Clock()
+    budget = spend_budget(clock, seconds=3.0, reserve=0.5)  # stops at 1.5 s; only sleeps cost
+
+    def sleep(seconds: float) -> None:
+        clock.now += seconds
+
+    events: list[dict[str, Any]] = []
+    errors = [TransientError("blip", source="fake")]
+    with recording(forward_errors=errors) as session:
+        result = train(
+            session,
+            make_spec(max_epochs=1),
+            budget=budget,
+            sleep=sleep,
+            on_event=events.append,
+        )
+    # The 2 s backoff passed the stop, so the retry was refused rather than sent.
+    assert [e["attempt"] for e in events if e["type"] == "retry"] == [1]
+    assert session.calls.count("forward") == 1
+    assert result.stopped_reason == "budget_exhausted"
+    assert result.epochs == []
+    assert "stopped before finishing the validation of epoch 1" in result.warnings[0]
+    assert session.outstanding == []
 
 
 def test_a_validation_error_that_is_not_transient_is_not_retried() -> None:
@@ -1121,6 +1157,57 @@ def test_the_spend_budget_carries_over_a_resume() -> None:
     assert resumed_budget.elapsed_seconds == 24 * 60
     assert "stopped before step 7" in result.warnings[-1]
     assert second.resume_points[-1].elapsed_seconds == 24 * 60
+
+
+def test_a_resume_counts_the_time_spent_after_its_checkpoint() -> None:
+    # As above, but the first attempt went on for 6 minutes after its checkpoint (16 min)
+    # before it crashed: the resumed budget starts at the 22 minutes recorded, not at 16.
+    spec = make_spec(max_epochs=3, batch_size=1, pipeline_depth=1, checkpoint_every_minutes=10)
+    options = FakeOptions(fail_at_step=6)
+    rows = row_examples(4)
+
+    def budget(clock: Clock) -> Budget:
+        return Budget(
+            max_spend_usd=30.0, hourly_rate_usd=60.0, spend_reserve_fraction=0.2, clock=clock
+        )
+
+    clock = Clock()
+    first = MemoryState()
+    with (
+        pytest.raises(Exception, match="fail_at_step"),
+        FakeBackend(options).open_session(FAKE_PROFILE, LORA, **SESSION) as session,
+    ):
+        train(
+            session,
+            spec,
+            rows=rows,
+            state=first,
+            budget=budget(clock),
+            clock=clock,
+            on_event=ticking(clock, 4),
+        )
+    point = first.resume_points[-1]
+    assert point.elapsed_seconds == 16 * 60
+    later = Clock()
+    resumed_budget = budget(later)
+    second = MemoryState()
+    with FakeBackend(options).open_session(
+        FAKE_PROFILE, LORA, resume_from=point.checkpoint, **SESSION
+    ) as session:
+        result = train(
+            session,
+            spec,
+            rows=rows,
+            state=second,
+            budget=resumed_budget,
+            clock=later,
+            on_event=ticking(later, 4),
+            resume=Resume(point=point, epochs=first.epochs, elapsed_seconds=22 * 60),
+        )
+    # Stops at 24 USD (24 minutes): one step, from 22 to 26 minutes, instead of two.
+    assert result.stopped_reason == "budget_exhausted"
+    assert second.steps == [(2, 5)]
+    assert resumed_budget.elapsed_seconds == 26 * 60
 
 
 def test_resuming_after_the_epoch_that_stops_early_stops_at_once() -> None:

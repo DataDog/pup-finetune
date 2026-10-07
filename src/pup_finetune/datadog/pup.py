@@ -44,6 +44,8 @@ INSTALL_HINT = (
 
 DEFAULT_TIMEOUT_SECONDS = 120.0
 _QUICK_TIMEOUT_SECONDS = 30.0
+CURRENT_USER_PATH = "v2/current_user"
+"""The API route :meth:`Pup.current_org_id` reads the login's org id from."""
 _FORMAT_TIMEOUT_SECONDS = 30.0
 
 # pup applies these to its own output; internal reads must get plain JSON.
@@ -214,6 +216,10 @@ def _decode(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
 def _optional_str(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
@@ -329,6 +335,23 @@ class Pup:
             "org": _optional_str(data.get("org")),
             "expires_at": _optional_str(data.get("expires_at")),
         }
+
+    def current_org_id(self) -> str:
+        """The id of the Datadog org pup's login reads from (``GET v2/current_user``).
+
+        ``pup auth status`` names the org only for a named session (``pup auth login --org``),
+        so this identifies the org of the default session. Only the org id is kept; nothing
+        else about the user is returned.
+        """
+        data = self.api("GET", CURRENT_USER_PATH, timeout=_QUICK_TIMEOUT_SECONDS)
+        relationships = _mapping(_mapping(data).get("data")).get("relationships")
+        org = _mapping(_mapping(_mapping(relationships).get("org")).get("data"))
+        org_id = _optional_str(org.get("id"))
+        if not org_id:
+            raise ExternalError(
+                f"`pup api {CURRENT_USER_PATH}` did not report the org id", source="pup"
+            )
+        return org_id
 
     def _run(
         self,

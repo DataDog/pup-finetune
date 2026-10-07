@@ -66,6 +66,17 @@ def test_atomic_write_json_round_trips(tmp_path: Path, loose_umask: object) -> N
     assert sorted(p.name for p in tmp_path.iterdir()) == ["run.json"]
 
 
+def test_atomic_write_json_ascii_round_trips_lone_surrogates(tmp_path: Path) -> None:
+    target = tmp_path / "page.json"
+    data = {"text": "half an emoji \ud83d here", "accent": "é"}
+    with pytest.raises(UnicodeEncodeError):
+        atomic_write_json(target, data)
+    atomic_write_json(target, data, ensure_ascii=True)
+    assert target.read_text(encoding="ascii")
+    assert read_json(target) == data
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["page.json"]
+
+
 def test_invalid_json_data_is_rejected_before_touching_disk(tmp_path: Path) -> None:
     target = tmp_path / "run.json"
     atomic_write_json(target, {"keep": True})

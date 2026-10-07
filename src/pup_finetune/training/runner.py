@@ -20,11 +20,13 @@ kept.
 
 A resume opens the session from the last training checkpoint and continues at its epoch and
 step, keeping the epoch history, the best epoch, the patience counter and the budget spent
-so far. The promotion after training may use the budget's spend reserve, but a sampler
-checkpoint it would have to re-create past ``max_spend_usd`` fails it. A run whose training
-ended but whose promotion failed (``resume_mode`` ``finalize_only``) only retries the
-promotion, in a session opened from the best training checkpoint; that retry, which the
-user asks for, is not held to the budget.
+so far: the trained tokens at that checkpoint, and the wall-clock time of every earlier
+attempt as ``state.json`` last recorded it, including the time after that checkpoint. The
+promotion after training may use the budget's spend reserve, but a sampler checkpoint it
+would have to re-create past ``max_spend_usd`` fails it. A run whose training ended but
+whose promotion failed (``resume_mode`` ``finalize_only``) only retries the promotion, in a
+session opened from the best training checkpoint; that retry, which the user asks for, is
+not held to the budget.
 
 The caller supplies the rendered rows, the same ones on every resume: the order of each
 epoch is a function of the seed and the rows, so other rows would skip the wrong steps.
@@ -205,11 +207,18 @@ class _Run:
                 f"{self.run_dir.state_path}: epochs finished but no training checkpoint is "
                 "recorded to resume from"
             )
+        budget = Budget.from_spec(self.spec, clock=self.clock)
+        # Every earlier attempt's time, as last saved: it includes what was spent after the
+        # last training checkpoint, so repeated interruptions cannot exceed the spend cap.
+        earlier = state.elapsed_seconds
         resume = None
         if point is not None:
-            resume = Resume(point=point, epochs=history, warnings=state.warnings)
-
-        budget = Budget.from_spec(self.spec, clock=self.clock)
+            resume = Resume(
+                point=point, epochs=history, warnings=state.warnings, elapsed_seconds=earlier
+            )
+        else:  # an earlier attempt that never saved a training checkpoint still spent time
+            budget.add_elapsed(earlier)
+        state.track_elapsed(lambda: budget.elapsed_seconds)
         # Promotion may spend the reserve the budget keeps beyond where training stops.
         promotion = dataclasses.replace(
             self.promotion, spend_guard=lambda: budget.spend_exhausted(use_reserve=True)

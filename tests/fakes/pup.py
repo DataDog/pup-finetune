@@ -15,18 +15,22 @@ longest registered prefix wins)::
     fake.on("auth", "status", returncode=1, stderr="Error: not logged in")
     fake.on("llm-obs", "datasets", "list", times_out=True)
     fake.on("--version", raw=True, stdout="pup 1.10.7\n")
+    fake.on("api", "v2/some/route", handler=lambda call: {"echo": call.stdin_json()})
     pup = fake.client()
 
-``raw=True`` answers calls made without the fixed flags (only ``pup --version``); every other
-call must carry them. Every call is recorded (argv, env, stdin, timeout) for assertions. A call
-with no registered response exits 1, the way pup rejects an unknown command.
+``handler`` computes the answer from the :class:`PupCall`: its return value is printed as JSON;
+when it is a :class:`PupExit`, pup exits with that code and stderr, and when it is a
+:class:`PupStdout`, pup prints that text as is. ``raw=True`` answers
+calls made without the fixed flags (only ``pup --version``); every other call must carry them.
+Every call is recorded (argv, env, stdin, timeout) for assertions. A call with no registered
+response exits 1, the way pup rejects an unknown command.
 """
 
 from __future__ import annotations
 
 import json as jsonlib
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -62,12 +66,31 @@ class PupCall:
 
 
 @dataclass(frozen=True)
+class PupExit:
+    """What a ``handler`` returns to make pup fail instead of printing JSON."""
+
+    returncode: int = 1
+    stderr: str = "Error: fake pup failure"
+
+
+@dataclass(frozen=True)
+class PupStdout:
+    """What a ``handler`` returns to make pup print ``text`` as is (e.g. output that is not JSON)."""
+
+    text: str
+
+
+Handler = Callable[[PupCall], Any]
+
+
+@dataclass(frozen=True)
 class _Response:
     returncode: int
     stdout: bytes
     stderr: bytes
     raises: BaseException | None
     times_out: bool
+    handler: Handler | None = None
 
 
 def _as_bytes(value: str | bytes) -> bytes:
@@ -92,12 +115,14 @@ class FakePup:
         raises: BaseException | None = None,
         times_out: bool = False,
         raw: bool = False,
+        handler: Handler | None = None,
     ) -> FakePup:
         """Answer calls whose arguments start with ``prefix``.
 
         ``json`` is serialized to stdout (it overrides ``stdout``). ``raises`` is raised from
         the runner (e.g. ``OSError``); ``times_out`` raises ``subprocess.TimeoutExpired``.
         ``raw`` answers calls made without the fixed flags instead of calls with them.
+        ``handler`` answers each call from the call itself (see the module docstring).
         """
         if json is not _UNSET:
             stdout = jsonlib.dumps(json)
@@ -107,6 +132,7 @@ class FakePup:
             stderr=_as_bytes(stderr),
             raises=raises,
             times_out=times_out,
+            handler=handler,
         )
         return self
 
@@ -129,6 +155,15 @@ class FakePup:
             raise subprocess.TimeoutExpired(argv, timeout)
         if response.raises is not None:
             raise response.raises
+        if response.handler is not None:
+            answer = response.handler(call)
+            if isinstance(answer, PupExit):
+                stderr = answer.stderr.encode()
+                return subprocess.CompletedProcess(argv, answer.returncode, b"", stderr)
+            if isinstance(answer, PupStdout):
+                return subprocess.CompletedProcess(argv, 0, answer.text.encode(), b"")
+            stdout = jsonlib.dumps(answer).encode()
+            return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr=b"")
         return subprocess.CompletedProcess(
             argv, response.returncode, stdout=response.stdout, stderr=response.stderr
         )

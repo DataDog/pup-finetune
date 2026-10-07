@@ -139,7 +139,7 @@ def _find_lone_surrogate(value: object, root: str = "") -> str | None:
     while stack:
         item, where = stack.pop()
         if isinstance(item, str):
-            if (surrogate := _lone_surrogate(item)) is not None:
+            if (surrogate := lone_surrogate(item)) is not None:
                 return f"{where} has a lone surrogate ({surrogate}); UTF-8 cannot encode it"
         elif isinstance(item, dict):
             children: list[tuple[object, str]] = []
@@ -148,7 +148,7 @@ def _find_lone_surrogate(value: object, root: str = "") -> str | None:
                 # Escaped, so the description itself stays encodable.
                 name = text.encode("utf-8", "backslashreplace").decode("utf-8")
                 path = f"{where}.{name}" if where else name
-                if (surrogate := _lone_surrogate(text)) is not None:
+                if (surrogate := lone_surrogate(text)) is not None:
                     return (
                         f"the key {path} has a lone surrogate ({surrogate}); UTF-8 cannot encode it"
                     )
@@ -159,8 +159,11 @@ def _find_lone_surrogate(value: object, root: str = "") -> str | None:
     return None
 
 
-def _lone_surrogate(text: str) -> str | None:
-    """The first lone surrogate in ``text`` as ``U+XXXX``, or ``None``."""
+def lone_surrogate(text: str) -> str | None:
+    """The first lone surrogate in ``text`` as ``U+XXXX``, or ``None``.
+
+    Any string that may be written as UTF-8 can use it to fail at validation instead.
+    """
     try:
         text.encode("utf-8")
     except UnicodeEncodeError as exc:
@@ -414,11 +417,25 @@ def _format_location(loc: tuple[int | str, ...]) -> str:
 
 def _content_payload(row: TrainingRow) -> dict[str, Any]:
     # Weight is training metadata, not content: the same conversation is the same row.
+    messages = [
+        message.model_dump(mode="json", exclude_none=True, exclude={"weight"})
+        for message in row.messages
+    ]
+    # Tool call ids are generated, by the provider or by conversion, so they differ between
+    # recordings of the same conversation: a call is named by its position instead
+    # (``m{message index}.c{call index}``) and a result by the position of the call it
+    # answers. The position keeps results paired with different calls of a parallel call
+    # apart. An id no call has is kept as given (a valid row has none).
+    positions: dict[str, str] = {}
+    for index, message in enumerate(messages):
+        for call_index, call in enumerate(message.get("tool_calls") or ()):
+            position = f"m{index}.c{call_index}"
+            positions.setdefault(call["id"], position)
+            call["id"] = position
+        if (call_id := message.get("tool_call_id")) is not None:
+            message["tool_call_id"] = positions.get(call_id, call_id)
     return {
-        "messages": [
-            message.model_dump(mode="json", exclude_none=True, exclude={"weight"})
-            for message in row.messages
-        ],
+        "messages": messages,
         "tools": [tool.model_dump(mode="json", exclude_none=True) for tool in row.tools],
     }
 
@@ -426,8 +443,11 @@ def _content_payload(row: TrainingRow) -> dict[str, Any]:
 def row_content_hash(row: TrainingRow) -> str:
     """The sha256 hex digest of the row's messages and tools as canonical JSON.
 
-    The id, source, schema version and per-message weights are left out, so two rows with
-    the same conversation hash the same. Used for deduplication and split-leakage checks.
+    The id, source, schema version and per-message weights are left out, and tool call ids
+    are replaced by the call's position (a tool result's ``tool_call_id`` by the position
+    of the call it answers), so two rows with the same conversation hash the same however
+    their calls were numbered. The row's stored ids are unchanged. Used for deduplication
+    and split-leakage checks.
     """
     return hashlib.sha256(canonical_json(_content_payload(row)).encode("utf-8")).hexdigest()
 
@@ -435,3 +455,14 @@ def row_content_hash(row: TrainingRow) -> str:
 def split_key(row: TrainingRow) -> str:
     """The key a row is assigned to a split by: its trace id, so a trace never straddles splits."""
     return row.source.trace_id or row.id
+
+
+def without_reasoning(row: TrainingRow) -> TrainingRow:
+    """``row`` with no ``reasoning_content`` on any message.
+
+    Two recordings of one conversation that are equal this way differ only in the reasoning
+    they carry, which a pull with ``reasoning="preserve"`` fills in from the conversations
+    collapsed into a row, and so depends on how much of its trace was read.
+    """
+    messages = [message.model_copy(update={"reasoning_content": None}) for message in row.messages]
+    return row.model_copy(update={"messages": messages})

@@ -14,22 +14,36 @@ Files, all ``0600`` in a ``0700`` directory, since rows hold trace content:
 - ``excluded.jsonl`` - one ``{row_id?, trace_id?, span_id?, line_sha256?, code, detail}`` per
   excluded row: the latest reason per ``row_id``, and none for an id that has since been
   accepted.
-- ``labels.jsonl`` - keep/drop labels (written by a later command; optional).
+- ``labels.jsonl`` - keep/drop labels, appended by ``dataset label`` (see
+  :mod:`pup_finetune.data.labels`); the last label of a row id wins. Optional: a row
+  with no label is kept, and a label of an id that is no longer accepted is ignored.
 - ``splits.json`` - split assignments (see :mod:`pup_finetune.data.split`).
 - ``summary.json`` - counts and warnings, rewritten after every change.
+- ``push.json`` - written by ``dataset push``: the Agent Observability dataset the kept rows
+  were pushed to and the record id of each (see :mod:`pup_finetune.data.push`).
+- ``raw/`` - for a Datadog pull, the raw Export API pages it read, so an interrupted pull
+  resumes without fetching them again (see
+  :func:`~pup_finetune.datadog.spans.iter_span_pages`).
 """
 
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
 from pup_finetune.data.exclusions import Exclusion, ExclusionCode
 from pup_finetune.data.jsonl import read_rows, scan_rows, to_provider_dict, write_rows
-from pup_finetune.data.schema import RowError, TrainingRow, row_content_hash, split_key
+from pup_finetune.data.labels import Label, label_counts, latest_labels, read_labels
+from pup_finetune.data.schema import (
+    RowError,
+    TrainingRow,
+    row_content_hash,
+    split_key,
+    without_reasoning,
+)
 from pup_finetune.data.split import (
     SPLITS,
     SplitAssignments,
@@ -58,6 +72,7 @@ EXCLUDED_FILE = "excluded.jsonl"
 LABELS_FILE = "labels.jsonl"
 SPLITS_FILE = "splits.json"
 SUMMARY_FILE = "summary.json"
+RAW_DIR = "raw"
 
 SourceKind = Literal["import", "datadog"]
 
@@ -86,6 +101,10 @@ class AddResult:
     unchanged: int
     excluded: int
     summary: dict[str, Any]
+    retired: int = 0
+    """Stored rows taken out and recorded as excluded."""
+    updated: int = 0
+    """Stored rows replaced by a version with more reasoning."""
 
 
 class DatasetDir:
@@ -118,6 +137,10 @@ class DatasetDir:
     def summary_path(self) -> Path:
         return self.path / SUMMARY_FILE
 
+    @property
+    def raw_path(self) -> Path:
+        return self.path / RAW_DIR
+
     def is_dataset(self) -> bool:
         return self.settings_path.is_file()
 
@@ -130,7 +153,10 @@ class DatasetDir:
         except FileNotFoundError:
             raise UsageError(
                 f"{self.path} is not a dataset directory (it has no {self.settings_path.name})",
-                hint="create one with `pup finetune dataset import DIR --file rows.jsonl`",
+                hint=(
+                    "create one with `pup finetune dataset import DIR --file rows.jsonl` or "
+                    "`pup finetune dataset pull DIR --ml-app APP`"
+                ),
             ) from None
         if not isinstance(data, dict):
             raise StateError(f"{self.settings_path}: expected a JSON object")
@@ -154,18 +180,17 @@ class DatasetDir:
         except RowError as exc:
             raise StateError(f"stored row is invalid: {exc}") from exc
 
+    def labels(self) -> dict[str, Label]:
+        """The label in force per row id: the last one recorded. Empty without labels."""
+        return latest_labels(read_labels(self.labels_path))
+
     def kept_rows(self) -> list[TrainingRow]:
         """The accepted rows minus those labeled ``keep: false``."""
-        return self._kept(self.rows())
+        return self._kept(self.rows(), self.labels())
 
-    def _kept(self, rows: list[TrainingRow]) -> list[TrainingRow]:
-        dropped = self._dropped_row_ids()
-        return [row for row in rows if row.id not in dropped]
-
-    def _dropped_row_ids(self) -> frozenset[str]:
-        # The seam for keep/drop labels (``labels.jsonl``), which arrive with `dataset label`.
-        # Until then no row is dropped, and a missing labels file means the same.
-        return frozenset()
+    @staticmethod
+    def _kept(rows: list[TrainingRow], labels: Mapping[str, Label]) -> list[TrainingRow]:
+        return [row for row in rows if (label := labels.get(row.id)) is None or label.keep]
 
     def excluded(self) -> list[dict[str, Any]]:
         """Every exclusion record, in the order it was recorded."""
@@ -183,9 +208,15 @@ class DatasetDir:
         return self.rows_by_split()[split]
 
     def summary(self) -> dict[str, Any]:
-        """Counts of accepted and excluded rows, per exclusion code and per split, and warnings."""
+        """Counts of accepted, excluded, kept and dropped rows, and warnings.
+
+        Exclusions are counted per code, kept rows per split, and drops per reason (the most
+        frequent reasons only).
+        """
         rows = self.rows()
-        by_split = _group_by_split(self._kept(rows), self.splits(), where=self.splits_path)
+        labels = self.labels()
+        kept = self._kept(rows, labels)
+        by_split = _group_by_split(kept, self.splits(), where=self.splits_path)
         excluded = _reconcile(self.excluded(), (), accepted_ids={row.id for row in rows})
         by_code = Counter(str(record.get("code")) for record in excluded)
         counts = {split: len(by_split[split]) for split in SPLITS}
@@ -194,6 +225,8 @@ class DatasetDir:
             "accepted": len(rows),
             "excluded": len(excluded),
             "excluded_by_code": dict(sorted(by_code.items())),
+            "kept": len(kept),
+            **label_counts(labels, (row.id for row in rows)),
             "splits": counts,
             "warnings": split_warnings(counts),
         }
@@ -204,6 +237,22 @@ class DatasetDir:
         """Recompute and write ``summary.json``; returns the summary."""
         with DirectoryLock(self.path):
             return self._write_summary()
+
+    def append_labels(self, labels: Sequence[Label]) -> dict[str, Any]:
+        """Append ``labels`` to ``labels.jsonl`` and rewrite ``summary.json``; returns it.
+
+        The caller holds the directory lock and has checked the labels (see
+        :func:`~pup_finetune.curation.labels.apply_labels`). The file is rewritten as its
+        current content plus ``labels`` in one atomic replace; ``rows.jsonl`` is untouched.
+        """
+        if labels:
+            path = self.labels_path
+            text = path.read_text(encoding="utf-8") if path.exists() else ""
+            if text and not text.endswith("\n"):
+                text += "\n"
+            text += "".join(canonical_json(label.to_json()) + "\n" for label in labels)
+            atomic_write_text(path, text)
+        return self._write_summary()
 
     def _write_summary(self) -> dict[str, Any]:
         summary = self.summary()
@@ -231,6 +280,8 @@ class DatasetDir:
         exclusions: Iterable[Exclusion] = (),
         *,
         settings: DatasetSettings,
+        retired: Iterable[Exclusion] = (),
+        updated: Iterable[TrainingRow] = (),
     ) -> AddResult:
         """Add valid ``rows`` and record ``exclusions``, creating the directory if needed.
 
@@ -245,8 +296,23 @@ class DatasetDir:
         that are now accepted rows are dropped, so a fixed row re-imported under its id is
         counted once, as accepted.
 
+        ``retired`` takes stored rows out: each is an exclusion whose ``row_id`` names an
+        accepted row that no longer belongs, such as a conversation a later pull found inside
+        a longer one. The row is removed from ``rows.jsonl`` and the exclusion recorded. A
+        ``row_id`` that is not stored is recorded as an exclusion all the same, and one that
+        ``rows`` also holds raises :class:`ValueError`.
+
+        ``updated`` replaces stored rows in place, by id: each must name a stored row and
+        differ from it only in ``reasoning_content``, such as reasoning a later pull read for
+        a row it already stored (see :func:`~pup_finetune.data.pull.reasoning_updates`). Its
+        split assignment is unchanged. An id that is not stored, that ``rows`` or ``retired``
+        also holds, a change to anything but reasoning, or an update that leaves the row
+        holding the same conversation as another stored row raises :class:`ValueError`.
+
         A validation error (a conflicting id, changed settings) leaves existing dataset files
-        unchanged. If writing fails part-way, re-running the same add repairs the directory.
+        unchanged. If writing fails part-way, re-running the same add repairs the directory;
+        the exclusions of ``retired`` are written before the rows are, so a retired row is
+        never gone from ``rows.jsonl`` without its record in ``excluded.jsonl``.
         """
         self._prepare()
         with DirectoryLock(self.path):
@@ -254,9 +320,18 @@ class DatasetDir:
             if not fresh:
                 self._check_split_params(settings.split)
                 FrozenSettings.check_or_write(self.path, SETTINGS_NAME, settings.to_json())
-            existing = self.rows()
-            excluded = list(exclusions)
-            new_rows, unchanged = _merge(existing, rows, excluded)
+            retiring = list(retired)
+            retired_ids = {e.row_id for e in retiring if e.row_id is not None}
+            stored = self.rows()
+            existing = [row for row in stored if row.id not in retired_ids]
+            incoming = list(rows)
+            if clash := retired_ids.intersection(row.id for row in incoming):
+                raise ValueError(f"rows both added and retired: {sorted(clash)}")
+            existing, changed = _apply_updates(
+                existing, list(updated), retired_ids | {row.id for row in incoming}
+            )
+            excluded = [*exclusions, *retiring]
+            new_rows, unchanged = _merge(existing, incoming, excluded)
             all_rows = [*existing, *new_rows]
             splits = SplitAssignments.load(self.splits_path, settings.split)
             for row in all_rows:
@@ -269,13 +344,34 @@ class DatasetDir:
                 make_private_dir(self.path)
                 FrozenSettings.check_or_write(self.path, SETTINGS_NAME, settings.to_json())
             # Splits first: an assignment without its row is harmless if we stop part-way.
-            # Rows before exclusions: a stale exclusion of an accepted row is skipped on read.
+            # The retirements next, before the rows they take out: a stale exclusion of an
+            # accepted row is skipped on read, but a retired row gone from rows.jsonl without
+            # its record could not be recovered, as nothing left on disk would show it.
+            # Then the rows, and the exclusions last; a re-run of the same add repairs both.
             splits.save(self.splits_path)
+            if retiring:
+                staged = _reconcile(
+                    self.excluded(), retiring, accepted_ids={row.id for row in existing}
+                )
+                self._write_excluded(staged)
             write_rows(self.rows_path, all_rows)
-            lines = "".join(canonical_json(record) + "\n" for record in records)
-            atomic_write_text(self.excluded_path, lines)
+            self._write_excluded(records)
             summary = self._write_summary()
-        return AddResult(len(new_rows), unchanged, len(excluded), summary)
+        retired_rows = len(stored) - len(existing)
+        return AddResult(len(new_rows), unchanged, len(excluded), summary, retired_rows, changed)
+
+    def _write_excluded(self, records: Iterable[dict[str, Any]]) -> None:
+        lines = "".join(canonical_json(record) + "\n" for record in records)
+        atomic_write_text(self.excluded_path, lines)
+
+    def create_or_check(self, settings: DatasetSettings) -> dict[str, Any]:
+        """Create an empty dataset frozen with ``settings``, or check an existing one has them.
+
+        Raises as :meth:`add` does: :class:`StateError` when the frozen settings differ, and
+        :class:`UsageError` for a non-empty directory that is not a dataset. Returns the
+        summary.
+        """
+        return self.add((), settings=settings).summary
 
     def _check_split_params(self, params: SplitParams) -> None:
         stored = self.split_params()
@@ -355,6 +451,46 @@ def _merge(
         by_hash[digest] = row.id
         new_rows.append(row)
     return new_rows, unchanged
+
+
+def _apply_updates(
+    existing: list[TrainingRow], updated: list[TrainingRow], taken: Collection[str]
+) -> tuple[list[TrainingRow], int]:
+    """``existing`` with each of ``updated`` in place of the stored row of its id.
+
+    Returns the rows and how many of them changed. Raises :class:`ValueError` for an update
+    of an id that is not stored, that is ``taken`` (added or retired in the same add), that
+    changes anything but reasoning, or that leaves the row with the content hash of another.
+    """
+    if not updated:
+        return existing, 0
+    replacements: dict[str, TrainingRow] = {}
+    for row in updated:
+        if row.id in taken:
+            raise ValueError(f"row {row.id!r} both updated and added or retired")
+        replacements[row.id] = row
+    stored = {row.id for row in existing}
+    if missing := sorted(set(replacements) - stored):
+        raise ValueError(f"updated rows are not stored: {missing}")
+    rows: list[TrainingRow] = []
+    changed = 0
+    for row in existing:
+        replacement = replacements.get(row.id, row)
+        if replacement != row:
+            if without_reasoning(replacement) != without_reasoning(row):
+                raise ValueError(f"row {row.id!r} updated in more than its reasoning")
+            changed += 1
+        rows.append(replacement)
+    # Filling in reasoning can make a row equal to another one that already had it: the two
+    # would then be one conversation stored twice, which the caller must retire one of.
+    by_hash: dict[str, str] = {}
+    for row in rows:
+        other = by_hash.setdefault(row_content_hash(row), row.id)
+        if other != row.id and (row.id in replacements or other in replacements):
+            raise ValueError(
+                f"rows {other!r} and {row.id!r} hold the same conversation after the update"
+            )
+    return rows, changed
 
 
 def _reconcile(
