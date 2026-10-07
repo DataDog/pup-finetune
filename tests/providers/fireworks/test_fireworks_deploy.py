@@ -14,6 +14,7 @@ endpoint, and time against a fake clock: nothing reaches the network or waits.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Any
 
 import httpx
 import pytest
@@ -254,18 +255,73 @@ def test_a_dropped_connection_on_create_is_adopted(
     assert deployer.deploy(MODEL, OPTIONS).deployment_id == OPTIONS.deployment_id
 
 
+def ours(**changes: Any) -> dict[str, Any]:
+    """The deployment :data:`OPTIONS` creates of :data:`MODEL`, as the API reads it back."""
+    return {
+        "name": NAME,
+        "state": "CREATING",
+        "base_model": MODEL.uri,
+        "deployment_shape": f"{SHAPE}/versions/v2",
+        "display_name": OPTIONS.display_name,
+        "min_replica_count": OPTIONS.min_replicas,
+        "max_replica_count": OPTIONS.max_replicas,
+        **changes,
+    }
+
+
 def test_a_conflict_from_our_own_earlier_create_is_adopted(
     deployer: FireworksDeployer, sdk: FakeSdkFireworks
 ) -> None:
     """An SDK retry (or a rerun) of a create that had succeeded answers HTTP 409."""
-    sdk.records[OPTIONS.deployment_id] = {
-        "name": NAME,
-        "state": "CREATING",
-        "base_model": MODEL.uri,
-    }
+    sdk.records[OPTIONS.deployment_id] = ours()
     endpoint = deployer.deploy(MODEL, OPTIONS)
     assert endpoint.name == NAME
     assert sdk.call_names().count("create") == 1
+
+
+def test_a_conflict_with_fields_the_api_did_not_report_is_adopted(
+    deployer: FireworksDeployer, sdk: FakeSdkFireworks
+) -> None:
+    unreported = ours()
+    for key in ("deployment_shape", "min_replica_count", "max_replica_count"):
+        del unreported[key]
+    sdk.records[OPTIONS.deployment_id] = unreported
+    assert deployer.deploy(MODEL, OPTIONS).name == NAME
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"display_name": "someone else's"}, 'display name is "someone else\'s"'),
+        ({"display_name": None}, "display name is 'empty'"),
+        (
+            {"deployment_shape": f"{SHAPE}-large/versions/v1"},
+            f"shape {SHAPE}-large/versions/v1",
+        ),
+        ({"max_replica_count": 4}, "maximum replica count is 4, not 1"),
+    ],
+    ids=["display-name", "no-display-name", "shape", "replicas"],
+)
+def test_a_conflict_with_a_deployment_this_deploy_did_not_create_is_refused(
+    deployer: FireworksDeployer, sdk: FakeSdkFireworks, changes: dict[str, Any], message: str
+) -> None:
+    sdk.records[OPTIONS.deployment_id] = ours(**changes)
+    created: list[str] = []
+    with pytest.raises(UsageError, match="did not create") as caught:
+        deployer.deploy(MODEL, OPTIONS, on_created=lambda e, s: created.append(s))
+    assert message in caught.value.message
+    assert "--deployment-id" in (caught.value.hint or "")
+    assert created == []  # no receipt, so an undeploy never deletes it
+    assert OPTIONS.deployment_id not in sdk.deleted
+
+
+def test_a_lost_create_finding_another_deployment_is_refused(
+    deployer: FireworksDeployer, sdk: FakeSdkFireworks
+) -> None:
+    sdk.records[OPTIONS.deployment_id] = ours(display_name="pup-finetune another-run")
+    sdk.fail["create"] = FakeSdkError("upstream timed out", status_code=504)
+    with pytest.raises(UsageError, match="did not create"):
+        deployer.deploy(MODEL, OPTIONS)
 
 
 def test_a_failed_create_that_made_nothing_raises_the_failure(
@@ -537,8 +593,16 @@ def test_the_wrapper_matches_the_installed_sdk() -> None:
         DeploymentShapeVersion.model_fields
     )
     fields = Deployment.model_fields
-    assert {"name", "state", "base_model", "deployment_shape", "create_time", "status"} <= set(
-        fields
-    )
+    assert {
+        "name",
+        "state",
+        "base_model",
+        "deployment_shape",
+        "create_time",
+        "status",
+        "display_name",
+        "min_replica_count",
+        "max_replica_count",
+    } <= set(fields)
     states = set(typing.get_args(typing.get_args(fields["state"].annotation)[0]))
     assert {"CREATING", "READY", "FAILED", "DELETING", "DELETED"} <= states

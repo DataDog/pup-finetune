@@ -1074,6 +1074,9 @@ class DeploymentRecord:
     ``name`` is its resource name, ``accounts/<account>/deployments/<id>``; ``state`` one of
     ``CREATING``, ``READY``, ``UPDATING``, ``FAILED``, ``DELETING``, ``DELETED`` (or
     ``STATE_UNSPECIFIED``); ``detail`` the server's status message, when it sent one.
+    ``shape`` is the shape version Fireworks resolved the requested shape to;
+    ``display_name`` and the replica counts are as the deployment was created, and ``None``
+    when the API did not report them.
     """
 
     name: str
@@ -1082,6 +1085,9 @@ class DeploymentRecord:
     shape: str | None = None
     create_time: str | None = None
     detail: str = ""
+    display_name: str | None = None
+    min_replica_count: int | None = None
+    max_replica_count: int | None = None
 
 
 class FireworksDeployments(Protocol):
@@ -1113,10 +1119,13 @@ class FireworksDeployments(Protocol):
         Sent once, never retried by the SDK (the API takes no idempotency key, so a retried
         create that had succeeded would answer HTTP 409). When the create fails in a way that
         may hide a success (a 409, a timeout, a server error or a dropped connection), the
-        deployment is read back: an existing deployment of ``base_model`` under that id is
-        returned as the one created. Raises :class:`UsageError` when the id is taken by a
-        deployment of another model, and :class:`TransientError` when the create succeeded
-        but its answer cannot be read (no deployment name), as the deployment exists.
+        deployment is read back: an existing deployment under that id is returned as the one
+        created only when it is this create's own, of ``base_model`` with ``display_name``,
+        on ``shape`` and with the replica counts asked for (as far as the API reports them).
+        Raises :class:`UsageError` when the id is taken by any other deployment, so one this
+        create did not make is never recorded (and later undeployed) as its own, and
+        :class:`TransientError` when the create succeeded but its answer cannot be read (no
+        deployment name), as the deployment exists.
         """
         ...
 
@@ -1161,6 +1170,40 @@ SdkFireworksFactory = Callable[..., _SdkFireworks]
 """Builds the SDK's ``Fireworks`` client from its keyword arguments (tests pass a fake)."""
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Requested:
+    """What a create asked for, to tell a deployment it made from one already there."""
+
+    base_model: str
+    shape: str
+    display_name: str
+    min_replica_count: int
+    max_replica_count: int
+
+    def mismatch(self, existing: DeploymentRecord) -> str | None:
+        """How ``existing`` differs from this request, or ``None`` when it matches.
+
+        Fireworks records the shape version it resolves the shape to, so a shape matches
+        itself or any of its versions. A field the API did not report is not compared.
+        """
+        if existing.display_name != self.display_name:
+            return f"its display name is {existing.display_name or 'empty'!r}"
+        shape = existing.shape
+        if (
+            shape is not None
+            and shape != self.shape
+            and not shape.startswith(f"{self.shape}/versions/")
+        ):
+            return f"it runs on the shape {shape}"
+        for label, theirs, ours in (
+            ("minimum", existing.min_replica_count, self.min_replica_count),
+            ("maximum", existing.max_replica_count, self.max_replica_count),
+        ):
+            if theirs is not None and theirs != ours:
+                return f"its {label} replica count is {theirs}, not {ours}"
+        return None
+
+
 def _deployment_record(raw: Any) -> DeploymentRecord:
     name = getattr(raw, "name", None)
     if not isinstance(name, str) or not name:
@@ -1171,6 +1214,7 @@ def _deployment_record(raw: Any) -> DeploymentRecord:
     message = getattr(status, "message", None)
     shape = getattr(raw, "deployment_shape", None)
     base_model = getattr(raw, "base_model", None)
+    display_name = getattr(raw, "display_name", None)
     return DeploymentRecord(
         name=name,
         state=str(state) if state else "STATE_UNSPECIFIED",
@@ -1178,7 +1222,14 @@ def _deployment_record(raw: Any) -> DeploymentRecord:
         shape=str(shape) if shape else None,
         create_time=created.isoformat() if isinstance(created, datetime) else created or None,
         detail=redact(str(message))[:_DETAIL_LIMIT] if message else "",
+        display_name=display_name if isinstance(display_name, str) else None,
+        min_replica_count=_count(getattr(raw, "min_replica_count", None)),
+        max_replica_count=_count(getattr(raw, "max_replica_count", None)),
     )
+
+
+def _count(value: Any) -> int | None:
+    return value if type(value) is int else None
 
 
 def _shape_versions(raw: Any) -> list[ShapeVersion]:
@@ -1278,7 +1329,14 @@ class FireworksDeploymentsClient:
             conflict = _has_status(exc, 409)
             if not (conflict or isinstance(error, TransientError)):
                 raise error from exc
-            existing = self._created_anyway(deployment_id, base_model, error)
+            requested = _Requested(
+                base_model=base_model,
+                shape=shape,
+                display_name=display_name,
+                min_replica_count=min_replica_count,
+                max_replica_count=max_replica_count,
+            )
+            existing = self._created_anyway(deployment_id, requested, error)
             if existing is not None:
                 return existing
             if conflict and not isinstance(error, ProviderCapacityError):
@@ -1300,25 +1358,35 @@ class FireworksDeploymentsClient:
             ) from exc
 
     def _created_anyway(
-        self, deployment_id: str, base_model: str, error: FinetuneError
+        self, deployment_id: str, requested: _Requested, error: FinetuneError
     ) -> DeploymentRecord | None:
         """The deployment a failed create may have made anyway, read back; ``None`` when
-        there is none. Raises :class:`UsageError` when the id serves another model."""
+        there is none. Raises :class:`UsageError` when the id holds a deployment this create
+        did not make: of another model, under another display name, or on another shape or
+        replica counts."""
         try:
             existing = self.get_deployment(deployment_id)
         except FinetuneError as read_error:
             raise error from read_error
         if existing is None:
             return None
-        if existing.base_model != base_model:
+        hint = "pass another --deployment-id, or delete the existing deployment"
+        if existing.base_model != requested.base_model:
             raise UsageError(
                 f"the account already has a Fireworks deployment named {deployment_id}, "
                 f"serving {existing.base_model or 'another model'}",
-                hint="pass another --deployment-id, or delete the existing deployment",
+                hint=hint,
+            )
+        mismatch = requested.mismatch(existing)
+        if mismatch is not None:
+            raise UsageError(
+                f"the account already has a Fireworks deployment named {deployment_id} that "
+                f"this deploy did not create ({mismatch})",
+                hint=hint,
             )
         info(
             f"creating {deployment_id} reported a failure ({error.message}), but the "
-            f"deployment of {base_model} exists: using it"
+            f"deployment of {requested.base_model} exists: using it"
         )
         return existing
 

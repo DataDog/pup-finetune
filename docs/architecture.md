@@ -359,7 +359,9 @@ drives the SDK's `Fireworks` client through `client.py`: the first validated, la
 shape `deployment_shape_versions.match_for_model` returns (unless `--shape`), then
 `deployments.create` (sent once, without the SDK's retries: the API takes no idempotency key,
 so a retried create that had succeeded would answer HTTP 409; after a 409, a timeout or a
-server error the deployment is read back and adopted when it serves the requested model)
+server error the deployment is read back and adopted only when it is this deploy's own:
+the requested model, display name, shape and replica counts; any other is refused as a
+taken `--deployment-id`, so it is never recorded, or undeployed, as the run's)
 with the promoted model as the base model, `min_replica_count` 0,
 `max_replica_count` 1, a five-minute scale-to-zero window and hot loading off (the SDK's own
 deployment helper defaults it on, for training rollouts). It reads the deployment every 15

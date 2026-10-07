@@ -92,6 +92,9 @@ class _Deployments:
             "state": "CREATING",
             "base_model": kwargs["base_model"],
             "deployment_shape": f"{kwargs['deployment_shape']}/versions/v2",
+            "display_name": kwargs["display_name"],
+            "min_replica_count": kwargs["min_replica_count"],
+            "max_replica_count": kwargs["max_replica_count"],
             "create_time": datetime(2026, 10, 6, 12, 0, tzinfo=UTC),
             "status": SimpleNamespace(message=""),
         }
