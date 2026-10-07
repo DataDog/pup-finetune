@@ -189,7 +189,8 @@ def parse_verdict(text: str | None) -> tuple[bool, str] | None:
     around it. Objects nested in another object or an array are never considered on their
     own: a malformed object or array whose brackets balance is skipped whole, and only a
     bracket that is never closed is read as prose. A missing or non-string ``reason`` reads
-    as empty.
+    as empty, and a lone surrogate in it (JSON's ``\\ud800`` escape decodes to one) is kept
+    escaped, as ``\\ud800``, so the reason can always be written as UTF-8.
 
     Reasoning is never read: when the answer holds a ``</think>``, only the text after the
     last one counts (the chat template may have opened the block), and a ``<think>`` block
@@ -212,10 +213,15 @@ def parse_verdict(text: str | None) -> tuple[bool, str] | None:
             continue
         if isinstance(value, dict) and isinstance(value.get("pass"), bool):
             reason = value.get("reason")
-            reason = reason.strip()[:_REASON_LIMIT] if isinstance(reason, str) else ""
+            reason = _encodable(reason).strip()[:_REASON_LIMIT] if isinstance(reason, str) else ""
             return value["pass"], reason
         start = _JSON_START.search(text, end)
     return None
+
+
+def _encodable(text: str) -> str:
+    """``text`` with any lone surrogate escaped, which UTF-8 cannot encode."""
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
 
 
 def _balanced_end(text: str, start: int) -> int | None:
@@ -275,7 +281,8 @@ def judge(
         max_tokens=config.max_tokens,
     )
     content = completion.message.get("content")
-    raw = content if isinstance(content, str) else None
+    # Escaped like the reason, so the answer kept with a verdict can always be written.
+    raw = _encodable(content) if isinstance(content, str) else None
     verdict = parse_verdict(raw)
     if verdict is None:
         error = TRUNCATED if completion.finish_reason == "length" else UNPARSEABLE

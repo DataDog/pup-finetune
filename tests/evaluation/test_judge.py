@@ -263,7 +263,32 @@ def test_a_long_reason_is_truncated() -> None:
     assert len(verdict[1]) == 500
 
 
+def test_a_lone_surrogate_in_the_reason_is_kept_escaped() -> None:
+    verdict = parse_verdict('{"pass": true, "reason": "odd \\ud800 text"}')
+    assert verdict == (True, "odd \\ud800 text")
+    verdict[1].encode("utf-8")  # writable as UTF-8
+
+
 # --- judging -----------------------------------------------------------------------------
+
+
+JSON_HEADERS = {"content-type": "application/json"}
+
+
+def test_judge_keeps_a_lone_surrogate_in_the_answer_escaped() -> None:
+    fake = FakeChatApi(answer=always("unused"))
+    body = completion(None).json()
+    body["choices"][0]["message"]["content"] = '{"pass": false, "reason": "bad \\udfff"}\udfff'
+    # JSON's escape carries the lone surrogate over the wire; UTF-8 could not.
+    fake.script.append(
+        httpx.Response(200, content=json.dumps(body).encode("ascii"), headers=JSON_HEADERS)
+    )
+    case = tool_case()
+    with chat_client(fake) as client:
+        result = judge(case, case.reference, client, CONFIG, format_valid=True)
+    assert (result.passed, result.reason) == (False, "bad \\udfff")
+    assert result.raw is not None and result.raw.endswith("\\udfff")
+    json.dumps(result.to_json(), ensure_ascii=False).encode("utf-8")
 
 
 def test_judge_sends_the_prompt_with_the_config_settings() -> None:
