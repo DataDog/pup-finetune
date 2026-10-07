@@ -596,6 +596,19 @@ def test_ctrl_c_abandons_a_call_in_flight_on_a_daemon_thread(tmp_path: Path) -> 
     assert read_votes(dataset.path / JUDGMENTS_FILE) == []  # nothing written after it stopped
 
 
+def test_a_lone_surrogate_in_a_reason_is_written_escaped(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path, n=2)
+
+    def policy(judge: str, row_id: str) -> str:
+        # JSON's escape decodes to a lone surrogate, which UTF-8 cannot encode.
+        return '{"keep": true, "reason": "odd \\ud800"}'
+
+    report = run_triage(plan_triage(dataset, RUBRIC, (J1,)), FakeCouncil(policy))
+    assert report.votes_cast == 2
+    assert {vote.reason for vote in read_votes(dataset.path / JUDGMENTS_FILE)} == {"odd \\ud800"}
+    assert set(dataset.labels()) == {"row-0", "row-1"}
+
+
 def test_judgments_do_not_hold_the_judges_raw_answers(tmp_path: Path) -> None:
     dataset = make_dataset(tmp_path, n=1)
     run_triage(plan_triage(dataset, RUBRIC, (J1,)), FakeCouncil(keep_all))
