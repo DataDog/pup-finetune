@@ -36,7 +36,10 @@ from pup_finetune.errors import require_confirm, require_writable
 from pup_finetune.evaluation import runner
 
 RunDirArgument = Annotated[
-    Path, typer.Argument(metavar="RUN_DIR", help="A completed run directory.", show_default=False)
+    Path,
+    typer.Argument(
+        metavar="RUN_DIR", help="A completed or cancelled run directory.", show_default=False
+    ),
 ]
 
 
@@ -116,13 +119,13 @@ def register(app: typer.Typer) -> None:
         "evaluate",
         short_help="Replay held-out conversations with the base and tuned model (paid).",
         help=(
-            "Replay every held-out test conversation of a completed run, one recorded "
-            "assistant turn at a time, with the base model and the run's best checkpoint; "
-            "score each answer with deterministic tool-call metrics and an LLM judge; and "
-            "compare the two (pass rates, wins and regressions, and the tuned-minus-base "
-            "delta with a bootstrap confidence interval). Tools are not executed, so the "
-            "scores measure agreement with the recorded behavior, not task success. "
-            "Without --confirm, previews the calls it would make. With --confirm, "
+            "Replay every held-out test conversation of a completed or cancelled run, one "
+            "recorded assistant turn at a time, with the base model and the run's best "
+            "checkpoint; score each answer with deterministic tool-call metrics and an LLM "
+            "judge; and compare the two (pass rates, wins and regressions, and the "
+            "tuned-minus-base delta with a bootstrap confidence interval). Tools are not "
+            "executed, so the scores measure agreement with the recorded behavior, not task "
+            "success. Without --confirm, previews the calls it would make. With --confirm, "
             "calibrates the judge first, then evaluates; rerun the same command to continue "
             "an evaluation that stopped. A complete evaluation is published to Datadog as "
             "two Agent Observability experiments on the dataset `dataset push` created "

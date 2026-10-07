@@ -52,7 +52,7 @@ from pup_finetune.providers.base import (
     Sampler,
     TrainingSession,
 )
-from pup_finetune.runs import RunDir, dataset_content_hash, error_json
+from pup_finetune.runs import Phase, RunDir, dataset_content_hash, error_json
 from pup_finetune.runs import cancel_on_signals as _cancel_on_signals
 from pup_finetune.runtime import Runtime
 from pup_finetune.storage import LOCK_FILE_NAME, canonical_json, finite_json
@@ -72,6 +72,7 @@ __all__ = [
     "DEFAULT_OUT_DIR_NAME",
     "DEFAULT_SEED",
     "EVALUATED_STOPS",
+    "FINISHED_PHASES",
     "EvalPlan",
     "EvalSettings",
     "EvaluateAfterTraining",
@@ -79,8 +80,8 @@ __all__ = [
     "StandaloneEvaluation",
     "calibration_failed",
     "cancel_on_signals",
-    "completed_result",
     "evaluation_exit_code",
+    "finished_result",
     "open_judge_client",
     "plan_evaluation",
     "plan_standalone",
@@ -106,8 +107,12 @@ EVALUATED_STOPS: Final[frozenset[StoppedReason]] = frozenset({"completed", "earl
 A cancelled run was stopped on request, and a ``budget_exhausted`` one reached the spend
 cap, which the training session's time counts against: evaluating in that session would
 spend past it. Both are skipped with the ``evaluate`` command to run instead, which
-evaluates any completed run (a budget-capped one too) in a session of its own, on request.
+evaluates any finished run (:data:`FINISHED_PHASES`: a budget-capped or cancelled one too)
+with a best epoch in a session of its own, on request.
 """
+
+FINISHED_PHASES: Final[frozenset[Phase]] = frozenset({"completed", "cancelled"})
+"""The run phases ``evaluate`` evaluates: a cancelled run still promoted its best epoch."""
 
 _CANCEL_NOTICE: Final = (
     b"cancel requested: finishing the generations in flight, then writing the summary"
@@ -780,13 +785,18 @@ class EvaluateAfterTraining:
 # --- evaluate -----------------------------------------------------------------------------
 
 
-def completed_result(run: RunDir) -> TrainResult:
-    """The training result of a completed run; raises :class:`UsageError` for another phase."""
+def finished_result(run: RunDir) -> TrainResult:
+    """The training result of a completed or cancelled run (:data:`FINISHED_PHASES`).
+
+    Raises :class:`UsageError` for another phase. A cancelled run that finished no epoch has
+    nothing to evaluate either, which
+    :func:`~pup_finetune.evaluation.targets.best_training_checkpoint` refuses.
+    """
     state = run.load_state()
-    if state.phase != "completed":
+    if state.phase not in FINISHED_PHASES:
         raise UsageError(
-            f"the run in {run.path} is {state.phase}, not completed, so there is nothing to "
-            "evaluate yet",
+            f"the run in {run.path} is {state.phase}, not completed or cancelled, so there is "
+            "nothing to evaluate yet",
             hint=f"see `pup finetune status {_q(run.path)}`",
         )
     stored = run.read_result()
@@ -819,7 +829,7 @@ def _check_renderer(run: RunDir, manifest: Mapping[str, Any], provider: Provider
 
 @dataclass(frozen=True, slots=True)
 class StandaloneEvaluation:
-    """The ``evaluate`` command for one completed run: its plan and what it samples."""
+    """The ``evaluate`` command for one finished run: its plan and what it samples."""
 
     plan: EvalPlan
     provider: Provider
@@ -880,16 +890,17 @@ class StandaloneEvaluation:
 def plan_standalone(
     runtime: Runtime, run_dir: Path, settings: EvalSettings
 ) -> StandaloneEvaluation:
-    """The evaluation of the completed run in ``run_dir``, checked against its inputs.
+    """The evaluation of the finished run in ``run_dir``, checked against its inputs.
 
-    Raises :class:`UsageError` when the run did not complete, and :class:`StateError` when its
-    dataset or renderer changed since it was trained.
+    Raises :class:`UsageError` when the run is neither completed nor cancelled, and
+    :class:`StateError` when it has no best epoch or its dataset or renderer changed since it
+    was trained.
     """
     from pup_finetune.evaluation.targets import best_training_checkpoint
 
     run = RunDir(run_dir)
     manifest = run.manifest()
-    result = completed_result(run)
+    result = finished_result(run)
     training = best_training_checkpoint(result)
     provider = get_provider(str(manifest["provider"]), runtime)
     dataset = DatasetDir(Path(str(manifest["dataset_dir"])))

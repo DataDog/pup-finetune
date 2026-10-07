@@ -37,7 +37,7 @@ from pup_finetune.evaluation import targets as targets_module
 from pup_finetune.evaluation.fake_judge import FAKE_JUDGE_MODEL, FakeJudge
 from pup_finetune.inference import ChatCompleter, ChatCompletion, JudgeConfig
 from pup_finetune.providers.fake import FakeRenderer
-from pup_finetune.runs import RunDir
+from pup_finetune.runs import RunDir, RunState
 from pup_finetune.runtime import Runtime
 from pup_finetune.storage import append_jsonl
 
@@ -253,6 +253,29 @@ def test_a_run_that_did_not_complete_is_refused(dataset: Path, tmp_path: Path) -
     result = invoke("evaluate", str(run))
     assert result.exit_code == 2
     assert "interrupted" in result.stderr
+
+
+def test_a_failed_run_is_refused(run_dir: Path) -> None:
+    path = run_dir / "state.json"
+    state = json.loads(path.read_text())
+    path.write_text(json.dumps({**state, "phase": "failed", "resume_mode": "finalize_only"}))
+    result = invoke("evaluate", str(run_dir))
+    assert result.exit_code == 2
+    assert "failed, not completed or cancelled" in result.stderr
+
+
+def test_a_run_cancelled_before_its_first_epoch_has_nothing_to_evaluate(
+    dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = tmp_path / "run"
+    # Stands in for a cancel request (``RunState.request_cancel``) before the first step.
+    monkeypatch.setattr(RunState, "cancel_requested", lambda self: True)
+    trained = invoke(*train_args(dataset, run, "--confirm"))
+    assert output(trained)["phase"] == "cancelled", trained.stderr
+    assert output(trained)["best_epoch"] is None
+    result = invoke("evaluate", str(run))
+    assert result.exit_code == 1
+    assert "no best epoch" in result.stderr
 
 
 def test_a_changed_dataset_is_refused(run_dir: Path, dataset: Path) -> None:
@@ -562,6 +585,26 @@ def test_train_evaluate_skips_a_budget_capped_run(dataset: Path, tmp_path: Path)
     assert "spend cap" in evaluation["reason"]
     assert shlex.split(evaluation["next_command"])[:3] == ["pup", "finetune", "evaluate"]
     assert not (run / "eval" / "results.jsonl").exists()
+
+
+def test_train_evaluate_skips_a_cancelled_run_that_evaluate_then_evaluates(
+    dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = tmp_path / "run"
+    # Stands in for a cancel request (``RunState.request_cancel``) after the first epoch.
+    monkeypatch.setattr(RunState, "cancel_requested", lambda self: self.best is not None)
+    trained = invoke(*train_args(dataset, run, "--evaluate", "--confirm"))
+    data = output(trained)
+    assert (data["phase"], data["stopped_reason"]) == ("cancelled", "cancelled"), trained.stderr
+    assert data["best_epoch"] == 1
+    evaluation = data["evaluation"]
+    assert evaluation["status"] == "skipped"
+    assert "cancelled" in evaluation["reason"]
+    assert not (run / "eval" / "results.jsonl").exists()
+    result = rerun(evaluation["next_command"] + " --confirm")  # it previews without
+    assert result.exit_code == 0, result.stderr
+    assert output(result)["status"] == "complete"
+    assert (run / "eval" / "summary.json").is_file()
 
 
 def test_a_cancel_during_the_evaluation_keeps_the_trained_run(

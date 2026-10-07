@@ -263,9 +263,9 @@ provider, and talks to models only through the `Sampler` protocol.
   killed during the evaluation leaves a finished run, not one a resume would train again. A
   cancelled or budget-capped training is not evaluated in its session, since the evaluation
   would spend the session's time past the cap.
-  A standalone `evaluate` opens a new session, loads the best *training* checkpoint and
-  saves it again as a sampler checkpoint, since a sampler checkpoint may not outlive the
-  session that saved it.
+  A standalone `evaluate`, of a completed or cancelled run with a best epoch, opens a new
+  session, loads the best *training* checkpoint and saves it again as a sampler checkpoint,
+  since a sampler checkpoint may not outlive the session that saved it.
 - **Replay** ([`replay.py`](../src/pup_finetune/evaluation/replay.py)). `run_replay` runs
   every `(target, case)` pair on a thread pool: generate, score, judge. Each generation and
   each result is appended to `generations.jsonl` and `results.jsonl` as soon as it is known,
