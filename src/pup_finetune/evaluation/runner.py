@@ -39,7 +39,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 from pup_finetune.data.dataset_dir import DatasetDir
-from pup_finetune.data.push import PushState, dataset_record, push_path, read_push_state
+from pup_finetune.data.push import (
+    PushState,
+    dataset_record,
+    push_path,
+    read_push_state,
+    record_digest,
+)
 from pup_finetune.datadog.pup import Pup
 from pup_finetune.errors import FinetuneError, StateError, UsageError
 from pup_finetune.output import info
@@ -132,7 +138,8 @@ class Publishing:
 
     ``enabled`` is false with ``--no-publish``. ``skipped`` says why an enabled evaluation
     cannot be published (no push receipt, an unfinished push, test rows the receipt does not
-    list); ``None`` when it can. ``records`` holds each test row's dataset record, as pushed.
+    list, test rows that changed after they were pushed); ``None`` when it can. ``records``
+    holds each test row's dataset record, as pushed.
     """
 
     enabled: bool
@@ -203,12 +210,24 @@ def plan_publishing(dataset: DatasetDir, *, enabled: bool) -> Publishing:
             skipped=f"{len(missing)} test row(s) of {dataset.path} were not pushed (e.g. "
             f"{missing[0]}); " + _push_hint(dataset.path),
         )
-    return Publishing(
-        enabled=True,
-        dataset_dir=dataset.path,
-        push=push,
-        records={row.id: dataset_record(row, "test") for row in rows},
-    )
+    records = {row.id: dataset_record(row, "test") for row in rows}
+    # A row pushed by a receipt that predates digests has none and counts as unchanged.
+    changed = [
+        row_id
+        for row_id, record in records.items()
+        if (sent := push.record_digests.get(row_id)) is not None and sent != record_digest(record)
+    ]
+    if changed:
+        return Publishing(
+            enabled=True,
+            dataset_dir=dataset.path,
+            push=push,
+            skipped=f"{len(changed)} test row(s) of {dataset.path} changed after they were "
+            f"pushed (e.g. {changed[0]}), so their remote records hold the content pushed "
+            f"earlier, not what is evaluated; to publish, move {push_path(dataset).name} aside "
+            "and push to a new --name, or pass --no-publish",
+        )
+    return Publishing(enabled=True, dataset_dir=dataset.path, push=push, records=records)
 
 
 # --- the plan -----------------------------------------------------------------------------

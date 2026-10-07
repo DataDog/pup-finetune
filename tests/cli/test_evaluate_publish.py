@@ -316,6 +316,36 @@ def test_an_unfinished_push_is_not_published(
     assert experiments.experiments == {}
 
 
+@pytest.mark.parametrize("digests", ["changed", "unchanged", "none"])
+def test_a_test_row_changed_after_its_push_is_not_published(
+    fake: FakePup,
+    experiments: FakeExperimentsApi,
+    dataset: Path,
+    run_dir: Path,
+    digests: str,
+) -> None:
+    push(dataset)
+    receipt = json.loads((dataset / "push.json").read_text())
+    test_row = DatasetDir(dataset).rows_for_split("test")[0].id
+    if digests == "changed":
+        # As if the row was updated in place (e.g. reasoning filled in) after its push.
+        edit_receipt(dataset, record_digests={**receipt["record_digests"], test_row: "0" * 64})
+    elif digests == "none":
+        edit_receipt(dataset, record_digests={})  # a receipt that predates digests
+    publish = output(invoke("evaluate", str(run_dir)))["preview"]["publish"]
+    if digests != "changed":
+        assert publish["status"] == "planned"
+        return
+    assert publish["status"] == "skipped"
+    assert "1 test row(s)" in publish["reason"]
+    assert test_row in publish["reason"]
+    assert "--no-publish" in publish["reason"]
+    result = invoke("evaluate", str(run_dir), "--confirm")
+    assert result.exit_code == 0, result.stderr
+    assert output(result)["publication"]["status"] == "skipped"
+    assert experiments_calls(fake) == 0
+
+
 def test_a_corrupt_push_receipt_says_how_to_go_on(
     fake: FakePup, experiments: FakeExperimentsApi, dataset: Path, run_dir: Path
 ) -> None:
