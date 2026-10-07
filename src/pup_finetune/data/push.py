@@ -34,8 +34,10 @@ push) are reported as stale records; they are not deleted from the remote datase
 The receipt also keeps a digest of the record pushed for each row (``record_digests``), so a
 kept row that changed after it was pushed, such as one a resumed ``--reasoning preserve``
 pull filled reasoning in for under the same id, is reported as a changed record: a push only
-adds records, so its remote record keeps the content pushed before. A row without a digest
-(pushed by a receipt that predates them) is never reported as changed.
+adds records, so its remote record keeps the content pushed before. The digests of a batch
+are saved with it as ``in_flight_digests``, so a record adopted from an interrupted batch
+gets the digest of the record sent, and a row changed since it was sent is reported too. A
+row without a digest (pushed by a receipt that predates them) is never reported as changed.
 """
 
 from __future__ import annotations
@@ -45,7 +47,7 @@ import secrets
 import shlex
 import signal
 import threading
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -161,6 +163,10 @@ class PushState:
     that predates digests has none."""
     in_flight: tuple[str, ...] = ()
     """Row ids of a batch sent whose record ids are not known yet; empty between batches."""
+    in_flight_digests: Mapping[str, str] = field(default_factory=dict)
+    """The :func:`record_digest` of each record in flight, as sent: a record adopted later
+    gets this digest, so a row changed since is reported as a changed record. Empty between
+    batches, and in a receipt written before it was recorded."""
     in_flight_at: datetime | None = None
     """When the batch in flight was sent (UTC); ``None`` between batches, and in a receipt
     written before it was recorded, whose batch is taken as settled."""
@@ -178,6 +184,7 @@ class PushState:
             "record_ids": dict(self.record_ids),
             "record_digests": dict(self.record_digests),
             "in_flight": list(self.in_flight),
+            "in_flight_digests": dict(self.in_flight_digests),
             "in_flight_at": (
                 None
                 if self.in_flight_at is None
@@ -218,6 +225,13 @@ class PushState:
         in_flight = data.get("in_flight", [])
         if not isinstance(in_flight, list) or not all(isinstance(i, str) for i in in_flight):
             raise StateError(f"{where}: in_flight must be a list of row ids")
+        # Missing in a receipt written before they were recorded.
+        in_flight_digests = data.get("in_flight_digests", {})
+        if not isinstance(in_flight_digests, dict) or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in in_flight_digests.items()
+        ):
+            raise StateError(f"{where}: in_flight_digests must map row ids to record digests")
         in_flight_at = optional("in_flight_at")
         sent_at = _parse_time(in_flight_at) if in_flight_at is not None else None
         if in_flight_at is not None and sent_at is None:
@@ -236,6 +250,7 @@ class PushState:
             record_ids=dict(record_ids),
             record_digests=dict(record_digests),
             in_flight=tuple(in_flight),
+            in_flight_digests=dict(in_flight_digests),
             in_flight_at=sent_at,
             pushed_at=optional("pushed_at"),
         )
@@ -518,7 +533,10 @@ def _add_records(
         batch = plan.pending[start : start + batch_size]
         row_ids = tuple(item.row_id for item in batch)
         # Saved before the call: if its answer is lost, the next push checks for these rows.
-        state = replace(state, in_flight=row_ids, in_flight_at=_now(clock))
+        digests = {item.row_id: record_digest(item.record) for item in batch}
+        state = replace(
+            state, in_flight=row_ids, in_flight_digests=digests, in_flight_at=_now(clock)
+        )
         _save(dataset, state)
         try:
             added = api.add_records(state.project_id, dataset_id, [item.record for item in batch])
@@ -531,13 +549,12 @@ def _add_records(
             ) from exc
         record_ids = dict(state.record_ids)
         record_ids.update(zip(row_ids, added.record_ids, strict=True))
-        record_digests = dict(state.record_digests)
-        record_digests.update((item.row_id, record_digest(item.record)) for item in batch)
         state = replace(
             state,
             record_ids=record_ids,
-            record_digests=record_digests,
+            record_digests={**state.record_digests, **digests},
             in_flight=(),
+            in_flight_digests={},
             in_flight_at=None,
             dataset_version=added.dataset_version,
             pushed_at=_now(clock).isoformat(),
@@ -557,8 +574,11 @@ def _reconcile(
 ) -> PushState:
     """Adopt the records of an interrupted batch (``in_flight``) that reached the dataset.
 
-    ``local`` holds the record of each kept row not pushed yet; a record adopted gets the
-    digest of its row's record, and none when the row is no longer kept.
+    A record adopted gets the digest of the record sent (``in_flight_digests``), so a row
+    that changed since it was sent, such as one a resumed pull filled reasoning in for, is
+    reported as a changed record. A receipt that predates those digests falls back to the
+    digest of the row's current record in ``local`` (each kept row not pushed yet), and to
+    none when the row is no longer kept.
 
     Raises :class:`StateError` when rows of it are missing within :data:`IN_FLIGHT_SETTLE` of
     when it was sent, after adopting those found: the rest may still be being added.
@@ -599,12 +619,14 @@ def _reconcile(
     state = replace(
         state,
         record_ids={**state.record_ids, **found},
-        record_digests={
-            **state.record_digests,
-            **{row_id: record_digest(local[row_id]) for row_id in found if row_id in local},
-        },
+        record_digests={**state.record_digests, **_sent_digests(state, found, local)},
         # Until the batch has settled its missing rows stay in flight, so none is sent twice.
         in_flight=missing if unsettled else (),
+        in_flight_digests=(
+            {row_id: d for row_id, d in state.in_flight_digests.items() if row_id in missing}
+            if unsettled
+            else {}
+        ),
         in_flight_at=sent_at if unsettled else None,
         # Records were added since the version recorded, and the listing does not tell how many.
         dataset_version=None if found else state.dataset_version,
@@ -625,6 +647,19 @@ def _reconcile(
         f"{len(missing)} are sent again"
     )
     return state
+
+
+def _sent_digests(
+    state: PushState, found: Iterable[str], local: Mapping[str, Mapping[str, Any]]
+) -> dict[str, str]:
+    """The digest of the record sent for each adopted row id in ``found``, where known."""
+    digests: dict[str, str] = {}
+    for row_id in found:
+        if (sent := state.in_flight_digests.get(row_id)) is not None:
+            digests[row_id] = sent
+        elif row_id in local:
+            digests[row_id] = record_digest(local[row_id])
+    return digests
 
 
 def _now(clock: Clock) -> datetime:

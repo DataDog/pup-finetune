@@ -287,11 +287,13 @@ def test_push_json_is_private_and_holds_the_receipt(dataset: DatasetDir, fake: F
         "record_ids",
         "record_digests",
         "in_flight",
+        "in_flight_digests",
         "in_flight_at",
         "pushed_at",
         "settings_hash",
     }
     assert data["in_flight"] == [] and data["in_flight_at"] is None
+    assert data["in_flight_digests"] == {}
 
 
 def test_records_split_tags_match_the_dataset_splits(
@@ -358,6 +360,7 @@ def test_an_interrupted_push_resumes_without_repeating_records(
     assert set(state.record_ids) == set(order[:4])  # the first batch
     assert state.in_flight == tuple(order[4:8])
     assert state.in_flight_at == SENT
+    assert state.in_flight_digests == {i: local_digests(dataset)[i] for i in order[4:8]}
     clock.advance(IN_FLIGHT_SETTLE)
     receipt = push(dataset, fake, clock=clock)
     assert (receipt.pushed, receipt.already_pushed) == (FIRST - 4, 4)
@@ -366,6 +369,7 @@ def test_an_interrupted_push_resumes_without_repeating_records(
     assert receipt.state.record_ids == dict(zip(order, remote.record_ids, strict=True))
     assert receipt.state.in_flight == ()
     assert receipt.state.in_flight_at is None
+    assert receipt.state.in_flight_digests == {}
 
 
 def test_missing_rows_of_a_batch_are_not_sent_again_until_it_has_settled(
@@ -413,6 +417,7 @@ def test_rows_of_an_unsettled_batch_found_are_adopted_and_the_rest_wait(
     assert state is not None
     assert set(state.record_ids) == set(order[:6])
     assert (state.in_flight, state.in_flight_at) == (tuple(order[6:8]), SENT)
+    assert set(state.in_flight_digests) == set(order[6:8])
     assert state.dataset_version is None
     assert records_add_calls(fake) == 2
     # The write lands; within the window the push adopts it and sends the remaining batch.
@@ -462,6 +467,47 @@ def test_a_batch_whose_response_was_lost_is_not_added_twice(
     assert receipt.state.record_digests == local_digests(dataset)  # adopted ones too
     assert records_add_calls(fake) == 3  # two, then only the third batch: none sent twice
     assert any("4 of the 4 records were already in the dataset" in m for m in messages)
+
+
+def by_id(row_id: str) -> TrainingRow:
+    [row] = [row for row in ALL_ROWS if row.id == row_id]
+    return row
+
+
+def test_a_row_changed_since_its_lost_batch_was_sent_is_a_changed_record(
+    dataset: DatasetDir, fake: FakePup, api: FakeDatasetsApi
+) -> None:
+    api.records_add_lost_responses = {2}
+    order = push_order(dataset)
+    with pytest.raises(ExternalError, match="timed out"):
+        push(dataset, fake)
+    sent = local_digests(dataset)
+    # A resumed pull fills reasoning in for a row of the lost batch before the next push.
+    row = by_id(order[5])
+    dataset.add([], settings=IMPORT, updated=[with_reasoning(row, "Check the units first.")])
+    receipt = push(dataset, fake)
+    remote = api.dataset_named(NAME)
+    assert len(remote.records) == FIRST  # adopted, not sent again
+    assert receipt.state.record_digests[row.id] == sent[row.id]  # the record as sent
+    assert receipt.changed_records == {row.id: receipt.state.record_ids[row.id]}
+
+
+def test_a_receipt_without_in_flight_digests_adopts_the_current_digest(
+    dataset: DatasetDir, fake: FakePup, api: FakeDatasetsApi
+) -> None:
+    api.records_add_lost_responses = {2}
+    order = push_order(dataset)
+    with pytest.raises(ExternalError):
+        push(dataset, fake)
+    path = dataset.path / PUSH_FILE
+    data = json.loads(path.read_text())
+    del data["in_flight_digests"]  # written before they were recorded
+    path.write_text(json.dumps(data))
+    row = by_id(order[5])
+    dataset.add([], settings=IMPORT, updated=[with_reasoning(row, "Think.")])
+    receipt = push(dataset, fake)
+    assert receipt.state.record_digests == local_digests(dataset)
+    assert receipt.changed_records == {}
 
 
 def test_a_lost_last_batch_is_adopted_without_sending_anything(
@@ -734,6 +780,8 @@ def test_a_receipt_of_other_settings_is_a_state_error(dataset: DatasetDir, fake:
         {"dataset_id": 7},
         {"push_id": None},
         {"in_flight": "row-1"},
+        {"in_flight_digests": ["row-1"]},
+        {"in_flight_digests": {"row-1": 7}},
         {"in_flight_at": "yesterday"},
         {"in_flight_at": "2026-01-02T03:04:05"},
     ],
