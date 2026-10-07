@@ -15,7 +15,9 @@ success.
 Everything recorded is untrusted: a trajectory can hold text written to steer a judge. The
 system prompt says so, and every piece of data travels JSON-encoded inside a tagged block in
 which ``<`` and ``>`` are escaped (``\\u003c``, ``\\u003e``), so no data can close its block or
-open another. ``reasoning_content`` is never shown: the judge reads actions, not thoughts.
+open another. It is ASCII-encoded too, so a lone surrogate (a tool argument holding JSON's
+``\\ud800``, say) stays an escape and the prompt can always be sent as UTF-8.
+``reasoning_content`` is never shown: the judge reads actions, not thoughts.
 
 The judge's answer is parsed strictly (:func:`parse_verdict`): the first top-level JSON
 object with a boolean ``pass``, outside any ``<think>`` block. Anything else is a failed
@@ -35,7 +37,7 @@ from __future__ import annotations
 import copy
 import json
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, Literal
 
@@ -146,12 +148,14 @@ def _without_reasoning(message: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def encode_data(value: Any) -> str:
-    """``value`` as indented JSON in which ``<`` and ``>`` never appear raw.
+    """``value`` as indented, ASCII-only JSON in which ``<`` and ``>`` never appear raw.
 
     They can only occur inside JSON strings, where the ``\\u`` escapes mean the same thing,
-    so the text decodes to ``value`` and cannot contain a block's closing tag.
+    so the text decodes to ``value`` and cannot contain a block's closing tag. Every other
+    character outside ASCII is escaped as well, so a lone surrogate, which UTF-8 cannot
+    encode, never reaches the request body raw.
     """
-    text = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, default=str)
+    text = json.dumps(value, ensure_ascii=True, indent=2, sort_keys=True, default=str)
     return text.replace("<", "\\u003c").replace(">", "\\u003e")
 
 
@@ -198,11 +202,34 @@ def parse_verdict(text: str | None, *, key: str = "pass") -> tuple[bool, str] | 
     last one counts (the chat template may have opened the block), and a ``<think>`` block
     is dropped, up to the end of the answer when it was never closed (a judge cut off at
     ``max_tokens``). So a draft verdict, or an object the judge quoted while thinking, never
-    stands in for the answer.
+    stands in for the answer. The tags are looked for outside the verdict objects only, so a
+    verdict whose reason quotes ``<think>`` or ``</think>`` is still read.
     """
     if not text:
         return None
-    text = _THINK.sub("", _THINK_CLOSE.split(text)[-1])
+    verdicts = list(_verdicts(text, key))
+    # The text with every verdict blanked out, at the same positions, is where tags count.
+    outside = list(text)
+    for start, end, _ in verdicts:
+        outside[start:end] = " " * (end - start)
+    prose = "".join(outside)
+    closes = list(_THINK_CLOSE.finditer(prose))
+    answer_start = closes[-1].end() if closes else 0
+    thinking = [match.span() for match in _THINK.finditer(prose, answer_start)]
+    for start, _, value in verdicts:
+        if start < answer_start or any(low <= start < high for low, high in thinking):
+            continue
+        reason = value.get("reason")
+        reason = _encodable(reason).strip()[:_REASON_LIMIT] if isinstance(reason, str) else ""
+        return value[key], reason
+    return None
+
+
+def _verdicts(text: str, key: str) -> Iterator[tuple[int, int, dict[str, Any]]]:
+    """The top-level JSON objects of ``text`` whose ``key`` is a boolean, with their span.
+
+    See :func:`parse_verdict` for what is top-level; reasoning tags are not looked at here.
+    """
     decoder = json.JSONDecoder()
     start = _JSON_START.search(text)
     while start is not None:
@@ -214,11 +241,8 @@ def parse_verdict(text: str | None, *, key: str = "pass") -> tuple[bool, str] | 
             start = _JSON_START.search(text, closed if closed is not None else position + 1)
             continue
         if isinstance(value, dict) and isinstance(value.get(key), bool):
-            reason = value.get("reason")
-            reason = _encodable(reason).strip()[:_REASON_LIMIT] if isinstance(reason, str) else ""
-            return value[key], reason
+            yield position, end, value
         start = _JSON_START.search(text, end)
-    return None
 
 
 def _encodable(text: str) -> str:

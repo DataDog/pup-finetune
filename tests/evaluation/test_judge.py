@@ -195,6 +195,30 @@ def test_data_that_tries_to_break_out_stays_inside_its_block() -> None:
     assert block(text, "candidate_action") == candidate
 
 
+def surrogate_candidate() -> dict[str, Any]:
+    """A candidate whose tool-call arguments hold a lone surrogate, as a tool-call parser that
+    decodes JSON's ``\\ud800`` and writes it back with ``ensure_ascii=False`` leaves them."""
+    return {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [call("lookup_order", '{"order_id": "4\ud8002"}')],
+    }
+
+
+def test_the_prompt_is_ascii_so_a_lone_surrogate_can_be_sent() -> None:
+    candidate = surrogate_candidate()
+    _, user = build_messages(tool_case(), candidate)
+    text = user["content"]
+    assert text.isascii()
+    text.encode("utf-8")
+    assert block(text, "candidate_action") == candidate
+    # Other text outside ASCII is escaped too, and still decodes to itself.
+    case = text_case(content="Bestellung 42 ist unterwegs: ✓")
+    _, user = build_messages(case, case.reference)
+    assert user["content"].isascii()
+    assert block(user["content"], "reference_action")["content"] == case.reference["content"]
+
+
 def test_the_case_is_not_changed_by_building_a_prompt() -> None:
     case = tool_case()
     before = dataclasses.asdict(case)
@@ -289,6 +313,14 @@ def test_judge_keeps_a_lone_surrogate_in_the_answer_escaped() -> None:
     assert (result.passed, result.reason) == (False, "bad \\udfff")
     assert result.raw is not None and result.raw.endswith("\\udfff")
     json.dumps(result.to_json(), ensure_ascii=False).encode("utf-8")
+
+
+def test_judge_gives_a_verdict_for_a_candidate_holding_a_lone_surrogate() -> None:
+    fake = FakeChatApi(answer=always('{"pass": false, "reason": "odd order id"}'))
+    with chat_client(fake) as client:
+        result = judge(tool_case(), surrogate_candidate(), client, CONFIG, format_valid=True)
+    assert (result.passed, result.reason, result.error) == (False, "odd order id", None)
+    assert block(user_prompt(fake), "candidate_action") == surrogate_candidate()
 
 
 def test_judge_sends_the_prompt_with_the_config_settings() -> None:
