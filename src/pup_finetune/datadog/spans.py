@@ -15,7 +15,8 @@ skipped and counted in :class:`ExportStats` instead of failing the export.
 With a ``cache_dir``, every raw page is written there before its spans are yielded, together
 with ``cursor.json`` (the cursor to continue from), so an interrupted export resumes without
 fetching the cached pages again. A cache belongs to the query and to the Datadog site and org
-pup is logged in to (``pup auth status``), so it is never reused for another account.
+pup is logged in to (``pup auth status``, and the org id from ``v2/current_user`` when pup's
+default session does not name its org), so it is never reused for another account.
 :func:`iter_span_pages` yields the same spans a page at a time, so a caller can stop between
 pages without fetching the next one.
 
@@ -459,7 +460,9 @@ def iter_spans(
     the same query and directory re-reads the cached pages and continues from
     ``next_cursor``; a cache written for a different query, or for another Datadog site or
     org than pup's login (read with ``pup auth status`` first), raises :class:`StateError`.
-    ``cursor.json`` records that ``account`` (``{site, org}``, nothing secret).
+    ``cursor.json`` records that ``account`` (``{site, org}``, nothing secret); when pup's
+    default session reports no org name, the org is told apart by its id instead
+    (``{site, org: null, org_id}``, from ``GET v2/current_user``).
     Re-read pages yield their spans again, so callers that persist results should dedupe
     by span id. Non-finite numbers in a page are stored as ``null``.
     """
@@ -660,23 +663,33 @@ def _next_cursor(page: Page) -> str | None:
 # --- the cache ------------------------------------------------------------------------------
 
 Account = dict[str, str | None]
-"""The Datadog ``site`` and ``org`` an export reads from."""
+"""The Datadog ``site`` and ``org`` an export reads from, and the ``org_id`` when unnamed."""
 
 
 def _account(pup: Pup) -> Account:
-    """The site and org pup is logged in to; :class:`ExternalError` when it is not."""
+    """The site and org pup is logged in to; :class:`ExternalError` when it is not.
+
+    pup's default session reports no org name, so ``org`` alone would not tell two orgs on
+    one site apart: the org's id is read then (``org_id``).
+    """
     status = pup.auth_status()
     if not status["authenticated"]:
         raise ExternalError(
             "pup is not logged in to Datadog", source="pup", hint="run `pup auth login`"
         )
-    return {"site": status["site"], "org": status["org"]}
+    account: Account = {"site": status["site"], "org": status["org"]}
+    if status["org"] is None:
+        account["org_id"] = pup.current_org_id()
+    return account
 
 
 def _describe_account(account: object) -> str:
     if not isinstance(account, Mapping):
         return "an unknown account"
-    return f"site {account.get('site') or '?'}, org {account.get('org') or '?'}"
+    site = account.get("site") or "?"
+    if account.get("org") is None and account.get("org_id"):
+        return f"site {site}, org id {account['org_id']}"
+    return f"site {site}, org {account.get('org') or '?'}"
 
 
 def _read_cursor(cache_dir: Path, query_hash: str, account: Account) -> _Cursor:
@@ -705,11 +718,21 @@ def _read_cursor(cache_dir: Path, query_hash: str, account: Account) -> _Cursor:
             f"{cache_dir} holds spans exported for a different query",
             hint="use a new directory, or delete this one to export from the start",
         )
-    if data.get("account") != account:
+    recorded = data.get("account")
+    if recorded != account:
+        unidentified = (
+            isinstance(recorded, Mapping)
+            and recorded.get("org") is None
+            and not recorded.get("org_id")
+        )
         raise StateError(
-            f"{cache_dir} holds spans exported from {_describe_account(data.get('account'))}, "
+            f"{cache_dir} holds spans exported from {_describe_account(recorded)}, "
             f"but pup is logged in to {_describe_account(account)}",
-            hint="use a new directory, or log pup in to the account the cache came from",
+            hint=(
+                "the cache does not record which org it came from; use a new directory"
+                if unidentified
+                else "use a new directory, or log pup in to the account the cache came from"
+            ),
         )
     return _Cursor(next_cursor=next_cursor, pages=pages, done=done)
 

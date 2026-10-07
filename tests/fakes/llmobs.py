@@ -25,6 +25,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from pup_finetune.datadog.pup import CURRENT_USER_PATH
 from pup_finetune.datadog.spans import EXPORT_PATH
 from tests.fakes.pup import FakePup, PupCall, PupExit
 
@@ -60,6 +61,19 @@ def page(items: Sequence[Any], after: str | None = None, *, status: str = "done"
 
 SYNTHETIC_ACCOUNT: dict[str, str | None] = {"site": "datadoghq.com", "org": "synthetic-org"}
 """The Datadog account :class:`FakeExportApi` reports pup as logged in to."""
+SYNTHETIC_ORG_ID = "00000000-0000-4000-8000-000000000001"
+"""The org id :class:`FakeExportApi` answers ``v2/current_user`` with."""
+
+
+def current_user(org_id: str) -> dict[str, Any]:
+    """A minimal ``GET v2/current_user`` response for a user of the org ``org_id``."""
+    return {
+        "data": {
+            "id": "synthetic-user",
+            "type": "users",
+            "relationships": {"org": {"data": {"id": org_id, "type": "orgs"}}},
+        }
+    }
 
 
 class FakeExportApi:
@@ -76,6 +90,7 @@ class FakeExportApi:
         self.timeouts: dict[str | None, int] = {}
         self.failures: dict[str | None, int] = {}
         self.account: dict[str, str | None] = dict(SYNTHETIC_ACCOUNT)
+        self.org_id = SYNTHETIC_ORG_ID
 
     @property
     def cursors(self) -> list[str | None]:
@@ -83,11 +98,14 @@ class FakeExportApi:
         return [body["data"]["attributes"]["page"].get("cursor") for body in self.requests]
 
     def install(self, fake: FakePup) -> FakePup:
-        """Answer the Export API route, and ``pup auth status`` with :attr:`account`, on ``fake``.
+        """Answer the Export API route, ``pup auth status`` with :attr:`account` and
+        ``v2/current_user`` with :attr:`org_id`, on ``fake``.
 
-        Returns ``fake``. Change :attr:`account` to log the fake pup in elsewhere.
+        Returns ``fake``. Change :attr:`account` or :attr:`org_id` to log the fake pup in
+        elsewhere.
         """
         fake.on("auth", "status", handler=lambda call: {"authenticated": True, **self.account})
+        fake.on("api", CURRENT_USER_PATH, handler=lambda call: current_user(self.org_id))
         return fake.on("api", EXPORT_PATH, handler=self)
 
     def __call__(self, call: PupCall) -> Any:

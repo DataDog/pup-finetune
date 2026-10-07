@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from pup_finetune.datadog.pup import CURRENT_USER_PATH, Pup
 from pup_finetune.datadog.spans import (
     CONTENT_TYPE,
     CURSOR_FILE_NAME,
@@ -28,7 +29,14 @@ from pup_finetune.datadog.spans import (
 )
 from pup_finetune.errors import ExternalError, StateError, UsageError
 from pup_finetune.storage import atomic_write_json, read_json, settings_hash
-from tests.fakes.llmobs import SYNTHETIC_ACCOUNT, FakeExportApi, fixture_pages, page, span_item
+from tests.fakes.llmobs import (
+    SYNTHETIC_ACCOUNT,
+    SYNTHETIC_ORG_ID,
+    FakeExportApi,
+    fixture_pages,
+    page,
+    span_item,
+)
 from tests.fakes.pup import FAKE_BINARY, FakePup
 
 
@@ -514,6 +522,71 @@ def test_a_cache_for_another_datadog_account_is_refused(
     with pytest.raises(StateError, match=message) as failure:
         list(iter_spans(pup, SpanQuery(), cache_dir=cache))
     assert "site datadoghq.com, org synthetic-org" in failure.value.message
+    assert api.requests == []
+
+
+def default_session_cache(tmp_path: Path) -> tuple[Path, FakeExportApi, Pup]:
+    """A finished cache exported through pup's default session, which names no org."""
+    cache = tmp_path / "raw"
+    api = FakeExportApi(three_pages())
+    api.account = {"site": "datadoghq.com", "org": None}
+    pup = api.install(FakePup()).client()
+    assert ids(list(iter_spans(pup, SpanQuery(), cache_dir=cache))) == ids_of_three_pages()
+    api.requests.clear()
+    return cache, api, pup
+
+
+def test_a_default_session_cache_records_the_org_id(tmp_path: Path) -> None:
+    cache, _, _ = default_session_cache(tmp_path)
+    assert read_json(cache / CURSOR_FILE_NAME)["account"] == {
+        "site": "datadoghq.com",
+        "org": None,
+        "org_id": SYNTHETIC_ORG_ID,
+    }
+
+
+def test_a_named_session_does_not_read_the_org_id(tmp_path: Path) -> None:
+    fake = FakePup()
+    FakeExportApi(three_pages()).install(fake)
+    list(iter_spans(fake.client(), SpanQuery(), cache_dir=tmp_path / "raw"))
+    assert all(call.args[:2] != ("api", CURRENT_USER_PATH) for call in fake.calls)
+
+
+def test_a_default_session_cache_resumes_in_the_same_org(tmp_path: Path) -> None:
+    cache, api, pup = default_session_cache(tmp_path)
+    assert ids(list(iter_spans(pup, SpanQuery(), cache_dir=cache))) == ids_of_three_pages()
+    assert api.requests == []
+
+
+def test_a_default_session_cache_for_another_org_is_refused(tmp_path: Path) -> None:
+    cache, api, pup = default_session_cache(tmp_path)
+    api.org_id = "00000000-0000-4000-8000-000000000002"
+    with pytest.raises(StateError, match="org id 00000000-0000-4000-8000-000000000002") as failure:
+        list(iter_spans(pup, SpanQuery(), cache_dir=cache))
+    assert f"org id {SYNTHETIC_ORG_ID}" in failure.value.message
+    assert api.requests == []
+
+
+def test_a_default_session_cache_without_an_org_id_is_refused(tmp_path: Path) -> None:
+    cache, api, pup = default_session_cache(tmp_path)
+    cursor = read_json(cache / CURSOR_FILE_NAME)
+    del cursor["account"]["org_id"]
+    atomic_write_json(cache / CURSOR_FILE_NAME, cursor)
+    with pytest.raises(StateError, match="org id") as failure:
+        list(iter_spans(pup, SpanQuery(), cache_dir=cache))
+    assert failure.value.hint is not None
+    assert "does not record which org" in failure.value.hint
+    assert api.requests == []
+
+
+def test_a_default_session_without_an_org_id_fails(tmp_path: Path) -> None:
+    fake = FakePup()
+    api = FakeExportApi(three_pages())
+    api.account = {"site": "datadoghq.com", "org": None}
+    api.install(fake)
+    fake.on("api", CURRENT_USER_PATH, json={"data": {"type": "users"}})
+    with pytest.raises(ExternalError, match="org id"):
+        list(iter_spans(fake.client(), SpanQuery(), cache_dir=tmp_path / "raw"))
     assert api.requests == []
 
 
