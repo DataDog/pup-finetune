@@ -108,7 +108,8 @@ def triage_rows(
         bool,
         typer.Option(
             "--reset-triage",
-            help="Discard every vote and the frozen rubric and judges first.",
+            help="Discard every vote (even an unreadable judgments.jsonl) and the frozen "
+            "rubric and judges first.",
         ),
     ] = False,
     print_template: Annotated[

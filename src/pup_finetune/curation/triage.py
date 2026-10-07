@@ -24,7 +24,8 @@ row content, rubric and judge it was cast for.
 
 **Frozen settings.** The rubric's hash and the judges are recorded in ``triage.json`` when a
 triage first runs. Once votes exist, other ones are an error, unless ``reset`` discards the
-votes (and the recorded settings) first. The check is made when planning and again under the dataset's lock before
+votes (and the recorded settings) first; ``reset`` also discards a ``judgments.jsonl`` that
+cannot be read. The check is made when planning and again under the dataset's lock before
 anything is written, so a triage planned while another one ran stops instead of mixing the
 votes of two rubrics.
 
@@ -336,9 +337,12 @@ class TriagePlan:
     judge_labels: dict[str, Label]
     """The judge labels in force before this triage, by row id."""
     stored_votes: int
-    """Every vote in ``judgments.jsonl``, counted or not."""
+    """Every vote in ``judgments.jsonl``, counted or not (with ``reset``, the lines of a file
+    that could not be read)."""
     reset: bool
     settings: dict[str, Any] = field(default_factory=dict)
+    votes_unreadable: bool = False
+    """With ``reset``: ``judgments.jsonl`` could not be read, and is discarded all the same."""
 
     @property
     def calls(self) -> int:
@@ -401,6 +405,8 @@ class TriagePlan:
                 "votes_discarded": self.stored_votes,
                 "stale_judge_labels": stale,
             }
+            if self.votes_unreadable:
+                preview["reset"]["judgments_unreadable"] = True
         return preview
 
 
@@ -429,7 +435,15 @@ def plan_triage(
     """
     dataset.settings()  # A UsageError when this is not a dataset directory.
     settings = _settings(criteria, judges)
-    stored_votes = read_votes(dataset.path / JUDGMENTS_FILE)
+    votes_path = dataset.path / JUDGMENTS_FILE
+    unreadable = False
+    try:
+        stored_votes = read_votes(votes_path)
+    except StateError:
+        if not reset:
+            raise
+        # The reset discards the file anyway, which is what read_votes' hint offers.
+        stored_votes, unreadable = [], True
     if not reset:
         _check_frozen(dataset, settings, len(stored_votes))
     labels = dataset.labels()
@@ -464,9 +478,10 @@ def plan_triage(
         skipped_labeled=skipped,
         votes=counted,
         judge_labels=judge_labels,
-        stored_votes=len(stored_votes),
+        stored_votes=_line_count(votes_path) if unreadable else len(stored_votes),
         reset=reset,
         settings=settings,
+        votes_unreadable=unreadable,
     )
 
 
@@ -490,6 +505,11 @@ def _check_frozen(dataset: DatasetDir, settings: Mapping[str, Any], votes: int) 
         hint="keep the same --rubric, --rule and --judges to resume, use a new dataset "
         "directory, or pass --reset-triage to discard the votes",
     )
+
+
+def _line_count(path: Path) -> int:
+    """The non-empty lines of ``path``."""
+    return sum(1 for line in path.read_bytes().splitlines() if line.strip())
 
 
 # --- running ------------------------------------------------------------------------------

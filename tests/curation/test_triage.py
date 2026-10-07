@@ -441,6 +441,27 @@ def test_votes_stored_since_planning_stop_the_triage(tmp_path: Path) -> None:
     assert len(plan_triage(dataset, RUBRIC, (J1,)).pending) == 1
 
 
+def test_a_reset_discards_an_unreadable_judgments_file(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path, n=2)
+    run_triage(plan_triage(dataset, RUBRIC, (J1,)), FakeCouncil(keep_all))
+    path = dataset.path / JUDGMENTS_FILE
+    first, second = path.read_bytes().splitlines(keepends=True)
+    path.write_bytes(first + b"not json\n" + second)
+    with pytest.raises(StateError, match=f"{JUDGMENTS_FILE}:2"):
+        plan_triage(dataset, RUBRIC, (J1,))
+    reset = plan_triage(dataset, RUBRIC, (J1,), reset=True)
+    assert reset.preview(base_url=DEFAULT_JUDGE_BASE_URL)["reset"] == {
+        "votes_discarded": 3,
+        "stale_judge_labels": 0,
+        "judgments_unreadable": True,
+    }
+    council = FakeCouncil(keep_all)
+    report = run_triage(reset, council)
+    assert len(council.calls) == 2  # voted again
+    assert report.complete
+    assert len(read_votes(path)) == 2
+
+
 def test_settings_without_votes_can_change(tmp_path: Path) -> None:
     dataset = make_dataset(tmp_path, n=1)
     run_triage(plan_triage(dataset, RUBRIC, (J1,)), FakeCouncil(lambda j, r: outage()))
