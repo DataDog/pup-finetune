@@ -364,6 +364,9 @@ def train(
     profile = provider.resolve_model(model)
     raw_options = _provider_options(provider_option or [])
     options = provider.validate_options(raw_options)
+    # What the run trains with: an option may narrow the profile (e.g. cap its context),
+    # so rows are rendered, previewed and recorded against the narrowed one.
+    profile = provider.training_profile(profile)
     flags: dict[str, Any] = {
         "max_epochs": max_epochs,
         "patience": patience,

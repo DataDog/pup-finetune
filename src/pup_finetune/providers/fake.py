@@ -39,10 +39,11 @@ import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, NoReturn
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, PositiveInt, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt
 
 from pup_finetune.errors import FinetuneError, UsageError
 from pup_finetune.providers.base import (
@@ -57,6 +58,7 @@ from pup_finetune.providers.base import (
     ModelRef,
     StepMetrics,
 )
+from pup_finetune.providers.options import parse_options
 from pup_finetune.rendering.base import (
     ChatMessage,
     ParsedResponse,
@@ -257,11 +259,12 @@ class FakeRenderer:
         """The completion text of an assistant ``message``, ``<|end|>`` included."""
         return self._assistant_body(message, where="the completion") + _END
 
-    def parse_response(self, text: str) -> ParsedResponse:
+    def parse_response(self, text: str, tools: Sequence[ToolSpec] = ()) -> ParsedResponse:
         """``text`` as an assistant message, the inverse of :meth:`render_completion`.
 
         Text the renderer could not have produced is format-invalid, including a template
         marker anywhere but in its own place (the renderer refuses marker-bearing text).
+        ``tools`` are not needed: this format writes tool-call arguments as JSON.
         """
         body, end, rest = text.partition(_END)
         invalid = ParsedResponse({"role": "assistant", "content": text}, format_valid=False)
@@ -449,33 +452,9 @@ class FakeOptions(BaseModel):
     @classmethod
     def parse(cls, options: Mapping[str, Any]) -> FakeOptions:
         """Validate ``options``, decoding string values as JSON, or raise :class:`UsageError`."""
-        unknown = sorted(set(options) - set(cls.model_fields))
-        if unknown:
-            raise UsageError(
-                f"unknown fake provider option(s): {', '.join(unknown)}",
-                hint=f"known options: {', '.join(cls.model_fields)}",
-            )
-        decoded = {key: _decode(key, value) for key, value in options.items()}
-        try:
-            return cls.model_validate(decoded)
-        except ValidationError as exc:
-            problems = [
-                f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
-                for error in exc.errors()
-            ]
-            raise UsageError(f"invalid fake provider options: {'; '.join(problems)}") from exc
-
-
-def _decode(key: str, value: Any) -> Any:
-    if not isinstance(value, str):
-        return value
-    try:
-        return json.loads(value)
-    except (ValueError, RecursionError) as exc:  # JSONDecodeError is a ValueError
-        raise UsageError(
-            f"fake provider option {key!r} must be JSON, got {value!r}",
-            hint="for example loss_curve=[2.0,1.5] or prefix_stable=false",
-        ) from exc
+        return parse_options(
+            cls, options, provider="fake", example="loss_curve=[2.0,1.5] or prefix_stable=false"
+        )
 
 
 # --- Training ----------------------------------------------------------------------------
@@ -759,7 +738,11 @@ class FakeSession:
             state = _State.from_ref(ckpt)
         self._state.trained = state.trained
 
-    def promote(self, ckpt: CheckpointRef, model_id: str) -> ModelRef:
+    def promote(
+        self, ckpt: CheckpointRef, model_id: str, *, adopt_since: datetime | None = None
+    ) -> ModelRef:
+        # The fake never refuses a model id it promoted before, so it has nothing to adopt.
+        del adopt_since
         self._require_open()
         if not self._backend.supports_promotion:
             raise UsageError("this fake backend is configured without promotion")
@@ -884,7 +867,7 @@ class FakeSampler:
         stop_reason = "stop"
         if len(completion) > max_tokens:
             completion, stop_reason = completion[:max_tokens], "length"
-        parsed = self.renderer.parse_response(self.renderer.decode(completion))
+        parsed = self.renderer.parse_response(self.renderer.decode(completion), tools)
         return Generation(
             message=parsed.message,
             format_valid=parsed.format_valid,
@@ -954,6 +937,9 @@ class FakeProvider:
     def renderer(self, profile: ModelProfile) -> FakeRenderer:
         self._own(profile)
         return FakeRenderer(profile, prefix_stable=self.options.prefix_stable)
+
+    def training_profile(self, profile: ModelProfile) -> ModelProfile:
+        return profile  # no fake option narrows a profile
 
     def backend(self) -> FakeBackend:
         return self._backend

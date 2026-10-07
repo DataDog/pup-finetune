@@ -14,7 +14,11 @@ rows, at most the profile's), and run
 :func:`~pup_finetune.training.loop.run_training` with
 :class:`~pup_finetune.training.promotion.Promotion` as its ``finalize`` hook, so the best
 checkpoint is promoted before the session closes. The promoted model's id is
-:func:`~pup_finetune.runs.model_id_for_run`. Once training and promotion are done, a
+:func:`~pup_finetune.runs.model_id_for_run`, and when the run first asked for a promotion is
+recorded in ``state.json`` before that request
+(:meth:`~pup_finetune.runs.RunState.mark_promotion_requested`), so a model an earlier attempt
+of the run promoted (its response lost) is adopted, and one that existed before is not. Once
+training and promotion are done, a
 failure to end the session only adds a warning: the result, and the promoted model, are
 kept.
 
@@ -221,7 +225,9 @@ class _Run:
         state.track_elapsed(lambda: budget.elapsed_seconds)
         # Promotion may spend the reserve the budget keeps beyond where training stops.
         promotion = dataclasses.replace(
-            self.promotion, spend_guard=lambda: budget.spend_exhausted(use_reserve=True)
+            self.promotion,
+            spend_guard=lambda: budget.spend_exhausted(use_reserve=True),
+            requested_at=state.mark_promotion_requested,
         )
 
         def train_in(session: TrainingSession) -> TrainResult:
@@ -248,10 +254,11 @@ class _Run:
         result = TrainResult.from_json(self.run_dir.read_result() or {})
         if not self.backend.supports_promotion or result.best_epoch is None:
             return self.promotion.record_deployable(result)
+        promotion = dataclasses.replace(self.promotion, requested_at=state.mark_promotion_requested)
 
         def promote_in(session: TrainingSession) -> TrainResult:
             try:
-                return self.promotion(session, result)
+                return promotion(session, result)
             except BaseException as exc:
                 raise FinalizeFailed(result, exc) from exc
 

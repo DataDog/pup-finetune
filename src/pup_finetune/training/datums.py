@@ -7,8 +7,9 @@
 """Rows in, training examples out: render each row and reject the ones that cannot train.
 
 A prefix-stable renderer gives one example per row with every assistant turn trainable; any
-other renderer gives one example per trainable assistant turn, each against its own prefix
-(see :mod:`pup_finetune.rendering.base`). A row's examples stay together: the batcher
+other renderer, or a prefix-stable one refusing a row with ``not_prefix_stable``, gives one
+example per trainable assistant turn, each against its own prefix (see
+:mod:`pup_finetune.rendering.base`). A row's examples stay together: the batcher
 shuffles and batches whole rows. A row is rejected whole, never truncated or repaired.
 """
 
@@ -21,7 +22,7 @@ from typing import Any
 
 from pup_finetune.data.jsonl import to_provider_dict
 from pup_finetune.data.schema import TrainingRow
-from pup_finetune.rendering.base import Renderer, RendererError
+from pup_finetune.rendering.base import Renderer, RendererError, RendererErrorCode
 from pup_finetune.rendering.tokens import TokenizedExample
 
 
@@ -131,5 +132,9 @@ def _render(row: Mapping[str, Any], renderer: Renderer) -> list[TokenizedExample
     messages = list(row.get("messages") or [])
     tools = list(row.get("tools") or [])
     if renderer.prefix_stable:
-        return [renderer.supervised_example(messages, tools)]
+        try:
+            return [renderer.supervised_example(messages, tools)]
+        except RendererError as exc:
+            if exc.code is not RendererErrorCode.NOT_PREFIX_STABLE:
+                raise
     return renderer.per_turn_examples(messages, tools)

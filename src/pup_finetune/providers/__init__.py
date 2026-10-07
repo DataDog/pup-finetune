@@ -7,7 +7,7 @@
 """Training providers, registered by name and imported only when a command needs one.
 
 The registry maps a provider name to a ``"module:attr"`` import path. Listing providers
-imports nothing, so ``--help`` and commands that never train never pay for a provider SDK.
+imports no provider implementation, so ``--help`` and commands that never train never pay for a provider SDK.
 :func:`get_provider` imports the module on first use and calls ``attr`` with the
 :class:`~pup_finetune.runtime.Runtime`; it must return a
 :class:`~pup_finetune.providers.base.Provider`. Development-only providers are visible only
@@ -140,5 +140,11 @@ def _is_first_party(missing: str, module_name: str) -> bool:
     )
 
 
-# Built-in providers register below by import path only, so listing them imports nothing.
+# Built-in providers register below by import path only, so listing them imports no
+# provider implementation.
 register_provider("fake", "pup_finetune.providers.fake:FakeProvider", dev_only=True)
+register_provider("fireworks", "pup_finetune.providers.fireworks.provider:FireworksProvider")
+
+# Providers with an API key register its CredentialSpec in their (lightweight) package, so
+# `auth`, `doctor` and every command that imports this registry know about the key.
+from pup_finetune.providers import fireworks as _fireworks  # noqa: E402, F401

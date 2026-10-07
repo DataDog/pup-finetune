@@ -40,6 +40,7 @@ _PROVIDER_SOURCE = textwrap.dedent(
         def resolve_model(self, alias_or_id): raise NotImplementedError
         def preflight(self, profile): raise NotImplementedError
         def renderer(self, profile): raise NotImplementedError
+        def training_profile(self, profile): return profile
         def backend(self): raise NotImplementedError
         def validate_options(self, options): return dict(options)
         def deploy(self, model, options): raise NotImplementedError
@@ -288,8 +289,12 @@ def test_importing_the_cli_imports_no_provider_module() -> None:
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
     )
     report = json.loads(completed.stdout)
-    # Only the protocols module, never a provider implementation.
-    assert set(report["provider_modules"]) <= {"pup_finetune.providers.base"}
+    # Only the protocols module and the light packages that register provider API keys,
+    # never a provider implementation.
+    assert set(report["provider_modules"]) <= {
+        "pup_finetune.providers.base",
+        "pup_finetune.providers.fireworks",
+    }
     assert report["targets"]
     assert report["loaded_targets"] == []
     assert report["sdks"] == []

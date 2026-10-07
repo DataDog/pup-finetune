@@ -13,7 +13,7 @@ import pytest
 from pup_finetune.data.jsonl import to_provider_dict
 from pup_finetune.data.schema import validate_row
 from pup_finetune.providers.fake import FakeRenderer
-from pup_finetune.rendering.base import ChatMessage, ToolSpec
+from pup_finetune.rendering.base import ChatMessage, RendererError, RendererErrorCode, ToolSpec
 from pup_finetune.rendering.tokens import TokenizedExample
 from pup_finetune.training import RejectedRow, RejectionCode, build_examples, provider_row
 from tests.fakes.training import chat_rows
@@ -29,6 +29,39 @@ class _ZeroWeightRenderer(FakeRenderer):
         return TokenizedExample(
             example.input_tokens, example.target_tokens, (0.0,) * len(example.weights)
         )
+
+
+class _RefusingRenderer(FakeRenderer):
+    """Prefix-stable, but refuses full renders of rows longer than two messages with ``code``."""
+
+    def __init__(self, code: RendererErrorCode) -> None:
+        super().__init__()
+        self.code = code
+
+    def supervised_example(
+        self, messages: list[ChatMessage], tools: list[ToolSpec]
+    ) -> TokenizedExample:
+        if len(messages) > 2:
+            raise RendererError(self.code, "refused")
+        return super().supervised_example(messages, tools)
+
+
+def test_a_row_the_renderer_refuses_as_not_prefix_stable_renders_per_turn() -> None:
+    rows = [*chat_rows(1, turns=1, prefix="short"), *chat_rows(1, turns=3, prefix="long")]
+    renderer = _RefusingRenderer(RendererErrorCode.NOT_PREFIX_STABLE)
+    result = build_examples(rows, renderer, max_seq_len=4096)
+    assert [len(row.examples) for row in result.examples] == [1, 3]
+    assert result.examples[1].examples == tuple(renderer.per_turn_examples(rows[1]["messages"], []))
+    assert result.rejected == []
+
+
+def test_other_refusals_of_a_full_render_still_reject_the_row() -> None:
+    rows = chat_rows(1, turns=3)
+    result = build_examples(
+        rows, _RefusingRenderer(RendererErrorCode.TEMPLATE_ERROR), max_seq_len=4096
+    )
+    assert result.examples == []
+    assert [rejected.code for rejected in result.rejected] == ["template_error"]
 
 
 def test_a_prefix_stable_renderer_gives_one_example_per_row() -> None:

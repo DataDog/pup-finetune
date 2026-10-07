@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import dataclasses
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -31,7 +32,8 @@ from pup_finetune.training import (
     TrainResult,
     run_training,
 )
-from tests.fakes.training import SESSION, MemoryState, row_examples
+from pup_finetune.training.promotion import ADOPT_CLOCK_ALLOWANCE
+from tests.fakes.training import SESSION, MemoryState, RecordingSession, row_examples
 
 LORA = LoraConfig(rank=8)
 
@@ -164,6 +166,37 @@ def test_a_spend_guard_is_not_asked_when_nothing_is_re_created() -> None:
     result = train(backend, spec(), finalize=finalize)
     assert result.promoted_model is not None
     assert asked == []
+
+
+def test_a_promotion_adopts_only_models_created_since_the_run_first_asked() -> None:
+    asked = datetime(2026, 10, 6, 12, 0, tzinfo=UTC)
+    calls: list[str] = []
+
+    def requested_at() -> datetime:
+        calls.append("requested_at")
+        return asked
+
+    def promote_with(finalize: Promotion) -> list[datetime | None]:
+        backend = FakeBackend(FakeOptions())
+        with backend.open_session(FAKE_PROFILE, LORA, **SESSION) as inner:
+            session = RecordingSession(inner)
+            run_training(
+                session,
+                train_rows=row_examples(2),
+                validation_rows=row_examples(2, prefix="val"),
+                spec=spec(max_epochs=1),
+                state=MemoryState(),
+                budget=Budget(),
+                checkpoint_namer=namer,
+                max_checkpoint_name_len=MAX_CHECKPOINT_NAME_LEN,
+                finalize=finalize,
+            )
+        return session.adopt_since
+
+    since = promote_with(dataclasses.replace(promotion(), requested_at=requested_at))
+    assert (calls, since) == (["requested_at"], [asked - ADOPT_CLOCK_ALLOWANCE])
+    # Without a recorded request, no existing model can be told to be the run's.
+    assert promote_with(promotion()) == [None]
 
 
 def test_without_promotion_the_best_sampler_checkpoint_is_the_deployable_one() -> None:

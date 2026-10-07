@@ -14,6 +14,7 @@ from typing import Any
 import typer
 
 from pup_finetune import __version__
+from pup_finetune import providers as _providers  # noqa: F401 - registers provider API keys
 from pup_finetune.cli._common import CommandResult, run_command
 from pup_finetune.datadog.pup import MIN_PUP_VERSION, Pup, format_version
 from pup_finetune.doctor import CheckResult, error_detail, run_registered_checks

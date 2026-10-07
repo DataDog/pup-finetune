@@ -19,6 +19,7 @@ import re
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, Protocol, Self, runtime_checkable
 
 from pydantic import (
@@ -33,14 +34,13 @@ from pydantic import (
 
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.rendering.base import ChatMessage, Renderer, ToolSpec
+from pup_finetune.rendering.hf import COMMIT_SHA
 from pup_finetune.rendering.tokens import TokenizedExample
 
 if TYPE_CHECKING:
     from concurrent.futures import Future
 
 # --- Models and training configuration ---------------------------------------------------
-
-_COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -66,7 +66,7 @@ class ModelProfile:
     notes: str = ""
 
     def __post_init__(self) -> None:
-        if not _COMMIT_SHA.fullmatch(self.tokenizer_revision):
+        if not COMMIT_SHA.fullmatch(self.tokenizer_revision):
             raise ValueError(
                 "tokenizer_revision must be a full 40-character lowercase commit SHA, got "
                 f"{self.tokenizer_revision!r}"
@@ -210,6 +210,25 @@ class TransientError(ExternalError):
     """
 
 
+def is_transient(exc: BaseException) -> bool:
+    """Whether ``exc`` is worth retrying for an idempotent call such as ``forward``."""
+    return isinstance(exc, TransientError | TimeoutError | ConnectionError)
+
+
+class ProviderCapacityError(ExternalError):
+    """The provider has no capacity or quota for the request right now (e.g. HTTP 429).
+
+    It does not by itself mean nothing is running: a call in the middle of a session can
+    raise it while the session is still open. A provider that ends what a failed start had
+    provisioned says so in the hint. It is not a :class:`TransientError`: the loop does not
+    retry it, the user does, later.
+    """
+
+
+class ProviderAuthError(ExternalError):
+    """The provider rejected the API key (HTTP 401) or refused it the request (HTTP 403)."""
+
+
 # --- Results the seam returns ------------------------------------------------------------
 
 
@@ -241,7 +260,12 @@ digits and dashes, starting with a letter and not ending with a dash."""
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModelRef:
-    """A promoted model: a checkpoint turned into a model the provider can deploy."""
+    """A promoted model: a checkpoint turned into a model the provider can deploy.
+
+    ``model_id`` is the provider-local id it was promoted as (the ``model_id`` passed to
+    :meth:`TrainingSession.promote`); ``uri`` is the provider's fully qualified name for it,
+    e.g. ``accounts/<account>/models/<model_id>`` on Fireworks.
+    """
 
     provider: str
     model_id: str
@@ -379,13 +403,23 @@ class TrainingSession(Protocol):
         """Replace the session's weights with ``ckpt``'s (e.g. the best epoch's)."""
         ...
 
-    def promote(self, ckpt: CheckpointRef, model_id: str) -> ModelRef:
+    def promote(
+        self, ckpt: CheckpointRef, model_id: str, *, adopt_since: datetime | None = None
+    ) -> ModelRef:
         """Turn a sampler checkpoint into a deployable model named ``model_id``.
 
         Only on a backend with :attr:`TrainingBackend.supports_promotion`. ``model_id``
         fully matches :data:`MODEL_ID_PATTERN` (lowercase letters, digits and dashes, starting
         with a letter, at most :data:`MAX_MODEL_ID_LEN` characters), which every provider
-        accepts.
+        accepts. The returned :class:`ModelRef` carries ``model_id`` as given and the
+        provider's fully qualified name for the model as ``uri``.
+
+        A promotion can succeed on the provider while its response is lost, and a retry then
+        finds ``model_id`` taken. ``adopt_since`` (shortly before the run first asked for a
+        promotion) lets a provider that can look models up return such a model instead: one
+        named ``model_id``, of the same base model, created no earlier than ``adopt_since``, so
+        it is this run's and not another run's that used the same id. A provider that cannot
+        tell ignores it.
         """
         ...
 
@@ -473,6 +507,15 @@ class Provider(Protocol):
 
     def renderer(self, profile: ModelProfile) -> Renderer:
         """The renderer for ``profile``, with its tokenizer pinned to the profile's revision."""
+        ...
+
+    def training_profile(self, profile: ModelProfile) -> ModelProfile:
+        """``profile`` as a run trains it under the validated provider options.
+
+        ``profile`` itself unless an option narrows it (e.g. caps its context). Call it after
+        :meth:`validate_options`: rows are rendered against, and a run records, the profile
+        it returns. Raises :class:`UsageError` when an option does not fit ``profile``.
+        """
         ...
 
     def backend(self) -> TrainingBackend:

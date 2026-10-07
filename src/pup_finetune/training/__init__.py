@@ -56,7 +56,6 @@ from pup_finetune.training.loop import (
     FinalizeFailed,
     LoopState,
     checked_checkpoint_name,
-    is_transient,
     run_training,
 )
 from pup_finetune.training.promotion import NO_SAMPLER_CHECKPOINT, NOTHING_TO_PROMOTE, Promotion
@@ -100,7 +99,6 @@ __all__ = [
     "checked_checkpoint_name",
     "checkpoint_from_json",
     "epoch_rng",
-    "is_transient",
     "pack_microbatches",
     "plan_batches",
     "provider_row",

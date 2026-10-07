@@ -8,7 +8,7 @@ all welcome. For a security issue, follow [SECURITY.md](SECURITY.md) instead of 
 You need Python 3.12 or newer and [uv](https://docs.astral.sh/uv/).
 
 ```sh
-uv sync                      # create .venv and install the project and dev tools
+uv sync --all-extras         # create .venv and install the project, its extras and dev tools
 uv run pre-commit install    # run the checks below on every commit
 ```
 
@@ -50,12 +50,18 @@ ticks every box:
       imports the provider's SDK; every other module talks to that client.
 - [ ] **Protocols.** Implement `Provider`, `TrainingBackend` (with its `TrainingSession`) and
       `Sampler` from `providers/base.py`. For the `Renderer`, reuse the shared Hugging Face
-      chat-template renderer of the model family; only a new model family needs a new one.
+      chat-template renderer (`rendering/hf.py`) of the model family from
+      `rendering/families.py`; only a new model family needs a new table entry (plus a
+      response parser when its output format is new).
 - [ ] **Registration.** Register the provider lazily in `providers/__init__.py` with
-      `register_provider("<name>", "pup_finetune.providers.<name>:<Name>Provider")`, so
-      listing providers imports nothing.
+      `register_provider("<name>", "pup_finetune.providers.<name>.provider:<Name>Provider")`,
+      so listing providers imports no provider implementation; keep the implementation in
+      `provider.py` and the package `__init__.py` light.
 - [ ] **Credentials.** Add a `CredentialSpec` for the provider's API key to the registry in
-      `credentials.py`, so `auth login`, `auth status` and `doctor` cover it.
+      `credentials.py`, from the package's `__init__.py` (keep it free of heavy imports), and
+      import the package at the bottom of `providers/__init__.py` with
+      `from pup_finetune.providers import <name> as _<name>  # noqa: E402, F401`, so
+      `auth login`, `auth status` and `doctor` cover it.
 - [ ] **Install.** Add a `<name>` extra to `pyproject.toml` for the SDK, with its rows in
       `LICENSE-3rdparty.csv`.
 - [ ] **Contract suites.** Subclass `RendererContract`, `BackendContract` and

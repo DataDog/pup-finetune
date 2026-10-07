@@ -24,6 +24,7 @@ loop's reports in lists and can ask for cancellation after a number of steps.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import Any
 
 from pup_finetune.providers.base import (
@@ -137,6 +138,8 @@ class RecordingSession:
         self.train_metrics = list(train_metrics)
         self.forward_metrics = list(forward_metrics)
         self.calls: list[str] = []
+        self.adopt_since: list[datetime | None] = []
+        """The ``adopt_since`` of each promotion."""
         self.train_batches: list[tuple[TokenizedExample, ...]] = []
         self.validation_batches: list[tuple[TokenizedExample, ...]] = []
         self.outstanding: list[TrackedResult[Any]] = []
@@ -194,8 +197,11 @@ class RecordingSession:
     def load_weights(self, ckpt: CheckpointRef) -> None:
         self.inner.load_weights(ckpt)
 
-    def promote(self, ckpt: CheckpointRef, model_id: str) -> ModelRef:
-        return self.inner.promote(ckpt, model_id)
+    def promote(
+        self, ckpt: CheckpointRef, model_id: str, *, adopt_since: datetime | None = None
+    ) -> ModelRef:
+        self.adopt_since.append(adopt_since)
+        return self.inner.promote(ckpt, model_id, adopt_since=adopt_since)
 
     def sampler(self, ckpt: CheckpointRef | None) -> Sampler:
         return self.inner.sampler(ckpt)

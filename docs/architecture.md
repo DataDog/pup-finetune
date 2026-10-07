@@ -75,37 +75,68 @@ side of a session:
   checkpoint's weights, and sampling from the base model or a checkpoint.
 
 **Renderers** (`Renderer`) own tokenization and response parsing. They are provider-neutral:
-each model family has one renderer built on its Hugging Face chat template and tokenizer,
-pinned to a revision, and every provider serving that family uses it.
+one implementation, `HFChatTemplateRenderer` in
+[`rendering/hf.py`](../src/pup_finetune/rendering/hf.py), renders with the model's own
+Hugging Face chat template and tokenizer, pinned to a revision, and every provider serving
+that model uses it. Each model family is an entry in
+[`rendering/families.py`](../src/pup_finetune/rendering/families.py): the tokenizer, its
+40-character revision, the response parser (from
+[`rendering/parsers.py`](../src/pup_finetune/rendering/parsers.py)), the stop tokens, any
+template arguments, and for models that stop by emitting the next role tag, which tag follows
+an assistant message. `transformers` comes from the optional `hf` extra and loads lazily.
 
 - `supervised_example` renders a whole conversation with every assistant turn trainable
   (honoring `weight: 0`); `per_turn_examples` renders each trainable turn against its own
   prefix.
 - `generation_prompt_tokens`, `stop_token_ids`, `decode` and `parse_response` are the
   inference side: the prompt a sampler continues, where it stops, and how a completion becomes
-  an OpenAI assistant message plus a `format_valid` flag.
+  an OpenAI assistant message plus a `format_valid` flag. `parse_response` takes the prompt's
+  tools, since a format can write argument values untyped (Qwen3.8 writes strings unquoted).
 - `identity()` pins the tokenizer, its revision, the template hash and the renderer and parser
   versions. A run records it, and a mismatch on resume means "prepare a new run".
 
 **Providers** (`Provider`) own everything outside the loop: the model profiles they support
 (`models`, `resolve_model`), a live `preflight`, readiness `check`s for `doctor`, their
-credentials, validation of provider-specific `provider_options`, and `deploy` / `undeploy`.
+credentials, validation of provider-specific `provider_options`, `training_profile` (the
+profile as those options train it, e.g. with a shorter context: rows are rendered against
+it and the run records it, so a preview shows its effect and a resume renders the same rows),
+and `deploy` / `undeploy`.
 
 ## Training matches inference
 
-The loop trains on one render per row with every assistant turn trainable. That costs
-O(turns) tokens rather than O(turns²), but it is only correct when the renderer is
-**prefix-stable**: for every assistant turn *i*, the generation prompt for `messages[:i]` must
-be a token prefix of the full render, so the model is trained on exactly the tokens it will
-see at inference.
+A chat endpoint renders the conversation with the chat template, tokenizes the whole prompt
+text as **one** string, and the model generates the completion after it. Training must see the
+same tokens, so by default `HFChatTemplateRenderer` renders **one example per trainable
+assistant turn**: the generation prompt for `messages[:i]`, tokenized whole, followed by the
+turn's completion tokens. The loss covers the completion through its stop token and nothing
+after it (for role-tag families, the appended next role tag is the stop target, after any
+whitespace the template renders past the reply is dropped). A turn whose render does not
+continue its own prompt is rejected with `prompt_mismatch`.
 
-Chat templates are often prefix-stable as text and still not as tokens, because a tokenizer can
-merge characters across the point where generation starts. Renderers therefore tokenize
-**segment-wise**: they split the rendered conversation at each generation-prompt end and each
-assistant-turn end, and tokenize each segment on its own, which is how the inference server
-tokenizes the prompt and the completion. A renderer that still cannot guarantee prefix
-stability declares `prefix_stable = False` (or raises `RendererError` with code
-`not_prefix_stable`), and the loop falls back to `per_turn_examples`.
+Chat templates are often prefix-stable as text and still not as tokens: a tokenizer can merge
+characters across the point where generation starts. Qwen3.8's prompt ends `<think>\n` and an
+empty reasoning block continues `\n`, which the whole conversation encodes as one `\n\n`
+token. In that case the completion is the rest of the rendered turn encoded on its own after
+the prompt's tokens, as the model would generate it.
+
+One example per row with every assistant turn trainable costs O(turns) tokens rather than
+O(turns²), but it is only correct when the renderer is **prefix-stable** for that row: for
+every trainable turn *i*, the turn's per-turn example must be an exact token prefix of the
+whole conversation tokenized once. A family may pin `prefix_stable` to try this fast path;
+the renderer then checks it on every row in `supervised_example` (rows with
+`reasoning_content` always render per turn) and raises `RendererError` with code
+`not_prefix_stable` when it does not hold, and the loop renders that row with
+`per_turn_examples`. A renderer that is not prefix-stable declares `prefix_stable = False` and
+the loop renders every row per turn. Qwen3.8 is not token prefix-stable, so `qwen3_8` renders
+per turn. Only `supervised_example` raises `not_prefix_stable`; a per-turn failure carries
+its own code, so the loop never retries it per turn.
+
+A tokenizer that cannot be loaded fails every row alike, so the renderer reports it as an
+`ExternalError` (a `UsageError` when the `hf` extra is missing) rather than rejecting rows.
+
+The Qwen3.8 response parser knows its generation prompt opens `<think>`: sampled text that
+never reaches `</think>` (cut off at the token limit) is all reasoning and `format_valid` is
+false.
 
 ## Token arrays
 
@@ -144,11 +175,56 @@ Rows are validated once, when they enter a dataset, so renderers can rely on thi
 ## The registry
 
 [`providers/__init__.py`](../src/pup_finetune/providers/__init__.py) maps each provider name
-to a `"module:attr"` import path. Listing providers imports nothing; `get_provider(name,
-runtime)` imports the module on first use and calls `attr(runtime)`, which must return a
-`Provider`. A provider whose SDK is not installed fails with a hint to install its extra.
+to a `"module:attr"` import path. Listing providers imports no provider implementation;
+`get_provider(name, runtime)` imports the module on first use and calls `attr(runtime)`, which
+must return a `Provider`. A provider whose SDK is not installed fails with a hint to install its extra.
 Entries registered with `dev_only=True`, like the offline `fake` provider used for
-development, are visible only with `PUP_FINETUNE_DEV=1`.
+development, are visible only with `PUP_FINETUNE_DEV=1`. `fireworks` is registered for
+everyone. The registry also imports the lightweight package of every provider that has an API
+key (today `fireworks`, through an import at the bottom of `providers/__init__.py`). That
+package's `__init__.py` does little more than register the provider's `CredentialSpec`, so
+`auth`, `doctor` and every other command know the API key without importing an SDK, an HTTP
+client or a tokenizer. The implementation lives in the package's `provider` module, which
+`get_provider` imports on first use.
+
+## Training on Fireworks
+
+[`providers/fireworks/backend.py`](../src/pup_finetune/providers/fireworks/backend.py) is the
+`TrainingBackend` for Fireworks serverless training, and the worked example of a real one. It
+talks to the narrow interface in `providers/fireworks/client.py`, never to the SDK:
+
+- **Sessions.** `open_session` opens one serverless training session and creates the LoRA
+  run on it (rank, alpha and seed from the run), or continues a training checkpoint with
+  `create_training_client_from_state_with_optimizer`. Leaving the context always ends the
+  session: results still in flight are waited for briefly after a normal exit and abandoned
+  after an error or Ctrl-C, then the samplers, the session and the client are closed. A
+  failure to close never hides the error that ended the body, and a failure to close the
+  session (which may leave it billing) is the one raised after a normal exit, any other as a
+  note. With no capacity, nothing is left running. The `max_seq_len` provider option cuts the
+  profile's context (`training_profile`), so longer rows are left out when the rows are
+  rendered; the session also refuses a longer sequence length, as a backstop.
+- **Losses.** `forward_backward` reports Fireworks' `loss:sum` over `response_tokens`.
+  Fireworks' forward pass returns no loss, only per-token logprobs, so the validation loss is
+  `-sum(logprob * weight)` over every target token, after checking that the logprobs match
+  the examples sent, token for token.
+- **Checkpoints.** Training checkpoints (`save_state`) hold weights and optimizer state and
+  can be resumed in a later session; sampler checkpoints (`save_weights_for_sampler`) can be
+  sampled from and promoted only while their session lives, which ends shortly after the
+  process exits. Fireworks enforces its 17-character name limit only at promotion, so names
+  are checked before saving.
+- **Promotion.** Fireworks renames checkpoints (`run-<hex>-<name>-<8 hex>`), so `promote`
+  lists the session's checkpoints and takes the newest promotable sampler row carrying the
+  checkpoint's name, then promotes it to `accounts/<account>/models/<model id>`: the
+  `ModelRef`'s `model_id` is the bare id, its `uri` that full name. The shared
+  `finalize` hook ([`training/promotion.py`](../src/pup_finetune/training/promotion.py)) runs
+  it before the session ends; after a resume, it first re-creates the best epoch's sampler
+  checkpoint from its training checkpoint (`load_state`, then `save_weights_for_sampler`).
+- **Sampling.** A sampler renders the prompt with the profile's renderer, samples greedily up
+  to the renderer's stop tokens and parses the completion into an OpenAI message; a
+  completion cut off at `max_tokens` is not `format_valid`. Sampling alone is retried on a
+  transient failure, a bounded number of times with a warning before each retry; training
+  calls never are, since the loop owns that policy. `latency_s` times the successful attempt
+  only.
 
 ## How a new provider plugs in
 
@@ -162,20 +238,31 @@ Using Baseten as the example:
    stopped early or failed. Convert each `TokenizedExample` to the SDK's datum type, map
    `AdamConfig` onto its optimizer parameters, size the trainer from the `seed` and
    `max_seq_len` passed to `open_session`, set `max_checkpoint_name_len` to the provider's
-   limit, and declare `supports_resume` and `supports_promotion`.
-3. **Renderer.** Reuse the Hugging Face chat-template renderer for the model family: the same
-   model renders the same way on every provider. A new family needs a new renderer, plus a
-   prefix-stability test against its real template.
+   limit, and declare `supports_resume` and `supports_promotion`. Map SDK failures onto the
+   neutral errors in `providers/base.py`: `ProviderCapacityError` when there is no capacity
+   or quota (end what the failed call started before raising it, and say so in the hint
+   only then), `ProviderAuthError` for a rejected key and
+   `TransientError` for a retryable server error or dropped connection, with redacted
+   messages (`providers/fireworks/client.py` does this in `fireworks_error`).
+   `providers/fireworks/backend.py` is a complete backend to follow.
+3. **Renderer.** Reuse `HFChatTemplateRenderer` through the model's family in
+   `rendering/families.py`: the same model renders the same way on every provider. A new
+   family is a new table entry (plus a response parser when its output format is new) and
+   `tokenizer`-marked tests against its real template, including the `RendererContract`.
 4. **Profiles.** Return `ModelProfile`s from `models()`, with the tokenizer pinned to a
    40-character revision, and check in `preflight` that the provider's model matches the
    profile.
 5. **Credentials.** Register a `CredentialSpec` for `BASETEN_API_KEY` in `credentials.py`'s
-   registry, so `auth login baseten`, `auth status` and `doctor` work without new code. Pass
-   the resolved key explicitly to the SDK; never copy it into the environment.
+   registry from the package's lightweight `__init__.py` (as `providers/fireworks/` does), and
+   import that package at the bottom of `providers/__init__.py` with
+   `from pup_finetune.providers import baseten as _baseten  # noqa: E402, F401`, so
+   `auth login baseten`, `auth status` and `doctor` work without new code. Pass the resolved
+   key explicitly to the SDK; never copy it into the environment.
 6. **Deploy.** Implement `deploy` and `undeploy` for a promoted `ModelRef`. Callers gate them
    behind `--confirm` and `PUP_READ_ONLY`.
 7. **Registration and install.** Call `register_provider("baseten",
-   "pup_finetune.providers.baseten:BasetenProvider")` in the registry, and add a `baseten`
+   "pup_finetune.providers.baseten.provider:BasetenProvider")` in the registry (the
+   implementation lives in `provider.py`, so the package `__init__.py` stays light), and add a `baseten`
    extra to `pyproject.toml` for the SDK (with its rows in `LICENSE-3rdparty.csv`).
 8. **Tests.** Subclass the contract suites in `tests/providers/contract/`
    (`RendererContract`, `BackendContract`, `ProviderContract`) against a fake of the SDK
