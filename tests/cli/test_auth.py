@@ -28,7 +28,12 @@ from pup_finetune.errors import ExternalError, UsageError
 from tests.fakes.keyring import FailKeyring, LockedKeyring, MemoryKeyring, StickyKeyring
 
 SECRET = "zq9Xsynthetic0000keyVALUEw7Pm"  # noqa: S105 - synthetic test value
-ACME = CredentialSpec(provider="acme", env_var="ACME_API_KEY", description="Acme test provider")
+ACME = CredentialSpec(
+    provider="acme",
+    env_var="ACME_API_KEY",
+    description="Acme test provider",
+    needed_for="training on acme",
+)
 BETA = CredentialSpec(provider="beta", env_var="BETA_API_KEY")
 
 runner = CliRunner()
@@ -92,8 +97,20 @@ def test_status_reports_each_provider_and_source(
     assert result.exit_code == 0, result.stderr
     assert json.loads(result.stdout) == {
         "providers": [
-            {"provider": "acme", "env_var": "ACME_API_KEY", "configured": False, "source": None},
-            {"provider": "beta", "env_var": "BETA_API_KEY", "configured": False, "source": None},
+            {
+                "provider": "acme",
+                "env_var": "ACME_API_KEY",
+                "configured": False,
+                "source": None,
+                "needed_for": "training on acme",
+            },
+            {
+                "provider": "beta",
+                "env_var": "BETA_API_KEY",
+                "configured": False,
+                "source": None,
+                "needed_for": None,
+            },
         ]
     }
 
@@ -119,7 +136,13 @@ def test_status_for_one_provider(keychain: MemoryKeyring, monkeypatch: pytest.Mo
     assert result.exit_code == 0, result.stderr
     assert json.loads(result.stdout) == {
         "providers": [
-            {"provider": "acme", "env_var": "ACME_API_KEY", "configured": True, "source": "env"}
+            {
+                "provider": "acme",
+                "env_var": "ACME_API_KEY",
+                "configured": True,
+                "source": "env",
+                "needed_for": "training on acme",
+            }
         ]
     }
     assert_no_leak(result.stdout + result.stderr)
@@ -427,7 +450,7 @@ def test_the_key_never_leaks_through_auth_commands_or_errors(
     assert [r.exit_code for r in results] == [0, 0, 0, 1, 2, 0, 1, 0]
     beta_error = results[3].stderr
     assert "RuntimeError: provider rejected ***" in beta_error
-    assert "Error: bad key ***" in results[4].stderr
+    assert "Error [usage]: bad key ***" in results[4].stderr
     assert "Bearer ***" in results[4].stderr
     assert "Traceback" in results[6].stderr
     for result in results:

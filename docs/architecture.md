@@ -96,11 +96,14 @@ an assistant message. `transformers` comes from the optional `hf` extra and load
   versions. A run records it, and a mismatch on resume means "prepare a new run".
 
 **Providers** (`Provider`) own everything outside the loop: the model profiles they support
-(`models`, `resolve_model`), a live `preflight`, readiness `check`s for `doctor`, their
+(`models`, `resolve_model`), a live `preflight` (which `doctor --provider NAME --check` and
+`models list --check` run), their
 credentials, validation of provider-specific `provider_options`, `training_profile` (the
 profile as those options train it, e.g. with a shorter context: rows are rendered against
 it and the run records it, so a preview shows its effect and a resume renders the same rows),
-and `deploy` / `smoke_test` / `undeploy`.
+the billing sentences previews show (`training_billing` and `sampling_billing`: what the
+provider bills for, with the usage the preview counts, never a price it cannot know), and
+`deploy` / `smoke_test` / `undeploy`.
 
 ## Training matches inference
 
@@ -191,6 +194,26 @@ package's `__init__.py` does little more than register the provider's `Credentia
 client or a tokenizer. The implementation lives in the package's `provider` module, which
 `get_provider` imports on first use.
 
+Each entry also says what the provider needs (`ProviderInfo`): the credential it signs in
+with, the optional packages each step needs (`Package`: the Training SDK and the renderer's
+`transformers`, found with `importlib.util.find_spec`, never imported), the `train` flags it
+refuses (`RefusedFlag`, e.g. Baseten's `--lora-alpha`) and whether it deploys. `doctor` builds
+its provider checks and its `ready` map from it (`readiness.py`), and the `train`, `resume`,
+`evaluate`, `deploy` and `undeploy` previews check it before any provider call, so a missing
+SDK or a flag the provider cannot honor fails the preview with the install hint or the
+reason, exit 2, rather than a detached worker or a paid session after `--confirm`. A
+provider has no readiness method of its own: `doctor` never builds one unless
+`--provider NAME --check` asks for its live `preflight`, and a failed preflight blocks
+`train` and `evaluate` on it in `ready`. A package that is found but fails to load (its
+parent package raises on import) is reported as installed but unloadable, apart from one
+that is missing.
+
+`doctor`'s JSON report changed shape in this version: the top-level `pup` and
+`datadog_auth` sections (and `python` and `package`) are gone. Scripts read the `pup` and
+`datadog_auth` checks in `checks` instead (the login's `detail` names when its token
+expires) and `versions` (`pup_finetune`, `checkout`, `pup`, `python`); `ok` stays for one
+release.
+
 ## Training on Fireworks
 
 [`providers/fireworks/backend.py`](../src/pup_finetune/providers/fireworks/backend.py) is the
@@ -274,11 +297,16 @@ provider, and talks to models only through the `Sampler` protocol.
   from the sampler. Arguments compare as JSON values, and `reasoning_content` is never
   compared. `aggregate` reports `{rate, passed, n}` per metric over the cases it applies to,
   with `rate` `null` when `n` is `0`.
-- **Judge** ([`judge.py`](../src/pup_finetune/evaluation/judge.py)). An LLM, through an
-  OpenAI-compatible endpoint, says whether the candidate is an acceptable substitute for the
-  reference. The recorded data is untrusted and travels JSON-encoded in tagged blocks.
-  Before anything is generated, a calibration checks that references pass and corrupted
-  versions of them fail; a judge that fails it is not used. The judge must not be the model
+- **Judge** ([`judge.py`](../src/pup_finetune/evaluation/judge.py)). An LLM on any judge
+  provider (see [Judges](#judges)) says whether the candidate is an acceptable substitute for
+  the reference. The recorded data is untrusted and travels JSON-encoded in tagged blocks.
+  The answer is parsed strictly whichever provider gave it; an answer the provider refused
+  (`finish_reason` `refusal`) is a failed judgment with error `refused`, like an unparseable
+  one.
+  Before anything is generated, a calibration checks that references pass and two corrupted
+  versions of each fail (for a tool call, the first two that apply of the wrong tool, an
+  altered argument, a refusal and an unsupported claim; for a text answer, an unsupported
+  claim and an off-topic answer); a judge that fails it is not used. The judge must not be the model
   being trained, nor the run's tuned model (its model id, or the promoted model).
 - **Targets** ([`targets.py`](../src/pup_finetune/evaluation/targets.py)). Two samplers from
   one session: `base` (no checkpoint) and `tuned`, the best epoch. `train --evaluate` runs in
@@ -381,7 +409,8 @@ waiting still records what exists and bills; a smoke test that raises is recorde
 with an undeploy hint. It is updated once the deployment serves, with the
 `smoke_test` result, and with `deleted_at` by `undeploy`. A run has one deployment at a time.
 `undeploy` is idempotent and keeps the model. Both are remote writes: they preview without
-`--confirm` and are refused with `PUP_READ_ONLY`.
+`--confirm`, from the run directory alone (no provider call), and with `PUP_READ_ONLY` set
+only their `--confirm` is refused.
 
 On Fireworks, [`providers/fireworks/deploy.py`](../src/pup_finetune/providers/fireworks/deploy.py)
 drives the SDK's `Fireworks` client through `client.py`: the first validated, latest-validated
@@ -419,11 +448,59 @@ the model and deployment ids, so `deployment_name` is `None`; `owns_deployment` 
 model back by name, and `undeploy` deletes the model with its deployment, which keeps the
 checkpoint and frees the name for the next deploy.
 
+## Judges
+
+LLM judges (the replay judge and the triage council) run on Fireworks, Anthropic or OpenAI.
+[`judges.py`](../src/pup_finetune/judges.py) is provider-neutral and imports no SDK:
+`parse_judge` reads a judge spec by prefix (`anthropic/<model>` or `openai/<model>`; any
+other spec is a Fireworks model id such as `accounts/fireworks/models/<model>`, as before)
+into a `JudgeConfig` with the provider's defaults (endpoint, credential,
+whether a temperature is sent, the token limit, the reasoning effort). A verdict needs
+little thinking, so every judge of a reasoning model asks for the lowest effort its model
+accepts: `low` on Anthropic (on its models with effort levels) and OpenAI (not its GPT-4-era
+models, which do not reason and refuse the field), and on Fireworks the effort
+`FIREWORKS_REASONING` records per model (`none` for DeepSeek V4.1 Flash, `low` for GLM-5.3
+Flash, which cannot turn thinking off); other Fireworks models are sent no reasoning effort.
+The effort is part of the judge's identity and of a triage's frozen settings, so an
+evaluation or triage made before a change to it is continued only in a new `--out-dir`, or
+after `--reset-triage`. `JudgeConfig.provider` is part of the
+judge's identity, so a judge on another provider never reuses earlier judgments or votes, and
+`JudgeConfig.spec` writes the judge back the one way commands pin it. `open_client` builds
+the client for a judge, and `open_clients` one client per provider for a council that mixes
+them; every client answers the one `ChatCompleter.complete` call, which takes an optional
+`response_schema` for a JSON answer and an optional `reasoning_effort`. A request longer than
+the model's context window is a `ContextLimitError` on every provider (`is_context_limit`
+reads each one's error answer), which no retry fixes.
+
+- **Fireworks** and **OpenAI** share the `httpx` `ChatClient`
+  ([`inference.py`](../src/pup_finetune/inference.py)), with a per-provider `RequestPolicy`:
+  OpenAI's token limit goes in `max_completion_tokens`, no `temperature` is sent (its current
+  models reason), a JSON answer is asked for with `response_format` `json_object`, an
+  answer with a `refusal` (or `finish_reason` `content_filter`) is reported as a refusal, and
+  each attempt may take up to 10 minutes, as a reasoning model's answer arrives only once it
+  is complete.
+- **Anthropic** uses the official SDK (the `anthropic` extra) in
+  [`anthropic_client.py`](../src/pup_finetune/anthropic_client.py), the only module that
+  imports it: the leading system message becomes `system`, no sampling parameter is sent,
+  `output_config.format` carries the verdict's JSON schema on models with structured outputs,
+  `output_config.effort` is the judge's effort on models with effort levels, and the models with
+  server-side refusal fallbacks are called through the beta API with `fallbacks="default"`.
+  Its typed errors map to the same error classes as `ChatClient`'s; a failed SDK sign-in
+  (`CredentialsError`, `WorkloadIdentityError`) is a rejected key, which stops a triage.
+
+The keys are `CredentialSpec`s like Fireworks' ([`judge_credentials.py`](../src/pup_finetune/judge_credentials.py),
+registered when the providers package is imported): `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`,
+or the keychain accounts `anthropic` and `openai`. Without an Anthropic key, the SDK may sign in
+on its own (`ANTHROPIC_AUTH_TOKEN`, an `ant auth login` profile whose file exists); `auth
+status` and `doctor` report that as the source `anthropic-sdk`, and the tokens it would use
+are registered for redaction before the client is built. Every preview names each provider and endpoint the
+data is sent to.
+
 ## Triage
 
 [`curation/triage.py`](../src/pup_finetune/curation/triage.py) is `dataset triage`, the paid
 alternative to agent or human labels: a council of judge models (two Fireworks serverless
-models by default, through the same OpenAI-compatible client as the replay judge) votes keep
+models by default; any [judge provider](#judges), mixed as the user likes) votes keep
 or drop on each **whole** row against a rubric or rules, since training imitates every
 assistant turn of a kept row. The prompt follows the replay judge's conventions: the system
 message holds the rubric and says that everything recorded is untrusted data, and the row
@@ -431,10 +508,15 @@ travels JSON-encoded in tagged blocks it cannot close. The answer is parsed stri
 `{"keep": bool, "reason": str}`.
 
 A row is kept only on a strict majority of keep votes; a tie drops it; a row missing a vote
-is undecided and left unlabeled. A failed call, or an answer without a vote, is not a vote:
-it is reported and retried by the next run. Votes are appended to `judgments.jsonl` as they
+is undecided and left unlabeled. A failed call, an answer without a vote, or one the
+provider refused, is not a vote:
+it is reported and retried by the next run. A row a judge refuses as longer than its
+context window is never truncated: that answer is stored as a `too_long` vote, which drops
+the row (the council keeps no row one of its judges could not read whole), and the row's
+other calls are skipped, on this run and the next. Votes are appended to `judgments.jsonl` as they
 arrive, and count only for the row content, rubric and judge they were cast for, so an
-interrupted triage resumes. The rubric's hash and the judges are frozen in `triage.json`
+interrupted triage resumes. The rubric's hash and the judges (as provider-qualified specs)
+are frozen in `triage.json`
 once votes exist (`--reset-triage` discards them). Decisions are recorded as labels with
 `by: judge` through `apply_labels`; rows the agent or a person labeled are not reviewed. A
 label cannot be withdrawn, so a judge label the current votes do not back (cast under a
@@ -442,6 +524,12 @@ discarded rubric, outside a `--max-rows` sample, or on a row left undecided) is 
 stale, and the triage is `incomplete` until a run over every row replaces it.
 `--max-rows` reviews a fixed pseudo-random sample, so a calibration run's votes are reused
 by the full run. A rubric template ships with the package (`--print-template`).
+
+`--agreement` measures a council before it labels anything: it reviews the rows the agent or
+a person labeled instead, writes no label, and reports how often the council's decisions agree
+with those labels (`Agreement`: the rate, Cohen's kappa, the confusion counts, each judge's own
+agreement, and the rows they disagree on). Its votes are stored and frozen like
+any other, so the same rubric then labels the remaining rows.
 
 ## How a new provider plugs in
 
@@ -468,7 +556,8 @@ Using Baseten as the example:
    `tokenizer`-marked tests against its real template, including the `RendererContract`.
 4. **Profiles.** Return `ModelProfile`s from `models()`, with the tokenizer pinned to a
    40-character revision, and check in `preflight` that the provider's model matches the
-   profile.
+   profile. Say what the provider bills for in `training_billing` and `sampling_billing`
+   (wrap `training_usage_text` and `sampling_usage_text`; no dollar figure).
 5. **Credentials.** Register a `CredentialSpec` for `BASETEN_API_KEY` in `credentials.py`'s
    registry from the package's lightweight `__init__.py` (as `providers/fireworks/` does), and
    import that package at the bottom of `providers/__init__.py` with
@@ -483,8 +572,14 @@ Using Baseten as the example:
    one a `DeploymentRequest` creates) and an idempotent `undeploy` for a promoted `ModelRef`. Callers
    gate them behind `--confirm` and `PUP_READ_ONLY`.
 7. **Registration and install.** Call `register_provider("baseten",
-   "pup_finetune.providers.baseten.provider:BasetenProvider")` in the registry (the
-   implementation lives in `provider.py`, so the package `__init__.py` stays light), and add a `baseten`
+   "pup_finetune.providers.baseten.provider:BasetenProvider", options=("max_seq_len",),
+   models=("qwen3p5-9b", "glm-5p3-flash"))` in the registry (the implementation lives in
+   `provider.py`, so the package `__init__.py` stays light; `options` names the
+   `--provider-option` keys, which `train --help` lists, and a provider that takes
+   `max_seq_len` gets `train --max-seq-len` too; `models` names the profiles' aliases, which
+   `train` infers `--provider` from, and an alias another provider offers too makes
+   `--provider` required for it; `label`, `credential`, `packages`, `refuses` and `deploys`
+   say what it needs, which `doctor` and the previews check), and add a `baseten`
    extra to `pyproject.toml` for the SDK (with its rows in `LICENSE-3rdparty.csv`).
 8. **Tests.** Subclass the contract suites in `tests/providers/contract/`
    (`RendererContract`, `BackendContract`, `ProviderContract`) against a fake of the SDK

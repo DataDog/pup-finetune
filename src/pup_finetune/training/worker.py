@@ -41,7 +41,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, get_args
 
-from pup_finetune.errors import StateError, UsageError
+from pup_finetune.display import ABSOLUTE_PATHS_ENV, display_path
+from pup_finetune.errors import StateError, UsageError, WrongPhase
+from pup_finetune.next_steps import command
 from pup_finetune.providers.base import Provider
 from pup_finetune.runs import Clock, RunDir, error_json, utcnow
 from pup_finetune.storage import atomic_write_json, read_json
@@ -108,7 +110,7 @@ def run_in_dir(
     :func:`~pup_finetune.training.runner.start_training`). Returns the run's ``result.json``.
     """
     if mode == "finalize" and run_dir.load_state().resume_mode != "finalize_only":
-        raise UsageError(
+        raise WrongPhase(
             f"the run in {run_dir.path} has training left to do, not only its promotion",
             hint="resume it instead",
         )
@@ -140,7 +142,9 @@ def spawn_worker(run_dir: RunDir, mode: WorkerMode, *, now: Clock = utcnow) -> i
     """Start a detached worker for ``run_dir`` in ``mode``; returns its pid.
 
     The worker runs in a new session (so closing the terminal does not stop it), in the run
-    directory, reads nothing from stdin, and writes its output to ``worker.log``. Its pid,
+    directory, reads nothing from stdin, and writes its output to ``worker.log``; it shows
+    every path absolute (:data:`~pup_finetune.display.ABSOLUTE_PATHS_ENV`), since a path
+    relative to the run directory would not name the run for whoever reads the log. Its pid,
     mode and start time go to ``worker.json``. Raises :class:`StateError` when ``worker.log``
     is not a regular file of this user's (e.g. a symlink).
     """
@@ -153,6 +157,7 @@ def spawn_worker(run_dir: RunDir, mode: WorkerMode, *, now: Clock = utcnow) -> i
         process = subprocess.Popen(  # noqa: S603 - our own interpreter and module, no shell
             [sys.executable, "-P", "-m", "pup_finetune", "_worker", str(path), "--mode", mode],
             cwd=path,
+            env={**os.environ, ABSOLUTE_PATHS_ENV: "1"},
             stdin=subprocess.DEVNULL,
             stdout=log_fd,
             stderr=log_fd,
@@ -440,23 +445,23 @@ def worker_status(
 def cancellable_pid(run_dir: RunDir) -> int:
     """The pid of the live process of ours training ``run_dir``, checked; else raise.
 
-    Raises :class:`UsageError` when the run is not training, and :class:`StateError` when
-    the process recorded in ``state.json`` is gone, belongs to another user, or is not the
-    one holding the run's lock (so it is not the one training it).
+    Raises :class:`WrongPhase` when the run is not training or the process recorded in
+    ``state.json`` is gone (or no longer holds the run's lock), and :class:`StateError` when
+    that process belongs to another user or another process holds the lock.
     """
     state = run_dir.load_state()
-    resume = f"pup finetune resume {run_dir.path}"
+    resume = command("resume", run_dir.path)
     if state.phase != "training":
         why = (
             "it has not started training yet; retry once `status` shows it training"
             if state.phase == "created"
             else "there is nothing to cancel"
         )
-        raise UsageError(f"the run in {run_dir.path} is {state.phase}, not training", hint=why)
+        raise WrongPhase(f"the run in {run_dir.path} is {state.phase}, not training", hint=why)
     pid = state.pid
     probe = probe_pid(pid)
     if pid is None or probe == "gone":
-        raise StateError(
+        raise WrongPhase(
             f"the process training the run in {run_dir.path} ({pid}) is no longer running",
             hint=f"it stopped without recording why; resume the run with `{resume}`",
         )
@@ -464,16 +469,16 @@ def cancellable_pid(run_dir: RunDir) -> int:
         raise StateError(f"process {pid} belongs to another user; not signalling it")
     lock = run_dir.lock()
     if not lock.is_held():
-        raise StateError(
+        raise WrongPhase(
             f"process {pid} is not training the run in {run_dir.path} (the run is not locked)",
             hint=f"the training process is gone; resume the run with `{resume}`",
         )
     owner = lock.owner_pid()
     if owner != pid:
         raise StateError(
-            f"process {pid} is not training the run in {run_dir.path} (process {owner} holds "
-            "its lock); not signalling it",
-            hint=f"check the run with `pup finetune status {run_dir.path}`",
+            f"process {pid} is not training the run in {display_path(run_dir.path)} (process "
+            f"{owner} holds its lock); not signalling it",
+            hint=f"check the run with `{command('status', run_dir.path)}`",
         )
     return pid
 

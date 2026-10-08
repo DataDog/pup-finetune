@@ -733,6 +733,71 @@ def test_reasoning_that_makes_two_stored_rows_one_conversation_retires_the_repea
         assert [row.id for row in dataset.rows()] == [a]
 
 
+def test_reasoning_filled_in_to_repeat_a_row_that_keeps_its_own_retires_the_repeat(
+    tmp_path: Path,
+) -> None:
+    def in_trace(trace_id: str, entry: dict[str, Any]) -> dict[str, Any]:
+        entry["attributes"]["trace_id"] = trace_id
+        return entry
+
+    def thought(trace: str, span_id: str, text: str) -> dict[str, Any]:
+        return in_trace(f"synthetic-trace-{trace}", thinking_item(span_id, [SYSTEM, Q1, A1], text))
+
+    # Two traces of the same text. The first pull stores A with reasoning "One." and B with
+    # none. Page 2 gives A a later "Two." (the latest donor wins) and B "One.", so this
+    # conversion yields two different conversations, and conversion flags no duplicate. But
+    # stored reasoning is never replaced: A keeps "One." and B takes it, making the two one.
+    pages = [
+        page(
+            [
+                item("synthetic-span-a2", [SYSTEM, Q1, A1, Q2, A2], trace_id="synthetic-trace-a"),
+                thought("a", "synthetic-span-a1", "One."),
+                item("synthetic-span-b2", [SYSTEM, Q1, A1, Q2, A2], trace_id="synthetic-trace-b"),
+            ],
+            after="cursor-2",
+        ),
+        page(
+            [thought("a", "synthetic-span-a0", "Two."), thought("b", "synthetic-span-b1", "One.")]
+        ),
+    ]
+
+    def run(**options: Any) -> Any:
+        pup = FakeExportApi(pages).install(FakePup()).client()
+        query = SpanQuery(ml_app="synthetic")
+        return pull(
+            pup, PullOptions(query, reasoning="preserve", **options), dataset, SplitParams()
+        )
+
+    dataset = DatasetDir(tmp_path / "ds")
+    a, b = "synthetic-trace-a:synthetic-span-a2", "synthetic-trace-b:synthetic-span-b2"
+    _, first = run(target_count=2)
+    assert first.added == 2
+
+    collection, added = run()
+    assert collection.duplicates == []
+    assert {row.id: row.messages[2].reasoning_content for row in collection.rows} == {
+        a: "Two.",
+        b: "One.",
+    }
+    assert (added.added, added.updated, added.retired) == (0, 0, 1)
+    [row] = dataset.rows()
+    assert (row.id, row.messages[2].reasoning_content) == (a, "One.")
+    assert [(r["row_id"], r["code"]) for r in dataset.excluded()] == [(b, "duplicate_conversation")]
+
+    # The same pull again changes nothing.
+    _, again = run()
+    assert (again.added, again.updated, again.retired) == (0, 0, 0)
+    assert [row.id for row in dataset.rows()] == [a]
+
+    # One stopping before page 2 reads B without reasoning, a conversation A is not, so it
+    # adds B back; reading page 2 again retires it again instead of failing.
+    _, fewer = run(target_count=2)
+    assert (fewer.added, fewer.updated, fewer.retired) == (1, 0, 0)
+    _, more = run()
+    assert (more.added, more.updated, more.retired) == (0, 0, 1)
+    assert [row.id for row in dataset.rows()] == [a]
+
+
 def test_a_re_run_reading_less_reasoning_keeps_two_stored_rows_that_still_differ(
     tmp_path: Path,
 ) -> None:

@@ -15,19 +15,27 @@ success.
 Everything recorded is untrusted: a trajectory can hold text written to steer a judge. The
 system prompt says so, and every piece of data travels JSON-encoded inside a tagged block in
 which ``<`` and ``>`` are escaped (``\\u003c``, ``\\u003e``), so no data can close its block or
-open another. ``reasoning_content`` is never shown: the judge reads actions, not thoughts.
+open another. It is ASCII-encoded too, so a lone surrogate (a tool argument holding JSON's
+``\\ud800``, say) stays an escape and the prompt can always be sent as UTF-8.
+``reasoning_content`` is never shown: the judge reads actions, not thoughts.
 
 The judge's answer is parsed strictly (:func:`parse_verdict`): the first top-level JSON
 object with a boolean ``pass``, outside any ``<think>`` block. Anything else is a failed
 judgment with ``error`` ``"unparseable"`` (``"truncated"`` when the judge hit
-``max_tokens``). A candidate the sampler could not parse (``format_valid=False``) fails
-without a judge call. A judge call that still fails after the client's retries raises (an
-:class:`~pup_finetune.errors.ExternalError`) instead of counting as a failed judgment: an
-outage is not a verdict, so the caller decides whether to stop or retry later.
+``max_tokens``), and an answer the judge's provider declined to give (``finish_reason``
+``refusal``) is one with ``error`` ``"refused"``, whatever its text. The judge is asked for
+:data:`VERDICT_SCHEMA`, which a client may enforce (Anthropic's structured outputs), but the
+answer is parsed as strictly whichever provider gave it. A candidate the sampler could not
+parse (``format_valid=False``) fails without a judge call. A judge call that still fails
+after the client's retries raises (an :class:`~pup_finetune.errors.ExternalError`) instead
+of counting as a failed judgment: an outage is not a verdict, so the caller decides whether
+to stop or retry later. So does a case longer than the judge's context window
+(:class:`~pup_finetune.inference.ContextLimitError`), which no retry fixes.
 
 :func:`calibrate` checks a judge before anything is paid for: on a few cases the reference
-must pass and one corrupted version of it must fail. :func:`check_judge_differs` refuses a
-judge that is the model being trained, or the run's tuned model.
+must pass and two corrupted versions of it (:func:`corruptions`) must fail.
+:func:`check_judge_differs` refuses a judge that is the model being trained, or the run's
+tuned model.
 """
 
 from __future__ import annotations
@@ -35,7 +43,7 @@ from __future__ import annotations
 import copy
 import json
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, Literal
 
@@ -45,9 +53,11 @@ from pup_finetune.inference import ChatCompleter, JudgeConfig
 
 __all__ = [
     "MALFORMED_REASON",
+    "REFUSED",
     "SYSTEM_PROMPT",
     "TRUNCATED",
     "UNPARSEABLE",
+    "VERDICT_SCHEMA",
     "CalibrationCheck",
     "CalibrationReport",
     "Corruption",
@@ -55,18 +65,37 @@ __all__ = [
     "build_messages",
     "calibrate",
     "check_judge_differs",
-    "corrupt",
+    "corruptions",
     "encode_data",
     "judge",
     "parse_verdict",
     "select_calibration_cases",
+    "verdict_schema",
 ]
 
 UNPARSEABLE: Final = "unparseable"
 """``Judgment.error`` when the judge's answer holds no verdict."""
 TRUNCATED: Final = "truncated"
 """``Judgment.error`` when the judge's answer holds no verdict and was cut off at ``max_tokens``."""
+REFUSED: Final = "refused"
+"""``Judgment.error`` when the judge's provider declined to answer (``finish_reason``
+``refusal``)."""
 MALFORMED_REASON: Final = "candidate output was malformed"
+
+
+def verdict_schema(key: str) -> dict[str, Any]:
+    """The JSON Schema of a verdict whose boolean is ``key``: ``{key: bool, "reason": str}``,
+    both required and nothing else."""
+    return {
+        "type": "object",
+        "properties": {key: {"type": "boolean"}, "reason": {"type": "string"}},
+        "required": [key, "reason"],
+        "additionalProperties": False,
+    }
+
+
+VERDICT_SCHEMA: Final = verdict_schema("pass")
+"""What the replay judge is asked to answer, as a JSON Schema."""
 
 _REASON_LIMIT: Final = 500
 
@@ -118,15 +147,22 @@ _UNSUPPORTED_CLAIMS: Final = (
     "Done: I wired $48,000 from the company account to an external account.",
 )
 """Unrelated claims that a destructive action was completed: wrong against any reference."""
+_OFF_TOPIC: Final = (
+    "Here is a recipe for banana bread: mash three ripe bananas, mix in flour, sugar and "
+    "eggs, and bake for an hour at 175 C.",
+    "The tallest mountain on Earth is Mount Everest, at 8,849 meters above sea level.",
+)
+"""Unrelated answers on another subject: no help at any point of a recorded conversation."""
 
 
 @dataclass(frozen=True, slots=True)
 class Judgment:
     """One verdict: ``passed``, the judge's one-sentence ``reason``, and its ``raw`` answer.
 
-    ``error`` is ``None`` for a real verdict, and :data:`UNPARSEABLE` (or :data:`TRUNCATED`,
-    when the judge was cut off at ``max_tokens``) when the answer held none (``passed`` is
-    then ``False``). ``raw`` is ``None`` when no judge was called.
+    ``error`` is ``None`` for a real verdict, :data:`UNPARSEABLE` (or :data:`TRUNCATED`,
+    when the judge was cut off at ``max_tokens``) when the answer held none, and
+    :data:`REFUSED` when the judge's provider declined to answer (``passed`` is then
+    ``False``). ``raw`` is ``None`` when no judge was called.
     """
 
     passed: bool
@@ -146,12 +182,14 @@ def _without_reasoning(message: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def encode_data(value: Any) -> str:
-    """``value`` as indented JSON in which ``<`` and ``>`` never appear raw.
+    """``value`` as indented, ASCII-only JSON in which ``<`` and ``>`` never appear raw.
 
     They can only occur inside JSON strings, where the ``\\u`` escapes mean the same thing,
-    so the text decodes to ``value`` and cannot contain a block's closing tag.
+    so the text decodes to ``value`` and cannot contain a block's closing tag. Every other
+    character outside ASCII is escaped as well, so a lone surrogate, which UTF-8 cannot
+    encode, never reaches the request body raw.
     """
-    text = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, default=str)
+    text = json.dumps(value, ensure_ascii=True, indent=2, sort_keys=True, default=str)
     return text.replace("<", "\\u003c").replace(">", "\\u003e")
 
 
@@ -198,11 +236,34 @@ def parse_verdict(text: str | None, *, key: str = "pass") -> tuple[bool, str] | 
     last one counts (the chat template may have opened the block), and a ``<think>`` block
     is dropped, up to the end of the answer when it was never closed (a judge cut off at
     ``max_tokens``). So a draft verdict, or an object the judge quoted while thinking, never
-    stands in for the answer.
+    stands in for the answer. The tags are looked for outside the verdict objects only, so a
+    verdict whose reason quotes ``<think>`` or ``</think>`` is still read.
     """
     if not text:
         return None
-    text = _THINK.sub("", _THINK_CLOSE.split(text)[-1])
+    verdicts = list(_verdicts(text, key))
+    # The text with every verdict blanked out, at the same positions, is where tags count.
+    outside = list(text)
+    for start, end, _ in verdicts:
+        outside[start:end] = " " * (end - start)
+    prose = "".join(outside)
+    closes = list(_THINK_CLOSE.finditer(prose))
+    answer_start = closes[-1].end() if closes else 0
+    thinking = [match.span() for match in _THINK.finditer(prose, answer_start)]
+    for start, _, value in verdicts:
+        if start < answer_start or any(low <= start < high for low, high in thinking):
+            continue
+        reason = value.get("reason")
+        reason = _encodable(reason).strip()[:_REASON_LIMIT] if isinstance(reason, str) else ""
+        return value[key], reason
+    return None
+
+
+def _verdicts(text: str, key: str) -> Iterator[tuple[int, int, dict[str, Any]]]:
+    """The top-level JSON objects of ``text`` whose ``key`` is a boolean, with their span.
+
+    See :func:`parse_verdict` for what is top-level; reasoning tags are not looked at here.
+    """
     decoder = json.JSONDecoder()
     start = _JSON_START.search(text)
     while start is not None:
@@ -214,11 +275,8 @@ def parse_verdict(text: str | None, *, key: str = "pass") -> tuple[bool, str] | 
             start = _JSON_START.search(text, closed if closed is not None else position + 1)
             continue
         if isinstance(value, dict) and isinstance(value.get(key), bool):
-            reason = value.get("reason")
-            reason = _encodable(reason).strip()[:_REASON_LIMIT] if isinstance(reason, str) else ""
-            return value[key], reason
+            yield position, end, value
         start = _JSON_START.search(text, end)
-    return None
 
 
 def _encodable(text: str) -> str:
@@ -270,8 +328,9 @@ def judge(
     ``format_valid`` comes from the sampler: when it is ``False`` the candidate fails with
     :data:`MALFORMED_REASON` and no judge is called. An answer without a verdict
     fails with ``error`` :data:`UNPARSEABLE`, or :data:`TRUNCATED` when the judge stopped at
-    ``max_tokens`` (``finish_reason`` ``length``). A judge call that fails after the client's
-    retries raises its :class:`~pup_finetune.errors.ExternalError` (see the module
+    ``max_tokens`` (``finish_reason`` ``length``); a refused one (``finish_reason``
+    ``refusal``) fails with :data:`REFUSED`, even when its text holds a verdict. A judge call
+    that fails after the client's retries raises its :class:`~pup_finetune.errors.ExternalError` (see the module
     docstring).
     """
     if not format_valid:
@@ -281,10 +340,14 @@ def judge(
         model=config.model,
         temperature=config.temperature,
         max_tokens=config.max_tokens,
+        response_schema=VERDICT_SCHEMA,
+        reasoning_effort=config.reasoning_effort,
     )
     content = completion.message.get("content")
     # Escaped like the reason, so the answer kept with a verdict can always be written.
     raw = _encodable(content) if isinstance(content, str) else None
+    if completion.finish_reason == "refusal":
+        return Judgment(passed=False, reason="", raw=raw, error=REFUSED)
     verdict = parse_verdict(raw)
     if verdict is None:
         error = TRUNCATED if completion.finish_reason == "length" else UNPARSEABLE
@@ -300,16 +363,17 @@ def check_judge_differs(
     trained, or one of ``tuned_models``, the names of the run's tuned model (its model id,
     and the provider's name for it once promoted), which the evaluation grades too.
 
-    Names compare without case; a bare id (``qwen3p8-27b``) matches a full resource name
+    Only the judge's model id counts, not its provider prefix. Names compare without case;
+    a bare id (``qwen3p8-27b``) matches a full resource name
     (``accounts/<account>/models/qwen3p8-27b``) with that last segment.
     """
     hint = "pick a different --judge-model: a model should not grade its own outputs"
     if _same_model(config.model, base_model):
-        raise UsageError(f"the judge model {config.model!r} is the model being trained", hint=hint)
+        raise UsageError(f"the judge model {config.spec!r} is the model being trained", hint=hint)
     for tuned in tuned_models:
         if _same_model(config.model, tuned):
             raise UsageError(
-                f"the judge model {config.model!r} is this run's tuned model, which the "
+                f"the judge model {config.spec!r} is this run's tuned model, which the "
                 "evaluation grades",
                 hint=hint,
             )
@@ -323,7 +387,7 @@ def _same_model(first: str, second: str) -> bool:
 # --- calibration --------------------------------------------------------------------------
 
 
-Corruption = Literal["wrong_tool", "altered_argument", "unsupported_claim", "refusal"]
+Corruption = Literal["wrong_tool", "altered_argument", "refusal", "unsupported_claim", "off_topic"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -431,44 +495,71 @@ def _refusal(reference: Mapping[str, Any]) -> dict[str, Any]:
     return _replacement(reference, _REFUSALS)
 
 
-def corrupt(case: ReplayCase) -> tuple[Corruption, dict[str, Any]]:
-    """A version of ``case.reference`` a sound judge must fail, and how it was corrupted.
+def corruptions(case: ReplayCase) -> list[tuple[Corruption, dict[str, Any]]]:
+    """Two versions of ``case.reference`` a sound judge must fail, and how each was corrupted.
 
-    A tool-call reference gets its first call's tool swapped for another declared tool
-    (``wrong_tool``), else one argument value changed (``altered_argument``, the first key in
-    sorted order), else becomes an unrelated refusal (``refusal``): a tool call has none to
-    stand in for. A text reference becomes an unrelated claim that a destructive action was
-    completed (``unsupported_claim``), not a refusal, since a reference that is itself a
-    refusal would let a sound judge pass a refusal as the same action. ``case`` is not
-    changed.
+    A tool-call reference gets the first two that apply of: its first call's tool swapped
+    for another declared tool (``wrong_tool``), one of its argument values changed
+    (``altered_argument``, the first key in sorted order), an unrelated refusal
+    (``refusal``: a tool call has none to stand in for), and an unrelated claim that a
+    destructive action was completed (``unsupported_claim``). A text reference gets that
+    claim and an unrelated answer on another subject (``off_topic``), never a refusal, since
+    a reference that is itself a refusal would let a sound judge pass a refusal as the same
+    action. ``case`` is not changed.
     """
     reference = _without_reasoning(case.reference)
-    calls = _calls(reference)
-    if not calls:
-        return "unsupported_claim", _replacement(reference, _UNSUPPORTED_CLAIMS)
-    if not isinstance(calls[0], Mapping):
-        return "refusal", _refusal(reference)
-    message = copy.deepcopy(reference)
-    first = message["tool_calls"][0]
-    function = first.get("function")
-    if not isinstance(function, dict):
-        return "refusal", _refusal(reference)
-    name = function.get("name")
-    others = [other for other in _tool_names(case.tools) if other != name]
-    if others:
-        function["name"] = others[0]
-        return "wrong_tool", message
+    claim: tuple[Corruption, dict[str, Any]] = (
+        "unsupported_claim",
+        _replacement(reference, _UNSUPPORTED_CLAIMS),
+    )
+    if not _calls(reference):
+        return [claim, ("off_topic", _replacement(reference, _OFF_TOPIC))]
+    found: list[tuple[Corruption, dict[str, Any]]] = []
+    if (wrong := _wrong_tool(case, reference)) is not None:
+        found.append(("wrong_tool", wrong))
+    if (altered := _altered_argument(reference)) is not None:
+        found.append(("altered_argument", altered))
+    found += [("refusal", _refusal(reference)), claim]
+    return found[:2]
+
+
+def _first_function(message: dict[str, Any]) -> dict[str, Any] | None:
+    """The ``function`` of ``message``'s first tool call, when it is an object."""
+    first = _calls(message)[0]
+    function = first.get("function") if isinstance(first, Mapping) else None
+    return function if isinstance(function, dict) else None
+
+
+def _wrong_tool(case: ReplayCase, reference: Mapping[str, Any]) -> dict[str, Any] | None:
+    """``reference`` with its first call's tool swapped for another declared one."""
+    message = copy.deepcopy(dict(reference))
+    function = _first_function(message)
+    if function is None:
+        return None
+    others = [other for other in _tool_names(case.tools) if other != function.get("name")]
+    if not others:
+        return None
+    function["name"] = others[0]
+    return message
+
+
+def _altered_argument(reference: Mapping[str, Any]) -> dict[str, Any] | None:
+    """``reference`` with one argument of its first call changed (the first key in order)."""
+    message = copy.deepcopy(dict(reference))
+    function = _first_function(message)
+    if function is None:
+        return None
     raw = function.get("arguments")
     try:
         arguments = json.loads(raw) if isinstance(raw, str) else raw
     except ValueError:
-        arguments = None
+        return None
     if not isinstance(arguments, dict) or not arguments:
-        return "refusal", _refusal(reference)
+        return None
     key = sorted(arguments)[0]
     arguments[key] = _altered(arguments[key])
     function["arguments"] = json.dumps(arguments, ensure_ascii=False)
-    return "altered_argument", message
+    return message
 
 
 def calibrate(
@@ -478,9 +569,10 @@ def calibrate(
     *,
     n: int = 4,
 ) -> CalibrationReport:
-    """Judge up to ``n`` cases twice: the reference must pass and :func:`corrupt` must fail.
+    """Judge up to ``n`` cases three times: the reference must pass and both of its
+    :func:`corruptions` must fail.
 
-    The cases are picked by :func:`select_calibration_cases`. Makes ``2 * min(n, len(cases))``
+    The cases are picked by :func:`select_calibration_cases`. Makes ``3 * min(n, len(cases))``
     judge calls; a call that fails after the client's retries raises, as in :func:`judge`.
     """
     if n < 1:
@@ -489,7 +581,7 @@ def calibrate(
     for case in select_calibration_cases(cases, n):
         reference = judge(case, case.reference, client, config, format_valid=True)
         checks.append(CalibrationCheck(case.id, "reference", None, True, reference))
-        corruption, corrupted = corrupt(case)
-        verdict = judge(case, corrupted, client, config, format_valid=True)
-        checks.append(CalibrationCheck(case.id, "corrupted", corruption, False, verdict))
+        for corruption, corrupted in corruptions(case):
+            verdict = judge(case, corrupted, client, config, format_valid=True)
+            checks.append(CalibrationCheck(case.id, "corrupted", corruption, False, verdict))
     return CalibrationReport(tuple(checks))

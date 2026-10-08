@@ -119,6 +119,7 @@ def test_deploy_creates_the_checkpoint_as_a_model_named_after_the_deployment_id(
         url=URL,
         name="models/dmodel1/deployments/ddep1",
         shape="H100:1",
+        api_key_env="BASETEN_API_KEY",
     )
     assert world.transport.bodies(DEPLOY) == [
         {

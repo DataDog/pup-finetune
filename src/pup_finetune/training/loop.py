@@ -113,6 +113,11 @@ class LoopState(Protocol):
         """Whether to stop at the next step boundary."""
         ...
 
+    def record_plan(self, *, steps_per_epoch: int, max_steps: int) -> None:
+        """Training is about to start (or resume): an epoch has ``steps_per_epoch`` optimizer
+        steps, and the run at most ``max_steps`` (fewer when it stops early)."""
+        ...
+
     def record_step(self, *, epoch: int, step: int, loss: float) -> None:
         """Optimizer step ``step`` (over the run) of ``epoch`` has finished with mean ``loss``."""
         ...
@@ -467,6 +472,20 @@ class _Loop:
                 f"{self._start_epoch}, but an epoch has {steps_per_epoch}",
                 hint="resume with the same training rows and settings as the run",
             )
+        self._state.record_plan(
+            steps_per_epoch=steps_per_epoch, max_steps=spec.max_epochs * steps_per_epoch
+        )
+        self._emit(
+            {
+                "type": "plan",
+                "steps_per_epoch": steps_per_epoch,
+                "max_steps": spec.max_epochs * steps_per_epoch,
+                "max_epochs": spec.max_epochs,
+                "checkpoint_every_minutes": spec.checkpoint_every_minutes,
+                "epoch": self._start_epoch,
+                "step": self._step,
+            }
+        )
         if not self._validation:
             self._warn(NO_VALIDATION_WARNING)
         self._budget.start()

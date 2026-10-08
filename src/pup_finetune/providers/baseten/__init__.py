@@ -90,6 +90,7 @@ CREDENTIALS: Final = credentials.CredentialSpec(
     provider=PROVIDER_NAME,
     env_var=ENV_VAR,
     description="Baseten API key, for training and serving on Baseten Loops",
+    needed_for="training, evaluation and deployment on baseten",
     keychain_account=PROVIDER_NAME,
     config_reader=read_trussrc_key,
     validator=validate_key,

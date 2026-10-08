@@ -35,7 +35,7 @@ conversation repeats another trace's row and so was never stored (see :func:`con
 ``reasoning="preserve"`` a stored row a re-run reads more reasoning for takes that reasoning,
 and one a re-run reads less for keeps its own (see :func:`reasoning_updates`); a stored row
 that reasoning makes repeat another stored row is retired as a duplicate (see
-:func:`repeat_retirements`).
+:func:`repeat_retirements` and :func:`reconciled_repeats`).
 
 A relative ``--from`` or ``--to`` (``now-7d``) is resolved to epoch milliseconds once, when a
 collection or a dataset's first pull starts (:meth:`PullOptions.resolved`), and the export
@@ -78,6 +78,7 @@ from pup_finetune.datadog.spans import (
     iter_span_pages,
 )
 from pup_finetune.errors import ExternalError, UsageError
+from pup_finetune.next_steps import command
 from pup_finetune.storage import DirectoryLock, make_private_dir
 
 DEFAULT_TARGET_COUNT = 200
@@ -481,6 +482,46 @@ def reasoning_updates(
     return kept, updated
 
 
+def reconciled_repeats(
+    rows: Sequence[TrainingRow],
+    updated: Sequence[TrainingRow],
+    stored_rows: Sequence[TrainingRow],
+    retired: Iterable[Exclusion] = (),
+) -> tuple[list[TrainingRow], list[TrainingRow], list[Exclusion]]:
+    """``rows`` and ``updated`` without the stored rows they leave repeating another, and
+    those rows' retirements.
+
+    :func:`repeat_retirements` only sees the stored rows conversion flagged as duplicates,
+    but stored reasoning is never replaced, so two stored rows can become one conversation
+    without conversion seeing a repeat: stored A with reasoning and B without, read again
+    with other reasoning for A (which A does not take) and A's old reasoning for B (which B
+    does). Every stored row that is not being ``retired`` is compared as the dataset will
+    hold it, with its update from :func:`reasoning_updates` applied; of each group holding
+    one conversation, the first in dataset order is kept and the rest are retired as
+    ``duplicate_conversation``, and dropped from ``rows`` and ``updated`` so the dataset
+    neither keeps nor updates them.
+    """
+    retired_ids = {exclusion.row_id for exclusion in retired}
+    held = {row.id: row for row in updated}
+    first: dict[str, str] = {}
+    repeats: list[Exclusion] = []
+    for stored in stored_rows:
+        if stored.id in retired_ids:
+            continue
+        other = first.setdefault(row_content_hash(held.get(stored.id, stored)), stored.id)
+        if other != stored.id:
+            detail = f"same conversation as row {other!r}, read by a later pull"
+            repeats.append(Exclusion.for_row(stored, ExclusionCode.DUPLICATE_CONVERSATION, detail))
+    if not repeats:
+        return list(rows), list(updated), []
+    gone = {exclusion.row_id for exclusion in repeats}
+    return (
+        [row for row in rows if row.id not in gone],
+        [row for row in updated if row.id not in gone],
+        repeats,
+    )
+
+
 def _fill_reasoning(stored: TrainingRow, row: TrainingRow) -> TrainingRow | None:
     """``stored`` with the reasoning of ``row`` where it has none, or ``None`` when the two
     differ in more than reasoning."""
@@ -538,16 +579,38 @@ def resolve_window(options: PullOptions, dataset: DatasetDir, clock: Clock) -> P
     """
     if options.window is not None:
         return options
-    source = dataset.settings().get("source") if dataset.is_dataset() else None
-    if isinstance(source, dict):
-        frozen = source.get("filter")
-        same = (source.get("from_expr"), source.get("to_expr")) == (
-            options.query.from_,
-            options.query.to,
-        )
-        if same and isinstance(frozen, dict):
-            return options.with_window(frozen.get("from"), frozen.get("to"))
+    window = frozen_window(options, dataset)
+    if window is not None:
+        return options.with_window(*window)
     return options.resolved(epoch_ms(clock))
+
+
+def frozen_window(options: PullOptions, dataset: DatasetDir) -> tuple[TimeBound, TimeBound] | None:
+    """The window ``dataset`` froze for the ``from_expr`` and ``to_expr`` of ``options``, or
+    ``None`` when it froze none (a first pull) or froze other expressions."""
+    source = dataset.settings().get("source") if dataset.is_dataset() else None
+    if not isinstance(source, dict):
+        return None
+    frozen = source.get("filter")
+    same = (source.get("from_expr"), source.get("to_expr")) == (
+        options.query.from_,
+        options.query.to,
+    )
+    if same and isinstance(frozen, dict):
+        return frozen.get("from"), frozen.get("to")
+    return None
+
+
+def rerun_command(directory: Path, options: PullOptions) -> str:
+    """The ``dataset pull`` that resumes or continues a pull into ``directory`` with
+    ``options``: no source flag, as the directory's frozen settings fill them in, only the
+    limits that differ from the defaults (which are not frozen)."""
+    limits: list[object] = []
+    if options.target_count != DEFAULT_TARGET_COUNT:
+        limits += ["--target-count", options.target_count]
+    if options.max_candidates != DEFAULT_MAX_CANDIDATES:
+        limits += ["--max-candidates", options.max_candidates]
+    return command("dataset", "pull", directory, *limits)
 
 
 def pull(
@@ -569,7 +632,8 @@ def pull(
     part-way says so in its hint. Stored rows the new conversion collapsed are retired
     (:func:`retirements`), as are stored rows it found repeating another stored row
     (:func:`repeat_retirements`), stored rows it read more reasoning for are updated
-    (:func:`reasoning_updates`), and new rows a stored row contains are excluded instead of
+    (:func:`reasoning_updates`), stored rows those updates make repeat another are retired
+    instead (:func:`reconciled_repeats`), and new rows a stored row contains are excluded instead of
     added (:func:`contained`); the returned collection is what the export read and
     converted, before any of these.
 
@@ -588,7 +652,7 @@ def pull(
         try:
             collection = collect(pup, options, cache_dir=raw, sleep=sleep, progress=progress)
         except ExternalError as exc:
-            raise _with_resume_note(exc, raw) from exc
+            raise _with_resume_note(exc, raw, rerun_command(dataset.path, options)) from exc
         stored = dataset.rows()
         stored_exclusions = dataset.excluded()
         retired = [
@@ -596,6 +660,8 @@ def pull(
             *repeat_retirements(collection, stored),
         ]
         rows, updated = reasoning_updates(collection.rows, stored)
+        rows, updated, repeats = reconciled_repeats(rows, updated, stored, retired)
+        retired.extend(repeats)
         rows, exclusions = contained(rows, stored, retired, stored_exclusions)
         added = dataset.add(
             rows,
@@ -607,9 +673,9 @@ def pull(
     return collection, added
 
 
-def _with_resume_note(error: ExternalError, raw: Path) -> ExternalError:
-    """``error`` with a hint that the pages read so far are cached and a re-run resumes."""
-    note = f"pages read so far are cached in {raw}; re-run the same command to resume"
+def _with_resume_note(error: ExternalError, raw: Path, rerun: str) -> ExternalError:
+    """``error`` with a hint that the pages read so far are cached and ``rerun`` resumes."""
+    note = f"pages read so far are cached in {raw}; `{rerun}` resumes (the frozen settings fill in the flags)"
     hint = (error.hint or "").removesuffix(f" {CACHED_PAGES_NOTE}")
     return ExternalError(
         error.message, source=error.source, hint=f"{hint}; {note}" if hint else note

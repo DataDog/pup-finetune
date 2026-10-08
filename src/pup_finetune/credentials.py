@@ -15,6 +15,11 @@ order: the environment variable, the OS keychain (through ``keyring``: service
 only. Keys are returned as :class:`pydantic.SecretStr`, passed explicitly to whatever needs
 them, and never copied into ``os.environ``. Every resolved or stored key is registered for
 redaction, so it is masked if it ever reaches an error message or a log.
+
+A spec may also say that the provider's own SDK can sign in without a key from us
+(``sdk_login``, e.g. an Anthropic CLI login): :func:`sdk_login_source` reports it, as the
+source ``<provider>-sdk``, for ``auth status`` and ``doctor``. Such a credential is never read
+here; the SDK resolves it itself.
 """
 
 from __future__ import annotations
@@ -26,7 +31,6 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import SecretStr
 
-from pup_finetune.doctor import CheckOutcome, register_check
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.redaction import RedactingFilter, install_log_redaction, redact, register_secret
 
@@ -44,12 +48,16 @@ __all__ = [
     "ensure_storable",
     "get_spec",
     "install_log_redaction",
+    "key_source",
     "login_hint",
     "lookup",
+    "missing_key_error",
     "redact",
     "register",
+    "register_sdk_secrets",
     "register_secret",
     "resolve",
+    "sdk_login_source",
     "store",
 ]
 
@@ -63,17 +71,28 @@ class CredentialSpec:
     """How to find one provider's API key. Fields are keyword-only.
 
     ``config_reader`` is an optional, read-only fallback to the provider CLI's own stored
-    login. ``validator`` checks a key with a cheap provider call before it is stored: it
-    returns an account label (or ``None``), raises :class:`UsageError` when the provider
-    rejects the key, and :class:`ExternalError` when the provider cannot be reached.
+    login. ``sdk_login`` says, from the environment and without reading any secret, whether
+    the provider's SDK can find a credential of its own when no key is configured (see the
+    module docstring), and ``other_secret_env`` names the other environment variables that
+    SDK reads secrets from, so they are kept from child processes like the key's.
+    ``validator`` checks a key with a cheap provider call before it is stored: it returns an
+    account label (or ``None``), raises :class:`UsageError` when the provider rejects the
+    key, and :class:`ExternalError` when the provider cannot be reached. ``needed_for`` says
+    in a few words what the key is for (``anthropic/... judges``), for ``doctor`` and
+    ``auth status``; ``label`` is the provider's display name (default: ``provider``
+    capitalized).
     """
 
     provider: str
     env_var: str
     description: str = ""
+    needed_for: str = ""
+    label: str = ""
     keychain_service: str = KEYCHAIN_SERVICE
     keychain_account: str = ""
     config_reader: Callable[[], str | None] | None = None
+    sdk_login: Callable[[Mapping[str, str]], bool] | None = None
+    other_secret_env: tuple[str, ...] = ()
     validator: Callable[[SecretStr], str | None] | None = None
 
     def __post_init__(self) -> None:
@@ -83,6 +102,8 @@ class CredentialSpec:
             raise ValueError(f"credential spec {self.provider!r} needs an env_var")
         if not self.keychain_account:
             object.__setattr__(self, "keychain_account", self.provider)
+        if not self.label:
+            object.__setattr__(self, "label", self.provider.capitalize())
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +118,7 @@ _REGISTRY: dict[str, CredentialSpec] = {}
 
 
 def register(spec: CredentialSpec) -> None:
-    """Add a provider's credential spec, and its (optional) ``doctor`` check.
+    """Add a provider's credential spec; ``doctor`` and ``auth`` list every registered one.
 
     Registering an equal spec again is a no-op; a different spec under a taken provider name
     raises ``ValueError``. Cheap: nothing is resolved until a command asks.
@@ -108,7 +129,6 @@ def register(spec: CredentialSpec) -> None:
             raise ValueError(f"credentials for {spec.provider!r} are already registered")
         return
     _REGISTRY[spec.provider] = spec
-    register_check(f"credentials:{spec.provider}", _doctor_check(spec), required=False)
 
 
 def all_specs() -> list[CredentialSpec]:
@@ -270,9 +290,33 @@ def resolve(
     """
     found = lookup(provider, env=env, keyring_backend=keyring_backend)
     if found is None:
-        spec = get_spec(provider)
-        raise UsageError(f"no {spec.provider} API key found", hint=login_hint(spec))
+        raise missing_key_error(provider)
     return found
+
+
+def missing_key_error(provider: str, *, hint: str | None = None) -> UsageError:
+    """The :class:`UsageError` :func:`resolve` raises when no source has ``provider``'s key;
+    ``hint`` replaces its login hint."""
+    spec = get_spec(provider)
+    return UsageError(f"no {spec.provider} API key found", hint=hint or login_hint(spec))
+
+
+def sdk_login_source(provider: str, *, env: Mapping[str, str] = os.environ) -> str | None:
+    """``<provider>-sdk`` when ``provider``'s SDK can sign in on its own (its spec's
+    ``sdk_login``), else ``None``. Reads no secret."""
+    spec = get_spec(provider)
+    if spec.sdk_login is not None and spec.sdk_login(env):
+        return f"{spec.provider}-sdk"
+    return None
+
+
+def register_sdk_secrets(provider: str, *, env: Mapping[str, str] = os.environ) -> None:
+    """Register for redaction every secret ``provider``'s SDK would sign in with from
+    ``env`` (its spec's ``other_secret_env``), before that SDK is used without our key."""
+    for name in get_spec(provider).other_secret_env:
+        value = env.get(name, "").strip()
+        if value:
+            register_secret(value)
 
 
 def store(
@@ -361,11 +405,13 @@ def delete(provider: str, *, keyring_backend: KeyringBackend | None = None) -> b
     return deleted
 
 
-def _doctor_check(spec: CredentialSpec) -> Callable[[], CheckOutcome]:
-    def check() -> CheckOutcome:
-        found = lookup(spec.provider)
-        if found is None:
-            return CheckOutcome(False, f"no {spec.provider} API key; {login_hint(spec)}")
-        return CheckOutcome(True, f"{spec.provider} API key found (source: {found.source})")
+def key_source(provider: str, *, env: Mapping[str, str] = os.environ) -> str | None:
+    """Where ``provider``'s key would come from (:data:`Source`), ``<provider>-sdk`` when only
+    its SDK can sign in on its own, or ``None`` when nothing would. Never returns the key.
 
-    return check
+    Raises :class:`ExternalError` when the keychain cannot be read (e.g. it is locked).
+    """
+    found = lookup(provider, env=env)
+    if found is not None:
+        return found.source
+    return sdk_login_source(provider, env=env)

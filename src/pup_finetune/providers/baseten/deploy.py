@@ -55,7 +55,7 @@ from pup_finetune.providers.base import (
     SmokeTest,
     TransientError,
 )
-from pup_finetune.providers.baseten import PROVIDER_NAME
+from pup_finetune.providers.baseten import ENV_VAR, PROVIDER_NAME
 from pup_finetune.providers.baseten.client import (
     SOURCE,
     BasetenHTTP,
@@ -417,6 +417,7 @@ def deploy(
         url=deployment_url(created.model_id, created.deployment_id),
         name=f"models/{created.model_id}/deployments/{created.deployment_id}",
         shape=shape,
+        api_key_env=ENV_VAR,
     )
     if on_created is not None:
         on_created(endpoint, "CREATING")

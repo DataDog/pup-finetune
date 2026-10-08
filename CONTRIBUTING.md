@@ -59,8 +59,16 @@ ticks every box:
 - [ ] **Registration.** Register the provider lazily in `providers/__init__.py` with
       `register_provider("<name>", "pup_finetune.providers.<name>.provider:<Name>Provider")`,
       so listing providers imports no provider implementation; keep the implementation in
-      `provider.py` and the package `__init__.py` light.
-- [ ] **Credentials.** Add a `CredentialSpec` for the provider's API key to the registry in
+      `provider.py` and the package `__init__.py` light. Name its `--provider-option` keys
+      with `options=(...)` (`train --help` lists them, and a test holds them to the
+      provider's options model), and its profiles' aliases with `models=(...)` (`train`
+      infers `--provider` from them, and a test holds them to the provider's profiles).
+      Say what it needs: `label=`, `credential=` (its `CredentialSpec`), `packages=`
+      (`Package`s: the SDK and the renderer, by step), `refuses=` (`RefusedFlag`s for flags
+      it cannot honor) and `deploys=False` if it cannot deploy yet. `doctor` and the
+      previews read these, so nothing fails only after `--confirm`.
+- [ ] **Credentials.** Add a `CredentialSpec` for the provider's API key (with
+      `needed_for`, what `doctor` and `auth status` say it is for) to the registry in
       `credentials.py`, from the package's `__init__.py` (keep it free of heavy imports), and
       import the package at the bottom of `providers/__init__.py` with
       `from pup_finetune.providers import <name> as _<name>  # noqa: E402, F401`, so

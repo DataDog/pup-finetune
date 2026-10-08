@@ -14,6 +14,7 @@ would, while the fake's runs, checkpoints and models persist between them, as Ba
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shlex
@@ -25,7 +26,7 @@ import httpx
 import pytest
 from typer.testing import CliRunner, Result
 
-from pup_finetune import redaction
+from pup_finetune import providers, redaction
 from pup_finetune.cli import app
 from pup_finetune.cli import deploy as deploy_module
 from pup_finetune.cli import train as train_module
@@ -113,7 +114,8 @@ def test_the_preview_asks_baseten_nothing_paid(
     data = output(result)
     preview = data["preview"]
     assert (preview["provider"], preview["model"]) == ("baseten", "qwen3p5-9b")
-    assert preview["profile"]["renderer"] == "qwen3_5"
+    # The preview shows what identifies the model; run.json records the whole profile.
+    assert set(preview["profile"]) == {"alias", "base_model", "max_seq_len"}
     assert preview["examples"]["train"] > 0
     assert preview["data_destination"] == "training data is sent to baseten"
     assert shlex.split(data["next_command"])[-1] == "--confirm"
@@ -128,9 +130,10 @@ def test_a_confirmed_run_trains_leaves_nothing_running_and_deploys_its_checkpoin
     result = train(dataset, run_dir, "--confirm")
     assert result.exit_code == 0, result.stderr
     data = output(result)
-    assert data["phase"] == "completed"
+    assert data["status"] == "completed"
     assert data["promoted_model"] is None
-    checkpoint = data["deployable_checkpoint"]
+    checkpoint = (RunDir(run_dir).read_result() or {})["deployable_checkpoint"]
+    assert data["deployable_checkpoint"] == checkpoint["name"]
     assert checkpoint["kind"] == "sampler"
     assert checkpoint["uri"].startswith("bt://loops:run1/sampler_weights/")
     assert loops.runs
@@ -144,15 +147,22 @@ def test_a_confirmed_run_trains_leaves_nothing_running_and_deploys_its_checkpoin
     assert loops.models == {}
     deployed = invoke("deploy", str(run_dir), "--confirm")
     assert deployed.exit_code == 0, deployed.stderr
-    receipt = output(deployed)
+    result = output(deployed)
     name = checkpoint["uri"].rsplit("/", 1)[1]
-    assert receipt["model"] == checkpoint["uri"]
-    assert receipt["deployment_id"] == model_id_for_run(RunDir(run_dir).run_id)
-    assert receipt["deployment_name"] == "models/dmodel1/deployments/ddep1"
-    assert receipt["inference_model"] == name
-    assert receipt["url"] == "https://model-dmodel1.api.baseten.co/deployment/ddep1/sync/v1"
-    assert (receipt["shape"], receipt["state"]) == ("H100:1", "READY")
-    assert receipt["smoke_test"]["ok"] is True
+    assert result["model"] == checkpoint["uri"]
+    assert result["deployment_id"] == model_id_for_run(RunDir(run_dir).run_id)
+    assert result["deployment_name"] == "models/dmodel1/deployments/ddep1"
+    assert (result["shape"], result["state"]) == ("H100:1", "READY")
+    assert result["smoke_test"]["ok"] is True
+    url = "https://model-dmodel1.api.baseten.co/deployment/ddep1/sync/v1"
+    usage = result["usage"]
+    assert (usage["base_url"], usage["model"], usage["api_key_env"]) == (
+        url,
+        name,
+        "BASETEN_API_KEY",
+    )
+    assert '"Authorization: Bearer $BASETEN_API_KEY"' in usage["example"]
+    receipt = receipt_of(run_dir)
     assert loops.model_named(receipt["deployment_id"]).deployments[0].replicas == {
         "min_replica": 0,
         "max_replica": 1,
@@ -164,6 +174,40 @@ def test_a_confirmed_run_trains_leaves_nothing_running_and_deploys_its_checkpoin
     assert output(removed)["already_deleted"] is False
     assert loops.deleted == ["dmodel1"]
     assert checkpoint["uri"] in loops.checkpoints  # the checkpoint is kept
+
+
+def test_the_lora_alpha_is_refused_in_the_preview(
+    dataset: Path, tmp_path: Path, loops: FakeLoops
+) -> None:
+    run_dir = tmp_path / "run"
+    result = train(dataset, run_dir, "--lora-alpha", "16")
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert (
+        "Error [usage]: --lora-alpha is not supported on baseten: Baseten sets the LoRA alpha "
+        "itself"
+    ) in result.stderr
+    assert "Hint: drop --lora-alpha" in result.stderr
+    assert not run_dir.exists()
+    assert loops.calls == []
+
+
+def test_resuming_a_run_recorded_with_a_lora_alpha_says_to_start_a_new_run(
+    dataset: Path, tmp_path: Path, loops: FakeLoops
+) -> None:
+    run_dir = tmp_path / "run"
+    assert train(dataset, run_dir, "--confirm").exit_code == 0
+    manifest = json.loads((run_dir / "run.json").read_text())
+    manifest["spec"]["lora_alpha"] = 16
+    (run_dir / "run.json").write_text(json.dumps(manifest))
+    state = json.loads((run_dir / "state.json").read_text())
+    (run_dir / "state.json").write_text(json.dumps({**state, "phase": "interrupted"}))
+    result = invoke("resume", str(run_dir))
+    assert result.exit_code == 2
+    assert "--lora-alpha is not supported on baseten" in result.stderr
+    assert "Hint: the run was recorded with --lora-alpha" in result.stderr
+    assert "start a new run without --lora-alpha" in result.stderr
+    assert "drop --lora-alpha" not in result.stderr
 
 
 @pytest.fixture
@@ -180,7 +224,7 @@ def receipt_of(run_dir: Path) -> dict[str, Any]:
 
 
 def undeploy_hint(run_dir: Path) -> str:
-    return f"pup finetune undeploy {run_dir} --confirm"
+    return f"pup finetune undeploy {run_dir}"
 
 
 def test_a_timed_out_deploy_leaves_a_receipt_to_undeploy(loops: FakeLoops, run_dir: Path) -> None:
@@ -189,6 +233,7 @@ def test_a_timed_out_deploy_leaves_a_receipt_to_undeploy(loops: FakeLoops, run_d
     assert result.exit_code == 1
     assert "not ready after 1 minutes" in result.stderr
     assert undeploy_hint(run_dir) in result.stderr
+    assert f"{undeploy_hint(run_dir)} --confirm" not in result.stderr
     receipt = receipt_of(run_dir)
     assert (receipt["state"], receipt["error"]["type"]) == ("DEPLOYING", "DeploymentNotReady")
     assert invoke("undeploy", str(run_dir), "--confirm").exit_code == 0
@@ -199,14 +244,17 @@ def test_a_ctrl_c_while_creating_leaves_a_requested_receipt(
     loops: FakeLoops, run_dir: Path
 ) -> None:
     loops.lost["deploy"] = KeyboardInterrupt()
-    assert invoke("deploy", str(run_dir), "--confirm").exit_code == 130
+    interrupted = invoke("deploy", str(run_dir), "--confirm")
+    assert interrupted.exit_code == 1
+    assert "Error [interrupted]: stopped by Ctrl-C\n" in interrupted.stderr
     receipt = receipt_of(run_dir)
     assert receipt["state"] == "REQUESTED"
     assert receipt["deployment_name"] is None
     request = receipt["request"]
     assert (request["base_model"], request["shape"]) == (receipt["model"], "H100:1")
     again = invoke("deploy", str(run_dir), "--confirm")
-    assert again.exit_code == 1
+    assert again.exit_code == 2
+    assert "Error [wrong_phase]: " in again.stderr
     assert "already has the deployment" in again.stderr
     removed = invoke("undeploy", str(run_dir), "--confirm")
     assert removed.exit_code == 0, removed.stderr
@@ -264,6 +312,7 @@ def test_a_create_answered_without_ids_keeps_the_receipt(loops: FakeLoops, run_d
     result = invoke("deploy", str(run_dir), "--confirm")
     assert result.exit_code == 1
     assert undeploy_hint(run_dir) in result.stderr
+    assert f"{undeploy_hint(run_dir)} --confirm" not in result.stderr
     receipt = receipt_of(run_dir)
     assert receipt["state"] == "REQUESTED"
     assert "could not be read" in receipt["error"]["message"]
@@ -299,7 +348,9 @@ def test_undeploying_a_requested_deployment_never_deletes_another_model(
     loops: FakeLoops, run_dir: Path
 ) -> None:
     loops.fail["deploy"] = KeyboardInterrupt()  # before the create took effect
-    assert invoke("deploy", str(run_dir), "--confirm").exit_code == 130
+    interrupted = invoke("deploy", str(run_dir), "--confirm")
+    assert interrupted.exit_code == 1
+    assert "Error [interrupted]: stopped by Ctrl-C\n" in interrupted.stderr
     receipt = receipt_of(run_dir)
     assert receipt["state"] == "REQUESTED"
     other = loops.sampler_checkpoint("someone-elses", base_model="Qwen/Qwen3.5-9B")
@@ -315,7 +366,9 @@ def test_undeploying_a_requested_deployment_that_was_never_made_deletes_nothing(
     loops: FakeLoops, run_dir: Path
 ) -> None:
     loops.fail["deploy"] = KeyboardInterrupt()
-    assert invoke("deploy", str(run_dir), "--confirm").exit_code == 130
+    interrupted = invoke("deploy", str(run_dir), "--confirm")
+    assert interrupted.exit_code == 1
+    assert "Error [interrupted]: stopped by Ctrl-C\n" in interrupted.stderr
     removed = invoke("undeploy", str(run_dir), "--confirm")
     assert removed.exit_code == 0, removed.stderr
     assert output(removed)["already_deleted"] is True
@@ -329,3 +382,15 @@ def test_undeploying_a_deployment_already_gone_succeeds(loops: FakeLoops, run_di
     removed = invoke("undeploy", str(run_dir), "--confirm")
     assert removed.exit_code == 0, removed.stderr
     assert output(removed)["already_deleted"] is True
+
+
+def test_a_provider_that_does_not_deploy_is_refused_before_the_preview(
+    monkeypatch: pytest.MonkeyPatch, loops: FakeLoops, run_dir: Path
+) -> None:
+    refusing = dataclasses.replace(providers._REGISTRY["baseten"], deploys=False)
+    monkeypatch.setitem(providers._REGISTRY, "baseten", refusing)
+    preview = invoke("deploy", str(run_dir))
+    assert preview.exit_code == 2
+    assert preview.stdout == ""
+    assert "deploying on Baseten is not available in this version" in preview.stderr
+    assert loops.models == {}

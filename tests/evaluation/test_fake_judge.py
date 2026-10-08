@@ -87,4 +87,4 @@ def test_it_calibrates_on_the_fixture_cases() -> None:
     report = calibrate(cases, FakeJudge(), fake_judge_config(), n=len(cases))
     assert report.ok, report.to_json()
     kinds = {check.corruption for check in report.checks if check.kind == "corrupted"}
-    assert kinds == {"wrong_tool", "altered_argument", "unsupported_claim"}
+    assert kinds == {"wrong_tool", "altered_argument", "refusal", "unsupported_claim", "off_topic"}

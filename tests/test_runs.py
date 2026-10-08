@@ -11,6 +11,7 @@ import json
 import math
 import os
 import re
+import shlex
 import signal
 import stat
 import time
@@ -23,7 +24,7 @@ import pytest
 from pup_finetune.data.dataset_dir import DatasetDir, DatasetSettings
 from pup_finetune.data.schema import TrainingRow, validate_row
 from pup_finetune.data.split import SplitParams
-from pup_finetune.errors import ExternalError, StateError, UsageError
+from pup_finetune.errors import ExternalError, RunDirNotEmpty, StateError, UsageError
 from pup_finetune.providers.base import LoraConfig, TrainSpec
 from pup_finetune.providers.fake import (
     FAKE_PROFILE,
@@ -150,7 +151,7 @@ def test_the_run_dir_must_be_new_or_empty(tmp_path: Path) -> None:
     (target / "notes.txt").write_text("hello")
     with pytest.raises(StateError, match="is not empty"):
         create(target)
-    with pytest.raises(StateError, match="is not empty"):
+    with pytest.raises(RunDirNotEmpty, match="used already holds run ft-test-run \\(created\\)"):
         create(create(tmp_path / "used").path)
 
 
@@ -262,19 +263,44 @@ def test_every_save_records_the_elapsed_time_and_it_never_decreases(tmp_path: Pa
     assert run_dir.load_state().elapsed_seconds == 120.0
 
 
-def test_the_first_promotion_request_is_saved_once_and_kept(tmp_path: Path) -> None:
+def test_a_promotion_request_is_saved_per_checkpoint_and_kept(tmp_path: Path) -> None:
     run_dir = create(tmp_path / "run")
-    assert run_dir.load_state().promotion_requested_at is None
+    assert run_dir.load_state().promotions == []
     first = NOW + timedelta(hours=1, microseconds=500)
     state = run_dir.load_state(now=lambda: first)
+    assert not state.any_promotion_requested()
+    assert state.promotion_request(1, 2) is None
     # Saved before it is returned, to the second, as read back later.
-    assert state.mark_promotion_requested() == first.replace(microsecond=0)
-    assert read(run_dir.state_path)["promotion_requested_at"] == "2026-10-06T13:30:45+00:00"
-    # A later attempt (a resume, a promotion retry) gets the recorded time, not its own.
+    request = state.record_promotion_request("ft-run", epoch=1, step=2)
+    assert (request.model_id, request.epoch, request.step) == ("ft-run", 1, 2)
+    assert request.requested_at == first.replace(microsecond=0)
+    assert read(run_dir.state_path)["promotions"] == [
+        {"model_id": "ft-run", "epoch": 1, "step": 2, "requested_at": "2026-10-06T13:30:45+00:00"}
+    ]
+    # A later attempt (a resume, a promotion retry) finds the recorded request of the
+    # checkpoint, not its own, and none for another checkpoint.
     later = run_dir.load_state(now=lambda: NOW + timedelta(days=1))
-    assert later.mark_promotion_requested() == first.replace(microsecond=0)
-    later.save()
-    assert run_dir.load_state().promotion_requested_at == "2026-10-06T13:30:45+00:00"
+    assert later.any_promotion_requested()
+    assert later.promotion_request(1, 2) == request
+    assert later.promotion_request(3, 6) is None
+    other = later.record_promotion_request("ft-run-e3s6", epoch=3, step=6)
+    assert other.requested_at == NOW + timedelta(days=1)
+    reloaded = run_dir.load_state()
+    assert (reloaded.promotion_request(1, 2), reloaded.promotion_request(3, 6)) == (request, other)
+
+
+def test_a_state_saved_with_only_the_first_request_time_reads_as_an_unknown_checkpoint(
+    tmp_path: Path,
+) -> None:
+    run_dir = create(tmp_path / "run")
+    data = read(run_dir.state_path)
+    del data["promotions"]
+    data["promotion_requested_at"] = "2026-10-06T13:30:45+00:00"
+    run_dir.state_path.write_text(json.dumps(data))
+    state = run_dir.load_state()
+    # Some checkpoint was promoted to the run's model id, but not which: none matches.
+    assert state.any_promotion_requested()
+    assert state.promotion_request(1, 2) is None
 
 
 @pytest.mark.parametrize("elapsed", [-1.0, "soon"])
@@ -383,7 +409,7 @@ def test_an_unknown_phase_on_disk_is_an_error(tmp_path: Path) -> None:
 
 
 def test_reading_a_missing_run_is_an_error(tmp_path: Path) -> None:
-    with pytest.raises(StateError, match="does not exist"):
+    with pytest.raises(StateError, match="no such run directory or run id"):
         RunDir(tmp_path / "nothing").status()
 
 
@@ -502,6 +528,18 @@ def test_sigterm_interrupts_the_run_and_still_writes_the_result(tmp_path: Path) 
     assert read(run_dir.result_path)["phase"] == "interrupted"
     assert run_dir.load_state().phase == "interrupted"
     assert signal.getsignal(signal.SIGTERM) == before
+    # The run files record the code the error line shows.
+    assert read(run_dir.state_path)["error"]["code"] == "interrupted"
+    assert read(run_dir.result_path)["error"]["code"] == "interrupted"
+
+
+def test_a_crash_is_recorded_with_the_code_its_error_line_shows(tmp_path: Path) -> None:
+    run_dir = create(tmp_path / "run")
+    with pytest.raises(FakeCrash):
+        execute_run(run_dir, fake_training(FakeOptions(fail_at_step=1)))
+    for path in (run_dir.state_path, run_dir.result_path):
+        error = read(path)["error"]
+        assert (error["type"], error["code"]) == ("FakeCrash", "external"), path.name
 
 
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
@@ -548,7 +586,9 @@ def test_termination_notes_become_the_hint(tmp_path: Path) -> None:
 
     with pytest.raises(TrainingTerminated) as info:
         execute_run(run_dir, train)
-    assert info.value.hint == "step 3 also failed: RuntimeError: boom"
+    assert info.value.hint == (
+        f"step 3 also failed: RuntimeError: boom. Next: pup finetune resume {run_dir.path}"
+    )
     assert read(run_dir.result_path)["error"]["notes"] == ["step 3 also failed: RuntimeError: boom"]
     assert run_dir.load_state().phase == "interrupted"
 
@@ -639,6 +679,51 @@ def test_status_summarizes_the_run(tmp_path: Path) -> None:
     assert status["best"]["epoch"] == 2
     assert status["pid"] == os.getpid()
     assert status["error"] is None
+
+
+def test_status_reports_the_planned_steps_and_the_elapsed_time(tmp_path: Path) -> None:
+    run_dir = create(tmp_path / "run")
+    before = run_dir.status()
+    assert (before["steps_per_epoch"], before["max_steps"]) == (None, None)
+    assert before["elapsed_seconds"] == 0.0
+    assert before["hourly_rate_usd"] is None
+    execute_run(run_dir, fake_training(FakeOptions(val_curve=[2.0, 1.5, 1.8])))
+    status = run_dir.status()
+    assert status["steps_per_epoch"] > 0
+    assert status["max_steps"] == status["steps_per_epoch"] * SPEC.max_epochs
+    assert read(run_dir.state_path)["max_steps"] == status["max_steps"]
+    assert status["elapsed_seconds"] == run_dir.load_state().elapsed_seconds
+
+
+def test_status_of_a_state_saved_before_steps_were_planned_reads_them_from_the_epochs(
+    tmp_path: Path,
+) -> None:
+    run_dir = create(tmp_path / "run")
+    execute_run(run_dir, fake_training())
+    planned = run_dir.status()
+    state = read(run_dir.state_path)
+    del state["steps_per_epoch"], state["max_steps"]
+    run_dir.state_path.write_text(json.dumps(state))
+    old = run_dir.status()
+    assert (old["steps_per_epoch"], old["max_steps"]) == (
+        planned["steps_per_epoch"],
+        planned["max_steps"],
+    )
+    assert run_dir.load_state().steps_per_epoch is None
+
+
+def test_status_while_training_leaves_out_an_epoch_the_state_has_not_recorded(
+    tmp_path: Path,
+) -> None:
+    # record_epoch writes epochs.json before state.json: a status read in between sees the
+    # new epoch only in epochs.json, and must not pair its loss with the old best epoch.
+    run_dir = create(tmp_path / "run")
+    execute_run(run_dir, fake_training(FakeOptions(val_curve=[2.0, 1.5, 1.8])))
+    state = read(run_dir.state_path)
+    run_dir.state_path.write_text(json.dumps({**state, "phase": "training", "epochs": 2}))
+    status = run_dir.status()
+    assert status["val_losses"] == pytest.approx([2.0, 1.5])
+    assert status["epochs_completed"] == 2
 
 
 # --- resuming and finite numbers -----------------------------------------------------------
@@ -884,3 +969,55 @@ def test_an_interrupt_after_the_end_was_recorded_keeps_it(tmp_path: Path) -> Non
     assert read(run_dir.result_path)["phase"] == "completed"
     assert read(run_dir.result_path)["best_epoch"] is not None
     assert read(run_dir.state_path)["phase"] == "completed"
+
+
+# --- the resume hint ----------------------------------------------------------------------
+
+
+def test_every_error_that_leaves_the_run_resumable_names_the_resume_command(
+    tmp_path: Path,
+) -> None:
+    run_dir = create(tmp_path / "my run")
+    resume = f"Next: pup finetune resume {shlex.quote(str(run_dir.path))}"
+    with pytest.raises(FakeCrash) as crash:  # a FinetuneError, kept as it is
+        execute_run(run_dir, fake_training(FakeOptions(fail_at_step=3)))
+    assert crash.value.hint == f"the run is resumable from its last training checkpoint. {resume}"
+    assert run_dir.load_state().phase == "interrupted"
+
+    def auth_lost(state: RunState) -> TrainResult:
+        raise ExternalError("401", source="fake", hint="log in again.")
+
+    with pytest.raises(ExternalError) as lost:
+        execute_run(run_dir, auth_lost, resume=True)
+    assert lost.value.hint == f"log in again. {resume}"
+
+    def broken(state: RunState) -> TrainResult:
+        raise RuntimeError("boom")
+
+    with pytest.raises(ExternalError) as other:
+        execute_run(run_dir, broken, resume=True)
+    assert other.value.hint == f"the run is resumable from its last training checkpoint. {resume}"
+
+
+def test_a_run_that_saved_no_checkpoint_resumes_from_the_start(tmp_path: Path) -> None:
+    run_dir = create(tmp_path / "run")
+    with pytest.raises(FakeCrash) as crash:
+        execute_run(run_dir, fake_training(FakeOptions(fail_at_step=1)))
+    assert run_dir.load_state().resume_point is None
+    assert (crash.value.hint or "").startswith(
+        "the run is resumable from the start: it saved no training checkpoint yet. Next: "
+    )
+
+
+def test_an_error_after_the_end_was_recorded_names_no_resume(tmp_path: Path) -> None:
+    run_dir = create(tmp_path / "run")
+    trained = fake_training()
+
+    def train(state: RunState) -> TrainResult:
+        record_finished(run_dir, state, trained(state), now=now)
+        raise ExternalError("after the end", source="fake", hint="nothing to resume")
+
+    with pytest.raises(ExternalError) as info:
+        execute_run(run_dir, train, now=now)
+    assert info.value.hint == "nothing to resume"
+    assert run_dir.load_state().phase == "completed"

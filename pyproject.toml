@@ -61,6 +61,8 @@ fireworks = [
   "tinker>=0.23,<0.24",
   "pup-finetune[hf]",
 ]
+# Judges on Anthropic: the official SDK (anthropic_client.py is the only module that loads it).
+anthropic = ["anthropic>=1,<2"]
 # The Baseten Loops SDK, pinned to the version the client is tested with (providers/baseten).
 baseten = ["pup-finetune[hf]", "baseten-loops==0.26.0"]
 
@@ -148,4 +150,5 @@ addopts = "-q --strict-markers --import-mode=importlib"
 markers = [
   "live: hits real external services (skipped unless PUP_FINETUNE_LIVE=1)",
   "tokenizer: downloads real tokenizers (skipped unless PUP_FINETUNE_TOKENIZER_TESTS=1)",
+  "any_next_command: emits results that break the next_command rule on purpose",
 ]
