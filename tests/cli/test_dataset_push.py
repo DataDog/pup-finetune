@@ -353,10 +353,69 @@ def test_the_default_project(dataset: Path, api: FakeDatasetsApi) -> None:
     assert output_json(result)["preview"]["project"] == "pup-finetune"
 
 
-def test_name_is_required(dataset: Path) -> None:
+def test_name_is_required_until_the_first_push(dataset: Path) -> None:
     result = invoke("push", str(dataset))
     assert result.exit_code == 2
-    assert "--name" in _ANSI.sub("", result.stderr)
+    assert "Error [usage]: dataset push needs --name (" in _ANSI.sub("", result.stderr)
+    assert "was never pushed)" in result.stderr
+
+
+def test_project_without_name_is_refused(
+    dataset: Path, api: FakeDatasetsApi, fake: FakePup
+) -> None:
+    """Before a first push, --project alone names no dataset; after one, another project
+    than the receipt's is refused too."""
+    never = invoke("push", str(dataset), "--project", "other")
+    assert never.exit_code == 2
+    assert "Error [usage]: dataset push needs --name (" in _ANSI.sub("", never.stderr)
+    assert fake.calls == []
+    assert push(dataset, "--confirm").exit_code == 0
+    calls = len(fake.calls)
+    other = invoke("push", str(dataset), "--project", "other")
+    assert other.exit_code == 2
+    assert f"was pushed to dataset {NAME!r} in project {PROJECT!r}" in other.stderr
+    assert len(fake.calls) == calls
+
+
+def test_a_rerun_takes_the_dataset_from_the_receipt(tmp_path: Path, api: FakeDatasetsApi) -> None:
+    """Once pushed, `dataset push DIR` needs no flag; another --name names the receipt's."""
+    rows = TOOL_USE.read_text().splitlines()
+    first, rest = tmp_path / "first.jsonl", tmp_path / "rest.jsonl"
+    first.write_text("\n".join(rows[:6]) + "\n")
+    rest.write_text("\n".join(rows[6:]) + "\n")
+    directory = tmp_path / "ds"
+    assert invoke("import", str(directory), "--file", str(first)).exit_code == 0
+    pushed = push(directory, "--confirm")
+    assert pushed.exit_code == 0, pushed.stderr
+    assert output_json(pushed)["pipeline"]["push"] == {"status": "pushed", "pending": 0}
+
+    imported = output_json(invoke("import", str(directory), "--file", str(rest)))
+    new_rows = len(rows) - 6
+    assert imported["pipeline"]["push"] == {"status": "pushed_with_new_rows", "pending": new_rows}
+    flagless = f"pup finetune dataset push {directory}"
+    assert flagless in [step["command"] for step in imported["next_steps"]]
+
+    result = invoke("push", str(directory))
+    assert result.exit_code == 2, result.stderr
+    data = output_json(result)
+    # The receipt's project, not the default one.
+    assert (data["preview"]["project"], data["preview"]["dataset_name"]) == (PROJECT, NAME)
+    assert data["preview"]["defaults_used"] == []
+    assert data["preview"]["records_to_push"] == new_rows
+    words = shlex.split(data["next_command"])
+    assert words[:4] == ["pup", "finetune", "dataset", "push"]
+    assert "--name" not in words and "--project" not in words
+    confirmed = invoke(*words[3:])
+    assert confirmed.exit_code == 0, confirmed.stderr
+    receipt = output_json(confirmed)
+    assert (receipt["pushed"], receipt["records"]) == (new_rows, len(rows))
+    assert receipt["pipeline"]["push"] == {"status": "pushed", "pending": 0}
+    assert len(api.dataset_named(NAME).records) == len(rows)
+
+    other = invoke("push", str(directory), "--name", "other")
+    assert other.exit_code == 2
+    assert f"was pushed to dataset {NAME!r} in project {PROJECT!r}, not 'other'" in other.stderr
+    assert "leave --name and --project out" in other.stderr
 
 
 def test_show_reports_the_push(dataset: Path, api: FakeDatasetsApi) -> None:

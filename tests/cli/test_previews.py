@@ -201,7 +201,9 @@ def test_the_train_card_is_short_and_generated_from_the_preview(
     preview = output(result)["preview"]
     lines = card(result)
     assert 1 < len(lines) <= CARD_LINES
-    assert lines[0] == "Preview only, nothing was run: train fake-model on fake"
+    assert (
+        lines[0] == f"Preview only, nothing was run: train fake-model on fake in {tmp_path / 'run'}"
+    )
     rows = preview["rows"]
     assert lines[1] == (
         f"  data      {rows['train']} train / {rows['validation']} validation rows; "
@@ -297,7 +299,9 @@ def test_quiet_keeps_only_the_card_s_first_line(
 ) -> None:
     monkeypatch.setenv("PUP_FINETUNE_QUIET", "1")
     result = invoke(*train_args(dataset, tmp_path / "run"))
-    assert card(result) == ["Preview only, nothing was run: train fake-model on fake"]
+    assert card(result) == [
+        f"Preview only, nothing was run: train fake-model on fake in {tmp_path / 'run'}"
+    ]
 
 
 def test_train_evaluate_names_the_judge_in_its_action_and_billing(
@@ -494,4 +498,5 @@ def test_the_deploy_preview_has_settings_and_a_card(completed: Path) -> None:
     lines = card(result)
     assert lines[0].startswith("Preview only, nothing was run: deploy ")
     assert "wait up to 5 min" in lines[1]
-    assert lines[2].startswith("  cost      the deployment bills per GPU-second")
+    assert lines[2].startswith("  sends     the deployment request")
+    assert lines[3] == "  cost      nothing: the fake provider runs offline"

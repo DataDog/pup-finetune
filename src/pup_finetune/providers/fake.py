@@ -47,6 +47,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Final, Literal, NoReturn
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
@@ -57,7 +58,6 @@ from pup_finetune.providers.base import (
     MODEL_ID_PATTERN,
     OFFLINE_BILLING,
     AdamConfig,
-    Check,
     CheckpointRef,
     DeploymentRequest,
     DeployOptions,
@@ -456,7 +456,9 @@ class FakeOptions(BaseModel):
     :class:`FakeCrash` once per lineage: only a fresh session crashes, so a session resumed
     from a checkpoint (with the same options) trains on past that step; ``prefix_stable``
     configures the renderer; ``max_seq_len`` caps the profile's context, as the real
-    providers' option does (``train --max-seq-len``).
+    providers' option does (``train --max-seq-len``); ``hold_file`` holds every pending
+    result while that file exists, so a test can keep a run training for as long as it
+    needs and then let it finish (by removing the file).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
@@ -471,6 +473,12 @@ class FakeOptions(BaseModel):
     fail_at_step: PositiveInt | None = None
     prefix_stable: bool = True
     max_seq_len: PositiveInt | None = None
+    hold_file: str | None = None
+
+    @property
+    def hold(self) -> Path | None:
+        """The file whose existence holds every pending result, if any."""
+        return None if self.hold_file is None else Path(self.hold_file)
 
     @classmethod
     def parse(cls, options: Mapping[str, Any]) -> FakeOptions:
@@ -490,14 +498,27 @@ class FakeCrash(FinetuneError):
     error_code: ClassVar[str] = "external"
 
 
-class _Pending[T]:
-    """A result computed at call time and released ``delay_s`` seconds later."""
+HOLD_POLL_S = 0.02
+"""How often a held result (``hold_file``) checks whether its file is gone."""
 
-    def __init__(self, outcome: Callable[[], T], delay_s: float) -> None:
+
+class _Pending[T]:
+    """A result computed at call time and released ``delay_s`` seconds later, and not
+    before ``hold`` (a file) is gone."""
+
+    def __init__(self, outcome: Callable[[], T], delay_s: float, hold: Path | None = None) -> None:
         self._outcome = outcome
         self._ready_at = time.monotonic() + delay_s
+        self._hold = hold
 
     def result(self, timeout: float | None = None) -> T:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while self._hold is not None and self._hold.exists():
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("the fake result is held (hold_file exists)")
+            time.sleep(HOLD_POLL_S)
+        if deadline is not None:
+            timeout = max(deadline - time.monotonic(), 0.0)
         remaining = self._ready_at - time.monotonic()
         if remaining > 0:
             if timeout is not None and timeout < remaining:
@@ -741,7 +762,7 @@ class FakeSession:
         if step == self._options.fail_at_step and not self._resumed:
             self._crashed = True
             crash = FakeCrash(f"simulated crash at step {step} (fail_at_step)")
-            return _Pending(_raises(crash), self._options.step_delay_s)
+            return _Pending(_raises(crash), self._options.step_delay_s, self._options.hold)
         for example in batch:
             for key in self._observations(example):
                 state.policy[key] = state.policy.get(key, 0) + 1
@@ -756,7 +777,7 @@ class FakeSession:
         self._require_open()
         self._state.step += 1
         self._state.trained = self._state.epoch
-        return _Pending(lambda: None, self._options.step_delay_s)
+        return _Pending(lambda: None, self._options.step_delay_s, self._options.hold)
 
     def save_training_checkpoint(self, name: str, *, epoch: int, step: int) -> CheckpointRef:
         self._require_open()
@@ -863,7 +884,7 @@ class FakeSession:
         weight = sum(sum(example.weights) for example in batch)
         tokens = sum(example.num_tokens for example in batch)
         metrics = StepMetrics(loss_sum=mean * weight, weight=weight, tokens=tokens)
-        return _Pending(lambda: metrics, self._options.step_delay_s)
+        return _Pending(lambda: metrics, self._options.step_delay_s, self._options.hold)
 
     def _save(
         self, kind: Literal["training", "sampler"], name: str, *, epoch: int, step: int
@@ -1077,9 +1098,6 @@ class FakeProvider:
     @property
     def name(self) -> str:
         return PROVIDER_NAME
-
-    def check(self) -> list[Check]:
-        return [Check("fake provider", True, "offline; needs no credentials or network")]
 
     def models(self) -> list[ModelProfile]:
         return [FAKE_PROFILE]

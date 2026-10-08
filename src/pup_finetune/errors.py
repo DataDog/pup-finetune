@@ -174,12 +174,16 @@ ERROR_CODES: Final[dict[str, tuple[int, str]]] = {
         "a paid run or a remote write while PUP_READ_ONLY is set; changing that is the user's call",
     ),
     "not_a_dataset_dir": (2, "the directory is missing or is not a dataset directory"),
-    "not_a_run_dir": (2, "the directory is missing or is not a training run's"),
-    "run_dir_not_empty": (2, "a new run needs a new or empty directory"),
+    "not_a_run_dir": (2, "no such run directory or run id (`pup finetune runs` lists them)"),
+    "run_dir_not_empty": (
+        2,
+        "a new run needs a new directory: omit --run-dir/--run-id, or pass new ones",
+    ),
     "settings_conflict": (
         2,
-        "the directory records other settings (pass the same ones, or use a new directory), "
-        "or what `--confirm` would use changed since its preview (`--expect`): preview again",
+        "the directory records other settings (leave the flags out: the frozen values are "
+        "used; or use a new directory or `--out-dir`), or what `--confirm` would use changed "
+        "since its preview (`--expect`): preview again",
     ),
     "wrong_phase": (2, "the run is not in a phase the command acts on (`status` says which)"),
     "lock_busy": (1, "another pup-finetune process is using the directory; wait for it"),

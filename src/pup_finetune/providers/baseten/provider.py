@@ -30,16 +30,13 @@ import dataclasses
 import os
 import time
 from collections.abc import Callable, Mapping
-from importlib import metadata
 from typing import TYPE_CHECKING, Any, Final, NoReturn, TypeGuard
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from pup_finetune import credentials
-from pup_finetune.doctor import error_detail
-from pup_finetune.errors import ExternalError, FinetuneError, UsageError
+from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.providers.base import (
-    Check,
     DeploymentRequest,
     DeployOptions,
     Endpoint,
@@ -51,17 +48,15 @@ from pup_finetune.providers.base import (
     sampling_usage_text,
     training_usage_text,
 )
-from pup_finetune.providers.baseten import CREDENTIALS, PROVIDER_NAME
+from pup_finetune.providers.baseten import PROVIDER_NAME
 from pup_finetune.providers.baseten.backend import MIN_SEQ_LEN, BasetenBackend, Sleep
 from pup_finetune.providers.baseten.client import (
-    INSTALL_HINT,
     SOURCE,
     BasetenHTTP,
     LoopsModule,
     loops_sdk,
 )
 from pup_finetune.providers.options import parse_options
-from pup_finetune.redaction import redact
 from pup_finetune.rendering.families import GLM5_3, QWEN3_5, ModelFamily, get_family
 from pup_finetune.rendering.hf import ChatTokenizer, HFChatTemplateRenderer
 from pup_finetune.runtime import Runtime
@@ -231,25 +226,6 @@ class BasetenProvider:
     def name(self) -> str:
         return PROVIDER_NAME
 
-    def check(self) -> list[Check]:
-        """The SDK, the API key and, with a key, whether Baseten answers; never raises."""
-        checks = [_sdk_check()]
-        name = "baseten api key"
-        try:
-            found = credentials.lookup(PROVIDER_NAME, env=self._environ())
-        except Exception as exc:
-            return [*checks, Check(name, False, redact(_detail(exc, "could not look it up")))]
-        if found is None:
-            hint = credentials.login_hint(CREDENTIALS)
-            return [*checks, Check(name, False, f"no Baseten API key; {hint}")]
-        checks.append(Check(name, True, f"Baseten API key found (source: {found.source})"))
-        try:
-            with BasetenHTTP(found.value, transport=self._transport) as http:
-                http.capabilities()
-        except Exception as exc:
-            return [*checks, Check("baseten api", False, redact(_detail(exc, "unexpected error")))]
-        return [*checks, Check("baseten api", True, "Baseten Loops answers with this key")]
-
     def models(self) -> list[ModelProfile]:
         return list(PROFILES)
 
@@ -383,28 +359,6 @@ class BasetenProvider:
 
     def _http(self) -> BasetenHTTP:
         return BasetenHTTP(self._key(), transport=self._transport)
-
-
-def _sdk_check() -> Check:
-    name = "baseten loops sdk"
-    try:
-        version = metadata.version("baseten-loops")
-    except metadata.PackageNotFoundError:
-        return Check(name, False, f"the Baseten Loops SDK is not installed; {INSTALL_HINT}")
-    if version != LOOPS_VERSION:
-        return Check(
-            name,
-            True,
-            f"baseten-loops {version} is installed, but pup-finetune is tested with "
-            f"{LOOPS_VERSION}; {INSTALL_HINT}",
-        )
-    return Check(name, True, f"baseten-loops {version} is installed")
-
-
-def _detail(exc: Exception, unexpected: str) -> str:
-    if isinstance(exc, FinetuneError):
-        return error_detail(exc)
-    return f"{unexpected} ({type(exc).__name__})"
 
 
 def _later(action: str) -> NoReturn:

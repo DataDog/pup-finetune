@@ -743,8 +743,9 @@ def _check_state(
             f"{dataset.path} was pushed to dataset {state.dataset_name!r} in project "
             f"{state.project!r}, not {name!r} in {project!r}",
             hint=(
-                f"pass --name {shlex.quote(state.dataset_name)} --project "
-                f"{shlex.quote(state.project)} to add to that dataset; a directory pushes to "
+                "leave --name and --project out (or pass --name "
+                f"{shlex.quote(state.dataset_name)} --project {shlex.quote(state.project)}) "
+                f"to add to that dataset; a directory pushes to "
                 f"a new dataset only without a {PUSH_FILE}, so move {path} aside first to "
                 "push to another one"
             ),

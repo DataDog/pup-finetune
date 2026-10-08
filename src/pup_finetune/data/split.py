@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Self, cast
@@ -34,6 +34,12 @@ DEFAULT_TEST_FRACTION = 0.1
 
 MIN_TRAIN_ROWS = 3
 """Fewer training rows than this produce a warning."""
+SKEW_MAX_TRACES = 50
+"""With fewer traces than this, a split far from its fraction produces a warning
+(:func:`skew_warnings`); with more, the per-trace assignment evens out."""
+SKEW_POINTS = 0.10
+"""How far, as a share of the rows, a split may be from its fraction before it is skewed
+(it is also skewed at more than twice its fraction)."""
 
 _HASH_SPACE = 2**64
 
@@ -197,4 +203,40 @@ def split_warnings(counts: Mapping[SplitName, int]) -> list[str]:
         )
     if not counts.get("test", 0):
         warnings.append("the test split is empty, so there is nothing to evaluate on")
+    return warnings
+
+
+def skew_warnings(
+    keys_by_split: Mapping[SplitName, Sequence[str]], params: SplitParams, *, more: str
+) -> list[str]:
+    """Warnings about a validation or test split whose share of the rows is far from its
+    fraction (more than twice it, or :data:`SKEW_POINTS` or more off) in a dataset of fewer
+    than :data:`SKEW_MAX_TRACES` traces.
+
+    ``keys_by_split`` holds the split key of every row, per split. ``more`` is what to do
+    about it (``pull more rows``). Splits are assigned per trace, so a small dataset varies
+    by chance; the seed of a frozen directory cannot change, so the warning never suggests
+    it. An empty split is left to :func:`split_warnings`.
+    """
+    rows = sum(len(keys) for keys in keys_by_split.values())
+    traces = {split: len(set(keys_by_split.get(split, ()))) for split in SPLITS}
+    total_traces = sum(traces.values())
+    if not rows or total_traces >= SKEW_MAX_TRACES:
+        return []
+    warnings: list[str] = []
+    checked: tuple[tuple[SplitName, float], ...] = (
+        ("validation", params.validation_fraction),
+        ("test", params.test_fraction),
+    )
+    for split, fraction in checked:
+        count = len(keys_by_split.get(split, ()))
+        if not count or not fraction:
+            continue
+        share = count / rows
+        if share > 2 * fraction or round(abs(share - fraction), 9) >= SKEW_POINTS:
+            warnings.append(
+                f"{split} has {count} of {rows} rows ({share:.0%}, {traces[split]} of "
+                f"{total_traces} traces) though --{split}-fraction is {fraction:g}: splits "
+                f"are assigned per trace, so small datasets vary; {more}"
+            )
     return warnings

@@ -25,7 +25,7 @@ from pup_finetune.inference import (
     ChatCompleter,
     JudgeConfig,
 )
-from pup_finetune.judge_models import JUDGE_ALIASES, alias_of
+from pup_finetune.judge_models import JUDGE_SHORT_NAMES, alias_of
 from pup_finetune.judges import (
     ANTHROPIC_INSTALL_HINT,
     FIREWORKS_REASONING,
@@ -328,15 +328,15 @@ def test_the_providers_table_covers_every_remote_provider() -> None:
     assert all(d.base_url.startswith("https://") for d in judges.PROVIDERS.values())
 
 
-@pytest.mark.parametrize("alias", sorted(JUDGE_ALIASES))
+@pytest.mark.parametrize("alias", sorted(JUDGE_SHORT_NAMES))
 def test_an_alias_resolves_to_its_fireworks_model_id(alias: str) -> None:
     config = parse_judge(alias)
     assert config.provider == "fireworks"
-    assert config.model == JUDGE_ALIASES[alias]
+    assert config.model == JUDGE_SHORT_NAMES[alias]
     # The spec a preview prints and a directory freezes is the full id, never the alias.
-    assert config.spec == JUDGE_ALIASES[alias]
+    assert config.spec == JUDGE_SHORT_NAMES[alias]
     assert parse_judge(config.spec) == config
-    assert config.reasoning_effort == FIREWORKS_REASONING[JUDGE_ALIASES[alias]]
+    assert config.reasoning_effort == FIREWORKS_REASONING[JUDGE_SHORT_NAMES[alias]]
 
 
 def test_the_default_judges_have_aliases() -> None:

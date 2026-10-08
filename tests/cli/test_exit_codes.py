@@ -266,6 +266,5 @@ def test_a_mistake_exits_by_the_rule_with_its_code(
 def test_every_missing_required_option_is_named_at_once(world: World) -> None:
     result = _invoke("train", "--provider", "fake")
     assert result.stderr == (
-        "Error [usage]: train needs --dataset, --model and --run-dir\n"
-        "Hint: see `pup-finetune help train`\n"
+        "Error [usage]: train needs --dataset and --model\nHint: see `pup-finetune help train`\n"
     )

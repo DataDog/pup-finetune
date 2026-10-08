@@ -50,6 +50,7 @@ from pup_finetune.data.split import (
     SplitName,
     SplitParams,
     check_isolation,
+    skew_warnings,
     split_warnings,
 )
 from pup_finetune.display import display_path
@@ -220,7 +221,8 @@ class DatasetDir:
         rows = self.rows()
         labels = self.labels()
         kept = self._kept(rows, labels)
-        by_split = _group_by_split(kept, self.splits(), where=self.splits_path)
+        splits = self.splits()
+        by_split = _group_by_split(kept, splits, where=self.splits_path)
         excluded = _reconcile(self.excluded(), (), accepted_ids={row.id for row in rows})
         by_code = Counter(str(record.get("code")) for record in excluded)
         counts = {split: len(by_split[split]) for split in SPLITS}
@@ -232,8 +234,21 @@ class DatasetDir:
             "kept": len(kept),
             **label_counts(labels, (row.id for row in rows)),
             "splits": counts,
-            "warnings": split_warnings(counts),
+            "warnings": [
+                *split_warnings(counts),
+                *skew_warnings(
+                    {split: [split_key(row) for row in by_split[split]] for split in SPLITS},
+                    splits.params,
+                    more=self._more_rows(),
+                ),
+            ],
         }
+
+    def _more_rows(self) -> str:
+        """What a skew warning advises: more rows, from the command that built the dataset."""
+        source = self.settings().get("source")
+        kind = source.get("kind") if isinstance(source, Mapping) else None
+        return "import more rows" if kind == "import" else "pull more rows"
 
     # --- writing ------------------------------------------------------------------------
 
@@ -322,7 +337,7 @@ class DatasetDir:
         with DirectoryLock(self.path):
             fresh = not self.is_dataset()
             if not fresh:
-                self._check_source(settings.source)
+                self.check_source(settings.source)
                 self._check_split_params(settings.split)
                 FrozenSettings.check_or_write(self.path, SETTINGS_NAME, settings.to_json())
             retiring = list(retired)
@@ -378,7 +393,7 @@ class DatasetDir:
         """
         return self.add((), settings=settings).summary
 
-    def _check_source(self, kind: SourceKind) -> None:
+    def check_source(self, kind: SourceKind) -> None:
         """Raise :class:`SettingsConflict` naming the cause when the dataset was built by the
         other command (``dataset import`` against ``dataset pull``)."""
         source = self.settings().get("source")

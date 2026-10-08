@@ -19,9 +19,11 @@ from pup_finetune.data.schema import TrainingRow, validate_row
 from pup_finetune.data.split import (
     SPLITS,
     SplitAssignments,
+    SplitName,
     SplitParams,
     assign_split,
     check_isolation,
+    skew_warnings,
     split_counts,
     split_position,
     split_warnings,
@@ -266,3 +268,64 @@ def test_split_counts_follow_the_params_by_trace() -> None:
     assert set(counts) == set(SPLITS)
     assert all(count % 2 == 0 for count in counts.values())  # two rows per trace
     assert split_counts(rows, SplitParams(1, 0.0, 0.0)) == {"train": 40, "validation": 0, "test": 0}
+
+
+# --- skew -----------------------------------------------------------------------------------
+
+
+def keys(
+    train: int, validation: int, test: int, *, rows_per_trace: int = 1
+) -> dict[SplitName, list[str]]:
+    """Split keys for that many traces per split, each with ``rows_per_trace`` rows."""
+    counts: dict[SplitName, int] = {"train": train, "validation": validation, "test": test}
+    return {
+        split: [f"{split}-{n}" for n in range(count) for _ in range(rows_per_trace)]
+        for split, count in counts.items()
+    }
+
+
+def test_a_small_skewed_split_is_warned_about_without_suggesting_the_seed() -> None:
+    by_split = keys(7, 4, 2)
+    by_split["validation"].append("validation-0")  # the fixture's 7 / 5 / 2 rows
+    (warning,) = skew_warnings(by_split, SplitParams(), more="pull more rows")
+    assert warning == (
+        "validation has 5 of 14 rows (36%, 4 of 13 traces) though --validation-fraction is "
+        "0.1: splits are assigned per trace, so small datasets vary; pull more rows"
+    )
+    assert "seed" not in warning
+
+
+@pytest.mark.parametrize(
+    ("train", "validation", "test", "skewed"),
+    [
+        (16, 2, 2, []),  # on target
+        (17, 1, 2, []),  # 5 points under, and not over twice the fraction
+        (15, 4, 1, ["validation"]),  # 20%: 10 points over
+        (6, 1, 2, ["test"]),  # 22%: over twice the fraction, though 12 points off
+        (14, 5, 1, ["validation"]),  # 25%
+        (20, 0, 0, []),  # empty splits have their own warnings
+    ],
+)
+def test_skew_is_more_than_twice_the_fraction_or_ten_points_off(
+    train: int, validation: int, test: int, skewed: list[str]
+) -> None:
+    warnings = skew_warnings(keys(train, validation, test), SplitParams(), more="x")
+    assert [w.split()[0] for w in warnings] == skewed
+
+
+def test_more_than_twice_a_small_fraction_is_skewed_within_ten_points() -> None:
+    params = SplitParams(validation_fraction=0.02, test_fraction=0.1)
+    warnings = skew_warnings(keys(41, 3, 5), params, more="x")  # 6% against 2%
+    assert [w.split()[0] for w in warnings] == ["validation"]
+
+
+def test_ten_points_under_a_larger_fraction_is_skewed() -> None:
+    params = SplitParams(validation_fraction=0.3, test_fraction=0.1)
+    warnings = skew_warnings(keys(17, 2, 1), params, more="x")  # 10% against 30%
+    assert [w.split()[0] for w in warnings] == ["validation"]
+
+
+def test_skew_is_not_warned_about_once_there_are_enough_traces() -> None:
+    assert skew_warnings(keys(29, 15, 5), SplitParams(), more="x") != []
+    assert skew_warnings(keys(29, 15, 5, rows_per_trace=3), SplitParams(), more="x") != []
+    assert skew_warnings(keys(30, 15, 5), SplitParams(), more="x") == []  # 50 traces

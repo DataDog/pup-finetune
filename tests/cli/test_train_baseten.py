@@ -135,3 +135,48 @@ def test_a_confirmed_run_trains_leaves_nothing_running_and_cannot_deploy_yet(
     assert deployed.exit_code == 2, deployed.stderr
     assert "deploying on Baseten is not available" in deployed.stderr
     assert not (run_dir / "deployment.json").exists()
+
+
+def test_the_lora_alpha_is_refused_in_the_preview(
+    dataset: Path, tmp_path: Path, loops: FakeLoops
+) -> None:
+    run_dir = tmp_path / "run"
+    result = train(dataset, run_dir, "--lora-alpha", "16")
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert (
+        "Error [usage]: --lora-alpha is not supported on baseten: Baseten sets the LoRA alpha "
+        "itself"
+    ) in result.stderr
+    assert "Hint: drop --lora-alpha" in result.stderr
+    assert not run_dir.exists()
+    assert loops.calls == []
+
+
+def test_resuming_a_run_recorded_with_a_lora_alpha_says_to_start_a_new_run(
+    dataset: Path, tmp_path: Path, loops: FakeLoops
+) -> None:
+    run_dir = tmp_path / "run"
+    assert train(dataset, run_dir, "--confirm").exit_code == 0
+    manifest = json.loads((run_dir / "run.json").read_text())
+    manifest["spec"]["lora_alpha"] = 16
+    (run_dir / "run.json").write_text(json.dumps(manifest))
+    state = json.loads((run_dir / "state.json").read_text())
+    (run_dir / "state.json").write_text(json.dumps({**state, "phase": "interrupted"}))
+    result = invoke("resume", str(run_dir))
+    assert result.exit_code == 2
+    assert "--lora-alpha is not supported on baseten" in result.stderr
+    assert "Hint: the run was recorded with --lora-alpha" in result.stderr
+    assert "start a new run without --lora-alpha" in result.stderr
+    assert "drop --lora-alpha" not in result.stderr
+
+
+def test_the_deploy_preview_is_refused_before_any_confirm(
+    dataset: Path, tmp_path: Path, loops: FakeLoops
+) -> None:
+    run_dir = tmp_path / "run"
+    assert train(dataset, run_dir, "--confirm").exit_code == 0
+    preview = invoke("deploy", str(run_dir))
+    assert preview.exit_code == 2
+    assert preview.stdout == ""
+    assert "deploying on Baseten is not available in this version" in preview.stderr

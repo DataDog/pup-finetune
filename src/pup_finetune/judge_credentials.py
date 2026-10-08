@@ -177,6 +177,7 @@ ANTHROPIC: Final = credentials.CredentialSpec(
     provider="anthropic",
     env_var=ANTHROPIC_ENV_VAR,
     description="Anthropic API key, for LLM judges on Anthropic",
+    needed_for="anthropic/... judges",
     keychain_account="anthropic",
     sdk_login=anthropic_sdk_login,
     other_secret_env=(_SDK_AUTH_TOKEN, "ANTHROPIC_IDENTITY_TOKEN"),
@@ -187,6 +188,8 @@ OPENAI: Final = credentials.CredentialSpec(
     provider="openai",
     env_var=OPENAI_ENV_VAR,
     description="OpenAI API key, for LLM judges on OpenAI",
+    needed_for="openai/... judges",
+    label="OpenAI",
     keychain_account="openai",
     validator=validate_openai_key,
 )

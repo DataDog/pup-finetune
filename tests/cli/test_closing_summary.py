@@ -168,7 +168,9 @@ def test_a_preview_prints_its_card_then_its_warnings_then_the_next_line(
     warnings = [f"warning: {text}" for text in data["preview"]["warnings"]]
     assert warnings  # nothing to validate on
     card = lines[: -len(warnings) - 1]
-    assert card[0] == "Preview only, nothing was run: train fake-model on fake"
+    assert (
+        card[0] == f"Preview only, nothing was run: train fake-model on fake in {tmp_path / 'run'}"
+    )
     assert 1 < len(card) <= 6
     assert lines[len(card) : -1] == warnings
     assert lines[-1] == f"Next: {data['next_command']}"
@@ -310,15 +312,15 @@ EXAMPLES: dict[str, dict[str, Any]] = {
         "state": "READY",
         "smoke_test": {"ok": True},
         "usage": {"model": "accounts/a/deployments/ft-1", "base_url": "https://example.test/v1"},
-        "undeploy_command": "pup finetune undeploy ./run --confirm",
+        "undeploy_command": "pup finetune undeploy ./run",
         "next_command": None,
     },
     "undeploy": {"deployment_id": "ft-1", "model_kept": "fake://models/ft-1"},
-    "doctor": {
-        "checks": [
-            {"name": "pup", "ok": True, "required": True, "detail": "pup 1.0"},
-            {"name": "datadog_auth", "ok": False, "required": True, "detail": "not signed in"},
-        ]
+    "cancel": {
+        "run_id": "ft-1",
+        "pid": 4242,
+        "status": "cancelling",
+        "next_command": "pup finetune status ./run --watch",
     },
 }
 
@@ -334,9 +336,10 @@ EXPECTED: dict[str, str] = {
     "20 records from this directory (version 3)",
     "deploy": "deployed ft-1 (ready); call it: model accounts/a/deployments/ft-1 at "
     "https://example.test/v1; it bills while a replica runs; delete it with: pup finetune "
-    "undeploy ./run --confirm",
+    "undeploy ./run",
     "undeploy": "deleted the deployment ft-1; the model fake://models/ft-1 is kept",
-    "doctor": "doctor: 1/2 checks passed; failed: datadog_auth (not signed in)",
+    "cancel": "sent SIGTERM to process 4242: run ft-1 stops after its current step, saves a "
+    "resumable checkpoint and promotes its best epoch. Next: pup finetune status ./run --watch",
 }
 
 
@@ -347,6 +350,45 @@ def test_each_summary_is_one_line_off_a_terminal_and_a_few_on_one(command: str) 
     assert found.line == EXPECTED[command]
     assert "\n" not in found.line
     assert 1 <= len(found.lines) <= MAX_LINES
+
+
+def test_doctor_prints_its_whole_checklist_on_or_off_a_terminal() -> None:
+    result = {
+        "versions": {"pup_finetune": "0.0.1.dev3+g1234567", "checkout": None},
+        "mode": {"read_only": True, "dev": False},
+        "checks": [
+            {"name": "pup", "status": "pass", "label": "pup 1.0", "required": True},
+            {
+                "name": "datadog_auth",
+                "status": "fail",
+                "label": "Datadog: not signed in",
+                "needed_for": "reading traces",
+                "fix": "run `pup auth login`",
+                "required": True,
+            },
+            {"name": "a:key", "status": "optional", "label": "A key not set", "needed_for": "a/x"},
+        ],
+        "ready": {
+            "dataset show": {"ready": True},
+            "dataset preview": {"ready": False},
+            "dataset pull": {"ready": False},
+        },
+        "next_command": None,
+        "next_steps": [],
+    }
+    found = summarize("doctor", result)
+    assert found is not None
+    assert found.full
+    assert found.lines == (
+        "pup-finetune 0.0.1.dev3+g1234567   read-only: on   dev: off",
+        "ok    pup 1.0",
+        "FAIL  Datadog: not signed in  reading traces",
+        "      fix: run `pup auth login`",
+        "--    A key not set           only for a/x",
+        "Ready: dataset show.  Not ready: dataset preview, pull.",
+        "Next: run `pup auth login`",
+    )
+    assert found.line == "\n".join(found.lines)
 
 
 def test_triage_agreement_reports_the_rate_and_kappa() -> None:

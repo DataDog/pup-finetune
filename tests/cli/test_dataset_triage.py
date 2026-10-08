@@ -147,6 +147,11 @@ def test_an_unedited_template_rubric_warns_and_offers_no_confirm(
     assert warning in data["preview"]["warnings"]
     assert data["next_command"] is None
     assert "--allow-template-rubric" in result.stderr
+    # Why --confirm is refused, and what to change, are in the result too.
+    assert data["preview"]["refused"] == (
+        "--confirm is refused while the rubric's Task section is the template's"
+    )
+    assert "--allow-template-rubric" in data["preview"]["refused_hint"]
 
     refused = invoke(*args, "--confirm")
     assert refused.exit_code == 2
@@ -158,6 +163,7 @@ def test_an_unedited_template_rubric_warns_and_offers_no_confirm(
     allowed = invoke(*args, "--allow-template-rubric")
     assert allowed.exit_code == 2, allowed.stderr
     assert warning in output(allowed)["preview"]["warnings"]
+    assert "refused" not in output(allowed)["preview"]
     next_command = output(allowed)["next_command"]
     assert "--allow-template-rubric" in shlex.split(next_command)
     assert shlex.split(next_command)[-1] == "--confirm"
@@ -202,13 +208,22 @@ def test_triage_labels_rows_and_is_allowed_read_only(
     # Every row is labeled now: training (and a push) are the steps; no command is guessed.
     assert data["next_command"] is None
     assert [step["command"] for step in data["next_steps"]] == [
-        "pup finetune models list --provider <PROVIDER>",
-        f"pup finetune train --provider <PROVIDER> --model <MODEL> --dataset {dataset} "
-        "--run-dir <RUN_DIR>",
+        "pup finetune models list",
+        f"pup finetune train --dataset {dataset} --model <MODEL>",
         f"pup finetune dataset push {dataset} --name <NAME>",
     ]
     assert data["stale_judge_labels"] == 0
     assert data["dataset"]["dropped"] == data["dropped"]
+    assert data["pipeline"] == {
+        "rows": {
+            "accepted": rows,
+            "kept": data["kept"],
+            "dropped": data["dropped"],
+            "unlabeled": 0,
+        },
+        "triage": "complete",
+        "push": {"status": "not_pushed", "pending": data["kept"]},
+    }
     # The rubric is named as the preview names it.
     assert len(data["rubric_hash"]) == 12 and "rubric_sha256" not in data
     assert {body["model"] for body in chat.bodies} == {
@@ -240,16 +255,26 @@ def test_failed_calls_leave_rows_undecided_and_exit_1(dataset: Path, chat: FakeC
     # One call at a time, in review order: both judges of the first row failed.
     assert data["undecided"] == 1
     assert data["stale_judge_labels"] == 0
+    assert data["pipeline"]["triage"] == "incomplete"
+    assert data["pipeline"]["rows"]["unlabeled"] == 1
     assert data["next_command"] == shlex.join(["pup", "finetune", *args])
     retried = invoke(*args)
     assert retried.exit_code == 0, retried.stderr
     assert output(retried)["status"] == "complete"
+    assert output(retried)["pipeline"]["triage"] == "complete"
     assert output(retried)["calls_made"] == 2
 
 
 def test_a_changed_rubric_needs_a_reset(dataset: Path, chat: FakeChatApi) -> None:
     base = ["dataset", "triage", str(dataset), "--max-rows", "2", "--judges", "fireworks/j1"]
-    assert invoke(*base, "--rule", "first", "--confirm").exit_code == 0
+    first = invoke(*base, "--rule", "first", "--confirm")
+    assert first.exit_code == 0
+    # The run is complete, but the dataset's triage is not: --max-rows left rows unjudged.
+    assert output(first)["status"] == "complete"
+    assert output(first)["pipeline"]["triage"] == "incomplete"
+    assert f"pup finetune dataset triage {dataset} --rubric <RUBRIC_FILE>" in [
+        step["command"] for step in output(first)["next_steps"]
+    ]
     changed = invoke(*base, "--rule", "second", "--confirm")
     assert changed.exit_code == 2
     assert "Error [settings_conflict]: " in changed.stderr
@@ -279,6 +304,8 @@ def test_a_reset_sample_leaves_stale_judge_labels_and_asks_for_every_row(
     data = output(reset)
     assert data["status"] == "incomplete"
     assert data["stale_judge_labels"] == rows - 1
+    assert data["pipeline"]["triage"] == "incomplete"  # every row labeled, most labels stale
+    assert data["pipeline"]["rows"]["unlabeled"] == 0
     assert "judge label" in data["hint"]
     assert data["next_command"] == shlex.join(
         ["pup", "finetune", "dataset", "triage", str(dataset), "--rule", "second", *JUDGE_J1]
@@ -287,6 +314,7 @@ def test_a_reset_sample_leaves_stale_judge_labels_and_asks_for_every_row(
     assert final.exit_code == 0, final.stderr
     assert output(final)["status"] == "complete"
     assert output(final)["stale_judge_labels"] == 0
+    assert output(final)["pipeline"]["triage"] == "complete"
 
 
 def test_a_mixed_council_previews_every_provider_and_routes_each_judge(
@@ -406,12 +434,19 @@ def test_agreement_compares_the_council_with_the_user_s_labels(
     assert preview.exit_code == 2, preview.stderr
     assert output(preview)["preview"]["mode"] == "agreement"
     assert output(preview)["preview"]["rows"]["to_review"] == 4
+    noisy = (
+        "the agreement is measured on 4 rows you or the agent labeled; on fewer than 20 it is "
+        "noisy (one row moves it by 25 points)"
+    )
+    assert any(w.startswith(noisy) for w in output(preview)["preview"]["warnings"])
 
     result = invoke(*args, "--confirm")
     assert result.exit_code == 0, result.stderr
     data = output(result)
     assert data["mode"] == "agreement"
     assert data["status"] == "complete"
+    assert any(w.startswith(noisy) for w in data["warnings"])
+    assert f"warning: {noisy}" in result.stderr
     agreement = data["agreement"]
     assert (agreement["rows_compared"], agreement["rows_agreed"], agreement["rate"]) == (4, 2, 0.5)
     assert agreement["confusion"] == {
@@ -493,3 +528,19 @@ def test_a_judge_alias_is_previewed_and_frozen_as_its_full_id(
     again = invoke(*args, "--judges", full, "--confirm")
     assert again.exit_code == 0, again.stderr
     assert len(chat.requests) == before
+
+
+def test_the_card_names_the_rubric_file_the_rules_and_the_hash(
+    dataset: Path, rubric: Path, chat: FakeChatApi
+) -> None:
+    args = ["dataset", "triage", str(dataset), "--rubric", str(rubric)]
+    result = invoke(*args, "--rule", "stay on topic", "--rule", "no secrets")
+    assert result.exit_code == 2, result.stderr
+    preview = output(result)["preview"]
+    assert (preview["rubric_file"], preview["rule_count"]) == (str(rubric), 2)
+    rubric_line = f"  rubric    rubric {rubric} + 2 rules (hash {preview['rubric_hash']})"
+    assert rubric_line in result.stderr.splitlines()
+
+    rules_only = invoke("dataset", "triage", str(dataset), "--rule", "stay on topic")
+    hash_shown = output(rules_only)["preview"]["rubric_hash"]
+    assert f"  rubric    1 rule (hash {hash_shown})" in rules_only.stderr.splitlines()

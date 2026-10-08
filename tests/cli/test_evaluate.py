@@ -30,6 +30,7 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from pup_finetune.cli import app
+from pup_finetune.display import display_path as display
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.evaluation import cases as cases_module
 from pup_finetune.evaluation import runner as runner_module
@@ -156,12 +157,20 @@ class TooLong(Outage):
 
 class Interrupting(FakeJudge):
     """The offline judge, but its first call sends this process ``signum`` (or, for
-    ``KeyboardInterrupt``, raises it, as a second Ctrl-C would)."""
+    ``KeyboardInterrupt``, raises it, as a second Ctrl-C would).
+
+    The call runs on a replay worker, and the main thread runs the signal handler only when
+    it next gets the interpreter, so on a busy machine the worker could finish every other
+    pair before the cancel is seen. With :attr:`cancel` set (see :func:`use_interrupting`),
+    the call therefore waits, after the signal, until the evaluation's cancel event is set:
+    exactly the pair in flight finishes, whatever the scheduling.
+    """
 
     def __init__(self, signum: int | None = signal.SIGTERM) -> None:
         super().__init__()
         self.signum = signum
         self.fired = False
+        self.cancel: threading.Event | None = None
 
     def complete(self, messages: Sequence[Mapping[str, Any]], **kwargs: Any) -> ChatCompletion:
         if not self.fired:
@@ -169,6 +178,8 @@ class Interrupting(FakeJudge):
             if self.signum is None:
                 raise KeyboardInterrupt
             os.kill(os.getpid(), self.signum)
+            if self.cancel is not None and not self.cancel.wait(30):
+                raise AssertionError("the signal never cancelled the evaluation")
         return super().complete(messages, **kwargs)
 
 
@@ -178,6 +189,20 @@ def use_judge(monkeypatch: pytest.MonkeyPatch, judge: ChatCompleter) -> None:
         yield judge
 
     monkeypatch.setattr(runner_module, "open_judge_client", opened)
+
+
+def use_interrupting(monkeypatch: pytest.MonkeyPatch, judge: Interrupting) -> None:
+    """:func:`use_judge` with ``judge``, which is handed the cancel event each replay runs
+    with (the one a SIGTERM sets, directly or through the spend-cap watcher of `train
+    --evaluate`), so it can wait for the cancel to be seen."""
+    use_judge(monkeypatch, judge)
+    replay = runner_module.replay
+
+    def recording(*args: Any, cancel: threading.Event, **kwargs: Any) -> Any:
+        judge.cancel = cancel
+        return replay(*args, cancel=cancel, **kwargs)
+
+    monkeypatch.setattr(runner_module, "replay", recording)
 
 
 # --- evaluate: the preview ----------------------------------------------------------------
@@ -570,7 +595,7 @@ def test_a_judge_outage_is_not_a_complete_evaluation(
 def test_a_cancel_keeps_what_finished_and_the_rerun_completes(
     run_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    use_judge(monkeypatch, Interrupting(signal.SIGTERM))
+    use_interrupting(monkeypatch, Interrupting(signal.SIGTERM))
     args = ("evaluate", str(run_dir), "--skip-calibration", "--concurrency", "1", "--confirm")
     result = invoke(*args)
     assert result.exit_code == 0, result.stderr
@@ -843,9 +868,104 @@ def test_train_evaluate_skips_a_budget_capped_run(dataset: Path, tmp_path: Path)
     assert data["stopped_reason"] == "budget_exhausted"
     evaluation = data["evaluation"]
     assert evaluation["status"] == "skipped"
-    assert "spend cap" in evaluation["reason"]
-    assert shlex.split(evaluation["next_command"])[:3] == ["pup", "finetune", "evaluate"]
+    # No epoch finished: nothing to evaluate, now or later, and the cause is the token cap.
+    assert "no epoch finished" in evaluation["reason"]
+    assert "token budget, --max-train-tokens" in evaluation["reason"]
+    assert "spend cap" not in evaluation["reason"]
+    assert evaluation["next_command"] is None
+    assert data["next_command"] is None
+    assert any("no epoch finished" in entry["why"] for entry in data["next_steps"])
     assert not (run / "eval" / "results.jsonl").exists()
+    # The judge was never calibrated: the preview knew no epoch could finish.
+    assert "calibrating the judge fake" not in result.stderr
+    assert "not calibrating the judge" in result.stderr
+    # status says the same: no evaluate for a run without a best epoch.
+    status = output(invoke("status", str(run)))
+    assert status["next_command"] is None
+    assert "evaluation" not in status
+
+
+def test_a_train_preview_warns_when_no_epoch_can_finish(dataset: Path, tmp_path: Path) -> None:
+    preview = output(invoke(*train_args(dataset, tmp_path / "run")))["preview"]
+    per_epoch = preview["tokens_per_epoch"]
+    capped = output(
+        invoke(*train_args(dataset, tmp_path / "run", "--max-train-tokens", str(per_epoch - 1)))
+    )["preview"]
+    assert any(
+        "no epoch will finish" in warning and "nothing is promoted or evaluated" in warning
+        for warning in capped["warnings"]
+    )
+    enough = output(
+        invoke(*train_args(dataset, tmp_path / "run", "--max-train-tokens", str(per_epoch)))
+    )["preview"]
+    assert not any("no epoch will finish" in warning for warning in enough["warnings"])
+
+
+def test_train_evaluate_names_the_token_budget_after_an_epoch(
+    dataset: Path, tmp_path: Path
+) -> None:
+    run = tmp_path / "run"
+    per_epoch = output(invoke(*train_args(dataset, run)))["preview"]["tokens_per_epoch"]
+    args = train_args(dataset, run, "--max-train-tokens", str(per_epoch), "--evaluate")
+    result = invoke(*args, "--confirm")
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["stopped_reason"] == "budget_exhausted"
+    assert data["best_epoch"] == 1
+    evaluation = data["evaluation"]
+    assert evaluation["status"] == "skipped"
+    assert "token budget, --max-train-tokens" in evaluation["reason"]
+    assert "spend cap" not in evaluation["reason"]
+    assert shlex.split(evaluation["next_command"])[:3] == ["pup", "finetune", "evaluate"]
+    # status names the same command, which previews without a settings conflict.
+    status = output(invoke("status", str(run)))
+    assert status["next_command"] == evaluation["next_command"]
+    preview = rerun(status["next_command"])
+    assert preview.exit_code == 2, preview.stderr
+    assert output(preview)["status"] == "confirmation_required"
+
+
+def test_status_after_train_evaluate_with_settings_continues_that_evaluation(
+    dataset: Path, tmp_path: Path
+) -> None:
+    run = tmp_path / "run"
+    result = invoke(*train_args(dataset, run, "--evaluate", "--eval-seed", "7", "--confirm"))
+    assert result.exit_code == 0, result.stderr
+    assert output(result)["evaluation"]["status"] == "complete"
+    status = output(invoke("status", str(run)))
+    # Complete: status shows where it is and its headline, and goes on to deploy.
+    assert status["evaluation"]["status"] == "complete"
+    assert status["evaluation"]["out_dir"] == display(run / "eval")
+    assert status["evaluation"]["headline"]["judge_pass_rate"]["tuned"] is not None
+    assert status["next_command"] == f"pup finetune deploy {shlex.quote(display(run))}"
+    assert "evaluation complete in" in invoke("status", str(run)).stderr
+    # Not complete (as after a crash or a Ctrl-C): the recorded command, every setting
+    # pinned, previews without the settings conflict a bare `evaluate` would hit.
+    record = json.loads((run / "evaluation.json").read_text())
+    record["evaluations"]["eval"]["status"] = "partial"
+    record["evaluations"]["eval"]["complete"] = False
+    (run / "evaluation.json").write_text(json.dumps(record))
+    following = output(invoke("status", str(run)))["next_command"]
+    assert "--seed 7" in following
+    preview = rerun(following)
+    assert preview.exit_code == 2, preview.stderr
+    assert "settings_conflict" not in preview.stderr
+    bare = invoke("evaluate", str(run))
+    assert "settings_conflict" in bare.stderr
+
+
+def test_status_after_evaluate_confirm_no_longer_says_evaluate(run_dir: Path) -> None:
+    status = output(invoke("status", str(run_dir)))
+    assert shlex.split(status["next_command"])[:3] == ["pup", "finetune", "evaluate"]
+    evaluated = rerun(output(invoke("evaluate", str(run_dir)))["next_command"])
+    assert evaluated.exit_code == 0, evaluated.stderr
+    status = output(invoke("status", str(run_dir)))
+    assert status["evaluation"]["status"] == "complete"
+    assert shlex.split(status["next_command"])[:3] == ["pup", "finetune", "deploy"]
+    # Once deployed, there is no next command.
+    deployed = rerun(output(invoke("deploy", str(run_dir)))["next_command"])
+    assert deployed.exit_code == 0, deployed.stderr
+    assert output(invoke("status", str(run_dir)))["next_command"] is None
 
 
 SPEND = ("--max-spend-usd", "1000", "--hourly-rate-usd", "1")
@@ -935,7 +1055,7 @@ def test_train_evaluate_skips_a_cancelled_run_that_evaluate_then_evaluates(
 def test_a_cancel_during_the_evaluation_keeps_the_trained_run(
     dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    use_judge(monkeypatch, Interrupting(signal.SIGTERM))
+    use_interrupting(monkeypatch, Interrupting(signal.SIGTERM))
     run = tmp_path / "run"
     args = train_args(
         dataset,

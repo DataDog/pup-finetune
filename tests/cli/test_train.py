@@ -681,12 +681,27 @@ def test_a_watch_prints_a_line_when_the_run_moves_not_when_only_time_passes(
     monkeypatch.setattr(train_module.time, "sleep", nap)
     result = invoke("status", str(trained), "--watch", "--interval", "0.1")
     *lines, summary = result.stderr.splitlines()
+    # The run's end is said once, by the closing summary, not by a last progress line too.
     assert [line.split(" loss")[0] for line in lines] == [
         "18:03:16 training: epoch 1/2 step 1/2",
         "18:03:16 training: epoch 1/2 step 2/2",
-        "18:03:16 completed: epoch 1/2 step 2/2",
     ]
     assert summary.startswith("completed: epoch 1/2 step 2/2")
+
+
+def test_a_quiet_watch_still_prints_the_last_line(
+    trained: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _training(trained, epoch=1, step=2, epochs=0, elapsed_seconds=10.0)
+    monkeypatch.setenv("PUP_FINETUNE_QUIET", "1")
+    monkeypatch.setattr(
+        train_module.time, "sleep", lambda seconds: _set_state(trained, phase="completed")
+    )
+    result = invoke("status", str(trained), "--watch", "--interval", "0.1")
+    assert [line.split(" loss")[0] for line in result.stderr.splitlines()] == [
+        "18:03:16 training: epoch 1/2 step 2/2",
+        "18:03:16 completed: epoch 1/2 step 2/2",
+    ]
 
 
 def test_ctrl_c_stops_only_the_watch_and_prints_the_status(
@@ -802,7 +817,7 @@ def test_status_of_a_missing_run_is_an_error(tmp_path: Path) -> None:
     result = invoke("status", str(tmp_path / "nothing"))
     assert result.exit_code == 2
     assert "Error [not_a_run_dir]: " in result.stderr
-    assert "does not exist" in result.stderr
+    assert "no such run directory or run id" in result.stderr
 
 
 # --- resume ------------------------------------------------------------------------------

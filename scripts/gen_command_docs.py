@@ -12,9 +12,11 @@ Usage: uv run python scripts/gen_command_docs.py [--check]
 Writes ``docs/commands.md`` from the Typer app (every visible command, its full help,
 arguments, options, examples and safety, the safety table built from every command's
 ``Safety`` record in ``pup_finetune.cli._presentation``, and the exit-code rule and error
-codes from ``pup_finetune.errors.ERROR_CODES``) and the exclusion-code table between
-the markers in ``docs/data-format.md`` from ``pup_finetune.data.exclusions``. With
-``--check``, writes nothing and exits 1 when either file is out of date.
+codes from ``pup_finetune.errors.ERROR_CODES``), the exclusion-code table between
+the markers in ``docs/data-format.md`` from ``pup_finetune.data.exclusions``, and the table
+of what each step needs between the markers in ``README.md`` from what ``doctor`` checks
+(``pup_finetune.readiness``, the provider and credential registries). With ``--check``,
+writes nothing and exits 1 when any of them is out of date.
 
 The output is deterministic: it is built from the commands' parameters, not from rendered
 ``--help`` (which depends on the terminal width, color settings and ``GITHUB_ACTIONS``).
@@ -31,10 +33,13 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parent.parent
 COMMANDS_DOC = REPO_ROOT / "docs" / "commands.md"
 DATA_FORMAT_DOC = REPO_ROOT / "docs" / "data-format.md"
+README = REPO_ROOT / "README.md"
 
 PROG = "pup finetune"
 EXCLUSIONS_BEGIN = "<!-- BEGIN GENERATED: exclusion codes (scripts/gen_command_docs.py) -->"
 EXCLUSIONS_END = "<!-- END GENERATED: exclusion codes -->"
+REQUIREMENTS_BEGIN = "<!-- BEGIN GENERATED: what each step needs (scripts/gen_command_docs.py) -->"
+REQUIREMENTS_END = "<!-- END GENERATED: what each step needs -->"
 
 _DEFAULT_NOTE = re.compile(r"\s*\[dim\]\\\[default: (?P<default>.*?)\]\[/dim\]")
 """A default written into an option's help (``_presentation.default_note``)."""
@@ -169,9 +174,12 @@ def render_command(name: str, command: Any) -> list[str]:
         lines += ["| Argument | Description |", "| --- | --- |"]
         for param in arguments:
             metavar = str(param.metavar or param.name.upper())
-            required = "" if param.required else " Optional."
-            text = md(split_default(param.help or "")[0], cell=True)
-            lines.append(f"| `{metavar}` | {text}{required} |")
+            help_text, shown_default = split_default(param.help or "")
+            required = ""
+            if not param.required:
+                required = " Optional"
+                required += f"; default: {md(shown_default, cell=True)}." if shown_default else "."
+            lines.append(f"| `{metavar}` | {md(help_text, cell=True)}{required} |")
         lines.append("")
     if options:
         lines += ["| Option | Value | Default | Description |", "| --- | --- | --- | --- |"]
@@ -348,13 +356,118 @@ def render_exclusions() -> str:
     return "\n".join(lines)
 
 
+def between(text: str, begin: str, end: str, content: str, *, name: str) -> str:
+    """``text`` with what lies between the markers ``begin`` and ``end`` replaced."""
+    start, stop = text.find(begin), text.find(end)
+    if start < 0 or stop < start:
+        raise ValueError(f"{name} lacks the markers {begin!r} and {end!r}")
+    return f"{text[: start + len(begin)]}\n{content}\n{text[stop:]}"
+
+
 def with_exclusions(text: str) -> str:
     """``text`` (``docs/data-format.md``) with its generated table replaced."""
-    begin, end = text.find(EXCLUSIONS_BEGIN), text.find(EXCLUSIONS_END)
-    if begin < 0 or end < begin:
-        raise ValueError(f"{DATA_FORMAT_DOC.name} lacks the exclusion-code markers")
-    head = text[: begin + len(EXCLUSIONS_BEGIN)]
-    return f"{head}\n{render_exclusions()}\n{text[end:]}"
+    return between(
+        text, EXCLUSIONS_BEGIN, EXCLUSIONS_END, render_exclusions(), name=DATA_FORMAT_DOC.name
+    )
+
+
+_DATASET_STEPS = (
+    "dataset preview",
+    "dataset pull",
+    "dataset show",
+    "dataset triage",
+    "dataset push",
+)
+"""The dataset steps of :func:`~pup_finetune.readiness.ready_map`, in workflow order."""
+
+
+def requirement_rows() -> list[tuple[str, str, str, str]]:
+    """What each step needs, as (step, Datadog login, API key, extra) rows.
+
+    Read from what ``doctor`` checks: every check is made to fail, so each step of
+    :func:`~pup_finetune.readiness.ready_map` is blocked by exactly what it needs (deploying
+    on each provider that deploys included). Each judge-only provider (Anthropic, OpenAI)
+    gets a row for its judges. Development-only providers are left out.
+    """
+    from pup_finetune import credentials
+    from pup_finetune.doctor import CheckResult
+    from pup_finetune.providers import Package, provider_infos
+    from pup_finetune.readiness import DATADOG_CHECKS, JUDGE_PACKAGES, ready_map
+    from pup_finetune.runtime import Runtime
+
+    runtime = Runtime()  # not development mode, not read-only
+    infos = provider_infos(runtime)
+    packages: dict[str, Package] = {
+        f"{info.name}:{package.key}": package for info in infos for package in info.packages
+    }
+    packages |= {f"{owner}:{package.key}": package for owner, package in JUDGE_PACKAGES.items()}
+    keys = {f"{spec.provider}:key": spec.env_var for spec in credentials.all_specs()}
+    names = [*DATADOG_CHECKS, *keys, *packages]
+    steps = ready_map([CheckResult(name=name, status="fail", detail="") for name in names], runtime)
+
+    def cells(blocked_by: Sequence[str]) -> tuple[str, str, str]:
+        datadog = "yes" if any(name in DATADOG_CHECKS for name in blocked_by) else ""
+        env_vars = [keys[name] for name in blocked_by if name in keys]
+        extras = dict.fromkeys(packages[name].extra for name in blocked_by if name in packages)
+        return (
+            datadog,
+            ", ".join(f"`{var}`" for var in env_vars),
+            ", ".join(f"`{extra}`" for extra in extras),
+        )
+
+    def rows_of(
+        labeled: Sequence[tuple[str, Sequence[str]]], where: str = ""
+    ) -> list[tuple[str, str, str, str]]:
+        """``labeled`` steps as rows (on ``where``), adjacent ones with the same needs in one."""
+        merged: list[tuple[list[str], tuple[str, str, str]]] = []
+        for label, blocked_by in labeled:
+            needs = cells(blocked_by)
+            if merged and merged[-1][1] == needs:
+                merged[-1][0].append(label)
+            else:
+                merged.append(([label], needs))
+        suffix = f" on {where}" if where else ""
+        return [(", ".join(labels) + suffix, *needs) for labels, needs in merged]
+
+    labels = {"dataset show": "`dataset import`, `show`, `sample`, `label`; `status`, `runs`"}
+    rows = rows_of(
+        [(labels.get(name, f"`{name}`"), steps[name]["blocked_by"]) for name in _DATASET_STEPS]
+    )
+    for info in infos:
+        labeled: list[tuple[str, Sequence[str]]] = [
+            ("`train`", steps[f"train on {info.name}"]["blocked_by"]),
+            ("`evaluate`", steps[f"evaluate on {info.name}"]["blocked_by"]),
+        ]
+        if info.deploys:
+            labeled.append(("`deploy`, `undeploy`", steps[f"deploy on {info.name}"]["blocked_by"]))
+        rows += rows_of(labeled, info.label)
+    provider_keys = {info.credential for info in infos}
+    for spec in credentials.all_specs():
+        if spec.provider in provider_keys:
+            continue
+        judge = [f"{spec.provider}:key"]
+        if spec.provider in JUDGE_PACKAGES:
+            judge.append(f"{spec.provider}:{JUDGE_PACKAGES[spec.provider].key}")
+        rows += rows_of([(f"`{spec.provider}/<model>` judges", judge)])
+    return rows
+
+
+def render_requirements() -> str:
+    """The table of what each step needs that goes between the markers in ``README.md``."""
+    lines = [
+        "| Step | Datadog login | API key | Extra |",
+        "| --- | --- | --- | --- |",
+    ]
+    for step, datadog, key, extra in requirement_rows():
+        lines.append(f"| {step} | {datadog or '-'} | {key or '-'} | {extra or '-'} |")
+    return "\n".join(lines)
+
+
+def with_requirements(text: str) -> str:
+    """``text`` (``README.md``) with its generated table replaced."""
+    return between(
+        text, REQUIREMENTS_BEGIN, REQUIREMENTS_END, render_requirements(), name=README.name
+    )
 
 
 def expected() -> dict[Path, str]:
@@ -362,6 +475,7 @@ def expected() -> dict[Path, str]:
     return {
         COMMANDS_DOC: render_commands(),
         DATA_FORMAT_DOC: with_exclusions(DATA_FORMAT_DOC.read_text(encoding="utf-8")),
+        README: with_requirements(README.read_text(encoding="utf-8")),
     }
 
 

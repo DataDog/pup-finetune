@@ -13,16 +13,17 @@ import shlex
 import time
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any, Final
+from typing import Annotated, Any
 
 import typer
 
 from pup_finetune.approval import inputs_digest, require_expected, with_digest
 from pup_finetune.cli._common import current_context, get_runtime, run_command
 from pup_finetune.cli._dirs import require_dataset_dir
-from pup_finetune.cli._flags import given, renamed, require_enablers
+from pup_finetune.cli._flags import flag_name, given, renamed, require_enablers
 from pup_finetune.cli._presentation import (
     BUILD_A_DATASET,
     CommandDoc,
@@ -32,11 +33,12 @@ from pup_finetune.cli._presentation import (
     local,
 )
 from pup_finetune.curation.labels import Label, apply_labels, parse_labels
+from pup_finetune.curation.pipeline import Pipeline, pipeline_state
 from pup_finetune.curation.samples import (
     DEFAULT_SAMPLE_SEED,
     DEFAULT_SAMPLE_SIZE,
     SampleSplit,
-    row_brief,
+    row_summary,
     sample_rows,
 )
 from pup_finetune.data.convert import ReasoningMode
@@ -48,7 +50,9 @@ from pup_finetune.data.pull import (
     Collection,
     PullOptions,
     collect,
+    frozen_window,
     pull,
+    rerun_command,
     resolve_window,
 )
 from pup_finetune.data.push import (
@@ -60,22 +64,33 @@ from pup_finetune.data.push import (
     push_path,
     read_push_state,
 )
+from pup_finetune.data.schema import TrainingRow, split_key
 from pup_finetune.data.split import (
     DEFAULT_SEED,
     DEFAULT_TEST_FRACTION,
     DEFAULT_VALIDATION_FRACTION,
     SPLITS,
+    SplitName,
     SplitParams,
+    skew_warnings,
     split_counts,
     split_warnings,
 )
 from pup_finetune.datadog.datasets import DEFAULT_PROJECT, RECORDS_BATCH_SIZE
 from pup_finetune.datadog.pup import Pup
-from pup_finetune.datadog.spans import Clock, SpanQuery, TimeBound, epoch_ms, parse_time_bound
+from pup_finetune.datadog.spans import (
+    RELATIVE_TIME_UNITS_MS,
+    Clock,
+    SpanQuery,
+    TimeBound,
+    epoch_ms,
+    parse_time_bound,
+)
 from pup_finetune.display import display_path
-from pup_finetune.errors import StateError, UsageError, require_confirm, require_writable
+from pup_finetune.errors import SettingsConflict, UsageError, require_confirm, require_writable
 from pup_finetune.next_steps import command, step, template
 from pup_finetune.output import info
+from pup_finetune.workspace import ParentSetup, ignore_new_parent
 
 SAMPLE_IDS_PER_SPLIT = 5
 SAMPLE_SIZE = 5
@@ -83,8 +98,13 @@ SAMPLE_SIZE = 5
 EXPLAINED_CODES = 5
 """How many of the most frequent exclusion codes get an explanation in the output."""
 
-DEFAULT_FROM = "now-7d"
+DEFAULT_FROM = "7d"
 DEFAULT_TO = "now"
+_DEFAULT_FROM_BOUND = parse_time_bound(DEFAULT_FROM, "--from")
+"""The default ``--from`` as the query holds it (``now-7d``)."""
+WIDER_FROM = "30d"
+"""The ``--from`` a preview that accepted no row suggests when it read less than this."""
+_WIDER_FROM_MS = 30 * RELATIVE_TIME_UNITS_MS["d"]
 
 REVIEW_SAMPLE_SIZE = 20
 """How many rows the ``dataset sample`` a dataset's ``next_command`` names shows."""
@@ -136,6 +156,16 @@ MlAppOption = Annotated[
         rich_help_panel=FILTER_PANEL,
     ),
 ]
+PullMlAppOption = Annotated[
+    str | None,
+    typer.Option(
+        "--ml-app",
+        metavar="NAME",
+        help="The ml_app whose LLM spans to read (a rerun takes the frozen one).",
+        show_default=False,
+        rich_help_panel=FILTER_PANEL,
+    ),
+]
 SpanNameOption = Annotated[
     str | None,
     typer.Option(
@@ -171,7 +201,7 @@ FromOption = Annotated[
     typer.Option(
         "--from",
         metavar="TIME",
-        help="Start: ISO 8601, epoch ms, or relative (now-7d).",
+        help="Start: ISO 8601, epoch ms, or relative: 7d, 24h, now-7d, now.",
         rich_help_panel=FILTER_PANEL,
     ),
 ]
@@ -226,13 +256,16 @@ _PULL_FLAGS = (
     "contains is dropped, so sub-agents stay their own rows. "
     "Errored LLM calls are excluded as span_error unless --include-errors is passed. Reading "
     "stops once --target-count rows are accepted or --max-candidates spans are read, "
-    "unreadable ones included. A relative time is now or now-<n><unit> with unit s, m, h, "
-    "d or w, such as now-7d; it is resolved once, when the command starts."
+    "unreadable ones included. A relative time is a number and a unit (s, m, h, d or w, or "
+    "spelled out, such as 5min or 2hours), with or without now- in front (7d is now-7d), or "
+    "now; it is resolved once, when the command starts. A bare number is epoch "
+    "milliseconds, not seconds: one below 10^11 (before March 1973) is refused."
 )
 
 _DATADOG_READ = Safety(
-    data="reads Datadog",
-    recipients="nowhere: reads Datadog through pup",
+    data="reads Datadog, prints sample rows",
+    recipients="your terminal: samples of trace content are printed (and reach the agent's "
+    "model when an agent runs it); reads Datadog through pup",
     without="previews rows in memory",
 )
 
@@ -249,8 +282,8 @@ IMPORT_DOC = CommandDoc(
         "different content is an error. Later imports must pass the same split settings.",
     ),
     examples=(
-        "pup finetune dataset import ./ds --file rows.jsonl",
-        "pup finetune dataset import ./ds --file rows.jsonl --seed 7 --test-fraction 0.2",
+        "pup finetune dataset import datasets/my-agent --file rows.jsonl",
+        "pup finetune dataset import datasets/my-agent --file rows.jsonl --seed 7 --test-fraction 0.2",
     ),
     safety=local("imports rows into DIR"),
 )
@@ -260,9 +293,14 @@ SHOW_DOC = CommandDoc(
     short="Show a dataset's counts, exclusions, splits and settings.",
     description=(
         "Show a dataset directory: row counts, exclusion reasons, split sizes and warnings, "
-        "the frozen settings, where it was pushed, and a few row ids per split."
+        "the frozen settings, where it was pushed, a few row ids per split, and its pipeline: "
+        "how many rows are kept, dropped and unlabeled, whether a triage is complete, and "
+        "how many kept rows are not pushed yet, which choose the next steps."
     ),
-    examples=("pup finetune dataset show ./ds", "pup finetune dataset show datasets/my-agent"),
+    examples=(
+        "pup finetune dataset show datasets/my-agent",
+        "pup finetune dataset show datasets/my-agent",
+    ),
     safety=local("shows the dataset"),
 )
 
@@ -275,21 +313,24 @@ PUSH_DOC = CommandDoc(
     description=describe(
         "Add one record per kept row of DIR to the Agent Observability dataset --name in "
         "--project, creating either when missing. Without --confirm, previews what would be "
-        "sent. The receipt, push.json in DIR, makes a rerun send only rows not yet pushed.",
+        "sent. The receipt, push.json in DIR, makes a rerun send only rows not yet pushed, "
+        "and names the dataset, so a rerun needs no --name or --project.",
         "Rows labeled drop are never sent. Each record's input is the conversation before "
         "the final assistant message, with its tools; its expected output is that message; "
         "its metadata holds the row id, split and source; it is tagged split:<split> and "
         "source:pup-finetune. When every kept row was pushed already, it reports the "
         "receipt and sends nothing. The receipt is saved after every batch, so an "
         "interrupted push resumes without adding a row twice. A directory pushes to one "
-        "dataset: another --name or --project is an error. Rows labeled drop after they "
+        "dataset: another --name or --project than the receipt's is an error. Rows labeled "
+        "drop after they "
         "were pushed are reported as stale_records and are not deleted from the dataset; "
         "kept rows that changed after they were pushed are reported as changed_records and "
         "their records are not updated.",
     ),
     examples=(
-        "pup finetune dataset push ./ds --name my-agent-sft",
-        "pup finetune dataset push ./ds --name my-agent-sft --project pup-finetune-dev --confirm",
+        "pup finetune dataset push datasets/my-agent --name my-agent-sft",
+        "pup finetune dataset push datasets/my-agent --name my-agent-sft --project pup-finetune-dev",
+        "pup finetune dataset push datasets/my-agent",
     ),
     safety=Safety(
         data="--confirm writes the kept rows to Datadog",
@@ -308,11 +349,13 @@ PREVIEW_DOC = CommandDoc(
         "memory, writing nothing. Shows the time range read, how many rows would be accepted "
         "and why the rest would not, a few samples, and the `dataset pull` command with the "
         "same flags.",
-        f"The pull goes into a new directory under ./datasets named after --ml-app. {_PULL_FLAGS}",
+        "The samples are trace content, printed to your terminal, so when an agent runs the "
+        "preview they reach the agent's model. The pull goes into a new directory under "
+        f"./datasets named after --ml-app. {_PULL_FLAGS}",
     ),
     examples=(
         "pup finetune dataset preview --ml-app my-agent",
-        "pup finetune dataset preview --ml-app my-agent --span-name chat --from now-3d",
+        "pup finetune dataset preview --ml-app my-agent --span-name chat --from 3d",
     ),
     safety=_DATADOG_READ,
 )
@@ -322,20 +365,22 @@ PULL_DOC = CommandDoc(
     short="Pull training rows from Datadog into a dataset directory.",
     description=describe(
         "Pull --ml-app's LLM spans from Datadog into DIR as training rows, with splits. "
-        "Rerun the same command to resume; a higher --target-count reads further. The "
-        "filter, --reasoning, --include-errors and the splits are frozen on the first pull.",
-        "Excluded rows are recorded in excluded.jsonl with their reason. A pull with other "
-        "settings than the first fails, so use a new directory. Raw pages are cached in "
-        "DIR/raw/, so a rerun with the same flags resumes without fetching them again, and a "
-        "higher --target-count or --max-candidates reads further (a stored row that turns "
-        "out to be a prefix of a longer conversation of its trace is then excluded as "
-        "contained_conversation). A relative --from or --to, such as the default now-7d, is "
-        "resolved when the first pull starts and that window is frozen with the "
-        f"expressions; a rerun with the same expressions reads the same window. {_PULL_FLAGS}",
+        "The filter, the time range, --reasoning, --include-errors and the splits are frozen "
+        "on the first pull, so a rerun needs no flag: `dataset pull DIR` resumes, and a "
+        "higher --target-count reads further.",
+        "Excluded rows are recorded in excluded.jsonl with their reason. On a rerun, a flag "
+        "left out takes the frozen value and a flag with another value fails, so use a new "
+        "directory for other settings. Raw pages are cached in DIR/raw/, so a rerun resumes "
+        "without fetching them again, and a higher --target-count or --max-candidates (which "
+        "are not frozen) reads further (a stored row that turns out to be a prefix of a "
+        "longer conversation of its trace is then excluded as contained_conversation). A "
+        "relative --from or --to, such as the default 7d, is resolved when the first "
+        "pull starts and that window is frozen with the expressions: a rerun reads the same "
+        f"window, however much later it runs, and its result's window says so. {_PULL_FLAGS}",
     ),
     examples=(
-        "pup finetune dataset pull ./ds --ml-app my-agent --from now-7d --span-name chat",
-        "pup finetune dataset pull ./ds --ml-app my-agent --target-count 500",
+        "pup finetune dataset pull datasets/my-agent --ml-app my-agent --from 7d --span-name chat",
+        "pup finetune dataset pull datasets/my-agent --target-count 500",
     ),
     safety=Safety(
         data="reads Datadog, writes DIR",
@@ -357,7 +402,7 @@ LABEL_DOC = CommandDoc(
         "last label of an id wins; rows.jsonl is never changed.",
     ),
     examples=(
-        "pup finetune dataset label ./ds --file labels.jsonl",
+        "pup finetune dataset label datasets/my-agent --file labels.jsonl",
         "pup finetune dataset label datasets/my-agent --file review.jsonl",
     ),
     safety=local("records labels in DIR"),
@@ -375,8 +420,8 @@ SAMPLE_DOC = CommandDoc(
         "in rows.jsonl.",
     ),
     examples=(
-        "pup finetune dataset sample ./ds -n 20",
-        "pup finetune dataset sample ./ds --split test --include-dropped",
+        "pup finetune dataset sample datasets/my-agent -n 20",
+        "pup finetune dataset sample datasets/my-agent --split test --include-dropped",
     ),
     safety=local("shows rows"),
 )
@@ -387,25 +432,58 @@ def _quoted(path: Path) -> str:
 
 
 def dataset_next(
-    dataset: DatasetDir, directory: Path, *, accepted: int, sampled: bool = False
+    dataset: DatasetDir,
+    directory: Path,
+    *,
+    summary: Mapping[str, Any] | None = None,
+    sampled: bool = False,
 ) -> dict[str, Any]:
-    """``next_command`` and ``next_steps`` for a dataset directory, from its state.
+    """The ``pipeline`` block of a dataset directory, and the ``next_command`` and
+    ``next_steps`` it leads to.
 
     With accepted rows and none labeled, the next command is a ``dataset sample`` to
     review (``None`` right after one, ``sampled``), and labeling them, by hand or with a
-    judge council, are the steps. Once rows are labeled, training is: its preview needs a
-    provider, a model and a run directory that cannot be chosen without guessing, so it
-    is a step, with a ``dataset push`` while the dataset was never pushed. ``directory``
-    is the directory as the user typed it.
+    judge council, are the steps. A triage that is not complete gets a step to finish it.
+    Once rows are labeled, training is: its preview needs a model that cannot be chosen
+    without guessing, so it is a step. So is the push: with ``--name`` while the dataset
+    was never pushed, and without any flag (the receipt names the dataset) while kept rows
+    are not pushed yet. ``directory`` is the directory as the user typed it; ``summary`` is
+    the dataset's summary when the caller has it already. A pipeline file that cannot be
+    read adds ``warnings`` (see :func:`merge_next`).
     """
-    if not accepted:
-        return {"next_command": None, "next_steps": []}
+    state = pipeline_state(dataset, summary)
+    shown: dict[str, Any] = {"pipeline": state.to_json()}
+    if state.warnings:
+        shown["warnings"] = list(state.warnings)
+    if not state.accepted:
+        return {**shown, "next_command": None, "next_steps": []}
     label_step = step(
         template("dataset", "label", directory, "--file", "<LABELS_FILE>"),
         'record keep/drop decisions: write <LABELS_FILE> first, one {"id", "keep", '
         '"reason"} object per line (a reason is required to drop)',
     )
-    if not dataset.labels():
+    triage_steps = (
+        [
+            step(
+                template("dataset", "triage", directory, "--rubric", "<RUBRIC_FILE>"),
+                "finish the triage: the same --rubric and --judges resume it, reusing the "
+                "votes cast (paid; it previews first)",
+            )
+        ]
+        if state.triage == "incomplete"
+        else [
+            step(
+                template(
+                    "dataset", "triage", directory, "--rubric", "<RUBRIC_FILE>", "--reset-triage"
+                ),
+                "the triage files cannot be read (see the warning): fix or remove them, or "
+                "discard every vote and triage again (paid; it previews first)",
+            )
+        ]
+        if state.triage == "unreadable"
+        else []
+    )
+    if not state.labeled:
         triage_step = step(
             template(
                 "dataset",
@@ -422,33 +500,28 @@ def dataset_next(
         )
         sample = command("dataset", "sample", directory, "--count", REVIEW_SAMPLE_SIZE)
         return {
+            **shown,
             "next_command": None if sampled else sample,
-            "next_steps": [label_step, triage_step],
+            "next_steps": [
+                label_step,
+                *(triage_steps or [triage_step]),
+                *_push_steps(state, directory),
+            ],
         }
     steps = [label_step] if sampled else []
+    steps += triage_steps
     steps += [
         step(
-            template("models", "list", "--provider", "<PROVIDER>"),
+            command("models", "list"),
             "see the models a provider can fine-tune",
         ),
         step(
-            template(
-                "train",
-                "--provider",
-                "<PROVIDER>",
-                "--model",
-                "<MODEL>",
-                "--dataset",
-                directory,
-                "--run-dir",
-                "<RUN_DIR>",
-            ),
-            "preview a training run on the kept rows (free); choose the provider and model "
-            "with the user, and a new run directory",
+            template("train", "--dataset", directory, "--model", "<MODEL>"),
+            "preview a training run on the kept rows (free); choose the model with the user "
+            "(its provider is inferred, and the run goes in runs/RUN_ID)",
         ),
     ]
-    pushed = _push_receipt(dataset)
-    if pushed is None:
+    if state.push == "not_pushed":
         steps.append(
             step(
                 template("dataset", "push", directory, "--name", "<NAME>"),
@@ -456,15 +529,47 @@ def dataset_next(
                 "experiments (a remote write; it previews first)",
             )
         )
-    elif pushed is _UNREADABLE:
-        steps.append(
+    steps += _push_steps(state, directory)
+    return {**shown, "next_command": None, "next_steps": steps}
+
+
+def merge_next(result: dict[str, Any], following: Mapping[str, Any]) -> dict[str, Any]:
+    """``result`` with ``following`` (a :func:`dataset_next` block) added, its warnings
+    after the result's own."""
+    warnings = following.get("warnings") or []
+    result.update({key: value for key, value in following.items() if key != "warnings"})
+    if warnings:
+        result["warnings"] = [*(result.get("warnings") or []), *warnings]
+    return result
+
+
+def _push_steps(state: Pipeline, directory: Path) -> list[dict[str, str]]:
+    """The step for a dataset pushed before: the rows not pushed yet, or why it is unknown."""
+    if state.push == "pushed_with_new_rows":
+        return [
+            step(
+                command("dataset", "push", directory),
+                f"push the {state.pending} kept rows not pushed yet to dataset "
+                f"{state.dataset_name!r}, which {PUSH_FILE} names (a remote write; it "
+                "previews first)",
+            )
+        ]
+    if state.push == "unreadable":
+        return [
             step(
                 command("dataset", "show", directory),
                 f"{PUSH_FILE} cannot be read, so whether the dataset was pushed is unknown; "
                 "show reports why",
             )
-        )
-    return {"next_command": None, "next_steps": steps}
+        ]
+    return []
+
+
+def _ignore_note(directory: Path) -> ParentSetup:
+    """Create ``./datasets`` with a ``.gitignore`` when ``directory`` is the first dataset
+    in it (see :func:`~pup_finetune.workspace.ignore_new_parent`); the note saying so, or
+    the warning that an existing ``./datasets`` is not ignored by git."""
+    return ignore_new_parent(directory)
 
 
 @dataset_app.command(**IMPORT_DOC.typer())
@@ -491,23 +596,27 @@ def import_rows(
     require_dataset_dir(directory)
     rows, exclusions = read_import_file(file)
     dataset = DatasetDir(directory)
+    notes = _ignore_note(directory)
     result = dataset.add(rows, exclusions, settings=DatasetSettings("import", params))
     summary = result.summary
-    return {
-        "dataset_dir": display_path(dataset.path),
-        "accepted": summary["accepted"],
-        "excluded": summary["excluded"],
-        "excluded_by_code": summary["excluded_by_code"],
-        "splits": summary["splits"],
-        "warnings": summary["warnings"],
-        "import": {
-            "file": str(file),
-            "added": result.added,
-            "unchanged": result.unchanged,
-            "excluded": result.excluded,
+    return merge_next(
+        {
+            "dataset_dir": display_path(dataset.path),
+            "accepted": summary["accepted"],
+            "excluded": summary["excluded"],
+            "excluded_by_code": summary["excluded_by_code"],
+            "splits": summary["splits"],
+            "notes": notes.notes,
+            "warnings": [*notes.warnings, *summary["warnings"]],
+            "import": {
+                "file": str(file),
+                "added": result.added,
+                "unchanged": result.unchanged,
+                "excluded": result.excluded,
+            },
         },
-        **dataset_next(dataset, directory, accepted=summary["accepted"]),
-    }
+        dataset_next(dataset, directory, summary=summary),
+    )
 
 
 @dataset_app.command(**SHOW_DOC.typer())
@@ -518,7 +627,7 @@ def show(directory: DirArgument) -> dict[str, Any]:
     settings = dataset.settings()
     by_split = dataset.rows_by_split()
     summary = dataset.summary()
-    return {
+    result = {
         "dataset_dir": display_path(dataset.path),
         "settings": settings,
         "summary": summary,
@@ -526,8 +635,8 @@ def show(directory: DirArgument) -> dict[str, Any]:
             split: [row.id for row in by_split[split][:SAMPLE_IDS_PER_SPLIT]] for split in SPLITS
         },
         "push": _push_brief(dataset),
-        **dataset_next(dataset, directory, accepted=summary["accepted"]),
     }
+    return merge_next(result, dataset_next(dataset, directory, summary=summary))
 
 
 @dataset_app.command(**PUSH_DOC.typer())
@@ -535,13 +644,24 @@ def show(directory: DirArgument) -> dict[str, Any]:
 def push(
     directory: DirArgument,
     name: Annotated[
-        str,
-        typer.Option("--name", metavar="NAME", help="The dataset to push to.", show_default=False),
-    ],
+        str | None,
+        typer.Option(
+            "--name",
+            metavar="NAME",
+            help=f"The dataset to push to (a rerun takes the one {PUSH_FILE} names).",
+            show_default=False,
+        ),
+    ] = None,
     project: Annotated[
-        str,
-        typer.Option("--project", metavar="NAME", help="The project the dataset belongs to."),
-    ] = DEFAULT_PROJECT,
+        str | None,
+        typer.Option(
+            "--project",
+            metavar="NAME",
+            help=f"The project the dataset belongs to: {DEFAULT_PROJECT}, or the one "
+            f"{PUSH_FILE} names.",
+            show_default=False,
+        ),
+    ] = None,
     confirm: Annotated[
         bool,
         typer.Option("--confirm", help="Push (a remote write); without it, only preview."),
@@ -560,15 +680,30 @@ def push(
     runtime = get_runtime()
     require_dataset_dir(directory)
     dataset = DatasetDir(directory)
-    plan = plan_push(dataset, project=project, name=name)
-    plan.require_rows()
-    if plan.needs_remote:
+    dataset.settings()  # A UsageError when this is not a dataset directory.
+    state = read_push_state(dataset)
+    defaults_used: list[str] = []
+    if state is not None:
+        # The receipt pins the dataset: an omitted flag is its value, another one an error.
+        name = state.dataset_name if name is None else name
+        project = state.project if project is None else project
+        rerun: list[object] = ["dataset", "push", directory]
+    elif name is None:
+        raise UsageError(
+            f"dataset push needs --name ({display_path(directory)} was never pushed)",
+            hint="name the Agent Observability dataset to create or add to; later pushes "
+            f"take it from {PUSH_FILE}",
+        )
+    else:
+        if project is None:
+            project, defaults_used = DEFAULT_PROJECT, ["project"]
         rerun = ["dataset", "push", directory, "--name", name]
         if project != DEFAULT_PROJECT:
             rerun += ["--project", project]
+    plan = plan_push(dataset, project=project, name=name)
+    plan.require_rows()
+    if plan.needs_remote:
         parts = plan.approval_parts()
-        ctx = current_context()
-        defaults_used = [] if ctx is not None and given(ctx, "project") else ["project"]
         preview = with_digest(_push_preview(plan, defaults_used), inputs_digest(parts))
         if confirm:
             require_writable(runtime, "dataset push")
@@ -585,7 +720,12 @@ def push(
             require_expected(expect, locked.approval_parts(), preview=command(*rerun))
 
         receipt = push_dataset(
-            dataset, project=project, name=name, pup=Pup(), progress=info, approve=approve
+            dataset,
+            project=plan.project,
+            name=plan.dataset_name,
+            pup=Pup(),
+            progress=info,
+            approve=approve,
         )
     else:
         info("nothing to push: every kept row was pushed already")
@@ -594,8 +734,7 @@ def push(
     result["receipt_file"] = display_path(push_path(dataset))
     if warnings := _receipt_warnings(receipt.stale_records, receipt.changed_records):
         result["warnings"] = warnings
-    result.update(dataset_next(dataset, directory, accepted=dataset.summary()["accepted"]))
-    return result
+    return merge_next(result, dataset_next(dataset, directory))
 
 
 def _push_preview(plan: PushPlan, defaults_used: Sequence[str]) -> dict[str, Any]:
@@ -702,6 +841,13 @@ def preview(
     collection = collect(Pup(), options, progress=info)
     excluded_by_code = _count_codes(exclusion.code.value for exclusion in collection.exclusions)
     counts = split_counts(collection.rows, params)
+    warnings = _collection_warnings(collection, options)
+    if collection.rows:
+        # With no row accepted, the splits are empty for that reason alone.
+        warnings += [
+            *split_warnings(counts),
+            *skew_warnings(_keys_by_split(collection.rows, params), params, more="pull more rows"),
+        ]
     return {
         "query": options.settings(),
         "time_range": _time_range(options),
@@ -716,11 +862,16 @@ def preview(
         "excluded_by_code": excluded_by_code,
         "exclusion_explanations": _explanations(excluded_by_code),
         "splits": counts,
-        "warnings": [*_collection_warnings(collection, options), *split_warnings(counts)],
-        "sample_accepted": [row_brief(row) for row in collection.rows[:SAMPLE_SIZE]],
+        "warnings": warnings,
+        "sample_accepted": [row_summary(row) for row in collection.rows[:SAMPLE_SIZE]],
         "sample_excluded": _sample_exclusions(collection.exclusions),
         "stats": collection.stats(),
-        "next_command": _pull_command(_new_dataset_dir(ml_app), options, params),
+        "next_command": (
+            _pull_command(_new_dataset_dir(ml_app), options, params) if collection.rows else None
+        ),
+        "next_steps": (
+            [] if collection.rows else _no_rows_steps(collection, options, params, excluded_by_code)
+        ),
     }
 
 
@@ -728,7 +879,7 @@ def preview(
 @run_command
 def pull_rows(
     directory: DirArgument,
-    ml_app: MlAppOption,
+    ml_app: PullMlAppOption = None,
     span_name: SpanNameOption = None,
     query: QueryOption = None,
     tag: TagOption = None,
@@ -742,24 +893,61 @@ def pull_rows(
     validation_fraction: ValidationFractionOption = DEFAULT_VALIDATION_FRACTION,
     test_fraction: TestFractionOption = DEFAULT_TEST_FRACTION,
 ) -> dict[str, Any]:
-    params = SplitParams(seed, validation_fraction, test_fraction)
-    options = _pull_options(
-        ml_app=ml_app,
-        span_name=span_name,
-        query=query,
-        tags=tag,
-        from_=from_,
-        to=to,
-        target_count=target_count,
-        max_candidates=max_candidates,
-        reasoning=reasoning,
-        include_errors=include_errors,
-    )
     require_dataset_dir(directory)
     dataset = DatasetDir(directory)
+    values = _with_frozen(
+        dataset,
+        directory,
+        {
+            "ml_app": ml_app,
+            "span_name": span_name,
+            "query": query,
+            "tag": tag,
+            "from_": from_,
+            "to": to,
+            "reasoning": reasoning,
+            "include_errors": include_errors,
+            "seed": seed,
+            "validation_fraction": validation_fraction,
+            "test_fraction": test_fraction,
+        },
+    )
+    params = SplitParams(values["seed"], values["validation_fraction"], values["test_fraction"])
+    options = _pull_options(
+        ml_app=values["ml_app"],
+        span_name=values["span_name"],
+        query=values["query"],
+        tags=values["tag"],
+        from_=values["from_"],
+        to=values["to"],
+        target_count=target_count,
+        max_candidates=max_candidates,
+        reasoning=values["reasoning"],
+        include_errors=values["include_errors"],
+    )
+    frozen = frozen_window(options, dataset) is not None
     options = resolve_window(options, dataset, clock)
+    window = _window(options, frozen=frozen)
+    if frozen:
+        info(
+            f"reading the window the first pull froze: {window['from']} to {window['to']} "
+            f"(--from {options.query.from_} --to {options.query.to} as of then)"
+        )
+    notes = _ignore_note(directory)
     collection, added = pull(Pup(), options, dataset, params, progress=info)
     summary = added.summary
+    following = dataset_next(dataset, directory, summary=summary)
+    pipeline_warnings: list[str] = following.pop("warnings", [])
+    if collection.stopped == "max_candidates" and len(collection.rows) < options.target_count:
+        further = replace(options, max_candidates=options.max_candidates * 2)
+        following["next_steps"].insert(
+            0,
+            step(
+                rerun_command(directory, further),
+                "read further: --max-candidates stopped this pull before --target-count rows "
+                "were accepted (the frozen settings fill in the filter)",
+            ),
+        )
     return {
         "dataset_dir": display_path(dataset.path),
         "accepted": summary["accepted"],
@@ -767,7 +955,14 @@ def pull_rows(
         "excluded_by_code": summary["excluded_by_code"],
         "exclusion_explanations": _explanations(summary["excluded_by_code"]),
         "splits": summary["splits"],
-        "warnings": [*_collection_warnings(collection, options), *summary["warnings"]],
+        "notes": notes.notes,
+        "warnings": [
+            *notes.warnings,
+            *_collection_warnings(collection, options),
+            *summary["warnings"],
+            *pipeline_warnings,
+        ],
+        "window": window,
         "time_range": _time_range(options),
         "pull": {
             "matched_spans": collection.spans,
@@ -780,13 +975,124 @@ def pull_rows(
             "updated": added.updated,
             **collection.stats(),
         },
-        **dataset_next(dataset, directory, accepted=summary["accepted"]),
+        **following,
         "hint": (
             "review a sample of the accepted rows (`pup finetune dataset sample "
             f"{_quoted(directory)}`) and the exclusions ({dataset.excluded_path.name}) with "
             "the user before training, and record which rows to keep with `pup finetune "
             "dataset label`"
         ),
+    }
+
+
+def _with_frozen(dataset: DatasetDir, directory: Path, values: Mapping[str, Any]) -> dict[str, Any]:
+    """``dataset pull``'s source flags ``values`` (by parameter name), each one left out
+    taking the value the directory froze on its first pull.
+
+    A flag given with another value than the frozen one is a :class:`SettingsConflict`
+    naming the frozen value (any difference this misses, the settings check reports).
+    Without frozen settings, ``--ml-app`` is required.
+    """
+    frozen = _frozen_pull_values(dataset)
+    if frozen is None:
+        if values["ml_app"] is None:
+            if dataset.is_dataset():
+                dataset.check_source("datadog")  # a dataset built by `dataset import`
+            raise UsageError(
+                f"dataset pull needs --ml-app ({display_path(directory)} has no settings yet)",
+                hint="the first pull into a directory names the ml_app whose spans to read, "
+                "and freezes it with the filter; a rerun takes them from the directory",
+            )
+        return dict(values)
+    ctx = current_context()
+    merged = dict(values)
+    filled = [
+        name for name in values if values[name] is None or ctx is None or not given(ctx, name)
+    ]
+    if ctx is not None:
+        conflicts = [
+            f"{flag_name(ctx.command, name)} {_shown_value(name, frozen[name])}"
+            for name in values
+            if name not in filled
+            and _comparable(name, values[name]) != _comparable(name, frozen[name])
+        ]
+        if conflicts:
+            raise SettingsConflict(
+                f"{display_path(directory)} froze {', '.join(conflicts)} on its first pull",
+                hint="leave those flags out to use the frozen values, or pull into a new "
+                "directory for other settings",
+            )
+    for name in filled:
+        merged[name] = frozen[name]
+    if filled and ctx is not None:
+        # Named only where the frozen value is not the flag's default.
+        flags = ", ".join(
+            flag_name(ctx.command, name)
+            for name in filled
+            if _comparable(name, frozen[name]) != _comparable(name, values[name])
+        )
+        if flags:
+            info(f"{display_path(directory)} has frozen settings: using its {flags}")
+    return merged
+
+
+def _comparable(name: str, value: Any) -> Any:
+    """A pull flag's value as the settings freeze it, so ``7d`` and ``now-7d`` compare
+    equal, and so do tags in another order."""
+    if name in ("from_", "to"):
+        return parse_time_bound(str(value), "--from" if name == "from_" else "--to")
+    if name == "tag":
+        return _parse_tags(value or ())
+    if name in ("span_name", "query"):
+        return value or None
+    return value
+
+
+def _shown_value(name: str, value: Any) -> str:
+    """A frozen flag value as an error shows it: tags as ``k:v`` words, a relative --from
+    the short way (``7d``, as the help writes its default), text quoted."""
+    if name == "from_" and isinstance(value, str):
+        value = _short_time(value)
+    if value is None or value == []:
+        return "(none)"
+    if isinstance(value, list):
+        return " ".join(shlex.quote(str(item)) for item in value)
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    return shlex.quote(str(value))
+
+
+def _frozen_pull_values(dataset: DatasetDir) -> dict[str, Any] | None:
+    """The source flags the first pull into ``dataset`` froze, by parameter name, as they
+    would be passed; ``None`` when ``dataset`` has no pull settings."""
+    if not dataset.is_dataset():
+        return None
+    source = dataset.settings().get("source")
+    if not isinstance(source, dict) or source.get("kind") != "datadog":
+        return None
+    raw_filter = source.get("filter")
+    filter_: dict[str, Any] = raw_filter if isinstance(raw_filter, dict) else {}
+    tags = filter_.get("tags")
+    split = dataset.split_params()
+
+    def expr(key: str, bound: str, default: str) -> str:
+        value = source.get(key, filter_.get(bound))
+        return default if value is None else str(value)
+
+    return {
+        "ml_app": filter_.get("ml_app"),
+        "span_name": filter_.get("span_name"),
+        "query": filter_.get("query"),
+        "tag": [f"{key}:{value}" for key, value in sorted(tags.items())]
+        if isinstance(tags, dict) and tags
+        else None,
+        "from_": expr("from_expr", "from", DEFAULT_FROM),
+        "to": expr("to_expr", "to", DEFAULT_TO),
+        "reasoning": source.get("reasoning", "omit"),
+        "include_errors": bool(source.get("include_errors", False)),
+        "seed": split.seed,
+        "validation_fraction": split.validation_fraction,
+        "test_fraction": split.test_fraction,
     }
 
 
@@ -812,7 +1118,7 @@ def label(
     labels = _read_label_file(file, at=datetime.now(UTC))
     report = apply_labels(dataset, labels)
     summary = report.summary
-    return {
+    result = {
         "dataset_dir": display_path(dataset.path),
         "label": {
             "file": str(file),
@@ -828,8 +1134,8 @@ def label(
         "drop_reasons": summary["drop_reasons"],
         "splits": summary["splits"],
         "warnings": summary["warnings"],
-        **dataset_next(dataset, directory, accepted=summary["accepted"]),
     }
+    return merge_next(result, dataset_next(dataset, directory, summary=summary))
 
 
 @dataset_app.command(**SAMPLE_DOC.typer())
@@ -861,7 +1167,7 @@ def sample(
     rows, eligible = sample_rows(
         dataset, n=n, split=split, seed=seed, include_dropped=include_dropped
     )
-    return {
+    result = {
         "dataset_dir": display_path(dataset.path),
         "split": split,
         "seed": seed,
@@ -869,25 +1175,12 @@ def sample(
         "eligible": eligible,
         "rows": rows,
         "rows_file": display_path(dataset.rows_path),
-        **dataset_next(dataset, directory, accepted=len(dataset.rows()), sampled=True),
         "hint": (
             "review these rows with the user, then record decisions as JSON lines of "
             '{"id": ..., "keep": true|false, "reason": ...}; a reason is required to drop'
         ),
     }
-
-
-_UNREADABLE: Final = object()
-"""What :func:`_push_receipt` returns for a ``push.json`` that cannot be read."""
-
-
-def _push_receipt(dataset: DatasetDir) -> object | None:
-    """``dataset``'s push receipt, ``None`` when it was never pushed, or
-    :data:`_UNREADABLE` when ``push.json`` cannot be read."""
-    try:
-        return read_push_state(dataset)
-    except StateError:
-        return _UNREADABLE
+    return merge_next(result, dataset_next(dataset, directory, sampled=True))
 
 
 def _push_brief(dataset: DatasetDir) -> dict[str, Any] | None:
@@ -980,6 +1273,17 @@ def _time_bound(value: str, flag: str) -> str | int:
     return parse_time_bound(value, flag)
 
 
+def _window(options: PullOptions, *, frozen: bool) -> dict[str, Any]:
+    """The window the export reads, in UTC ISO 8601 (an ISO 8601 bound as written), and
+    whether it is the one the directory's first pull froze."""
+    from_, to = options.export_query.from_, options.export_query.to
+    return {
+        "from": _utc(from_) or from_,
+        "to": _utc(to) or to,
+        "frozen": frozen,
+    }
+
+
 def _time_range(options: PullOptions) -> dict[str, Any]:
     """The time range as written and as exported; an epoch ms bound also in UTC ISO 8601."""
     from_, to = options.export_query.from_, options.export_query.to
@@ -1012,9 +1316,28 @@ def _new_dataset_dir(ml_app: str) -> str:
     return f"./{candidate}"
 
 
+def _short_time(bound: str) -> str:
+    """A canonical relative --from the way the help writes it: ``now-7d`` as ``7d``
+    (``--to 1d`` would read as a duration, so a --to keeps its ``now-``)."""
+    return bound.removeprefix("now-")
+
+
 def _pull_command(directory: str, options: PullOptions, params: SplitParams) -> str:
     """The ``dataset pull`` command into ``directory`` with the flags that differ from the
     defaults (the filter, and the time range as written)."""
+    return command("dataset", "pull", directory, *_source_args(options, params))
+
+
+def _source_args(
+    options: PullOptions,
+    params: SplitParams,
+    *,
+    from_: str | None = None,
+    include_errors: bool | None = None,
+) -> list[str]:
+    """The flags of a preview or pull that differ from the defaults: the filter, the time
+    range as written (a relative --from the short way), the limits, rows and splits.
+    ``from_`` and ``include_errors`` replace the options' own."""
     query = options.query
     args: list[str] = ["--ml-app", query.ml_app or ""]
     if query.span_name:
@@ -1023,8 +1346,10 @@ def _pull_command(directory: str, options: PullOptions, params: SplitParams) -> 
         args += ["--query", query.query]
     for key, value in sorted(query.tags.items()):
         args += ["--tag", f"{key}:{value}"]
-    if str(query.from_) != DEFAULT_FROM:
-        args += ["--from", str(query.from_)]
+    if from_ is not None:
+        args += ["--from", from_]
+    elif str(query.from_) != _DEFAULT_FROM_BOUND:
+        args += ["--from", _short_time(str(query.from_))]
     if str(query.to) != DEFAULT_TO:
         args += ["--to", str(query.to)]
     if options.target_count != DEFAULT_TARGET_COUNT:
@@ -1033,7 +1358,7 @@ def _pull_command(directory: str, options: PullOptions, params: SplitParams) -> 
         args += ["--max-candidates", str(options.max_candidates)]
     if options.reasoning != "omit":
         args += ["--reasoning", options.reasoning]
-    if options.include_errors:
+    if options.include_errors if include_errors is None else include_errors:
         args.append("--include-errors")
     if params != SplitParams():
         args += [
@@ -1044,7 +1369,66 @@ def _pull_command(directory: str, options: PullOptions, params: SplitParams) -> 
             "--test-fraction",
             str(params.test_fraction),
         ]
-    return command("dataset", "pull", directory, *args)
+    return args
+
+
+_RELATIVE = re.compile(r"now-(?P<amount>[0-9]+)(?P<unit>[smhdw])")
+
+
+def _no_rows_steps(
+    collection: Collection,
+    options: PullOptions,
+    params: SplitParams,
+    excluded_by_code: Mapping[str, int],
+) -> list[dict[str, str]]:
+    """What a preview that accepted no row suggests instead of a pull: keeping errored
+    calls when they are what was excluded, a wider time range, and checking the filter."""
+    steps: list[dict[str, str]] = []
+    if collection.spans and excluded_by_code.get("span_error") and not options.include_errors:
+        steps.append(
+            step(
+                template("dataset", "preview", *_source_args(options, params, include_errors=True)),
+                f"{excluded_by_code['span_error']} spans were excluded as span_error: keep the "
+                "errored LLM calls too",
+            )
+        )
+    wider = _wider_from(options.query.from_)
+    read = "every span read was excluded" if collection.spans else "no LLM span matched"
+    steps.append(
+        step(
+            template("dataset", "preview", *_source_args(options, params, from_=wider)),
+            f"{read} in the time range read; widen it with an earlier --from"
+            + (" (an ISO 8601 date, or a relative time such as 90d)" if wider == "<FROM>" else ""),
+        )
+    )
+    steps.append(
+        step(
+            template("dataset", "preview", "--ml-app", "<ML_APP>"),
+            "check the filter: --ml-app must be the ml_app your agent reports its LLM spans "
+            "under, and --span-name, --query and --tag each narrow it further, so leave them "
+            "out to see every span",
+        )
+    )
+    return steps
+
+
+def _wider_from(bound: TimeBound) -> str:
+    """The ``--from`` a preview that accepted no row suggests: :data:`WIDER_FROM` when the
+    range read is a shorter relative one, else a placeholder."""
+    match = _RELATIVE.fullmatch(bound) if isinstance(bound, str) else None
+    if match is None:
+        return "<FROM>"
+    read_ms = int(match["amount"]) * RELATIVE_TIME_UNITS_MS[match["unit"]]
+    return WIDER_FROM if read_ms < _WIDER_FROM_MS else "<FROM>"
+
+
+def _keys_by_split(rows: Iterable[TrainingRow], params: SplitParams) -> dict[SplitName, list[str]]:
+    """The split key of each of ``rows`` by the split ``params`` would assign it."""
+    keys: dict[SplitName, list[str]] = {split: [] for split in SPLITS}
+    for row in rows:
+        key = split_key(row)
+        keys[params.assign(key)].append(key)
+    return keys
 
 
 def _count_codes(codes: Iterable[str]) -> dict[str, int]:

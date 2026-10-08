@@ -68,8 +68,53 @@ def test_the_body_has_the_rules_steps_and_debugging_table() -> None:
             assert "\nCheck:\n" in section, f"no Check: list in {section.splitlines()[0]!r}"
     assert "## End state" in text
     assert "| Symptom | Cause | Fix |" in text
-    assert "pup finetune auth login fireworks" in text
+    assert "pup finetune auth login <PROVIDER>" in text
     assert "untrusted data" in text
+
+
+def _section(text: str, heading: str) -> str:
+    """The body of the ``## heading`` section of ``text``."""
+    return text.split(f"\n## {heading}\n", 1)[1].split("\n## ", 1)[0]
+
+
+def test_the_body_opens_with_the_flow_and_where_to_start() -> None:
+    text = skill.skill_text()
+    assert text.index("## The flow") < text.index("## Rules for every step")
+    assert "| The user has | Start at |" in _section(text, "The flow")
+
+
+def test_there_are_about_eight_short_rules() -> None:
+    rules = re.findall(
+        r"^\d+\. (.*?)(?=^\d+\. |\Z)",
+        _section(skill.skill_text(), "Rules for every step"),
+        re.MULTILINE | re.DOTALL,
+    )
+    assert 6 <= len(rules) <= 9, rules
+    for rule in rules:
+        rule = rule.split("\n\n", 1)[0]
+        assert len(rule.split()) <= 30, rule
+
+
+def test_the_preview_and_status_templates_are_there() -> None:
+    text = skill.skill_text()
+    preview = _section(text, "Presenting a preview")
+    for line in ("Runs:", "Sends to:", "Cost:", "Command:", "Run it?"):
+        assert line in preview, line
+    status = _section(text, "Status -> do this")
+    for key in ("`phase`", "`worker.state`", "`publication.status`", "complete_with_errors"):
+        assert key in status, key
+
+
+def test_commands_use_runnable_examples_not_shell_variables_or_lowercase_placeholders() -> None:
+    # An agent copies these; its shell state does not persist between calls, and a lowercase
+    # `<run_dir>` reads like a real argument. `<UPPER>` marks a value to fill in.
+    text = skill.skill_text()
+    for line in text.splitlines():
+        if "pup finetune" not in line and "pup llm-obs" not in line:
+            continue
+        assert not re.search(r"\$[A-Za-z_{]", line), line
+        for command in re.findall(r"pup (?:finetune|llm-obs)[^`|]*", line):
+            assert not re.search(r"<[a-z][a-z_ ]*>", command), command
 
 
 @pytest.mark.parametrize(
@@ -97,7 +142,7 @@ def test_the_debugging_table_covers_each_failure() -> None:
     rows = [line for line in table.splitlines() if line.startswith("| ") and "---" not in line]
     for term in (
         "datadog_auth",  # Datadog auth
-        "fireworks",  # provider auth
+        "provider key",  # provider auth
         "matches no spans",  # empty pulls
         "excluded_by_code",  # exclusions
         "Error [read_only]",  # read-only mode
@@ -129,6 +174,28 @@ def test_the_skill_never_types_a_confirm_that_skips_expect() -> None:
     for command in ("train", "resume", "dataset triage", "dataset push"):
         typed = re.findall(rf"pup finetune {command} [^`\n]*--confirm", text)
         assert typed == [], typed
+
+
+MAX_SKILL_LINES = 320
+"""The most lines SKILL.md may have: an agent loads all of it into its context."""
+
+
+def test_the_skill_stays_short() -> None:
+    lines = len(skill.skill_text().splitlines())
+    assert lines <= MAX_SKILL_LINES, f"SKILL.md has {lines} lines, over {MAX_SKILL_LINES}"
+
+
+def test_the_skill_never_types_a_confirm_for_undeploy_or_deploy() -> None:
+    # Deleting or creating a deployment is the user's to approve from the preview.
+    text = skill.skill_text()
+    for command in ("deploy", "undeploy"):
+        assert re.findall(rf"pup finetune {command} [^`\n]*--confirm", text) == [], command
+
+
+def test_the_skill_keeps_data_out_of_the_checkout() -> None:
+    text = skill.skill_text()
+    assert "./ds" not in text
+    assert "datasets/my-agent" in text
 
 
 def _fake_files(root: Path) -> Callable[[str], Path]:

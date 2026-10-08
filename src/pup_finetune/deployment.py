@@ -51,6 +51,7 @@ from pup_finetune.output import info
 from pup_finetune.providers.base import (
     MAX_MODEL_ID_LEN,
     MODEL_ID_PATTERN,
+    OFFLINE_BILLING,
     DeploymentNotReady,
     DeploymentRequest,
     DeployOptions,
@@ -68,6 +69,7 @@ __all__ = [
     "DEPLOYABLE_PHASES",
     "REQUESTED",
     "DeployTarget",
+    "deploy_billing",
     "deploy_preview",
     "deploy_target",
     "deployment_id_for",
@@ -97,8 +99,9 @@ def _q(value: object) -> str:
 
 
 def undeploy_command(run_dir: RunDir) -> str:
-    """The exact command that deletes the run's deployment."""
-    return next_steps.command("undeploy", run_dir.path, "--confirm")
+    """The command that deletes the run's deployment, in its preview form: it names what is
+    deleted and prints the ``--confirm`` command, which is the user's to approve."""
+    return next_steps.command("undeploy", run_dir.path)
 
 
 def deployment_usage(receipt: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -221,8 +224,19 @@ def require_not_deployed(run_dir: RunDir) -> None:
     )
 
 
-def deploy_preview(target: DeployTarget, options: DeployOptions) -> dict[str, Any]:
-    """What ``deploy --confirm`` would create, and how to tear it down."""
+def deploy_billing(*, offline: bool = False) -> str:
+    """What a deployment bills: :data:`BILLING`, or, on the offline fake provider,
+    that it bills nothing (how a training preview says it too)."""
+    if offline:
+        return f"{OFFLINE_BILLING}: its deployment is only a record in memory"
+    return BILLING
+
+
+def deploy_preview(
+    target: DeployTarget, options: DeployOptions, *, offline: bool = False
+) -> dict[str, Any]:
+    """What ``deploy --confirm`` would create, who is sent what, and how to tear it down.
+    ``offline`` is the provider's (:attr:`~pup_finetune.providers.ProviderInfo.offline`)."""
     minutes = options.timeout_s / 60
     return {
         "run_id": target.run_id,
@@ -238,9 +252,13 @@ def deploy_preview(target: DeployTarget, options: DeployOptions) -> dict[str, An
             f"up to {minutes:g} minutes for it to serve, then send one chat completion as a "
             "smoke test"
         ),
-        "billing": f"{BILLING}: run `{undeploy_command(target.run_dir)}`",
+        "billing": f"{deploy_billing(offline=offline)}: run `{undeploy_command(target.run_dir)}`",
         "undeploy_command": undeploy_command(target.run_dir),
         "receipt_file": display_path(target.run_dir.deployment_path),
+        "data_recipients": [
+            f"the deployment request and one fixed smoke-test prompt (no rows) -> {target.provider}"
+        ],
+        "warnings": [],
     }
 
 
@@ -404,6 +422,8 @@ def undeploy_preview(run_dir: RunDir, receipt: Mapping[str, Any]) -> dict[str, A
         "deployment_name": receipt.get("deployment_name"),
         "state": receipt.get("state"),
         "action": _undeploy_action(receipt),
+        "data_recipients": [f"the delete request -> {receipt.get('provider')}"],
+        "warnings": [],
     }
 
 

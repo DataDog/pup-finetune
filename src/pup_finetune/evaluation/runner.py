@@ -30,6 +30,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import hashlib
+import os
 import shlex
 import threading
 from collections.abc import Callable, Iterator, Mapping
@@ -60,7 +61,7 @@ from pup_finetune.errors import (
 from pup_finetune.next_steps import PROGRAM, command, step, template
 from pup_finetune.output import info
 from pup_finetune.progress import EvaluationProgress
-from pup_finetune.providers import get_provider
+from pup_finetune.providers import get_provider, require_packages
 from pup_finetune.providers.base import (
     CheckpointRef,
     Generation,
@@ -70,7 +71,15 @@ from pup_finetune.providers.base import (
     Sampler,
     TrainingSession,
 )
-from pup_finetune.runs import Phase, RunDir, dataset_content_hash, error_json, model_id_for_run
+from pup_finetune.redaction import redact
+from pup_finetune.runs import (
+    Phase,
+    RunDir,
+    dataset_content_hash,
+    error_json,
+    model_id_for_run,
+    utcnow,
+)
 from pup_finetune.runs import cancel_on_signals as _cancel_on_signals
 from pup_finetune.runtime import Runtime
 from pup_finetune.storage import LOCK_FILE_NAME, canonical_json, finite_json
@@ -97,16 +106,23 @@ __all__ = [
     "EvalSettings",
     "EvaluateAfterTraining",
     "Publishing",
+    "RecordedEvaluation",
     "StandaloneEvaluation",
     "calibration_failed",
     "calibration_line",
     "cancel_on_signals",
+    "deploy_command",
+    "evaluate_words",
     "evaluation_exit_code",
     "finished_result",
+    "headline",
+    "next_after_training",
     "open_judge_client",
     "plan_evaluation",
     "plan_standalone",
     "prepare_eval_dir",
+    "record_evaluation",
+    "recorded_evaluation",
     "replay",
     "replay_result",
     "require_new_eval_dir",
@@ -331,6 +347,32 @@ class EvalSettings:
     publish: bool = True
 
 
+def evaluate_words(
+    run_dir: Path, settings: EvalSettings, judge_spec: str, *, pin: bool
+) -> list[str]:
+    """The ``evaluate`` command (without ``--confirm``) for the run in ``run_dir`` with
+    ``settings`` and the judge ``judge_spec``: the judge always, and the other settings that
+    differ from the defaults, or every one of them with ``pin``."""
+    defaults = EvalSettings(out_dir=run_dir / DEFAULT_OUT_DIR_NAME)
+    words = [*PROGRAM, "evaluate", display_path(run_dir)]
+    if pin or settings.out_dir != defaults.out_dir:
+        words += ["--out-dir", display_path(settings.out_dir)]
+    if pin or settings.max_cases_per_trajectory != defaults.max_cases_per_trajectory:
+        words += ["--max-cases", str(settings.max_cases_per_trajectory)]
+    words += ["--judge-model", judge_spec]
+    if pin or settings.concurrency != defaults.concurrency:
+        words += ["--concurrency", str(settings.concurrency)]
+    if pin or settings.max_tokens != defaults.max_tokens:
+        words += ["--max-tokens", str(settings.max_tokens)]
+    if pin or settings.seed != defaults.seed:
+        words += ["--seed", str(settings.seed)]
+    if settings.skip_calibration:
+        words.append("--skip-calibration")
+    if not settings.publish:
+        words.append("--no-publish")
+    return words
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class EvalPlan:
     """What an evaluation of one run replays, with which judge, into which directory."""
@@ -397,33 +439,20 @@ class EvalPlan:
             return 0
         return 3 * min(CALIBRATION_CASES, len(self.cases))
 
-    def evaluate_command(self) -> list[str]:
+    def evaluate_command(self, *, pin: bool | None = None) -> list[str]:
         """The standalone ``evaluate`` command for this plan, without ``--confirm``.
 
         For ``evaluate`` it repeats the settings that differ from the defaults, and always
         the judge, which decides where the data goes; the identity check of
-        ``evaluation.json`` refuses any drift. After ``train --evaluate`` every setting is
-        pinned, so the command continues the evaluation that run started.
+        ``evaluation.json`` refuses any drift. After ``train --evaluate`` (or with ``pin``)
+        every setting is pinned, so the command continues the evaluation that run started.
         """
-        settings, defaults = self.settings, EvalSettings(out_dir=self.default_out_dir)
-        pin = not self.standalone
-        words = [*PROGRAM, "evaluate", display_path(self.run_dir)]
-        if pin or settings.out_dir != defaults.out_dir:
-            words += ["--out-dir", display_path(settings.out_dir)]
-        if pin or settings.max_cases_per_trajectory != defaults.max_cases_per_trajectory:
-            words += ["--max-cases", str(settings.max_cases_per_trajectory)]
-        words += ["--judge-model", self.judge.spec]
-        if pin or settings.concurrency != defaults.concurrency:
-            words += ["--concurrency", str(settings.concurrency)]
-        if pin or settings.max_tokens != defaults.max_tokens:
-            words += ["--max-tokens", str(settings.max_tokens)]
-        if pin or settings.seed != defaults.seed:
-            words += ["--seed", str(settings.seed)]
-        if settings.skip_calibration:
-            words.append("--skip-calibration")
-        if not settings.publish:
-            words.append("--no-publish")
-        return words
+        return evaluate_words(
+            self.run_dir,
+            self.settings,
+            self.judge.spec,
+            pin=not self.standalone if pin is None else pin,
+        )
 
     @property
     def default_out_dir(self) -> Path:
@@ -937,7 +966,12 @@ def replay_result(
         )
     warnings.extend(str(warning) for warning in publication.get("warnings") or [])
     if publication["status"] == "skipped":
-        warnings.append(f"the evaluation was not published: {publication['reason']}")
+        # Skipping publishing is moot once the evaluation ran: only the push is offered.
+        reason = str(publication["reason"])
+        for flag in (NO_PUBLISH, EVAL_NO_PUBLISH):
+            reason = reason.removesuffix(f", or pass {flag}")
+        publication = {**publication, "reason": reason}
+        warnings.append(f"the evaluation was not published: {reason}")
     elif publication["status"] == "failed":
         error = publication["error"]
         then = f"{error['hint']}, then run" if error.get("hint") else "run"
@@ -1005,11 +1039,11 @@ def _replay_next(
     elif publication["status"] == "skipped":
         next_command = None
     else:
-        next_command = _deploy_command(plan.run_dir)
+        next_command = deploy_command(plan.run_dir)
     return {"next_command": next_command, "next_steps": steps}
 
 
-def _deploy_command(run_dir: Path) -> str | None:
+def deploy_command(run_dir: Path) -> str | None:
     """``deploy`` for the run (a free preview), or ``None`` while it is deployed already.
 
     An unreadable ``deployment.json`` still gets ``deploy``, which reports it, rather than
@@ -1039,9 +1073,215 @@ def evaluation_exit_code(result: Mapping[str, Any]) -> int:
     return 1 if any(int(target["completed"]) == 0 for target in targets) else 0
 
 
+# --- the run's record of its evaluations --------------------------------------------------
+
+RECORD_STATUSES: Final = frozenset(
+    {"running", "complete", "complete_with_errors", "partial", "skipped", "failed"}
+)
+"""How a recorded evaluation stands: ``running`` from the start of its replay until its
+result is recorded (so a crash leaves it), then its result's ``status``."""
+
+
+def headline(summary: Mapping[str, Any]) -> dict[str, Any]:
+    """An evaluation summary's headline: the judge pass rate per target, tuned minus base
+    with its 95% CI, the paired verdicts and the cases."""
+    targets: Mapping[str, Any] = summary.get("targets") or {}
+    difference: Mapping[str, Any] = summary.get("tuned_minus_base") or {}
+    paired: Mapping[str, Any] = summary.get("paired") or {}
+    ci = difference.get("ci95")
+
+    def rate(name: str) -> Any:
+        found = (targets.get(name) or {}).get("judge_pass")
+        return found.get("rate") if isinstance(found, Mapping) else None
+
+    return {
+        "judge_pass_rate": {
+            "base": rate("base"),
+            "tuned": rate("tuned"),
+            "delta": difference.get("judge_pass_rate"),
+            "ci95": list(ci) if isinstance(ci, list | tuple) else None,
+        },
+        "paired": {key: paired.get(key, 0) for key in ("wins", "regressions", "ties")},
+        "cases": summary.get("n_cases"),
+        "trajectories": summary.get("n_trajectories"),
+    }
+
+
+def _out_dir_key(out_dir: Path, run_dir: Path) -> str:
+    """How ``evaluation.json`` names an evaluation directory: relative to the run when it is
+    inside it (so the record survives moving the run), else absolute."""
+    absolute = Path(os.path.abspath(out_dir))
+    try:
+        return absolute.relative_to(Path(os.path.abspath(run_dir))).as_posix()
+    except ValueError:
+        return str(absolute)
+
+
+def _settings_record(plan: EvalPlan) -> dict[str, Any]:
+    settings = plan.settings
+    return {
+        "out_dir": _out_dir_key(settings.out_dir, plan.run_dir),
+        "max_cases": settings.max_cases_per_trajectory,
+        "judge_model": plan.judge.spec,
+        "concurrency": settings.concurrency,
+        "max_tokens": settings.max_tokens,
+        "seed": settings.seed,
+        "skip_calibration": settings.skip_calibration,
+        "publish": settings.publish,
+    }
+
+
+def _is_complete(status: str, publication: str | None) -> bool:
+    """Whether an evaluation is done: every pair judged without error, and its publishing
+    neither failed nor was cancelled (either is what a rerun continues)."""
+    return status == "complete" and publication not in {"failed", "cancelled", "pending"}
+
+
+def record_evaluation(plan: EvalPlan, outcome: Mapping[str, Any]) -> None:
+    """Record ``outcome`` (an evaluation's result, or ``{"status": "running"}``) in the run's
+    ``evaluation.json`` (:data:`~pup_finetune.runs.EVALUATIONS_FILE`), under its directory,
+    with every setting, so ``status`` can name the command that continues it or, once it is
+    complete, the next step.
+
+    Never raises: the evaluation itself is decided already. A record that cannot be written
+    is a warning in ``outcome`` (when it has a ``warnings`` list).
+    """
+    status = str(outcome.get("status"))
+    if status not in RECORD_STATUSES:
+        return
+    publication = outcome.get("publication")
+    published = str(publication.get("status")) if isinstance(publication, Mapping) else None
+    summary = outcome.get("summary")
+    settings = _settings_record(plan)
+    entry = {
+        "settings": settings,
+        "status": status,
+        "complete": _is_complete(status, published),
+        "publication": published,
+        "headline": headline(summary) if isinstance(summary, Mapping) else None,
+        "recorded_at": utcnow().isoformat(timespec="seconds").replace("+00:00", "Z"),
+    }
+    run = RunDir(plan.run_dir)
+    try:
+        record = run.read_evaluations() or {}
+        evaluations = record.get("evaluations")
+        found = dict(evaluations) if isinstance(evaluations, Mapping) else {}
+        key = str(settings["out_dir"])
+        found.pop(key, None)  # the newest last
+        found[key] = entry
+        run.write_evaluations({"latest": key, "evaluations": found})
+    except (FinetuneError, OSError) as exc:
+        warnings = outcome.get("warnings")
+        if isinstance(warnings, list):
+            warnings.append(
+                f"could not record the evaluation in {display_path(run.evaluations_path)}: "
+                f"{redact(str(exc))}"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedEvaluation:
+    """An evaluation of a run, as its ``evaluation.json`` records it."""
+
+    out_dir: Path
+    status: str
+    complete: bool
+    publication: str | None
+    headline: dict[str, Any] | None
+    settings: EvalSettings
+    judge_model: str
+
+    def command(self, run_dir: Path) -> str:
+        """The ``evaluate`` command that continues it (a free preview), every setting
+        pinned, so its directory's identity check accepts it."""
+        return shlex.join(evaluate_words(run_dir, self.settings, self.judge_model, pin=True))
+
+
+def recorded_evaluation(run_dir: Path) -> RecordedEvaluation | None:
+    """The evaluation ``status`` reports for the run in ``run_dir``: the newest complete one,
+    else the newest one; ``None`` when none is recorded or the record cannot be read."""
+    try:
+        record = RunDir(run_dir).read_evaluations()
+    except FinetuneError:
+        return None
+    evaluations = record.get("evaluations") if record else None
+    if not isinstance(evaluations, Mapping):
+        return None
+    entries: list[RecordedEvaluation] = []
+    for entry in evaluations.values():
+        found = _recorded(run_dir, entry)
+        if found is not None:
+            entries.append(found)
+    if not entries:
+        return None
+    complete = [entry for entry in entries if entry.complete]
+    return (complete or entries)[-1]
+
+
+def _recorded(run_dir: Path, entry: object) -> RecordedEvaluation | None:
+    if not isinstance(entry, Mapping) or not isinstance(entry.get("settings"), Mapping):
+        return None
+    settings: Mapping[str, Any] = entry["settings"]
+    try:
+        out_dir = Path(str(settings["out_dir"]))
+        out_dir = out_dir if out_dir.is_absolute() else run_dir / out_dir
+        values = EvalSettings(
+            out_dir=out_dir,
+            max_cases_per_trajectory=int(settings["max_cases"]),
+            judge_model=str(settings["judge_model"]),
+            concurrency=int(settings["concurrency"]),
+            max_tokens=int(settings["max_tokens"]),
+            seed=int(settings["seed"]),
+            skip_calibration=bool(settings.get("skip_calibration")),
+            publish=bool(settings.get("publish", True)),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    found_headline = entry.get("headline")
+    publication = entry.get("publication")
+    return RecordedEvaluation(
+        out_dir=out_dir,
+        status=str(entry.get("status")),
+        complete=bool(entry.get("complete")),
+        publication=str(publication) if publication is not None else None,
+        headline=dict(found_headline) if isinstance(found_headline, Mapping) else None,
+        settings=values,
+        judge_model=str(settings["judge_model"]),
+    )
+
+
+def next_after_training(run_dir: Path) -> str | None:
+    """What follows a trained run with a best epoch: ``evaluate`` (a free preview) when it
+    was never evaluated; the recorded evaluation's own command while it is not complete
+    (every setting pinned, so it continues that evaluation); ``deploy`` (a free preview)
+    once it is, or ``None`` while the run is deployed."""
+    found = recorded_evaluation(run_dir)
+    if found is None:
+        return command("evaluate", run_dir)
+    if not found.complete:
+        return found.command(run_dir)
+    return deploy_command(run_dir)
+
+
 SPEND_POLL_S: Final = 0.5
 """How often :class:`EvaluateAfterTraining` checks the spend cap (and a cancel) while it
 evaluates."""
+
+
+def stop_cause(result: TrainResult) -> str:
+    """Why training stopped, in words, naming the cap for a ``budget_exhausted`` run: the
+    token budget (``--max-train-tokens``) or the spend cap (``--max-spend-usd``), from the
+    warning the loop recorded when it stopped."""
+    if result.stopped_reason == "cancelled":
+        return "it was cancelled"
+    if result.stopped_reason != "budget_exhausted":
+        return f"it stopped: {result.stopped_reason}"
+    said = " ".join(result.warnings)
+    if "max_train_tokens" in said:
+        return "it reached its token budget, --max-train-tokens"
+    if "max_spend_usd" in said:
+        return "it reached its spend cap, --max-spend-usd"
+    return "it reached its budget"
 
 
 class EvaluateAfterTraining:
@@ -1078,12 +1318,21 @@ class EvaluateAfterTraining:
     ) -> None:
         next_command = shlex.join(self.plan.evaluate_command())
         spent = None if spend_guard is None else spend_guard()
+        if result.best_epoch is None:
+            # Nothing to evaluate, here or later: no command would change that.
+            self.outcome = {
+                "status": "skipped",
+                "reason": f"the run was not evaluated because no epoch finished, so there is "
+                f"no checkpoint to evaluate: {stop_cause(result)}",
+                "next_command": None,
+            }
+            return
         if result.stopped_reason not in EVALUATED_STOPS or spent is not None:
-            why = {
-                "cancelled": "it was cancelled",
-                "budget_exhausted": "it reached its spend cap, which evaluating in its session "
-                "would spend past",
-            }.get(result.stopped_reason, f"it stopped: {result.stopped_reason}")
+            why = stop_cause(result)
+            if why.endswith("--max-spend-usd"):
+                why += ", which evaluating in its session would spend past"
+            elif result.stopped_reason == "budget_exhausted":
+                why += " (a budget-capped run is evaluated on request)"
             if result.stopped_reason in EVALUATED_STOPS:
                 why = f"its spend cap is reached ({spent})"
             self.outcome = {
@@ -1092,6 +1341,7 @@ class EvaluateAfterTraining:
                 "it in a session of its own",
                 "next_command": next_command,
             }
+            record_evaluation(self.plan, self.outcome)
             return
         try:
             with self._capped(cancel, spend_guard) as (stop, spend_stop):
@@ -1110,7 +1360,10 @@ class EvaluateAfterTraining:
                 "out_dir": display_path(self.plan.out_dir),
                 "next_command": next_command,
             }
+            record_evaluation(self.plan, self.outcome)
             raise
+        if self.outcome is not None:
+            record_evaluation(self.plan, self.outcome)
 
     def _evaluate(
         self, session: TrainingSession, result: TrainResult, stop: threading.Event
@@ -1120,6 +1373,7 @@ class EvaluateAfterTraining:
         training = best_training_checkpoint(result)
         report = prepare_eval_dir(self.plan, training, self.client, calibration=self.calibration)
         info(f"evaluating the run {self.plan.run_id} in its training session")
+        record_evaluation(self.plan, {"status": "running"})
         with session_samplers(
             session,
             result,
@@ -1241,9 +1495,12 @@ class StandaloneEvaluation:
             report = prepare_eval_dir(plan, self.training, client)
             if report is not None and not report.get("ok"):
                 return calibration_failed(plan, report)
+            record_evaluation(plan, {"status": "running"})
             try:
                 with cancel_on_signals(cancel):
-                    return self._replay(client, cancel, report)
+                    result = self._replay(client, cancel, report)
+                record_evaluation(plan, result)
+                return result
             except KeyboardInterrupt:
                 raise Interrupted(
                     f"evaluation stopped at once (Ctrl-C); what finished is kept in {display_path(plan.out_dir)}",
@@ -1289,6 +1546,8 @@ def plan_standalone(
     manifest = run.manifest()
     result = finished_result(run)
     training = best_training_checkpoint(result)
+    # A missing SDK or renderer fails the preview, not the evaluation after --confirm.
+    require_packages(str(manifest["provider"]), runtime, "evaluate")
     provider = get_provider(str(manifest["provider"]), runtime)
     dataset = DatasetDir(Path(str(manifest["dataset_dir"])))
     _check_run_inputs(run, manifest, dataset)

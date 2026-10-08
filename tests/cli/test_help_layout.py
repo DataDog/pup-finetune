@@ -146,6 +146,7 @@ def test_commands_are_listed_in_workflow_order() -> None:
         "dataset",
         "train",
         "status",
+        "runs",
         "resume",
         "cancel",
         "evaluate",
@@ -184,6 +185,7 @@ def test_the_top_level_help_groups_commands_under_the_flow() -> None:
         "dataset": BUILD_A_DATASET,
         "train": TRAIN,
         "status": TRAIN,
+        "runs": TRAIN,
         "resume": TRAIN,
         "cancel": TRAIN,
         "evaluate": EVALUATE_AND_SHIP,
@@ -207,8 +209,8 @@ def test_train_groups_its_options_in_panels() -> None:
         "Evaluate after training (with --evaluate)",
         "Advanced",
     ]
-    assert panels["Required"] == ["--dataset", "--model", "--provider"]
-    assert panels["Run"] == ["--run-dir", "--run-id", "--detach", "--confirm"]
+    assert panels["Required"] == ["--dataset", "--model"]
+    assert panels["Run"] == ["--provider", "--run-dir", "--run-id", "--detach", "--confirm"]
     assert "--max-seq-len" in panels["Training"]
     assert "--provider-option" in panels["Advanced"]
     assert all(flag.startswith("--eval") for flag in panels[list(panels)[4]])
@@ -305,7 +307,7 @@ def test_every_example_runs_as_written(name: str, example: str) -> None:
 
 
 def test_the_example_checker_catches_mistakes() -> None:
-    assert example_problem("pup finetune dataset pull ./ds") is not None  # --ml-app missing
+    assert example_problem("pup finetune dataset preview") is not None  # --ml-app missing
     assert example_problem("pup finetune train --bogus") is not None
     assert example_problem("pup finetune nope") is not None
     assert example_problem("pup finetune dataset label ./ds --file missing.jsonl") is None

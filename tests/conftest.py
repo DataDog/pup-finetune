@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 from collections.abc import Iterator
 from datetime import datetime
 from typing import Any
@@ -62,6 +63,19 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         for item in items:
             if marker in item.keywords:
                 item.add_marker(skip)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _ctrl_c_raises() -> Iterator[None]:
+    """Make SIGINT raise :class:`KeyboardInterrupt` for the whole session, as in an
+    interactive Python, even when pytest started with SIGINT ignored (``trap '' INT``, a
+    background job, some agents' shells): the tests that signal a process expect the
+    default. The handler pytest started with comes back after the session."""
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
 
 
 @pytest.fixture(autouse=True)

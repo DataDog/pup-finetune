@@ -182,7 +182,7 @@ def echo_outcome(result: Mapping[str, Any], runtime: Runtime, path: str | None) 
             return
         found = summarize(path, result)
         if found is not None:
-            output.summary(found.lines, found.line)
+            output.summary(found.lines, found.line, full=found.full)
         sys.stderr.flush()
     except Exception as exc:
         _debug_traceback(exc, runtime)

@@ -105,6 +105,10 @@ RESULT_FILE = "result.json"
 WORKER_FILE = "worker.json"
 WORKER_LOG = "worker.log"
 DEPLOYMENT_FILE = "deployment.json"
+EVALUATIONS_FILE = "evaluation.json"
+"""Each evaluation of the run (``evaluate`` and ``train --evaluate``), by its directory:
+its settings, how it stands and its headline (see
+:func:`pup_finetune.evaluation.runner.record_evaluation`)."""
 
 Phase = Literal["created", "training", "completed", "failed", "cancelled", "interrupted"]
 PHASES: tuple[Phase, ...] = get_args(Phase)
@@ -202,6 +206,11 @@ def _optional_str(value: object) -> str | None:
     if value is None or isinstance(value, str):
         return value
     raise ValueError(f"expected a string, got {type(value).__name__}")
+
+
+def is_run_id(text: str) -> bool:
+    """Whether ``text`` is a valid run id (what :func:`check_run_id` accepts)."""
+    return _RUN_ID.fullmatch(text) is not None
 
 
 def check_run_id(run_id: str) -> str:
@@ -406,6 +415,10 @@ class RunDir:
     def deployment_path(self) -> Path:
         return self.path / DEPLOYMENT_FILE
 
+    @property
+    def evaluations_path(self) -> Path:
+        return self.path / EVALUATIONS_FILE
+
     def lock(self) -> DirectoryLock:
         """The directory's lock; hold it while training or changing the run."""
         return DirectoryLock(self.path)
@@ -415,10 +428,12 @@ class RunDir:
     def manifest(self) -> dict[str, Any]:
         """``run.json``; :class:`NotARunDir` when there is none."""
         if not self.run_path.exists():
-            what = "does not exist" if not self.path.exists() else "is not a training run"
+            listed = "`pup finetune runs` lists the runs under ./runs"
+            if not self.path.exists():
+                raise NotARunDir(f"no such run directory or run id: {self.path}", hint=listed)
             raise NotARunDir(
-                f"{self.path} {what} (it has no {self.run_path.name})",
-                hint="pass the directory of a training run, which `train --run-dir` created",
+                f"{self.path} is not a training run (it has no {self.run_path.name})",
+                hint=f"pass a training run's directory or run id; {listed}",
             )
         return self._read_object(self.run_path)
 
@@ -461,6 +476,12 @@ class RunDir:
         if not self.deployment_path.exists():
             return None
         return self._read_object(self.deployment_path)
+
+    def read_evaluations(self) -> dict[str, Any] | None:
+        """``evaluation.json``, or ``None`` when the run was never evaluated."""
+        if not self.evaluations_path.exists():
+            return None
+        return self._read_object(self.evaluations_path)
 
     def status(self) -> dict[str, Any]:
         """A summary of the run: what it trains, where it is, and how it ended if it did.
@@ -529,28 +550,45 @@ class RunDir:
     def write_deployment(self, receipt: Mapping[str, Any]) -> None:
         atomic_write_json(self.deployment_path, finite_json(dict(receipt)))
 
+    def write_evaluations(self, record: Mapping[str, Any]) -> None:
+        atomic_write_json(self.evaluations_path, finite_json(dict(record)))
+
     # --- checks ---------------------------------------------------------------------
 
-    def require_empty(self) -> None:
+    def require_empty(self, *, default: bool = False) -> None:
         """Raise :class:`RunDirNotEmpty` unless :attr:`path` is missing or an empty directory,
-        saying what it holds when that is a run."""
+        saying what it holds when that is a run. ``default``: :attr:`path` is the default
+        ``runs/<run id>`` (no ``--run-dir`` was given), so the hint names ``--run-id``."""
+        again = (
+            "to train again, pass another --run-id (or omit it)"
+            if default
+            else "to train again, omit --run-dir or pass a new one"
+        )
         if self.path.exists() and not self.path.is_dir():
-            raise RunDirNotEmpty(
-                f"{self.path} exists and is not a directory", hint="use a new run directory"
-            )
+            raise RunDirNotEmpty(f"{self.path} exists and is not a directory", hint=again)
         if self.path.is_dir() and any(e.name != LOCK_FILE_NAME for e in self.path.iterdir()):
-            raise RunDirNotEmpty(f"{self.path} {self._holds()}", hint="use a new run directory")
+            holds = self._holds()
+            if holds is None:
+                raise RunDirNotEmpty(f"{self.path} is not empty", hint=again)
+            raise RunDirNotEmpty(
+                f"{self.path} {holds}",
+                hint=f"see it with `{next_steps.command('status', self.path)}`; {again}",
+            )
 
     # --- internals ------------------------------------------------------------------
 
-    def _holds(self) -> str:
-        """What a non-empty :attr:`path` holds, for the error that refuses a new run in it."""
+    def _holds(self) -> str | None:
+        """What a non-empty :attr:`path` holds when that is a run (``already holds run ...
+        (completed, best epoch 5)``), for the error that refuses a new run in it; else
+        ``None``."""
         try:
             run_id = self.manifest().get("run_id")
-            phase = self.load_state().phase
+            state = self.load_state()
         except FinetuneError:
-            return "is not empty"
-        return f"already holds run {run_id} ({phase})"
+            return None
+        best = (state.best or {}).get("epoch")
+        where = state.phase if best is None else f"{state.phase}, best epoch {best}"
+        return f"already holds run {run_id} ({where})"
 
     def _read_object(self, path: Path, *, hint: str | None = None) -> dict[str, Any]:
         try:

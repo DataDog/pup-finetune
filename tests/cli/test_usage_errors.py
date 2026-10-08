@@ -43,12 +43,12 @@ def run_on_a_terminal(args: list[str], monkeypatch: pytest.MonkeyPatch) -> tuple
     [
         (
             ["train"],
-            "train needs --dataset, --model, --provider and --run-dir",
+            "train needs --dataset and --model",
             "pup-finetune help train",
         ),
         (
             ["dataset", "pull"],
-            "dataset pull needs DIR and --ml-app",
+            "dataset pull needs DIR",
             "pup-finetune help dataset pull",
         ),
         (["evalute"], "No such command 'evalute'. Did you mean 'evaluate'?", "pup-finetune help"),
@@ -73,8 +73,7 @@ def test_on_a_terminal_too_there_is_no_box_and_no_color(monkeypatch: pytest.Monk
     code, err = run_on_a_terminal(["train", "--provider", "fake"], monkeypatch)
     assert code == 2
     assert err == (
-        "Error [usage]: train needs --dataset, --model and --run-dir\n"
-        "Hint: see `pup-finetune help train`\n"
+        "Error [usage]: train needs --dataset and --model\nHint: see `pup-finetune help train`\n"
     )
 
 

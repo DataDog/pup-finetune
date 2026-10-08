@@ -218,7 +218,8 @@ def test_deploy_and_undeploy_previews(run_dir: Path, raised: list[BaseException]
     assert deployed["state"] == "READY"
     assert deployed["next_command"] is None
     undeploy = previewed(["undeploy", str(run_dir)])
-    assert undeploy["next_command"] == deployed["undeploy_command"]
+    # undeploy_command is the preview form: the user approves the --confirm it prints.
+    assert undeploy["next_command"] == f"{deployed['undeploy_command']} --confirm"
     assert output(follow(undeploy["next_command"], raised))["state"] == "DELETED"
 
 

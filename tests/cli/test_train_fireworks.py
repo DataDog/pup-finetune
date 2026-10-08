@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner, Result
 
+from pup_finetune import providers
 from pup_finetune.cli import app
 from pup_finetune.cli import train as train_module
 from pup_finetune.providers.base import Provider
@@ -262,3 +263,62 @@ def test_the_max_seq_len_option_leaves_longer_rows_out_and_survives_a_resume(
     calls = [call[0] for call in fw.calls]
     assert calls.count("create_training_client_from_state_with_optimizer") >= 1
     assert _no_session_left(fw)
+
+
+# --- what the preview can know fails in the preview ----------------------------------------
+
+
+def _without(monkeypatch: pytest.MonkeyPatch, module: str) -> None:
+    """Make the package checks miss ``module``, as if its extra were not installed."""
+    monkeypatch.setattr(providers, "installed", lambda name: name != module)
+
+
+def test_a_missing_training_sdk_fails_the_preview_before_anything_is_created(
+    dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _without(monkeypatch, "tinker")
+    run_dir = tmp_path / "run"
+    for args in ((), ("--detach", "--confirm")):
+        result = train(dataset, run_dir, *args)
+        assert result.exit_code == 2, result.stderr
+        assert result.stdout == ""
+        assert (
+            "Error [usage]: training on Fireworks needs the Fireworks Training SDK, which is not "
+            "installed"
+        ) in result.stderr
+        assert "uv sync --all-extras" in result.stderr
+        assert not run_dir.exists()
+
+
+def test_a_missing_renderer_fails_the_preview(
+    dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _without(monkeypatch, "transformers")
+    result = train(dataset, tmp_path / "run")
+    assert result.exit_code == 2
+    assert "needs the Hugging Face transformers package, which is not installed" in result.stderr
+
+
+def test_a_missing_training_sdk_fails_the_resume_preview(
+    dataset: Path, tmp_path: Path, fw: CrashingFireworks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    fw.crash_at = 6
+    assert train(dataset, run_dir, "--confirm").exit_code == 1
+    _without(monkeypatch, "fireworks")
+    result = invoke("resume", str(run_dir))
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "training on Fireworks needs the Fireworks Training SDK" in result.stderr
+
+
+def test_a_missing_training_sdk_fails_the_evaluate_preview(
+    dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    assert train(dataset, run_dir, "--confirm").exit_code == 0
+    _without(monkeypatch, "tinker")
+    result = invoke("evaluate", str(run_dir))
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "evaluating on Fireworks needs the Fireworks Training SDK" in result.stderr
