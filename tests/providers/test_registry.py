@@ -41,6 +41,8 @@ _PROVIDER_SOURCE = textwrap.dedent(
         def preflight(self, profile): raise NotImplementedError
         def renderer(self, profile): raise NotImplementedError
         def training_profile(self, profile): return profile
+        def training_billing(self, usage): return "nothing"
+        def sampling_billing(self, usage): return "nothing"
         def backend(self): raise NotImplementedError
         def validate_options(self, options): return dict(options)
         def deploy(self, model, options, *, on_creating=None, on_created=None):

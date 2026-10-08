@@ -30,11 +30,13 @@ from pup_finetune.cli import _common, app
 from pup_finetune.cli import dataset as dataset_cli
 from pup_finetune.cli import triage as triage_cli
 from pup_finetune.curation.triage import rubric_template
+from pup_finetune.display import display_path
 from pup_finetune.errors import ConfirmRequired, StateError, UsageError
 from pup_finetune.evaluation import runner as runner_module
 from pup_finetune.evaluation.fake_judge import FakeJudge
 from pup_finetune.inference import ChatCompleter, ChatCompletion
 from pup_finetune.next_steps import PROGRAM, problems
+from pup_finetune.runs import RunDir
 from tests.fakes.datasets import FakeDatasetsApi
 from tests.fakes.llmobs import FakeExportApi, fixture_pages
 from tests.fakes.pup import FakePup
@@ -56,9 +58,9 @@ def raised(monkeypatch: pytest.MonkeyPatch) -> list[BaseException]:
     seen: list[BaseException] = []
     original = _common.handle_exception
 
-    def recording(exc: BaseException, runtime: Any, *, command: str | None = None) -> int:
+    def recording(exc: BaseException, runtime: Any, **where: str | None) -> int:
         seen.append(exc)
-        return original(exc, runtime, command=command)
+        return original(exc, runtime, **where)
 
     monkeypatch.setattr(_common, "handle_exception", recording)
     return seen
@@ -152,7 +154,7 @@ def test_dataset_preview_runs_its_pull(
     assert result.exit_code == 0, result.stderr
     pulled = output(follow(output(result)["next_command"], raised))
     assert pulled["accepted"] > 0
-    assert Path(pulled["dataset_dir"]) == (Path("datasets") / "synthetic-trip-planner").resolve()
+    assert pulled["dataset_dir"] == str(Path("datasets") / "synthetic-trip-planner")
 
 
 def test_dataset_push_preview(
@@ -190,7 +192,7 @@ def test_train_preview(
     dataset: Path, tmp_path: Path, raised: list[BaseException], extra: tuple[str, ...]
 ) -> None:
     data = previewed(train_args(dataset, tmp_path / "run", *extra))
-    assert output(follow(data["next_command"], raised))["phase"] == "completed"
+    assert output(follow(data["next_command"], raised))["status"] == "completed"
 
 
 def test_resume_preview(dataset: Path, tmp_path: Path, raised: list[BaseException]) -> None:
@@ -199,7 +201,7 @@ def test_resume_preview(dataset: Path, tmp_path: Path, raised: list[BaseExceptio
     assert invoke(*train_args(dataset, run, *crash)).exit_code == 1
     status = output(invoke("status", str(run)))
     data = output(follow(status["next_command"], raised))  # the resume preview
-    assert output(follow(data["next_command"], raised))["phase"] == "completed"
+    assert output(follow(data["next_command"], raised))["status"] == "completed"
 
 
 @pytest.mark.parametrize("extra", [(), ("--max-tokens", "512", "--seed", "4"), ("--no-publish",)])
@@ -254,7 +256,8 @@ def test_following_next_command_from_a_dataset_to_a_deployment(
     deploy = output(follow(f"pup finetune deploy {tmp_path / 'run'}", raised))
     deployed = output(follow(deploy["next_command"], raised))
     assert deployed["next_command"] is None
-    assert deployed["usage"]["model"] == deployed["inference_model"]
+    receipt = RunDir(tmp_path / "run").read_deployment() or {}
+    assert deployed["usage"]["model"] == receipt["inference_model"]
 
 
 def test_an_unreadable_push_receipt_is_a_step_not_silence(dataset: Path, tmp_path: Path) -> None:
@@ -266,5 +269,5 @@ def test_an_unreadable_push_receipt_is_a_step_not_silence(dataset: Path, tmp_pat
     labels.write_text(json.dumps({"id": row_id, "keep": True}) + "\n")
     labeled = output(invoke("dataset", "label", str(dataset), "--file", str(labels)))
     commands = [entry["command"] for entry in labeled["next_steps"]]
-    assert f"pup finetune dataset show {dataset}" in commands
+    assert f"pup finetune dataset show {display_path(dataset)}" in commands
     assert not any(" dataset push " in entry for entry in commands)

@@ -11,7 +11,10 @@ imports no provider implementation, so ``--help`` and commands that never train 
 :func:`get_provider` imports the module on first use and calls ``attr`` with the
 :class:`~pup_finetune.runtime.Runtime`; it must return a
 :class:`~pup_finetune.providers.base.Provider`. Development-only providers are visible only
-when ``PUP_FINETUNE_DEV=1``. The protocols live in :mod:`pup_finetune.providers.base`.
+when ``PUP_FINETUNE_DEV=1``. Each entry also names the provider's ``--provider-option``
+keys (:func:`registered_option_keys`), so help can list them without importing a provider; a
+test holds them to the providers' option models. The protocols live in
+:mod:`pup_finetune.providers.base`.
 """
 
 from __future__ import annotations
@@ -24,20 +27,24 @@ from pup_finetune.errors import FinetuneError, UsageError
 from pup_finetune.providers.base import Provider
 from pup_finetune.runtime import Runtime
 
-__all__ = ["get_provider", "known_providers", "register_provider"]
+__all__ = ["get_provider", "known_providers", "register_provider", "registered_option_keys"]
 
 
 @dataclass(frozen=True, slots=True)
 class _Entry:
     target: str
     dev_only: bool
+    options: tuple[str, ...] = ()
 
 
 _REGISTRY: dict[str, _Entry] = {}
 
 
-def register_provider(name: str, target: str, *, dev_only: bool = False) -> None:
-    """Register ``name`` as the provider ``target`` (``"package.module:attr"``) builds.
+def register_provider(
+    name: str, target: str, *, dev_only: bool = False, options: tuple[str, ...] = ()
+) -> None:
+    """Register ``name`` as the provider ``target`` (``"package.module:attr"``) builds, with
+    the ``--provider-option`` keys it takes (``options``).
 
     Nothing is imported. Registering the same entry again is a no-op; a different entry under
     a taken name raises ``ValueError``.
@@ -47,7 +54,7 @@ def register_provider(name: str, target: str, *, dev_only: bool = False) -> None
     module, sep, attr = target.partition(":")
     if not (module and sep and attr):
         raise ValueError(f"provider target must look like 'module:attr', got {target!r}")
-    entry = _Entry(target, dev_only)
+    entry = _Entry(target, dev_only, tuple(options))
     existing = _REGISTRY.get(name)
     if existing is not None and existing != entry:
         raise ValueError(f"provider {name!r} is already registered")
@@ -57,6 +64,16 @@ def register_provider(name: str, target: str, *, dev_only: bool = False) -> None
 def known_providers(runtime: Runtime) -> list[str]:
     """The provider names ``runtime`` may use, sorted. Imports no provider module."""
     return sorted(name for name, entry in _REGISTRY.items() if _visible(entry, runtime))
+
+
+def registered_option_keys(*, include_dev: bool = False) -> dict[str, tuple[str, ...]]:
+    """Each registered provider's ``--provider-option`` keys, by name; development-only
+    providers only with ``include_dev``. Imports no provider module."""
+    return {
+        name: entry.options
+        for name, entry in _REGISTRY.items()
+        if include_dev or not entry.dev_only
+    }
 
 
 def get_provider(name: str, runtime: Runtime) -> Provider:
@@ -142,9 +159,27 @@ def _is_first_party(missing: str, module_name: str) -> bool:
 
 # Built-in providers register below by import path only, so listing them imports no
 # provider implementation.
-register_provider("fake", "pup_finetune.providers.fake:FakeProvider", dev_only=True)
-register_provider("fireworks", "pup_finetune.providers.fireworks.provider:FireworksProvider")
-register_provider("baseten", "pup_finetune.providers.baseten.provider:BasetenProvider")
+register_provider(
+    "fake",
+    "pup_finetune.providers.fake:FakeProvider",
+    dev_only=True,
+    options=(
+        "loss_curve",
+        "val_curve",
+        "step_delay_s",
+        "fail_at_step",
+        "prefix_stable",
+        "max_seq_len",
+    ),
+)
+register_provider(
+    "fireworks",
+    "pup_finetune.providers.fireworks.provider:FireworksProvider",
+    options=("max_seq_len",),
+)
+register_provider(
+    "baseten", "pup_finetune.providers.baseten.provider:BasetenProvider", options=("max_seq_len",)
+)
 
 # Providers with an API key register its CredentialSpec in their (lightweight) package, so
 # `auth`, `doctor` and every command that imports this registry know about the key. The

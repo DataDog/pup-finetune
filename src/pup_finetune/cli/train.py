@@ -39,15 +39,28 @@ from typing import Annotated, Any
 import typer
 from pydantic import ValidationError
 
-from pup_finetune.cli._common import CommandResult, get_runtime, run_command
+from pup_finetune.approval import Part, inputs_digest, require_expected, with_digest
+from pup_finetune.cli._common import (
+    CommandResult,
+    current_context,
+    get_runtime,
+    prog_name,
+    run_command,
+)
 from pup_finetune.cli._dirs import require_dataset_dir, require_new_run_dir, require_run_dir
-from pup_finetune.cli._flags import require_enablers
+from pup_finetune.cli._flags import given, renamed, require_enablers
+from pup_finetune.cli._presentation import TRAIN as TRAIN_PANEL
+from pup_finetune.cli._presentation import CommandDoc, Safety, default_note, describe, local
 from pup_finetune.cli._summary import format_duration, status_line
+from pup_finetune.cli._views import changed_settings, files, status_view, train_view
 from pup_finetune.data.dataset_dir import DatasetDir
+from pup_finetune.display import display_path, quoted
 from pup_finetune.errors import (
+    PAID_RUN,
     FinetuneError,
-    StateError,
+    Interrupted,
     UsageError,
+    WrongPhase,
     require_confirm,
     require_writable,
 )
@@ -55,8 +68,16 @@ from pup_finetune.evaluation import runner as evaluation
 from pup_finetune.next_steps import PROGRAM, command, step
 from pup_finetune.output import info
 from pup_finetune.progress import TrainingProgress
-from pup_finetune.providers import get_provider
-from pup_finetune.providers.base import ModelProfile, Provider, TrainSpec
+from pup_finetune.providers import get_provider, registered_option_keys
+from pup_finetune.providers.base import (
+    MAX_SEQ_LEN_FLAG,
+    MAX_SEQ_LEN_OPTION_FLAG,
+    OFFLINE_BILLING,
+    ModelProfile,
+    Provider,
+    TrainingUsage,
+    TrainSpec,
+)
 from pup_finetune.rendering.base import Renderer
 from pup_finetune.runs import (
     RunDir,
@@ -73,6 +94,7 @@ from pup_finetune.training.runner import AfterFinalize
 from pup_finetune.training.worker import (
     WORKER_MODES,
     WorkerMode,
+    WorkerStatus,
     cancel_training,
     cancellable_pid,
     lock_held,
@@ -105,9 +127,11 @@ _FLAGS: dict[str, str] = {
 }
 
 TRAIN_NEEDS: dict[str, str] = {
+    "expect": "confirm",
     "spend_reserve_fraction": "max_spend_usd",
     "eval_out_dir": "evaluate",
-    "eval_max_cases_per_trajectory": "evaluate",
+    "eval_max_cases": "evaluate",
+    "old_eval_max_cases": "evaluate",
     "eval_judge_model": "evaluate",
     "eval_concurrency": "evaluate",
     "eval_max_tokens": "evaluate",
@@ -121,19 +145,56 @@ TRAIN_NEEDS: dict[str, str] = {
 STATUS_NEEDS: dict[str, str] = {"interval": "watch", "timeout": "watch"}
 """``status``'s options that need ``--watch``."""
 
+RESUME_NEEDS: dict[str, str] = {"expect": "confirm"}
+"""``resume``'s options that need ``--confirm``."""
+
+REQUIRED = "Required"
+RUN = "Run"
+TRAINING = "Training"
+BUDGET = "Budget"
+EVALUATE = "Evaluate after training (with --evaluate)"
+ADVANCED = "Advanced"
+"""``train``'s option panels. Every option of :data:`EVALUATE` needs ``--evaluate``."""
+
+_THE_MODELS = default_note("the model's")
+
+MAX_SEQ_LEN_OPTION = "max_seq_len"
+"""The provider option ``--max-seq-len`` sets."""
+
+
+def provider_option_keys() -> str:
+    """The ``--provider-option`` keys of each provider, for its help, e.g. ``Keys:
+    max_seq_len (baseten, fireworks).``; development-only providers are left out, so the help
+    is the same in every environment."""
+    providers: dict[tuple[str, ...], list[str]] = {}
+    for name, keys in sorted(registered_option_keys().items()):
+        providers.setdefault(keys, []).append(name)
+    groups = [
+        f"{', '.join(keys) or 'none'} ({', '.join(names)})" for keys, names in providers.items()
+    ]
+    return f"Keys: {'; '.join(groups)}." if groups else ""
+
+
 RunDirArgument = Annotated[
     Path, typer.Argument(metavar="RUN_DIR", help="The run directory.", show_default=False)
 ]
 DetachOption = Annotated[
-    bool,
-    typer.Option(
-        "--detach",
-        help="Train in a background worker and return at once; follow it with `status --watch`.",
-    ),
+    bool, typer.Option("--detach", help="Train in a background worker; see status --watch.")
 ]
 ConfirmOption = Annotated[
-    bool, typer.Option("--confirm", help="Run it (paid); without it, only preview what runs.")
+    bool, typer.Option("--confirm", help="Run it (paid); without it, only preview.")
 ]
+ExpectOption = Annotated[
+    str | None,
+    typer.Option(
+        "--expect",
+        metavar="DIGEST",
+        hidden=True,
+        help="With --confirm: the preview's inputs_digest; refused when the inputs changed.",
+    ),
+]
+"""``--expect``, which a preview's ``next_command`` passes (see :mod:`pup_finetune.approval`):
+hidden, since people and agents run that command rather than type it."""
 CancelConfirmOption = Annotated[
     bool,
     typer.Option(
@@ -143,11 +204,27 @@ CancelConfirmOption = Annotated[
 
 
 def _q(value: object) -> str:
-    return shlex.quote(str(value))
+    return quoted(value)
 
 
 def _default(field: str) -> object:
     return TrainSpec.model_fields[field].get_default(call_default_factory=True)
+
+
+def _int_default(field: str) -> int:
+    """The :class:`TrainSpec` default of the int field ``field``."""
+    value = _default(field)
+    if not isinstance(value, int):
+        raise TypeError(f"TrainSpec.{field} has no int default")
+    return value
+
+
+def _float_default(field: str) -> float:
+    """The :class:`TrainSpec` default of the float field ``field``."""
+    value = _default(field)
+    if not isinstance(value, float):
+        raise TypeError(f"TrainSpec.{field} has no float default")
+    return value
 
 
 # --- train -------------------------------------------------------------------------------
@@ -169,6 +246,18 @@ def _provider_options(values: Sequence[str]) -> dict[str, str]:
     return options
 
 
+def _with_max_seq_len(provider: str, options: Mapping[str, str], value: int) -> dict[str, str]:
+    """``options`` with ``max_seq_len`` set to ``value`` (``--max-seq-len``)."""
+    if MAX_SEQ_LEN_OPTION in options:
+        raise UsageError(
+            "--max-seq-len and --provider-option max_seq_len set the same thing",
+            hint="pass --max-seq-len only",
+        )
+    if MAX_SEQ_LEN_OPTION not in registered_option_keys(include_dev=True).get(provider, ()):
+        raise UsageError(f"--max-seq-len is not supported by the {provider} provider")
+    return {**options, MAX_SEQ_LEN_OPTION: str(value)}
+
+
 def _spec(values: Mapping[str, Any], provider_options: Mapping[str, Any]) -> TrainSpec:
     """The :class:`TrainSpec` from the flags that were given; errors name the flags."""
     data = {field: value for field, value in values.items() if value is not None}
@@ -185,8 +274,132 @@ def _spec(values: Mapping[str, Any], provider_options: Mapping[str, Any]) -> Tra
             problems.append(f"{name}: {message}" if name else message)
         raise UsageError(
             f"invalid training settings: {'; '.join(problems)}",
-            hint="see `pup finetune help train`",
+            hint=f"see `{prog_name()} help train`",
         ) from None
+
+
+_SETTING_PARAMS: dict[str, str] = {
+    "max_epochs": "max_epochs",
+    "patience": "patience",
+    "min_delta": "min_delta",
+    "learning_rate": "learning_rate",
+    "batch_size": "batch_size",
+    "lora.rank": "lora_rank",
+    "lora.alpha": "lora_alpha",
+    "max_seq_len": "max_seq_len",
+    "seed": "seed",
+    "checkpoint_every_minutes": "checkpoint_every_minutes",
+    "max_train_tokens": "max_train_tokens",
+    "microbatch_token_budget": "microbatch_token_budget",
+    "max_spend_usd": "max_spend_usd",
+    "hourly_rate_usd": "hourly_rate_usd",
+    "spend_reserve_fraction": "spend_reserve_fraction",
+}
+"""Each setting a preview's ``defaults_used`` can name, and the parameter that sets it."""
+
+
+def _defaults_used(ctx: Any, options: Mapping[str, Any]) -> list[str]:
+    """The settings of :data:`_SETTING_PARAMS` the command line left at their defaults (the
+    context counts as given through ``--provider-option max_seq_len`` too)."""
+    return [
+        name
+        for name, param in _SETTING_PARAMS.items()
+        if not (ctx is not None and given(ctx, param))
+        and not (name == "max_seq_len" and MAX_SEQ_LEN_OPTION in options)
+    ]
+
+
+def _rows(inputs: RunInputs) -> dict[str, int]:
+    """The rows a run trains and validates on, the test rows, and the rows left out."""
+    return {
+        "train": len(inputs.train_rows),
+        "validation": len(inputs.validation_rows),
+        "test": inputs.rows["test"],
+        "rejected": len(inputs.rejected),
+    }
+
+
+def _rows_now(rows: Mapping[str, int]) -> str:
+    return f"{rows['train']} train / {rows['validation']} validation rows"
+
+
+def _rows_part(inputs: RunInputs, rendering: Mapping[str, Any]) -> Part:
+    """The rendered rows a run trains on, as an approval pins them."""
+    rows = _rows(inputs)
+    value = {
+        "dataset_sha256": inputs.dataset_sha256,
+        "rendering": dict(rendering),
+        "rows": rows,
+        "train": [row.row_id for row in inputs.train_rows],
+        "validation": [row.row_id for row in inputs.validation_rows],
+        "rejected": [[row.row_id, row.code] for row in inputs.rejected],
+        "tokens": [inputs.tokens_per_epoch, inputs.validation.train_tokens],
+    }
+    return Part("the dataset", value, now=_rows_now(rows))
+
+
+def _train_parts(
+    provider: Provider,
+    profile: ModelProfile,
+    spec: TrainSpec,
+    inputs: RunInputs,
+    rendering: Mapping[str, Any],
+    plan: evaluation.EvalPlan | None,
+) -> list[Part]:
+    """What a ``train`` approval pins: the rendered rows, the settings, the evaluation."""
+    settings = {
+        "provider": provider.name,
+        "profile": dataclasses.asdict(profile),
+        "spec": spec.model_dump(mode="json"),
+    }
+    return [
+        _rows_part(inputs, rendering),
+        Part("the training settings", settings),
+        Part(
+            "the evaluation",
+            None if plan is None else plan.approval_value(),
+            now=None if plan is None else f"{len(plan.cases)} test cases",
+        ),
+    ]
+
+
+def _usage(
+    spec: TrainSpec, inputs: RunInputs, *, epochs: int, resumed: bool = False
+) -> TrainingUsage:
+    return TrainingUsage(
+        tokens_per_epoch=inputs.tokens_per_epoch,
+        epochs=epochs,
+        validation_tokens_per_epoch=inputs.validation.train_tokens,
+        max_train_tokens=spec.max_train_tokens,
+        max_spend_usd=spec.max_spend_usd,
+        hourly_rate_usd=spec.hourly_rate_usd,
+        resumed=resumed,
+    )
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
+def _action(profile: ModelProfile, spec: TrainSpec, rows: Mapping[str, int]) -> str:
+    """What ``train --confirm`` does, in one sentence."""
+    lora = spec.lora_config(profile)
+    text = (
+        f"fine-tune {profile.alias} with LoRA rank {lora.rank} for up to "
+        f"{_plural(spec.max_epochs, 'epoch')} on {_plural(rows['train'], 'row')}"
+    )
+    if rows["validation"]:
+        return f"{text}, validating on {rows['validation']}"
+    return f"{text}, with no rows to validate on"
+
+
+def _profile_brief(profile: ModelProfile) -> dict[str, Any]:
+    """The profile as a preview shows it; ``run.json`` records all of it."""
+    return {
+        "alias": profile.alias,
+        "base_model": profile.base_model,
+        "max_seq_len": profile.max_seq_len,
+    }
 
 
 def _preview(
@@ -196,6 +409,9 @@ def _preview(
     spec: TrainSpec,
     profile: ModelProfile,
     inputs: RunInputs,
+    *,
+    defaults_used: Sequence[str],
+    max_seq_len_flag: str,
 ) -> dict[str, Any]:
     warnings = []
     if not inputs.validation_rows:
@@ -203,40 +419,54 @@ def _preview(
             "the validation split has no rows to validate on, so the best epoch is chosen "
             "by training loss"
         )
+    rows = _rows(inputs)
+    usage = _usage(spec, inputs, epochs=spec.max_epochs)
     return {
+        "action": _action(profile, spec, rows),
+        "billing": provider.training_billing(usage),
         "provider": provider.name,
         "model": profile.alias,
-        "profile": dataclasses.asdict(profile),
+        "profile": _profile_brief(profile),
         "run_id": run_id,
-        "run_dir": str(run_dir),
-        "rows": dict(inputs.rows),
+        "run_dir": display_path(run_dir),
+        "rows": rows,
         "examples": inputs.examples(),
-        "rejected": len(inputs.rejected),
         "rejected_by_code": inputs.rejected_by_code(),
         "rejected_rows": [row.to_json() for row in inputs.rejected[:REJECTED_SAMPLE]],
         "tokens_per_epoch": inputs.tokens_per_epoch,
         "validation_tokens": inputs.validation.train_tokens,
-        "max_tokens_total": inputs.tokens_per_epoch * spec.max_epochs,
-        "spec": spec.model_dump(mode="json"),
+        "max_tokens_total": usage.max_tokens,
+        "settings": spec.resolved_settings(profile, max_seq_len_flag=max_seq_len_flag),
+        "defaults_used": list(defaults_used),
         "data_destination": f"training data is sent to {provider.name}",
         "data_recipients": [f"training rows -> {provider.name}"],
         "warnings": warnings,
     }
 
 
-def _finished(run_dir: RunDir, result: Mapping[str, Any]) -> dict[str, Any]:
-    """The result a foreground run emits: ``result.json`` plus where it is and what next."""
-    return finite_json(
-        {
-            **result,
-            "run_dir": str(run_dir.path),
-            **run_next(
-                run_dir.path,
-                str(result.get("phase")),
-                promoted=_promoted(result),
-                running=False,
-            ),
+def _finished(
+    run_dir: RunDir,
+    result: Mapping[str, Any],
+    *,
+    evaluated: bool = False,
+    evaluation: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """What a foreground run prints for ``result`` (``result.json``): the decision, what
+    next, and where the files are (:func:`~pup_finetune.cli._views.train_view`).
+
+    ``evaluated`` (``train --evaluate``) adds the ``evaluation``, whose next step, when it
+    has one, comes first: continue it, publish it, deploy.
+    """
+    next_steps = run_next(
+        run_dir.path, str(result.get("phase")), promoted=_promoted(result), running=False
+    )
+    if evaluation is not None and "next_command" in evaluation:
+        next_steps = {
+            "next_command": evaluation["next_command"],
+            "next_steps": [*evaluation.get("next_steps", []), *next_steps["next_steps"]],
         }
+    return finite_json(
+        train_view(run_dir, result, next_steps, evaluated=evaluated, evaluation=evaluation)
     )
 
 
@@ -248,7 +478,7 @@ def _in_foreground(
     *,
     after_finalize: AfterFinalize | None = None,
 ) -> dict[str, Any]:
-    """Train ``run`` in this process (Ctrl-C cancels gracefully) and return what to emit."""
+    """Train ``run`` in this process (Ctrl-C cancels gracefully); return its ``result.json``."""
     try:
         result = run_in_dir(
             provider,
@@ -264,178 +494,261 @@ def _in_foreground(
             phase = run.load_state().phase
         except FinetuneError:
             phase = "interrupted"
-        raise FinetuneError(
+        raise Interrupted(
             f"training stopped at once (Ctrl-C): the run in {run.path} is {phase}",
-            hint=resume_hint(run.path, "it is resumable from its last training checkpoint"),
+            hint=resume_hint(run.path),
         ) from None
-    return _finished(run, result)
+    return dict(result)
 
 
 def _detached(run_dir: RunDir, run_id: str, pid: int) -> dict[str, Any]:
     return {
-        "run_dir": str(run_dir.path),
-        "run_id": run_id,
-        "pid": pid,
         "status": "started",
-        "worker_log": str(run_dir.worker_log_path),
+        "run_id": run_id,
+        "run_dir": display_path(run_dir.path),
+        "pid": pid,
+        "worker_log": display_path(run_dir.worker_log_path),
         "next_command": command("status", run_dir.path, "--watch"),
     }
 
 
 @run_command
 def train(
-    provider_name: Annotated[
-        str, typer.Option("--provider", help="The training provider.", show_default=False)
-    ],
     dataset_dir: Annotated[
         Path,
-        typer.Option("--dataset", help="The dataset directory to train on.", show_default=False),
+        typer.Option(
+            "--dataset",
+            metavar="DIR",
+            help="The dataset directory to train on.",
+            show_default=False,
+            rich_help_panel=REQUIRED,
+        ),
     ],
     model: Annotated[
-        str, typer.Option("--model", help="The model profile to fine-tune.", show_default=False)
+        str,
+        typer.Option(
+            "--model",
+            metavar="MODEL",
+            help="The model profile (see models list).",
+            show_default=False,
+            rich_help_panel=REQUIRED,
+        ),
+    ],
+    provider_name: Annotated[
+        str,
+        typer.Option(
+            "--provider",
+            metavar="NAME",
+            help="The training provider, e.g. fireworks.",
+            show_default=False,
+            rich_help_panel=REQUIRED,
+        ),
     ],
     run_dir: Annotated[
         Path,
-        typer.Option("--run-dir", help="A new or empty run directory.", show_default=False),
+        typer.Option(
+            "--run-dir",
+            metavar="DIR",
+            help="A new or empty run directory.",
+            show_default=False,
+            rich_help_panel=RUN,
+        ),
     ],
     run_id: Annotated[
         str | None,
         typer.Option(
             "--run-id",
-            help="The run id (default: ft-<UTC timestamp>-<random hex>); also the promoted "
-            "model's id.",
+            metavar="ID",
+            help=f"Run and model id. {default_note('generated')}",
             show_default=False,
+            rich_help_panel=RUN,
         ),
     ] = None,
+    detach: Annotated[
+        bool,
+        typer.Option(
+            "--detach", help="Train in a background worker; see status.", rich_help_panel=RUN
+        ),
+    ] = False,
+    confirm: Annotated[
+        bool,
+        typer.Option("--confirm", help="Train (paid); without it, preview.", rich_help_panel=RUN),
+    ] = False,
     max_epochs: Annotated[
-        int | None,
-        typer.Option(help=f"Most epochs to train (default: {_default('max_epochs')})."),
-    ] = None,
+        int, typer.Option(metavar="N", help="Most epochs to train.", rich_help_panel=TRAINING)
+    ] = _int_default("max_epochs"),
     patience: Annotated[
-        int | None,
+        int,
         typer.Option(
-            help="Epochs without a validation-loss improvement before stopping early "
-            f"(default: {_default('patience')})."
+            metavar="N", help="Epochs without improvement to stop.", rich_help_panel=TRAINING
         ),
-    ] = None,
+    ] = _int_default("patience"),
     min_delta: Annotated[
-        float | None,
-        typer.Option(help=f"Smallest improvement that counts (default: {_default('min_delta')})."),
-    ] = None,
+        float,
+        typer.Option(metavar="X", help="Least improvement that counts.", rich_help_panel=TRAINING),
+    ] = _float_default("min_delta"),
     learning_rate: Annotated[
-        float | None,
-        typer.Option(help=f"Learning rate (default: {_default('learning_rate')})."),
-    ] = None,
+        float, typer.Option(metavar="X", help="Learning rate.", rich_help_panel=TRAINING)
+    ] = _float_default("learning_rate"),
     batch_size: Annotated[
+        int, typer.Option(metavar="N", help="Rows per optimizer step.", rich_help_panel=TRAINING)
+    ] = _int_default("batch_size"),
+    lora_rank: Annotated[
         int | None,
-        typer.Option(help=f"Rows per optimizer step (default: {_default('batch_size')})."),
-    ] = None,
-    lora_rank: Annotated[int | None, typer.Option(help="LoRA rank (default: the model's).")] = None,
-    lora_alpha: Annotated[
-        int | None, typer.Option(help="LoRA alpha (default: the provider's).")
-    ] = None,
-    seed: Annotated[int | None, typer.Option(help=f"Seed (default: {_default('seed')}).")] = None,
-    checkpoint_every_minutes: Annotated[
-        float | None,
         typer.Option(
-            help="Also save a resumable checkpoint this often, between epochs "
-            f"(default: {_default('checkpoint_every_minutes')})."
+            metavar="N",
+            help=f"LoRA rank. {_THE_MODELS}",
+            rich_help_panel=TRAINING,
         ),
     ] = None,
+    lora_alpha: Annotated[
+        int | None,
+        typer.Option(
+            metavar="N",
+            help=f"LoRA alpha. {default_note("the provider's")}",
+            rich_help_panel=TRAINING,
+        ),
+    ] = None,
+    max_seq_len: Annotated[
+        int | None,
+        typer.Option(
+            "--max-seq-len",
+            min=1,
+            metavar="N",
+            help=f"Context cap in tokens. {_THE_MODELS}",
+            show_default=False,
+            rich_help_panel=TRAINING,
+        ),
+    ] = None,
+    seed: Annotated[
+        int, typer.Option(metavar="N", help="Seed.", rich_help_panel=TRAINING)
+    ] = _int_default("seed"),
     max_train_tokens: Annotated[
         int | None,
-        typer.Option(help="Stop before training on more rendered tokens than this."),
+        typer.Option(metavar="N", help="Stop before training more tokens.", rich_help_panel=BUDGET),
     ] = None,
     max_spend_usd: Annotated[
         float | None,
-        typer.Option(
-            help="Stop before the elapsed time costs more; needs --hourly-rate-usd. With "
-            "--evaluate, the evaluation in the training session stops at it too."
-        ),
+        typer.Option(metavar="X", help="Stop before spending more (USD).", rich_help_panel=BUDGET),
     ] = None,
     hourly_rate_usd: Annotated[
         float | None,
-        typer.Option(help="Your training price per hour (USD), for --max-spend-usd."),
+        typer.Option(
+            metavar="X",
+            help="Your price per hour, for --max-spend-usd.",
+            rich_help_panel=BUDGET,
+        ),
     ] = None,
     spend_reserve_fraction: Annotated[
-        float | None,
+        float,
         typer.Option(
-            help="With --max-spend-usd: the share of it kept for the checkpoint and promotion "
-            "at the stop; training stops that much short of the cap "
-            f"(default: {_default('spend_reserve_fraction')})."
+            metavar="X",
+            help="Share of --max-spend-usd kept.",
+            rich_help_panel=BUDGET,
         ),
-    ] = None,
-    microbatch_token_budget: Annotated[
-        int | None,
-        typer.Option(help="Pack each step into microbatches of at most this many tokens."),
-    ] = None,
-    provider_option: Annotated[
-        list[str] | None,
-        typer.Option(
-            "--provider-option",
-            metavar="KEY=VALUE",
-            help="A provider-specific option; repeat for more.",
-            show_default=False,
-        ),
-    ] = None,
+    ] = _float_default("spend_reserve_fraction"),
     evaluate: Annotated[
         bool,
         typer.Option(
             "--evaluate",
-            help="Also evaluate the run on the test split once it is trained, in its "
-            "training session (paid; see `pup finetune evaluate`), within --max-spend-usd.",
+            help="Evaluate the run after training (paid).",
+            rich_help_panel=EVALUATE,
         ),
     ] = False,
     eval_out_dir: Annotated[
         Path | None,
         typer.Option(
             "--eval-out-dir",
-            help="With --evaluate: where the evaluation goes (default: RUN_DIR/eval).",
+            metavar="DIR",
+            help=f"Output directory. {default_note('RUN_DIR/eval')}",
             show_default=False,
+            rich_help_panel=EVALUATE,
         ),
     ] = None,
-    eval_max_cases_per_trajectory: Annotated[
+    eval_max_cases: Annotated[
         int,
         typer.Option(
-            min=1, help="With --evaluate: most assistant turns replayed per test conversation."
+            "--eval-max-cases",
+            min=1,
+            metavar="N",
+            help="Turns per conversation.",
+            rich_help_panel=EVALUATE,
         ),
     ] = evaluation.DEFAULT_MAX_CASES_PER_TRAJECTORY,
     eval_judge_model: Annotated[
         str | None,
         typer.Option(
             "--eval-judge-model",
-            help="With --evaluate: the judge model, anthropic/<model>, openai/<model> or a "
-            "Fireworks model (default and keys: as `evaluate --judge-model`).",
+            metavar="MODEL",
+            help="The judge, as evaluate --judge-model.",
             show_default=False,
+            rich_help_panel=EVALUATE,
         ),
     ] = None,
     eval_concurrency: Annotated[
         int,
-        typer.Option(min=1, max=64, help="With --evaluate: cases generated and judged at once."),
+        typer.Option(
+            min=1, max=64, metavar="N", help="Cases at once (1-64).", rich_help_panel=EVALUATE
+        ),
     ] = evaluation.DEFAULT_CONCURRENCY,
     eval_max_tokens: Annotated[
-        int, typer.Option(min=1, help="With --evaluate: most tokens each generation may produce.")
+        int,
+        typer.Option(
+            min=1, metavar="N", help="Most tokens per generation.", rich_help_panel=EVALUATE
+        ),
     ] = evaluation.DEFAULT_MAX_TOKENS,
     eval_seed: Annotated[
-        int, typer.Option(min=0, help="With --evaluate: seed for picking cases and the bootstrap.")
+        int,
+        typer.Option(
+            min=0, metavar="N", help="Seed for cases and bootstrap.", rich_help_panel=EVALUATE
+        ),
     ] = evaluation.DEFAULT_SEED,
     eval_skip_calibration: Annotated[
         bool,
         typer.Option(
-            "--eval-skip-calibration", help="With --evaluate: do not check the judge first."
+            "--eval-skip-calibration",
+            help="Do not check the judge first.",
+            rich_help_panel=EVALUATE,
         ),
     ] = False,
     eval_no_publish: Annotated[
         bool,
         typer.Option(
-            "--eval-no-publish",
-            help="With --evaluate: do not publish the evaluation to Datadog as experiments.",
+            "--eval-no-publish", help="Do not publish to Datadog.", rich_help_panel=EVALUATE
         ),
     ] = False,
-    detach: DetachOption = False,
-    confirm: ConfirmOption = False,
+    checkpoint_every_minutes: Annotated[
+        float,
+        typer.Option(metavar="X", help="Checkpoint interval.", rich_help_panel=ADVANCED),
+    ] = _float_default("checkpoint_every_minutes"),
+    microbatch_token_budget: Annotated[
+        int | None,
+        typer.Option(metavar="N", help="Most tokens per microbatch.", rich_help_panel=ADVANCED),
+    ] = None,
+    provider_option: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--provider-option",
+            metavar="KEY=VALUE",
+            help=f"Repeatable. {provider_option_keys()}",
+            show_default=False,
+            rich_help_panel=ADVANCED,
+        ),
+    ] = None,
+    old_eval_max_cases: Annotated[
+        int | None,
+        typer.Option(
+            "--eval-max-cases-per-trajectory",
+            min=1,
+            hidden=True,
+            help="With --evaluate: the old name of --eval-max-cases.",
+        ),
+    ] = None,
+    expect: ExpectOption = None,
 ) -> dict[str, Any] | CommandResult:
     require_enablers(TRAIN_NEEDS)
+    eval_max_cases = renamed("eval_max_cases", "old_eval_max_cases")
+    ctx = current_context()
     runtime = get_runtime()
     if detach:
         require_detach_supported()
@@ -452,6 +765,15 @@ def train(
     provider = get_provider(provider_name, runtime)
     profile = provider.resolve_model(model)
     raw_options = _provider_options(provider_option or [])
+    if max_seq_len is not None:
+        raw_options = _with_max_seq_len(provider.name, raw_options, max_seq_len)
+        if max_seq_len > profile.max_seq_len:
+            # Named by the flag the user typed; the provider's own check names its option.
+            raise UsageError(
+                f"--max-seq-len {max_seq_len} is over the {profile.max_seq_len}-token context "
+                f"of {profile.alias}",
+                hint=f"pass --max-seq-len N with N at most {profile.max_seq_len}",
+            )
     options = provider.validate_options(raw_options)
     # What the run trains with: an option may narrow the profile (e.g. cap its context),
     # so rows are rendered, previewed and recorded against the narrowed one.
@@ -478,14 +800,25 @@ def train(
     dataset.settings()  # a clear error when it is not a dataset directory
     renderer = provider.renderer(profile)
     inputs = build_inputs(dataset, renderer, profile)
-    preview = _preview(provider, run_dir, run_id, spec, profile, inputs)
+    defaults_used = _defaults_used(ctx, raw_options)
+    seq_flag = MAX_SEQ_LEN_FLAG if max_seq_len is not None else MAX_SEQ_LEN_OPTION_FLAG
+    preview = _preview(
+        provider,
+        run_dir,
+        run_id,
+        spec,
+        profile,
+        inputs,
+        defaults_used=defaults_used,
+        max_seq_len_flag=seq_flag,
+    )
     plan: evaluation.EvalPlan | None = None
     if evaluate:
         settings = evaluation.EvalSettings(
             out_dir=eval_out_dir
             if eval_out_dir is not None
             else run_dir / evaluation.DEFAULT_OUT_DIR_NAME,
-            max_cases_per_trajectory=eval_max_cases_per_trajectory,
+            max_cases_per_trajectory=eval_max_cases,
             judge_model=eval_judge_model,
             concurrency=eval_concurrency,
             max_tokens=eval_max_tokens,
@@ -510,26 +843,42 @@ def train(
         preview["evaluation"] = plan.preview(
             tuned="the best epoch of this run", tuned_checkpoint=None
         )
+        preview["action"] += f", then {preview['evaluation']['action']}"
+        # Each part names who bills it, so the card can say who bills what.
+        preview["billing"] += f"; {preview['evaluation']['billing']}"
         # The consent fields name every recipient, the evaluation's judge included.
         preview["data_destination"] += f"; {preview['evaluation']['data_destination']}"
         preview["data_recipients"] += preview["evaluation"]["data_recipients"]
+    parts = _train_parts(provider, profile, spec, inputs, renderer.identity(), plan)
+    preview = with_digest(preview, inputs_digest(parts))
     # The rerun pins the run id and directory, so it trains exactly what was previewed.
     rerun = [*PROGRAM, "train", "--provider", provider.name]
     rerun += ["--dataset", str(dataset_dir), "--model", model]
     rerun += ["--run-dir", str(run_dir), "--run-id", run_id]
     for field, value in flags.items():
-        if value is not None:
+        if value is not None and given(ctx, field):
             rerun += [_FLAGS[field], str(value)]
+    if max_seq_len is not None:
+        rerun += ["--max-seq-len", str(max_seq_len)]
     for key, value in raw_options.items():
-        rerun += ["--provider-option", f"{key}={value}"]
+        if not (key == MAX_SEQ_LEN_OPTION and max_seq_len is not None):
+            rerun += ["--provider-option", f"{key}={value}"]
     if detach:
         rerun.append("--detach")
     if plan is not None:
         rerun += plan.train_flags()
+    # PUP_READ_ONLY refuses paid and remote runs; one that never leaves the machine (the
+    # offline fake provider, and an evaluation that is offline too) is allowed.
+    offline = provider.name == "fake" and (plan is None or plan.offline)
     if confirm:
-        require_writable(runtime, f"training on {provider.name}")
+        if not offline:
+            require_writable(runtime, f"training on {provider.name}", what=PAID_RUN)
+        require_expected(expect, parts, preview=shlex.join(rerun))
     require_confirm(
-        confirm, preview, shlex.join([*rerun, "--confirm"]), read_only=runtime.read_only
+        confirm,
+        preview,
+        shlex.join([*rerun, "--expect", preview["inputs_digest"], "--confirm"]),
+        read_only=runtime.read_only and not offline,
     )
     if plan is not None:
         with evaluation.open_judge_client(plan.judge) as client:
@@ -543,25 +892,40 @@ def train(
                 calibration=calibration,
                 max_checkpoint_name_len=provider.backend().max_checkpoint_name_len,
             )
-            run = _create_run(provider, run_dir, run_id, profile, spec, dataset, inputs, renderer)
+            run = _create_run(
+                provider,
+                run_dir,
+                run_id,
+                profile,
+                spec,
+                dataset,
+                inputs,
+                renderer,
+                defaults_used,
+                max_seq_len_flag=seq_flag,
+            )
             info(f"training run {run_id} in {run_dir} on {provider.name}, then evaluating it")
             result = _in_foreground(provider, run, "train", inputs, after_finalize=hook)
-            data = {**result, "evaluation": hook.outcome}
-            if hook.outcome is not None and "next_command" in hook.outcome:
-                # What follows is the evaluation's next step: continue it, publish it, deploy.
-                data["next_command"] = hook.outcome["next_command"]
-                data["next_steps"] = [
-                    *hook.outcome.get("next_steps", []),
-                    *result.get("next_steps", []),
-                ]
+            data = _finished(run, result, evaluated=True, evaluation=hook.outcome)
             code = 0 if hook.outcome is None else evaluation.evaluation_exit_code(hook.outcome)
             # The trained run is kept either way; a failed evaluation still fails the command.
             return CommandResult(data, exit_code=code) if code else data
-    run = _create_run(provider, run_dir, run_id, profile, spec, dataset, inputs, renderer)
+    run = _create_run(
+        provider,
+        run_dir,
+        run_id,
+        profile,
+        spec,
+        dataset,
+        inputs,
+        renderer,
+        defaults_used,
+        max_seq_len_flag=seq_flag,
+    )
     if detach:
         return _detached(run, run_id, spawn_worker(run, "train"))
     info(f"training run {run_id} in {run_dir} on {provider.name} (Ctrl-C cancels)")
-    return _in_foreground(provider, run, "train", inputs)
+    return _finished(run, _in_foreground(provider, run, "train", inputs))
 
 
 def _create_run(
@@ -573,6 +937,9 @@ def _create_run(
     dataset: DatasetDir,
     inputs: RunInputs,
     renderer: Renderer,
+    defaults_used: Sequence[str],
+    *,
+    max_seq_len_flag: str,
 ) -> RunDir:
     return RunDir.create(
         run_dir,
@@ -583,6 +950,8 @@ def _create_run(
         dataset_sha256=inputs.dataset_sha256,
         rendering=renderer.identity(),
         run_id=run_id,
+        defaults_used=defaults_used,
+        max_seq_len_flag=max_seq_len_flag,
     )
 
 
@@ -593,7 +962,7 @@ def _resume_mode(run: RunDir, state: RunState) -> WorkerMode:
     """What resuming ``run`` does; raises when it cannot be resumed now."""
     worker = worker_status(run, phase=state.phase, pid=state.pid, heartbeat_at=state.heartbeat_at)
     if worker.starting:
-        raise StateError(
+        raise WrongPhase(
             f"a worker for the run in {run.path} is starting (process {worker.pid})",
             hint=f"follow it with `pup finetune status {_q(run.path)} --watch`",
         )
@@ -601,7 +970,7 @@ def _resume_mode(run: RunDir, state: RunState) -> WorkerMode:
         return "train"  # it never started (e.g. its worker failed to start): start it
     if state.phase == "training":
         if lock_held(run):
-            raise StateError(
+            raise WrongPhase(
                 f"the run in {run.path} is still training (process {state.pid})",
                 hint=f"wait for it, or cancel it with `pup finetune cancel {_q(run.path)}`",
             )
@@ -629,10 +998,35 @@ def _resume_action(mode: WorkerMode, state: RunState) -> tuple[str, dict[str, An
     return f"continue training in epoch {point.epoch} after step {point.step}", where
 
 
+def _run_settings(run: RunDir, manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """What the run trains with, as a preview shows it: ``run.json``'s ``settings`` without
+    what no flag changes, or, for a run recorded before it had them, resolved again."""
+    recorded = manifest.get("settings")
+    if isinstance(recorded, Mapping):
+        hidden = ("pipeline_depth", "optimizer")
+        return {key: value for key, value in recorded.items() if key not in hidden}
+    return run.spec().resolved_settings(run.profile())
+
+
+def _resume_billing(provider: Provider, mode: WorkerMode, usage: TrainingUsage) -> str:
+    if mode == "finalize":
+        if provider.name == "fake":
+            return f"{OFFLINE_BILLING}: it trains nothing, only promotes the best checkpoint"
+        return (
+            f"{provider.name} bills the session that promotes the best checkpoint at its own "
+            "rates, which pup-finetune does not know: it trains nothing"
+        )
+    return provider.training_billing(usage)
+
+
 @run_command
 def resume(
-    run_dir: RunDirArgument, detach: DetachOption = False, confirm: ConfirmOption = False
+    run_dir: RunDirArgument,
+    detach: DetachOption = False,
+    confirm: ConfirmOption = False,
+    expect: ExpectOption = None,
 ) -> dict[str, Any]:
+    require_enablers(RESUME_NEEDS)
     runtime = get_runtime()
     if detach:
         require_detach_supported()
@@ -643,32 +1037,62 @@ def resume(
     mode = _resume_mode(run, state)
     provider, inputs = load_run_inputs(run, runtime, finalize_only=mode == "finalize")
     action, resume_from = _resume_action(mode, state)
+    spec = run.spec()
     max_epochs = int(manifest["spec"]["max_epochs"])
+    remaining = 0 if mode == "finalize" else max(max_epochs - state.epochs, 0)
+    usage = _usage(spec, inputs, epochs=remaining, resumed=True)
+    rows = _rows(inputs)
     preview = {
+        "action": action,
+        "billing": _resume_billing(provider, mode, usage),
         "run_id": manifest["run_id"],
-        "run_dir": str(run_dir),
+        "run_dir": display_path(run_dir),
         "provider": provider.name,
         "model": manifest["profile"]["alias"],
         "phase": state.phase,
         "mode": mode,
-        "action": action,
         "resume_from": resume_from,
         "epochs_completed": state.epochs,
-        "remaining_epochs": 0 if mode == "finalize" else max(max_epochs - state.epochs, 0),
+        "remaining_epochs": remaining,
+        "rows": rows,
         "tokens_per_epoch": inputs.tokens_per_epoch,
+        "validation_tokens": inputs.validation.train_tokens,
+        "max_tokens_total": usage.max_tokens,
+        "settings": _run_settings(run, manifest),
+        "defaults_used": list(manifest.get("defaults_used") or []),
         "data_destination": f"training data is sent to {provider.name}",
         "data_recipients": [f"training rows -> {provider.name}"],
+        "warnings": [],
     }
+    point = {
+        "run_id": manifest["run_id"],
+        "settings_hash": manifest.get("settings_hash"),
+        "phase": state.phase,
+        "mode": mode,
+        "resume_from": resume_from,
+        "epochs_completed": state.epochs,
+    }
+    parts = [
+        Part("the run", point, now=f"{state.phase}; {action}"),
+        _rows_part(inputs, manifest.get("rendering") or {}),
+    ]
+    preview = with_digest(preview, inputs_digest(parts))
     rerun = [*PROGRAM, "resume", str(run_dir), *(["--detach"] if detach else [])]
+    offline = provider.name == "fake"
     if confirm:
-        require_writable(runtime, f"training on {provider.name}")
+        if not offline:
+            require_writable(runtime, f"training on {provider.name}", what=PAID_RUN)
+        require_expected(expect, parts, preview=shlex.join(rerun))
     require_confirm(
-        confirm, preview, shlex.join([*rerun, "--confirm"]), read_only=runtime.read_only
+        confirm,
+        preview,
+        shlex.join([*rerun, "--expect", preview["inputs_digest"], "--confirm"]),
+        read_only=runtime.read_only and not offline,
     )
     if detach:
         return _detached(run, str(manifest["run_id"]), spawn_worker(run, mode))
     info(f"resuming run {manifest['run_id']} in {run_dir}: {action} (Ctrl-C cancels)")
-    return _in_foreground(provider, run, mode, inputs)
+    return _finished(run, _in_foreground(provider, run, mode, inputs))
 
 
 # --- status ------------------------------------------------------------------------------
@@ -740,7 +1164,11 @@ def _timing(summary: Mapping[str, Any], *, live_s: float) -> dict[str, Any]:
 
 
 def run_status(run: RunDir) -> dict[str, Any]:
-    """What `status` reports for ``run``; every number finite or ``None``."""
+    """What `status` measures for ``run``; every number finite or ``None``.
+
+    ``worker`` is the :class:`~pup_finetune.training.worker.WorkerStatus`; what `status`
+    prints is :func:`~pup_finetune.cli._views.status_view` of this.
+    """
     summary = run.status()
     worker = worker_status(
         run,
@@ -755,10 +1183,10 @@ def run_status(run: RunDir) -> dict[str, Any]:
         warnings.append(worker.problem)
     live = summary["phase"] == "training" and worker.running
     live_s = (worker.heartbeat_age_s or 0.0) if live else 0.0
-    return finite_json(
+    data: dict[str, Any] = finite_json(
         {
             "run_id": summary["run_id"],
-            "run_dir": str(run.path),
+            "run_dir": display_path(run.path),
             "provider": summary["provider"],
             "model": summary["model"],
             "phase": summary["phase"],
@@ -776,9 +1204,8 @@ def run_status(run: RunDir) -> dict[str, Any]:
             "stopped_reason": summary["stopped_reason"],
             "promoted_model": summary["promoted_model"],
             "deployable_checkpoint": summary["deployable_checkpoint"],
+            "settings": changed_settings(summary["settings"], summary["defaults_used"]),
             "resume_mode": summary["resume_mode"],
-            "worker": worker.to_json(),
-            "worker_log": worker.log,
             "error": summary["error"] or worker.error,
             "finalize_error": summary["finalize_error"],
             "warnings": warnings,
@@ -789,12 +1216,33 @@ def run_status(run: RunDir) -> dict[str, Any]:
                 running=worker.running,
                 stale=stale_alive,
             ),
+            "files": files(
+                run=run.run_path,
+                state=run.state_path,
+                epochs=run.epochs_path,
+                result=run.result_path if run.result_path.exists() else None,
+            ),
         }
+    )
+    data["worker"] = worker
+    return data
+
+
+def _progress_line(data: Mapping[str, Any]) -> str:
+    """The watch's progress line for what `status` measured: :func:`status_line` of what it
+    prints, knowing also whether the epoch's last step is done and its validation runs."""
+    return status_line(
+        status_view(data),
+        steps_per_epoch=data["steps_per_epoch"],
+        epochs_completed=data["epochs_completed"],
     )
 
 
 DURATION_UNITS = {"": 1.0, "s": 1.0, "m": 60.0, "h": 3600.0}
 """What a ``--timeout`` suffix multiplies the number by: none or ``s``, ``m`` and ``h``."""
+
+WATCH_INTERVAL_S = 10.0
+"""The default ``--interval`` of a watch."""
 
 AGENT_WATCH_TIMEOUT_S = 90.0
 """The default ``--timeout`` of a watch under a coding agent: below the 120 s that agents'
@@ -826,15 +1274,15 @@ def _watch_command(run_dir: Path, *, interval: float | None, timeout: str | None
 
 
 def _watched(data: Mapping[str, Any], *, timed_out: bool, next_command: str) -> dict[str, Any]:
-    """``data`` from a watch: with ``watch_timed_out`` and the given ``next_command``."""
-    return {**data, "watch_timed_out": timed_out, "next_command": next_command}
+    """What a watch prints: ``data`` with ``watch_timed_out`` and the given ``next_command``."""
+    return status_view({**data, "watch_timed_out": timed_out, "next_command": next_command})
 
 
 def _stopped_watching(data: Mapping[str, Any], why: str, again: str) -> tuple[str, str]:
     """The stderr line for a watch that stops before training ends, and the next command."""
-    worker = data["worker"]
-    if worker["running"]:
-        pid = f" (pid {worker['pid']})" if worker["pid"] is not None else ""
+    worker: WorkerStatus = data["worker"]
+    if worker.running:
+        pid = f" (pid {worker.pid})" if worker.pid is not None else ""
         what = (
             "the run keeps training" if data["phase"] == "training" else "its worker keeps starting"
         )
@@ -853,15 +1301,15 @@ def status(
         bool,
         typer.Option(
             "--watch",
-            help="Print progress to stderr until training ends (or --timeout), then print "
-            "the status. Ctrl-C stops watching, never the training.",
+            help="Print progress until training ends, then the status.",
         ),
     ] = False,
     interval: Annotated[
         float | None,
         typer.Option(
             min=0.1,
-            help="With --watch: seconds between checks (default 10).",
+            metavar="X",
+            help=f"With --watch: seconds between checks. {default_note(f'{WATCH_INTERVAL_S:g}')}",
             show_default=False,
         ),
     ] = None,
@@ -870,9 +1318,8 @@ def status(
         typer.Option(
             "--timeout",
             metavar="DURATION",
-            help="With --watch: stop watching after DURATION (90s, 10m, 2h, or seconds) and "
-            "print the status with watch_timed_out true; training keeps going. Default: "
-            "90s under a coding agent (PUP_AGENT_MODE, AI_AGENT or CLAUDECODE), else none.",
+            help="With --watch: stop watching after DURATION (90s, 10m, 2h). "
+            f"{default_note(f'{AGENT_WATCH_TIMEOUT_S:g}s under a coding agent, else none')}",
             show_default=False,
         ),
     ] = None,
@@ -885,9 +1332,9 @@ def status(
     run = RunDir(run_dir)
     data = run_status(run)
     if not watch:
-        return data
+        return status_view(data)
     again = _watch_command(run_dir, interval=interval, timeout=timeout)
-    pause = 10.0 if interval is None else interval
+    pause = WATCH_INTERVAL_S if interval is None else interval
     deadline = None if limit is None else time.monotonic() + limit
     limit_s = limit or 0.0
     # Always with a unit (`--timeout 10` reads "10s"); a sub-second limit keeps its fraction.
@@ -897,11 +1344,11 @@ def status(
     try:
         while True:
             # A new line only when the run moved: the elapsed time alone does not count.
-            progress = status_line({**data, "elapsed_seconds": 0})
+            progress = _progress_line({**data, "elapsed_seconds": 0})
             if progress != shown:
-                info(status_line(data))
+                info(_progress_line(data))
                 shown = progress
-            if not data["worker"]["running"]:
+            if not data["worker"].running:
                 return _watched(data, timed_out=False, next_command=data["next_command"])
             left = None if deadline is None else deadline - time.monotonic()
             if left is not None and left <= 0:
@@ -930,7 +1377,7 @@ def cancel(run_dir: RunDirArgument, confirm: CancelConfirmOption = False) -> dic
     pid = cancellable_pid(run)
     preview = {
         "run_id": run_id,
-        "run_dir": str(run_dir),
+        "run_dir": display_path(run_dir),
         "pid": pid,
         "action": f"send SIGTERM to process {pid}: training stops after the current step, "
         "saves a resumable checkpoint and promotes the best epoch so far",
@@ -939,7 +1386,7 @@ def cancel(run_dir: RunDirArgument, confirm: CancelConfirmOption = False) -> dic
     pid = cancel_training(run)
     return {
         "run_id": run_id,
-        "run_dir": str(run_dir),
+        "run_dir": display_path(run_dir),
         "pid": pid,
         "status": "cancelling",
         "next_command": command("status", run_dir, "--watch"),
@@ -963,7 +1410,9 @@ def worker(
         runtime = get_runtime()
         # It runs what `train --confirm` or `resume --confirm` already allowed, but is a
         # command of its own: PUP_READ_ONLY must stop it too.
-        require_writable(runtime, f"training on {run.manifest()['provider']}")
+        provider_name = str(run.manifest()["provider"])
+        if provider_name != "fake":
+            require_writable(runtime, f"training on {provider_name}", what=PAID_RUN)
         info(f"worker {os.getpid()} started: {mode} {run_dir}")
         provider, inputs = load_run_inputs(run, runtime, finalize_only=mode == "finalize")
         result = run_in_dir(provider, run, mode, inputs, on_event=TrainingProgress())
@@ -974,48 +1423,101 @@ def worker(
     info(f"worker {os.getpid()} finished: the run is {result.get('phase')}")
 
 
+TRAIN_DOC = CommandDoc(
+    path="train",
+    short="Fine-tune a model (paid; previews without --confirm).",
+    description=describe(
+        "Fine-tune --model with LoRA SFT on --dataset's train split, keeping the best epoch "
+        "by validation loss. Without --confirm, previews the run and prints the command that "
+        "starts it. With --confirm, trains (Ctrl-C cancels gracefully).",
+        "The preview lists rows and rendered tokens per split, the rejected rows, tokens per "
+        "epoch and in total, the settings and where the data goes. --detach trains in a "
+        "background worker; follow it with `status --watch`. Training stops early after --patience epochs without a "
+        "validation-loss improvement; a Ctrl-C or `cancel` still promotes the best epoch. "
+        "With --evaluate, the run is also evaluated on the test split in its training "
+        "session once the best epoch is promoted (see `evaluate`): the judge is calibrated "
+        "and --eval-out-dir checked before training starts, so a failed calibration trains "
+        "nothing; --detach is refused with it; and the evaluation stops, partial, at "
+        "--max-spend-usd. --max-seq-len caps the context (and so the cost): longer rows "
+        "are left out, as the preview shows (exceeds_context).",
+    ),
+    examples=(
+        "pup finetune train --provider fireworks --model qwen3p8-27b --dataset ds --run-dir run",
+        "pup finetune train --provider fireworks --model qwen3p8-27b --dataset ds "
+        "--run-dir run --max-seq-len 8192 --detach --confirm",
+    ),
+    safety=Safety(
+        data="sends rows to the provider (and the judge)",
+        recipients="the training provider; with --evaluate, also the judge's provider and "
+        "Datadog (experiments, when the dataset was pushed)",
+        without="previews the run",
+        confirm="trains (paid)",
+        paid=True,
+        read_only="confirm_refused",
+        offline_allowed=True,
+    ),
+    panel=TRAIN_PANEL,
+)
+RESUME_DOC = CommandDoc(
+    path="resume",
+    short="Resume a stopped run (paid; previews without --confirm).",
+    description=(
+        "Continue an interrupted, failed or cancelled run from its last training checkpoint, "
+        "or only retry its promotion when training already ended. Without --confirm, "
+        "previews where it resumes."
+    ),
+    examples=("pup finetune resume run", "pup finetune resume run --detach --confirm"),
+    safety=Safety(
+        data="sends rows to the provider",
+        recipients="the training provider",
+        without="previews where it resumes",
+        confirm="resumes training (paid)",
+        paid=True,
+        read_only="confirm_refused",
+        offline_allowed=True,
+    ),
+    panel=TRAIN_PANEL,
+)
+STATUS_DOC = CommandDoc(
+    path="status",
+    short="Show a run's phase, progress, losses and worker.",
+    description=describe(
+        "Show a run's phase, epoch and step, losses, best epoch, elapsed time and ETA, "
+        "promoted model, and whether its process is alive. With --watch, prints progress to "
+        "stderr until training ends, then the status; Ctrl-C or --timeout stops only the "
+        "watch.",
+        "Training keeps going when the watch stops: the status then has watch_timed_out "
+        "true, and the command exits 0. Under a coding agent (PUP_AGENT_MODE, AI_AGENT or "
+        f"CLAUDECODE set), a watch stops after {AGENT_WATCH_TIMEOUT_S:g}s unless --timeout "
+        "says otherwise, below the time agents' shell tools commonly allow a command.",
+    ),
+    examples=("pup finetune status run", "pup finetune status run --watch --timeout 10m"),
+    safety=local("shows the run"),
+    panel=TRAIN_PANEL,
+)
+CANCEL_DOC = CommandDoc(
+    path="cancel",
+    short="Stop a training run gracefully (previews without --confirm).",
+    description=(
+        "Stop the process training a run: it finishes the current step, saves a resumable "
+        "checkpoint and promotes the best epoch so far. Without --confirm, previews which "
+        "process gets the signal."
+    ),
+    examples=("pup finetune cancel run", "pup finetune cancel run --confirm"),
+    safety=Safety(
+        data="signals the local training process",
+        recipients="nowhere: a signal to a local process",
+        without="previews which process gets the signal",
+        confirm="sends it SIGTERM",
+    ),
+    panel=TRAIN_PANEL,
+)
+
+
 def register(app: typer.Typer) -> None:
     """Add `train`, `resume`, `status`, `cancel` and the hidden `_worker` to ``app``."""
-    app.command(
-        "train",
-        short_help="Fine-tune a model with LoRA SFT (paid; previews without --confirm).",
-        help=(
-            "Fine-tune a model with LoRA SFT on a dataset's train split, choosing the best "
-            "epoch by validation loss and stopping early. Without --confirm, previews the "
-            "run (rows and rendered tokens per split, rejected rows, tokens per epoch and "
-            "in total, the settings, and where the data goes) and prints the exact command "
-            "that starts it. With --confirm, trains in the foreground (Ctrl-C cancels "
-            "gracefully: the best epoch is still promoted) or, with --detach, in a "
-            "background worker. The preview is allowed with PUP_READ_ONLY set; training "
-            "is not."
-        ),
-    )(train)
-    app.command(
-        "resume",
-        short_help="Resume an interrupted, failed or cancelled run (paid).",
-        help=(
-            "Continue a run from its last training checkpoint, or only retry its promotion "
-            "when training already ended. Without --confirm, previews where it resumes."
-        ),
-    )(resume)
-    app.command(
-        "status",
-        short_help="Show a run's phase, progress, losses and worker.",
-        help=(
-            "Show a run's phase, epoch and step, losses, best epoch, elapsed time and an "
-            "approximate ETA, promoted model and whether its training process is alive. "
-            "With --watch, prints progress to stderr until training ends, then the final "
-            "status; --timeout bounds the watch (90s by default under a coding agent). "
-            "Ctrl-C or the timeout stops only the watch, prints the status and exits 0."
-        ),
-    )(status)
-    app.command(
-        "cancel",
-        short_help="Stop a training run gracefully.",
-        help=(
-            "Stop the process training a run: it finishes the current step, saves a "
-            "resumable checkpoint and promotes the best epoch so far. Without --confirm, "
-            "previews which process gets the signal."
-        ),
-    )(cancel)
+    app.command(**TRAIN_DOC.typer())(train)
+    app.command(**RESUME_DOC.typer())(resume)
+    app.command(**STATUS_DOC.typer())(status)
+    app.command(**CANCEL_DOC.typer())(cancel)
     app.command("_worker", hidden=True)(worker)

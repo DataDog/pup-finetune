@@ -32,7 +32,7 @@ from collections import Counter
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from pup_finetune.data.exclusions import Exclusion, ExclusionCode
 from pup_finetune.data.jsonl import read_rows, scan_rows, to_provider_dict, write_rows
@@ -52,7 +52,8 @@ from pup_finetune.data.split import (
     check_isolation,
     split_warnings,
 )
-from pup_finetune.errors import StateError, UsageError
+from pup_finetune.display import display_path
+from pup_finetune.errors import DirectoryUsageError, NotADatasetDir, SettingsConflict, StateError
 from pup_finetune.storage import (
     LOCK_FILE_NAME,
     DirectoryLock,
@@ -75,6 +76,9 @@ SUMMARY_FILE = "summary.json"
 RAW_DIR = "raw"
 
 SourceKind = Literal["import", "datadog"]
+
+SOURCE_COMMANDS: Final[dict[str, str]] = {"import": "dataset import", "datadog": "dataset pull"}
+"""The command that builds a dataset from each source."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,11 +151,11 @@ class DatasetDir:
     # --- reading ------------------------------------------------------------------------
 
     def settings(self) -> dict[str, Any]:
-        """The frozen settings; raises :class:`UsageError` when this is not a dataset."""
+        """The frozen settings; raises :class:`NotADatasetDir` when this is not a dataset."""
         try:
             data = read_json(self.settings_path)
         except FileNotFoundError:
-            raise UsageError(
+            raise NotADatasetDir(
                 f"{self.path} is not a dataset directory (it has no {self.settings_path.name})",
                 hint=(
                     "create one with `pup finetune dataset import DIR --file rows.jsonl` or "
@@ -318,6 +322,7 @@ class DatasetDir:
         with DirectoryLock(self.path):
             fresh = not self.is_dataset()
             if not fresh:
+                self._check_source(settings.source)
                 self._check_split_params(settings.split)
                 FrozenSettings.check_or_write(self.path, SETTINGS_NAME, settings.to_json())
             retiring = list(retired)
@@ -367,16 +372,31 @@ class DatasetDir:
     def create_or_check(self, settings: DatasetSettings) -> dict[str, Any]:
         """Create an empty dataset frozen with ``settings``, or check an existing one has them.
 
-        Raises as :meth:`add` does: :class:`StateError` when the frozen settings differ, and
-        :class:`UsageError` for a non-empty directory that is not a dataset. Returns the
+        Raises as :meth:`add` does: :class:`SettingsConflict` when the frozen settings differ,
+        and :class:`NotADatasetDir` for a non-empty directory that is not a dataset. Returns the
         summary.
         """
         return self.add((), settings=settings).summary
 
+    def _check_source(self, kind: SourceKind) -> None:
+        """Raise :class:`SettingsConflict` naming the cause when the dataset was built by the
+        other command (``dataset import`` against ``dataset pull``)."""
+        source = self.settings().get("source")
+        stored = source.get("kind") if isinstance(source, Mapping) else None
+        if stored == kind or stored not in SOURCE_COMMANDS:
+            return
+        built, adding = SOURCE_COMMANDS[stored], SOURCE_COMMANDS[kind]
+        raise SettingsConflict(
+            f"{display_path(self.path)} was built by `{built}`; {adding.split()[-1]} into a new "
+            "DIR",
+            hint=f"a dataset directory holds rows from one source: run `{adding}` into a new "
+            f"or empty directory, or add to this one with `{built}`",
+        )
+
     def _check_split_params(self, params: SplitParams) -> None:
         stored = self.split_params()
         if stored != params:
-            raise StateError(
+            raise SettingsConflict(
                 f"split settings changed; {self.settings_path} records different ones",
                 hint=(
                     f"this dataset uses {_split_flags(stored)}: pass the same values, "
@@ -388,9 +408,9 @@ class DatasetDir:
         """Create the directory, refusing a non-empty one that is not already a dataset."""
         if self.path.exists() and not self.is_dataset():
             if not self.path.is_dir():
-                raise UsageError(f"{self.path} exists and is not a directory")
+                raise NotADatasetDir(f"{self.path} exists and is not a directory")
             if any(child.name != LOCK_FILE_NAME for child in self.path.iterdir()):
-                raise UsageError(
+                raise NotADatasetDir(
                     f"{self.path} is not empty and is not a dataset directory",
                     hint="choose a new or empty directory",
                 )
@@ -424,7 +444,7 @@ def _merge(
         known = stored.get(row.id)
         if known is not None:
             if known != row:
-                raise StateError(
+                raise DirectoryUsageError(
                     f"row id {row.id!r} is already in the dataset with different content",
                     hint="give the changed row a new id, or import into a new directory",
                 )
@@ -433,7 +453,7 @@ def _merge(
         earlier = batch.get(row.id)
         if earlier is not None:
             if earlier != row:
-                raise StateError(
+                raise DirectoryUsageError(
                     f"row id {row.id!r} appears more than once in the input with different content",
                     hint="give each row in the input file a unique id",
                 )

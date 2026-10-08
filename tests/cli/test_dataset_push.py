@@ -19,6 +19,9 @@ from typer.testing import CliRunner, Result
 
 from pup_finetune.cli import app
 from pup_finetune.cli import dataset as dataset_cli
+from pup_finetune.curation.labels import apply_labels
+from pup_finetune.data.dataset_dir import DatasetDir
+from pup_finetune.data.labels import Label
 from pup_finetune.data.push import PUSH_FILE, SOURCE_TAG
 from pup_finetune.data.split import SPLITS
 from tests.fakes.datasets import FakeDataset, FakeDatasetsApi
@@ -78,12 +81,34 @@ def output_json(result: Result) -> dict[str, Any]:
     return data
 
 
+def test_expect_is_checked_on_the_plan_made_under_the_lock(
+    dataset: Path, api: FakeDatasetsApi, fake: FakePup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row relabeled after the command planned, but before it took the lock, is caught."""
+    preview = output_json(push(dataset))
+    real = dataset_cli.push_dataset
+
+    def relabel_then_push(directory: DatasetDir, **kwargs: Any) -> Any:
+        apply_labels(directory, [Label(id=ROW_IDS[0], keep=False, reason="changed my mind")])
+        return real(directory, **kwargs)
+
+    monkeypatch.setattr(dataset_cli, "push_dataset", relabel_then_push)
+    words = shlex.split(preview["next_command"])
+    result = invoke(*words[3:])
+    assert result.exit_code == 2, result.stderr
+    assert "Error [settings_conflict]: the records to push changed since the preview" in (
+        result.stderr
+    )
+    assert fake.calls == []  # nothing was sent
+    assert not (dataset / PUSH_FILE).exists()
+
+
 def test_push_without_confirm_previews_and_sends_nothing(
     dataset: Path, api: FakeDatasetsApi, fake: FakePup
 ) -> None:
     result = push(dataset)
     assert result.exit_code == 2, result.stderr
-    assert "Confirmation required" in result.stderr
+    assert result.stderr.startswith("Preview only, nothing was run: push")
     data = output_json(result)
     assert data["status"] == "confirmation_required"
     preview = data["preview"]
@@ -91,8 +116,10 @@ def test_push_without_confirm_previews_and_sends_nothing(
     assert preview["dataset_name"] == NAME
     assert preview["dataset_id"] is None
     assert preview["records_to_push"] == len(ROW_IDS)
-    assert sum(preview["records_to_push_by_split"].values()) == len(ROW_IDS)
-    assert set(preview["records_to_push_by_split"]) == set(SPLITS)
+    assert sum(preview["rows"].values()) == len(ROW_IDS)
+    assert set(preview["rows"]) == set(SPLITS)
+    # Each count once: the records to push by split are the preview's rows.
+    assert not {"records_to_push_by_split", "kept_by_split"} & set(preview)
     assert preview["already_pushed"] == 0
     assert preview["stale_records"] == {}
     sample = preview["sample_record"]
@@ -110,6 +137,8 @@ def test_push_without_confirm_previews_and_sends_nothing(
         NAME,
         "--project",
         PROJECT,
+        "--expect",
+        preview["inputs_digest"],
         "--confirm",
     ]
     assert fake.calls == []
@@ -157,7 +186,7 @@ def test_push_with_confirm_pushes_and_emits_the_receipt(
     assert sum(data["records_by_split"].values()) == len(ROW_IDS)
     assert data["stale_records"] == {}
     assert data["receipt_file"] == str((dataset / PUSH_FILE).resolve())
-    assert data["next_command"] == f"pup finetune dataset sample {dataset} --n 20"
+    assert data["next_command"] == f"pup finetune dataset sample {dataset} --count 20"
     assert "dataset_url" not in data
     assert len(remote.records) == len(ROW_IDS)
 

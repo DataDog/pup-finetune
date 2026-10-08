@@ -19,8 +19,18 @@ from typing import Annotated, Any, Final
 
 import typer
 
-from pup_finetune.cli._common import get_runtime, run_command
+from pup_finetune.approval import inputs_digest, require_expected, with_digest
+from pup_finetune.cli._common import current_context, get_runtime, run_command
 from pup_finetune.cli._dirs import require_dataset_dir
+from pup_finetune.cli._flags import given, renamed, require_enablers
+from pup_finetune.cli._presentation import (
+    BUILD_A_DATASET,
+    CommandDoc,
+    Safety,
+    describe,
+    group,
+    local,
+)
 from pup_finetune.curation.labels import Label, apply_labels, parse_labels
 from pup_finetune.curation.samples import (
     DEFAULT_SAMPLE_SEED,
@@ -59,9 +69,10 @@ from pup_finetune.data.split import (
     split_counts,
     split_warnings,
 )
-from pup_finetune.datadog.datasets import DEFAULT_PROJECT
+from pup_finetune.datadog.datasets import DEFAULT_PROJECT, RECORDS_BATCH_SIZE
 from pup_finetune.datadog.pup import Pup
-from pup_finetune.datadog.spans import Clock, SpanQuery, TimeBound, epoch_ms
+from pup_finetune.datadog.spans import Clock, SpanQuery, TimeBound, epoch_ms, parse_time_bound
+from pup_finetune.display import display_path
 from pup_finetune.errors import StateError, UsageError, require_confirm, require_writable
 from pup_finetune.next_steps import command, step, template
 from pup_finetune.output import info
@@ -83,45 +94,66 @@ DATASETS_DIR = Path("datasets")
 clock: Clock = time.time
 """What ``now`` in ``--from`` and ``--to`` is resolved against; tests replace it."""
 
-_LOCAL_ONLY = "Reads and writes local files only, so it is allowed with PUP_READ_ONLY set."
-_DATADOG_READ = "It only reads from Datadog (through pup), so it is allowed with PUP_READ_ONLY set."
-
-dataset_app = typer.Typer(
-    name="dataset",
-    short_help="Build and inspect local training datasets.",
-    help=(
-        "Build and inspect dataset directories: accepted rows, excluded rows with the reason, "
-        "and stable train / validation / test splits. Dataset files hold conversation "
-        "content, so directories are created 0700 and files 0600."
+dataset_app = group(
+    "dataset",
+    short="Build, review and push a training dataset.",
+    description=describe(
+        "Build a dataset directory from your traces or a JSONL file, review and label its "
+        "rows, and push the kept rows to Datadog. Rows are split into train, validation and "
+        "test sets by trace, the same way every time.",
+        "Dataset files hold conversation content, so directories are created 0700 and files 0600.",
     ),
-    no_args_is_help=True,
 )
+
+FILTER_PANEL = "Filter"
+LIMITS_PANEL = "Limits"
+ROWS_PANEL = "Rows"
+SPLITS_PANEL = "Splits"
+"""The option panels of `dataset pull` and `dataset preview` (and `import`'s splits)."""
 
 DirArgument = Annotated[
     Path, typer.Argument(metavar="DIR", help="The dataset directory.", show_default=False)
 ]
-SeedOption = Annotated[int, typer.Option(help="Seed for the split assignment.")]
-ValidationFractionOption = Annotated[
-    float, typer.Option(help="Share of traces assigned to validation.")
+SeedOption = Annotated[
+    int,
+    typer.Option(metavar="N", help="Seed for the split assignment.", rich_help_panel=SPLITS_PANEL),
 ]
-TestFractionOption = Annotated[float, typer.Option(help="Share of traces assigned to test.")]
+ValidationFractionOption = Annotated[
+    float,
+    typer.Option(metavar="X", help="Share of traces for validation.", rich_help_panel=SPLITS_PANEL),
+]
+TestFractionOption = Annotated[
+    float, typer.Option(metavar="X", help="Share of traces for test.", rich_help_panel=SPLITS_PANEL)
+]
 
 MlAppOption = Annotated[
     str,
     typer.Option(
-        "--ml-app", help="The ml_app whose LLM spans to read (required).", show_default=False
+        "--ml-app",
+        metavar="NAME",
+        help="The ml_app whose LLM spans to read.",
+        show_default=False,
+        rich_help_panel=FILTER_PANEL,
     ),
 ]
 SpanNameOption = Annotated[
     str | None,
-    typer.Option("--span-name", help="Only spans with this name.", show_default=False),
+    typer.Option(
+        "--span-name",
+        metavar="NAME",
+        help="Only spans with this name.",
+        show_default=False,
+        rich_help_panel=FILTER_PANEL,
+    ),
 ]
 QueryOption = Annotated[
     str | None,
     typer.Option(
         "--query",
-        help="Only spans that also match this search query (event search syntax).",
+        metavar="TEXT",
+        help="Only spans that match this search query.",
         show_default=False,
+        rich_help_panel=FILTER_PANEL,
     ),
 ]
 TagOption = Annotated[
@@ -129,45 +161,61 @@ TagOption = Annotated[
     typer.Option(
         "--tag",
         metavar="KEY:VALUE",
-        help="Only spans with this tag; repeat for more (all must match).",
+        help="Only spans with this tag; repeatable.",
         show_default=False,
+        rich_help_panel=FILTER_PANEL,
     ),
 ]
 FromOption = Annotated[
     str,
     typer.Option(
         "--from",
-        help=(
-            "Start of the time range: ISO 8601, epoch ms, or a relative time: now, or "
-            "now-<n><unit> with unit s, m, h, d or w, such as now-7d. A relative time is "
-            "resolved once, when the command starts."
-        ),
+        metavar="TIME",
+        help="Start: ISO 8601, epoch ms, or relative (now-7d).",
+        rich_help_panel=FILTER_PANEL,
     ),
 ]
 ToOption = Annotated[
-    str, typer.Option("--to", help="End of the time range, in the same forms as --from.")
+    str,
+    typer.Option(
+        "--to",
+        metavar="TIME",
+        help="End, in the same forms as --from.",
+        rich_help_panel=FILTER_PANEL,
+    ),
 ]
 TargetCountOption = Annotated[
     int,
-    typer.Option(min=1, help="Stop reading once this many rows are accepted."),
+    typer.Option(
+        min=1,
+        metavar="N",
+        help="Stop once this many rows are accepted.",
+        rich_help_panel=LIMITS_PANEL,
+    ),
 ]
 MaxCandidatesOption = Annotated[
     int,
     typer.Option(
-        min=1, help="Read at most this many exported spans, counting ones that cannot be read."
+        min=1,
+        metavar="N",
+        help="Read at most this many spans.",
+        rich_help_panel=LIMITS_PANEL,
     ),
 ]
 ReasoningOption = Annotated[
     ReasoningMode,
     typer.Option(
-        help="Drop reasoning messages, or keep them as the assistant's reasoning_content."
+        metavar="MODE",
+        help="omit or preserve reasoning messages.",
+        rich_help_panel=ROWS_PANEL,
     ),
 ]
 IncludeErrorsOption = Annotated[
     bool,
     typer.Option(
         "--include-errors",
-        help="Keep errored LLM calls instead of excluding them as span_error.",
+        help="Keep errored LLM calls.",
+        rich_help_panel=ROWS_PANEL,
     ),
 ]
 
@@ -178,7 +226,159 @@ _PULL_FLAGS = (
     "contains is dropped, so sub-agents stay their own rows. "
     "Errored LLM calls are excluded as span_error unless --include-errors is passed. Reading "
     "stops once --target-count rows are accepted or --max-candidates spans are read, "
-    "unreadable ones included."
+    "unreadable ones included. A relative time is now or now-<n><unit> with unit s, m, h, "
+    "d or w, such as now-7d; it is resolved once, when the command starts."
+)
+
+_DATADOG_READ = Safety(
+    data="reads Datadog",
+    recipients="nowhere: reads Datadog through pup",
+    without="previews rows in memory",
+)
+
+
+IMPORT_DOC = CommandDoc(
+    path="dataset import",
+    short="Import canonical rows from a local JSONL file.",
+    description=describe(
+        "Validate canonical training rows from --file and add them to DIR, creating it if "
+        "needed. An invalid row is not fatal: it is recorded in excluded.jsonl with its "
+        "reason code. The split settings are frozen when DIR is created.",
+        "A row repeating a conversation already in the dataset is excluded as "
+        "duplicate_conversation. Importing again appends rows with new ids; a known id with "
+        "different content is an error. Later imports must pass the same split settings.",
+    ),
+    examples=(
+        "pup finetune dataset import ./ds --file rows.jsonl",
+        "pup finetune dataset import ./ds --file rows.jsonl --seed 7 --test-fraction 0.2",
+    ),
+    safety=local("imports rows into DIR"),
+)
+
+SHOW_DOC = CommandDoc(
+    path="dataset show",
+    short="Show a dataset's counts, exclusions, splits and settings.",
+    description=(
+        "Show a dataset directory: row counts, exclusion reasons, split sizes and warnings, "
+        "the frozen settings, where it was pushed, and a few row ids per split."
+    ),
+    examples=("pup finetune dataset show ./ds", "pup finetune dataset show datasets/my-agent"),
+    safety=local("shows the dataset"),
+)
+
+PUSH_NEEDS: dict[str, str] = {"expect": "confirm"}
+"""``dataset push``'s options that need ``--confirm``."""
+
+PUSH_DOC = CommandDoc(
+    path="dataset push",
+    short="Push kept rows to Datadog (previews without --confirm).",
+    description=describe(
+        "Add one record per kept row of DIR to the Agent Observability dataset --name in "
+        "--project, creating either when missing. Without --confirm, previews what would be "
+        "sent. The receipt, push.json in DIR, makes a rerun send only rows not yet pushed.",
+        "Rows labeled drop are never sent. Each record's input is the conversation before "
+        "the final assistant message, with its tools; its expected output is that message; "
+        "its metadata holds the row id, split and source; it is tagged split:<split> and "
+        "source:pup-finetune. When every kept row was pushed already, it reports the "
+        "receipt and sends nothing. The receipt is saved after every batch, so an "
+        "interrupted push resumes without adding a row twice. A directory pushes to one "
+        "dataset: another --name or --project is an error. Rows labeled drop after they "
+        "were pushed are reported as stale_records and are not deleted from the dataset; "
+        "kept rows that changed after they were pushed are reported as changed_records and "
+        "their records are not updated.",
+    ),
+    examples=(
+        "pup finetune dataset push ./ds --name my-agent-sft",
+        "pup finetune dataset push ./ds --name my-agent-sft --project pup-finetune-dev --confirm",
+    ),
+    safety=Safety(
+        data="--confirm writes the kept rows to Datadog",
+        recipients="Datadog: an Agent Observability dataset",
+        without="previews the records",
+        confirm="pushes the kept rows (a remote write)",
+        read_only="confirm_refused",
+    ),
+)
+
+PREVIEW_DOC = CommandDoc(
+    path="dataset preview",
+    short="Try a Datadog span filter; writes nothing.",
+    description=describe(
+        "Read --ml-app's LLM spans from Datadog and convert them into training rows in "
+        "memory, writing nothing. Shows the time range read, how many rows would be accepted "
+        "and why the rest would not, a few samples, and the `dataset pull` command with the "
+        "same flags.",
+        f"The pull goes into a new directory under ./datasets named after --ml-app. {_PULL_FLAGS}",
+    ),
+    examples=(
+        "pup finetune dataset preview --ml-app my-agent",
+        "pup finetune dataset preview --ml-app my-agent --span-name chat --from now-3d",
+    ),
+    safety=_DATADOG_READ,
+)
+
+PULL_DOC = CommandDoc(
+    path="dataset pull",
+    short="Pull training rows from Datadog into a dataset directory.",
+    description=describe(
+        "Pull --ml-app's LLM spans from Datadog into DIR as training rows, with splits. "
+        "Rerun the same command to resume; a higher --target-count reads further. The "
+        "filter, --reasoning, --include-errors and the splits are frozen on the first pull.",
+        "Excluded rows are recorded in excluded.jsonl with their reason. A pull with other "
+        "settings than the first fails, so use a new directory. Raw pages are cached in "
+        "DIR/raw/, so a rerun with the same flags resumes without fetching them again, and a "
+        "higher --target-count or --max-candidates reads further (a stored row that turns "
+        "out to be a prefix of a longer conversation of its trace is then excluded as "
+        "contained_conversation). A relative --from or --to, such as the default now-7d, is "
+        "resolved when the first pull starts and that window is frozen with the "
+        f"expressions; a rerun with the same expressions reads the same window. {_PULL_FLAGS}",
+    ),
+    examples=(
+        "pup finetune dataset pull ./ds --ml-app my-agent --from now-7d --span-name chat",
+        "pup finetune dataset pull ./ds --ml-app my-agent --target-count 500",
+    ),
+    safety=Safety(
+        data="reads Datadog, writes DIR",
+        recipients="DIR: reads Datadog through pup",
+        without="pulls rows into DIR",
+    ),
+)
+
+LABEL_DOC = CommandDoc(
+    path="dataset label",
+    short="Record keep/drop labels for a dataset's rows.",
+    description=describe(
+        'Record keep/drop decisions on accepted rows of DIR from --file, one {"id", "keep", '
+        '"reason"} object per line; a reason is required to drop. Every id must be an '
+        "accepted row, or nothing is written. A dropped row is left out of training and of "
+        "the split files.",
+        '"at" may be given per line and defaults to the current time. Rows labeled here are '
+        "never relabeled by `dataset triage`. Labels are appended to labels.jsonl and the "
+        "last label of an id wins; rows.jsonl is never changed.",
+    ),
+    examples=(
+        "pup finetune dataset label ./ds --file labels.jsonl",
+        "pup finetune dataset label datasets/my-agent --file review.jsonl",
+    ),
+    safety=local("records labels in DIR"),
+)
+
+SAMPLE_DOC = CommandDoc(
+    path="dataset sample",
+    short="Show a small, readable sample of a dataset's rows.",
+    description=describe(
+        "Show up to --count rows of DIR in brief, to review them before labeling: id, split, "
+        "label, turns, tools, and the first user and final assistant messages cut to 300 "
+        "characters. The same --seed picks the same rows. Rows labeled drop are left out "
+        "unless --include-dropped is passed.",
+        "A final message without text shows its tool calls as name(args). The full rows stay "
+        "in rows.jsonl.",
+    ),
+    examples=(
+        "pup finetune dataset sample ./ds -n 20",
+        "pup finetune dataset sample ./ds --split test --include-dropped",
+    ),
+    safety=local("shows rows"),
 )
 
 
@@ -220,7 +420,7 @@ def dataset_next(
             "previews first; `pup finetune dataset triage --print-template` prints a rubric "
             "to start from)",
         )
-        sample = command("dataset", "sample", directory, "--n", REVIEW_SAMPLE_SIZE)
+        sample = command("dataset", "sample", directory, "--count", REVIEW_SAMPLE_SIZE)
         return {
             "next_command": None if sampled else sample,
             "next_steps": [label_step, triage_step],
@@ -267,18 +467,7 @@ def dataset_next(
     return {"next_command": None, "next_steps": steps}
 
 
-@dataset_app.command(
-    "import",
-    short_help="Import canonical rows from a local JSONL file.",
-    help=(
-        "Validate canonical training rows from a local JSONL file and add them to DIR, "
-        "creating it if needed. Invalid rows are not fatal: each is recorded in "
-        "excluded.jsonl with its reason code. A row repeating a conversation already in the "
-        "dataset is excluded as duplicate_conversation. Importing again appends rows with new "
-        "ids; a known id with different content is an error. The split settings are frozen "
-        f"when DIR is created, and later imports must pass the same ones. {_LOCAL_ONLY}"
-    ),
-)
+@dataset_app.command(**IMPORT_DOC.typer())
 @run_command
 def import_rows(
     directory: DirArgument,
@@ -286,6 +475,7 @@ def import_rows(
         Path,
         typer.Option(
             "--file",
+            metavar="FILE",
             help="Canonical rows, one JSON object per line.",
             exists=True,
             dir_okay=False,
@@ -304,7 +494,7 @@ def import_rows(
     result = dataset.add(rows, exclusions, settings=DatasetSettings("import", params))
     summary = result.summary
     return {
-        "dataset_dir": str(dataset.path.resolve()),
+        "dataset_dir": display_path(dataset.path),
         "accepted": summary["accepted"],
         "excluded": summary["excluded"],
         "excluded_by_code": summary["excluded_by_code"],
@@ -320,14 +510,7 @@ def import_rows(
     }
 
 
-@dataset_app.command(
-    "show",
-    short_help="Show a dataset's counts, exclusions, splits and settings.",
-    help=(
-        "Show a dataset directory: row counts, exclusion reasons, split sizes and warnings, "
-        f"the frozen settings, and a few row ids per split. {_LOCAL_ONLY}"
-    ),
-)
+@dataset_app.command(**SHOW_DOC.typer())
 @run_command
 def show(directory: DirArgument) -> dict[str, Any]:
     require_dataset_dir(directory)
@@ -336,7 +519,7 @@ def show(directory: DirArgument) -> dict[str, Any]:
     by_split = dataset.rows_by_split()
     summary = dataset.summary()
     return {
-        "dataset_dir": str(dataset.path.resolve()),
+        "dataset_dir": display_path(dataset.path),
         "settings": settings,
         "summary": summary,
         "sample_row_ids": {
@@ -347,43 +530,33 @@ def show(directory: DirArgument) -> dict[str, Any]:
     }
 
 
-@dataset_app.command(
-    "push",
-    short_help="Push a dataset's kept rows to an Agent Observability dataset.",
-    help=(
-        "Add one record per kept row of DIR to the Agent Observability dataset --name in "
-        "project --project, creating either when missing; rows labeled drop are never sent. "
-        "Each record's input is the conversation before the final assistant message, with "
-        "its tools; its expected output is that message; its metadata holds the row id, "
-        "split and source; it is tagged split:<split> and source:pup-finetune. Without "
-        "--confirm it only previews what would be sent; when every kept row was pushed "
-        "already it reports the receipt and sends nothing. The receipt, push.json in DIR, "
-        "records the dataset and the record of every row pushed and is saved after every "
-        "batch, so pushing again sends only rows not yet pushed, and an interrupted push "
-        "resumes without adding a row twice. A directory pushes to one dataset: another --name or --project is an "
-        "error. Rows labeled drop after they were pushed are reported as stale_records and "
-        "are not deleted from the dataset; kept rows that changed after they were pushed "
-        "are reported as changed_records and their records are not updated. A remote "
-        "write: with PUP_READ_ONLY set, it previews (from local files) but refuses --confirm."
-    ),
-)
+@dataset_app.command(**PUSH_DOC.typer())
 @run_command
 def push(
     directory: DirArgument,
     name: Annotated[
         str,
-        typer.Option("--name", help="The dataset to push to (required).", show_default=False),
+        typer.Option("--name", metavar="NAME", help="The dataset to push to.", show_default=False),
     ],
     project: Annotated[
-        str, typer.Option("--project", help="The project the dataset belongs to.")
+        str,
+        typer.Option("--project", metavar="NAME", help="The project the dataset belongs to."),
     ] = DEFAULT_PROJECT,
     confirm: Annotated[
         bool,
-        typer.Option(
-            "--confirm", help="Push (a remote write); without it, only preview what is sent."
-        ),
+        typer.Option("--confirm", help="Push (a remote write); without it, only preview."),
     ] = False,
+    expect: Annotated[
+        str | None,
+        typer.Option(
+            "--expect",
+            metavar="DIGEST",
+            hidden=True,
+            help="With --confirm: the preview's inputs_digest; refused when the records changed.",
+        ),
+    ] = None,
 ) -> dict[str, Any]:
+    require_enablers(PUSH_NEEDS)
     runtime = get_runtime()
     require_dataset_dir(directory)
     dataset = DatasetDir(directory)
@@ -393,28 +566,39 @@ def push(
         rerun = ["dataset", "push", directory, "--name", name]
         if project != DEFAULT_PROJECT:
             rerun += ["--project", project]
+        parts = plan.approval_parts()
+        ctx = current_context()
+        defaults_used = [] if ctx is not None and given(ctx, "project") else ["project"]
+        preview = with_digest(_push_preview(plan, defaults_used), inputs_digest(parts))
         if confirm:
             require_writable(runtime, "dataset push")
         # The preview reads local files only, so it is allowed under PUP_READ_ONLY.
         require_confirm(
             confirm,
-            _push_preview(plan),
-            command(*rerun, "--confirm"),
+            preview,
+            command(*rerun, "--expect", preview["inputs_digest"], "--confirm"),
             read_only=runtime.read_only,
         )
-        receipt = push_dataset(dataset, project=project, name=name, pup=Pup(), progress=info)
+
+        def approve(locked: PushPlan) -> None:
+            # Against the plan made under the directory lock, which is what is sent.
+            require_expected(expect, locked.approval_parts(), preview=command(*rerun))
+
+        receipt = push_dataset(
+            dataset, project=project, name=name, pup=Pup(), progress=info, approve=approve
+        )
     else:
         info("nothing to push: every kept row was pushed already")
         receipt = plan.receipt()
-    result: dict[str, Any] = {"dataset_dir": str(dataset.path.resolve()), **receipt.to_json()}
-    result["receipt_file"] = str(push_path(dataset).resolve())
+    result: dict[str, Any] = {"dataset_dir": display_path(dataset.path), **receipt.to_json()}
+    result["receipt_file"] = display_path(push_path(dataset))
     if warnings := _receipt_warnings(receipt.stale_records, receipt.changed_records):
         result["warnings"] = warnings
     result.update(dataset_next(dataset, directory, accepted=dataset.summary()["accepted"]))
     return result
 
 
-def _push_preview(plan: PushPlan) -> dict[str, Any]:
+def _push_preview(plan: PushPlan, defaults_used: Sequence[str]) -> dict[str, Any]:
     to_push = len(plan.pending)
     if plan.dataset_id is None:
         action = (
@@ -429,18 +613,26 @@ def _push_preview(plan: PushPlan) -> dict[str, Any]:
     else:
         action = f"add {to_push} records to dataset {plan.dataset_id}"
     preview: dict[str, Any] = {
-        "dataset_dir": str(plan.directory.resolve()),
+        "action": action,
+        "billing": f"no model provider is called: the push writes {to_push} records to your "
+        "Datadog organization, in batches of at most "
+        f"{RECORDS_BATCH_SIZE} through pup",
+        "dataset_dir": display_path(plan.directory),
         "project": plan.project,
         "dataset_name": plan.dataset_name,
         "dataset_id": plan.dataset_id,
-        "action": action,
+        "rows": plan.pending_by_split(),
         "records_to_push": to_push,
-        "records_to_push_by_split": plan.pending_by_split(),
         "already_pushed": plan.already_pushed,
-        "kept_by_split": plan.kept_by_split,
         "stale_records": plan.stale_records,
         "changed_records": plan.changed_records,
         "sample_record": plan.pending[0].record if plan.pending else None,
+        "settings": {
+            "project": plan.project,
+            "dataset_name": plan.dataset_name,
+            "batch_size": RECORDS_BATCH_SIZE,
+        },
+        "defaults_used": list(defaults_used),
         "data_recipients": [
             f"kept rows -> Datadog (dataset {plan.dataset_name!r} in project {plan.project!r})"
         ],
@@ -476,17 +668,7 @@ def _receipt_warnings(stale: Mapping[str, str], changed: Mapping[str, str]) -> l
     return warnings
 
 
-@dataset_app.command(
-    "preview",
-    short_help="Try a Datadog span filter without writing anything.",
-    help=(
-        "Export LLM spans from Datadog, check and convert them into training rows, and "
-        "assign splits, all in memory: nothing is written. Shows the time range it read, how "
-        "many spans matched, how many rows would be accepted, why the rest would be excluded, a few samples, and the "
-        "`dataset pull` command with the same flags, into a new directory under ./datasets "
-        f"named after --ml-app. {_PULL_FLAGS} {_DATADOG_READ}"
-    ),
-)
+@dataset_app.command(**PREVIEW_DOC.typer())
 @run_command
 def preview(
     ml_app: MlAppOption,
@@ -542,24 +724,7 @@ def preview(
     }
 
 
-@dataset_app.command(
-    "pull",
-    short_help="Pull training rows from Datadog into a dataset directory.",
-    help=(
-        "Export LLM spans from Datadog, check and convert them into training rows, and add "
-        "them to DIR with their splits, creating it if needed. Excluded rows are recorded in "
-        "excluded.jsonl with their reason. The filter, --reasoning, --include-errors and the "
-        "split settings are frozen in DIR on the first pull; a pull with other values fails, "
-        "so use a new directory. Raw pages are cached in DIR/raw/, so re-running an "
-        "interrupted pull with the same flags resumes without fetching them again, and a "
-        "higher --target-count or --max-candidates reads further (a stored row that turns "
-        "out to be a prefix of a longer conversation of its trace is then excluded as "
-        "contained_conversation). A relative --from or --to, such as the default now-7d, is "
-        "resolved when the first pull starts and that window is frozen with the expressions; "
-        "a re-run with the same expressions reads the same window. "
-        f"{_PULL_FLAGS} {_DATADOG_READ}"
-    ),
-)
+@dataset_app.command(**PULL_DOC.typer())
 @run_command
 def pull_rows(
     directory: DirArgument,
@@ -596,7 +761,7 @@ def pull_rows(
     collection, added = pull(Pup(), options, dataset, params, progress=info)
     summary = added.summary
     return {
-        "dataset_dir": str(dataset.path.resolve()),
+        "dataset_dir": display_path(dataset.path),
         "accepted": summary["accepted"],
         "excluded": summary["excluded"],
         "excluded_by_code": summary["excluded_by_code"],
@@ -625,19 +790,7 @@ def pull_rows(
     }
 
 
-@dataset_app.command(
-    "label",
-    short_help="Apply keep/drop labels to a dataset's rows.",
-    help=(
-        "Record keep/drop decisions on accepted rows of DIR from a JSONL file of "
-        '{"id", "keep", "reason"} objects ("at" may be given per line and defaults to the '
-        "current time). A reason is required to drop a row. Rows labeled here are never "
-        "relabeled by `dataset triage`. Every id must be "
-        "an accepted row, or nothing is written. Labels are appended to labels.jsonl and the "
-        "last label of an id wins; rows.jsonl is never changed. A dropped row is left out of "
-        f"training and of the split files. {_LOCAL_ONLY}"
-    ),
-)
+@dataset_app.command(**LABEL_DOC.typer())
 @run_command
 def label(
     directory: DirArgument,
@@ -645,6 +798,7 @@ def label(
         Path,
         typer.Option(
             "--file",
+            metavar="FILE",
             help="Labels, one JSON object per line.",
             exists=True,
             dir_okay=False,
@@ -659,7 +813,7 @@ def label(
     report = apply_labels(dataset, labels)
     summary = report.summary
     return {
-        "dataset_dir": str(dataset.path.resolve()),
+        "dataset_dir": display_path(dataset.path),
         "label": {
             "file": str(file),
             "labels": len(labels),
@@ -678,31 +832,29 @@ def label(
     }
 
 
-@dataset_app.command(
-    "sample",
-    short_help="Show a small, readable sample of a dataset's rows.",
-    help=(
-        "Show up to --n rows of DIR in brief, to review them before labeling: each row's id, "
-        "split, label (keep, drop or none), assistant turns, tools used, and its first user "
-        "and final assistant messages cut to 300 characters (a final message without text "
-        "shows its tool calls as name(args)). The full rows stay in rows.jsonl. The same "
-        "--seed picks the same rows. Rows labeled drop are left out unless "
-        f"--include-dropped is passed. {_LOCAL_ONLY}"
-    ),
-)
+@dataset_app.command(**SAMPLE_DOC.typer())
 @run_command
 def sample(
     directory: DirArgument,
-    n: Annotated[int, typer.Option("--n", min=1, help="How many rows to show.")] = (
-        DEFAULT_SAMPLE_SIZE
-    ),
-    split: Annotated[SampleSplit, typer.Option(help="The split to sample from.")] = "all",
-    seed: Annotated[int, typer.Option(help="Seed that picks the rows.")] = DEFAULT_SAMPLE_SEED,
+    count: Annotated[
+        int, typer.Option("-n", "--count", min=1, metavar="N", help="How many rows to show.")
+    ] = DEFAULT_SAMPLE_SIZE,
+    split: Annotated[
+        SampleSplit,
+        typer.Option("--split", metavar="SPLIT", help="train, validation, test or all."),
+    ] = "all",
+    seed: Annotated[
+        int, typer.Option(metavar="N", help="Seed that picks the rows.")
+    ] = DEFAULT_SAMPLE_SEED,
     include_dropped: Annotated[
         bool,
         typer.Option("--include-dropped", help="Also sample rows labeled drop."),
     ] = False,
+    old_count: Annotated[
+        int | None, typer.Option("--n", min=1, hidden=True, help="The old name of --count.")
+    ] = None,
 ) -> dict[str, Any]:
+    n = renamed("count", "old_count")
     require_dataset_dir(directory)
     dataset = DatasetDir(directory)
     dataset.settings()  # A UsageError when this is not a dataset directory.
@@ -710,13 +862,13 @@ def sample(
         dataset, n=n, split=split, seed=seed, include_dropped=include_dropped
     )
     return {
-        "dataset_dir": str(dataset.path.resolve()),
+        "dataset_dir": display_path(dataset.path),
         "split": split,
         "seed": seed,
         "include_dropped": include_dropped,
         "eligible": eligible,
         "rows": rows,
-        "rows_file": str(dataset.rows_path.resolve()),
+        "rows_file": display_path(dataset.rows_path),
         **dataset_next(dataset, directory, accepted=len(dataset.rows()), sampled=True),
         "hint": (
             "review these rows with the user, then record decisions as JSON lines of "
@@ -798,8 +950,8 @@ def _pull_options(
         span_name=span_name or None,
         query=query or None,
         tags=_parse_tags(tags or ()),
-        from_=_time_bound(from_),
-        to=_time_bound(to),
+        from_=_time_bound(from_, "--from"),
+        to=_time_bound(to, "--to"),
     )
     return PullOptions(
         span_query,
@@ -822,12 +974,10 @@ def _parse_tags(values: Iterable[str]) -> dict[str, str]:
     return tags
 
 
-def _time_bound(value: str) -> str | int:
-    """A ``--from`` or ``--to`` value: epoch milliseconds as an integer, anything else as is."""
-    text = value.strip()
-    if not text:
-        raise UsageError("--from and --to must not be empty")
-    return int(text) if text.isascii() and text.isdigit() else text
+def _time_bound(value: str, flag: str) -> str | int:
+    """A ``--from`` or ``--to`` value, checked before anything is frozen or fetched
+    (:func:`~pup_finetune.datadog.spans.parse_time_bound`)."""
+    return parse_time_bound(value, flag)
 
 
 def _time_range(options: PullOptions) -> dict[str, Any]:
@@ -964,4 +1114,4 @@ def _sample_exclusions(exclusions: Sequence[Exclusion]) -> list[dict[str, Any]]:
 
 def register(app: typer.Typer) -> None:
     """Add the `dataset` command group to ``app``."""
-    app.add_typer(dataset_app, name="dataset")
+    app.add_typer(dataset_app, name="dataset", rich_help_panel=BUILD_A_DATASET)

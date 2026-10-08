@@ -178,8 +178,8 @@ def test_evaluate_publishes_two_experiments_and_a_rerun_sends_nothing_new(
     assert publication["status"] == "published"
     assert data["warnings"] == []
     assert len(experiments.experiments) == 2
-    cases = data["summary"]["n_cases"]
-    rows = data["summary"]["n_trajectories"]
+    cases = data["headline"]["cases"]
+    rows = data["headline"]["trajectories"]
     for target in ("base", "tuned"):
         entry = publication["experiments"][target]
         experiment = experiments.experiments[entry["experiment_id"]]

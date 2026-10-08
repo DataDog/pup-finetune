@@ -98,7 +98,7 @@ def run_dir(dataset: Path, tmp_path: Path) -> Path:
     path = tmp_path / "run"
     result = invoke(*train_args(dataset, path, "--confirm"))
     assert result.exit_code == 0, result.stderr
-    assert output(result)["phase"] == "completed"
+    assert output(result)["status"] == "completed"
     return path
 
 
@@ -277,7 +277,11 @@ def test_skipping_calibration_saves_its_judge_calls(run_dir: Path) -> None:
 
 def test_the_judge_must_not_be_the_model_being_trained(run_dir: Path) -> None:
     # Only the model id counts, whichever provider the judge names.
-    for model in ("accounts/fake/models/fake-model", "fake-model", "anthropic/fake-model"):
+    for model in (
+        "accounts/fake/models/fake-model",
+        "fireworks/fake-model",
+        "anthropic/fake-model",
+    ):
         result = invoke("evaluate", str(run_dir), "--judge-model", model)
         assert result.exit_code == 2
         assert "being trained" in result.stderr
@@ -296,11 +300,26 @@ def test_read_only_allows_the_preview_but_not_the_evaluation(
     run_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("PUP_READ_ONLY", "true")
-    assert invoke("evaluate", str(run_dir)).exit_code == 2
-    result = invoke("evaluate", str(run_dir), "--confirm")
+    judge = ("--judge-model", "fireworks/some-judge")  # a paid judge: the run leaves the machine
+    assert invoke("evaluate", str(run_dir), *judge).exit_code == 2
+    result = invoke("evaluate", str(run_dir), *judge, "--confirm")
     assert result.exit_code == 2
-    assert "PUP_READ_ONLY" in result.stderr
+    assert result.stderr.startswith(
+        "Error [read_only]: evaluating on fake is a paid or remote run and PUP_READ_ONLY is set"
+    )
     assert not (run_dir / "eval").exists()
+
+
+def test_read_only_allows_an_evaluation_that_stays_offline(
+    run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The fake provider and the fake judge, unpublished: nothing leaves the machine.
+    monkeypatch.setenv("PUP_READ_ONLY", "true")
+    preview = invoke("evaluate", str(run_dir), "--no-publish")
+    assert preview.exit_code == 2
+    assert output(preview)["next_command"] is not None
+    result = invoke("evaluate", str(run_dir), "--no-publish", "--confirm")
+    assert result.exit_code == 0, result.stderr
 
 
 def test_auto_approve_does_not_confirm(run_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -326,7 +345,8 @@ def test_a_changed_renderer_is_refused(run_dir: Path, monkeypatch: pytest.Monkey
         FakeRenderer, "identity", lambda self: {**identity(self), "version": "changed"}
     )
     result = invoke("evaluate", str(run_dir))
-    assert result.exit_code == 1
+    assert result.exit_code == 2
+    assert "Error [settings_conflict]: " in result.stderr
     assert "renderer changed" in result.stderr
     assert not (run_dir / "eval").exists()
 
@@ -356,10 +376,11 @@ def test_a_run_cancelled_before_its_first_epoch_has_nothing_to_evaluate(
     # Stands in for a cancel request (``RunState.request_cancel``) before the first step.
     monkeypatch.setattr(RunState, "cancel_requested", lambda self: True)
     trained = invoke(*train_args(dataset, run, "--confirm"))
-    assert output(trained)["phase"] == "cancelled", trained.stderr
+    assert output(trained)["status"] == "cancelled", trained.stderr
     assert output(trained)["best_epoch"] is None
     result = invoke("evaluate", str(run))
-    assert result.exit_code == 1
+    assert result.exit_code == 2
+    assert "Error [wrong_phase]: " in result.stderr
     assert "no best epoch" in result.stderr
 
 
@@ -373,7 +394,8 @@ def test_a_changed_dataset_is_refused(run_dir: Path, dataset: Path) -> None:
     append_jsonl(path, [extra])
     assert invoke("dataset", "import", str(dataset), "--file", str(path)).exit_code == 0
     result = invoke("evaluate", str(run_dir))
-    assert result.exit_code == 1
+    assert result.exit_code == 2
+    assert "Error [settings_conflict]: " in result.stderr
     assert "changed since" in result.stderr
 
 
@@ -389,9 +411,32 @@ def test_evaluate_writes_a_summary_where_the_tuned_model_wins(run_dir: Path) -> 
     assert data["calibration"]["ok"] is True
     assert data["next_command"] is None
     out = run_dir / "eval"
-    assert data["out_dir"] == str(out)
+    assert data["files"] == {
+        "summary": str(out / "summary.json"),
+        "results": str(out / "results.jsonl"),
+    }
     summary = json.loads((out / "summary.json").read_text())
-    assert summary == data["summary"]
+    # What it prints is the decision; summary.json has the rest.
+    headline = data["headline"]
+    rates = headline["judge_pass_rate"]
+    assert rates["delta"] == pytest.approx(summary["tuned_minus_base"]["judge_pass_rate"])
+    assert rates["ci95"] == pytest.approx(summary["tuned_minus_base"]["ci95"])
+    assert rates["tuned"] == summary["targets"]["tuned"]["judge_pass"]["rate"]
+    assert headline["paired"] == {
+        key: summary["paired"][key] for key in ("wins", "regressions", "ties")
+    }
+    assert (headline["cases"], headline["trajectories"]) == (
+        summary["n_cases"],
+        summary["n_trajectories"],
+    )
+    assert data["metrics"]["tool_decision_match"] == {
+        target: summary["targets"][target]["metrics"]["tool_decision_match"]["rate"]
+        for target in ("base", "tuned")
+    }
+    assert next(iter(data["metrics"])) == "tool_decision_match"
+    assert data["errors"] == {"base": 0, "tuned": 0}
+    assert data["caveat"] == summary["caveat"]
+    assert "summary" not in data
     delta = summary["tuned_minus_base"]["judge_pass_rate"]
     assert delta > 0
     tuned = summary["targets"]["tuned"]["judge_pass"]["rate"]
@@ -405,8 +450,7 @@ def test_evaluate_writes_a_summary_where_the_tuned_model_wins(run_dir: Path) -> 
     for name in ("evaluation.json", "generations.jsonl", "results.jsonl", "calibration.json"):
         assert (out / name).is_file()
     # The tuned checkpoint was re-created in a new session from the best training checkpoint.
-    assert data["tuned_checkpoint"]["name"].startswith("ev")
-    assert data["tuned_checkpoint"]["kind"] == "sampler"
+    assert data["tuned_checkpoint"].startswith("ev")
 
 
 def test_evaluating_again_generates_nothing(run_dir: Path) -> None:
@@ -418,7 +462,8 @@ def test_evaluating_again_generates_nothing(run_dir: Path) -> None:
     again = invoke("evaluate", str(run_dir), "--confirm")
     assert again.exit_code == 0, again.stderr
     assert output(again)["tuned_checkpoint"] is None  # no session was opened
-    assert output(again)["summary"] == first["summary"]
+    assert output(again)["headline"] == first["headline"]
+    assert output(again)["metrics"] == first["metrics"]
     assert (run_dir / "eval" / "generations.jsonl").read_text() == generations
 
 
@@ -493,8 +538,8 @@ def test_skip_calibration_judges_without_checking(
     assert result.exit_code == 0, result.stderr
     data = output(result)
     assert data["calibration"] is None
-    assert judge.calls == 2 * data["summary"]["n_cases"]
-    assert data["summary"]["tuned_minus_base"]["judge_pass_rate"] == 0.0
+    assert judge.calls == 2 * data["headline"]["cases"]
+    assert data["headline"]["judge_pass_rate"]["delta"] == 0.0
 
 
 def test_a_judge_outage_is_not_a_complete_evaluation(
@@ -505,10 +550,10 @@ def test_a_judge_outage_is_not_a_complete_evaluation(
     result = invoke("evaluate", str(run_dir), "--skip-calibration", "--confirm")
     assert result.exit_code == 1, result.stderr  # no target has a single verdict
     data = output(result)
-    cases = data["summary"]["n_cases"]
+    cases = data["headline"]["cases"]
     assert data["status"] == "complete_with_errors"
-    assert data["errors"] == 2 * cases
-    assert data["summary"]["targets"]["tuned"]["judge_pass"]["rate"] is None
+    assert data["errors"] == {"base": cases, "tuned": cases}
+    assert data["headline"]["judge_pass_rate"]["tuned"] is None
     assert "retry" in data["hint"]
     assert data["next_command"] is not None
     # The generations are kept: the rerun only judges, and completes.
@@ -519,7 +564,7 @@ def test_a_judge_outage_is_not_a_complete_evaluation(
     again = rerun(data["next_command"] + " --confirm")  # it previews without
     assert again.exit_code == 0, again.stderr
     assert output(again)["status"] == "complete"
-    assert output(again)["errors"] == 0
+    assert output(again)["errors"] == {"base": 0, "tuned": 0}
 
 
 def test_a_cancel_keeps_what_finished_and_the_rerun_completes(
@@ -531,14 +576,13 @@ def test_a_cancel_keeps_what_finished_and_the_rerun_completes(
     assert result.exit_code == 0, result.stderr
     data = output(result)
     assert data["status"] == "partial"
-    assert data["cancelled"] is True
     assert data["pending"] > 0
     assert json.loads((run_dir / "eval" / "summary.json").read_text())["status"] == "partial"
     assert data["next_command"] is not None
     again = rerun(data["next_command"] + " --confirm")  # it previews without
     assert again.exit_code == 0, again.stderr
     assert output(again)["status"] == "complete"
-    assert output(again)["summary"]["tuned_minus_base"]["judge_pass_rate"] > 0
+    assert output(again)["headline"]["judge_pass_rate"]["delta"] > 0
 
 
 def test_a_second_ctrl_c_stops_at_once_with_how_to_continue(
@@ -564,7 +608,7 @@ def test_the_fake_judge_is_for_development_only() -> None:
     assert config == JudgeConfig(reasoning_effort="none")
     dev = Runtime(dev_mode=True)
     assert runner_module.resolve_judge(None, provider="fake", runtime=dev).model == FAKE_JUDGE_MODEL
-    assert runner_module.resolve_judge("x-y", provider="fake", runtime=dev).model == "x-y"
+    assert runner_module.resolve_judge("fw/x-y", provider="fake", runtime=dev).model == "fw/x-y"
 
 
 def test_signals_cancel_first_and_stop_at_once_second() -> None:
@@ -643,9 +687,10 @@ def test_read_only_previews_offer_no_confirm(
     dataset: Path, run_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("PUP_READ_ONLY", "true")
+    judge = "fireworks/some-judge"  # a paid judge: the run would leave the machine
     for args in (
-        train_args(dataset, tmp_path / "other", "--evaluate"),
-        ["evaluate", str(run_dir)],
+        train_args(dataset, tmp_path / "other", "--evaluate", "--eval-judge-model", judge),
+        ["evaluate", str(run_dir), "--judge-model", judge],
     ):
         result = invoke(*args)
         assert result.exit_code == 2, result.stderr
@@ -665,16 +710,18 @@ def test_train_evaluate_evaluates_in_the_training_session(dataset: Path, tmp_pat
     result = rerun(preview["next_command"])
     assert result.exit_code == 0, result.stderr
     data = output(result)
-    assert data["phase"] == "completed"
+    assert data["status"] == "completed"
     assert data["warnings"] == []
     evaluation = data["evaluation"]
     assert evaluation["status"] == "complete"
-    assert evaluation["summary"]["tuned_minus_base"]["judge_pass_rate"] > 0
+    assert evaluation["headline"]["judge_pass_rate"]["delta"] > 0
     # The tuned target sampled the best epoch's own sampler checkpoint: no new session.
-    best = data["checkpoints"]["best_sampler"]
-    assert evaluation["tuned_checkpoint"] == best
+    best = json.loads((run / "result.json").read_text())["checkpoints"]["best_sampler"]
+    assert evaluation["tuned_checkpoint"] == best["name"]
+    assert "checkpoints" not in data  # they stay in result.json
     summary = json.loads((run / "eval" / "summary.json").read_text())
-    assert summary == evaluation["summary"]
+    assert evaluation["headline"]["cases"] == summary["n_cases"]
+    assert evaluation["files"]["summary"] == str(run / "eval" / "summary.json")
     # A standalone evaluate finds it done.
     again = output(invoke("evaluate", str(run)))["preview"]
     assert again["generation_calls"] == 0
@@ -727,7 +774,7 @@ def test_a_failed_evaluation_keeps_the_trained_run_and_exits_1(
     result = invoke(*train_args(dataset, run, "--evaluate", "--confirm"))
     assert result.exit_code == 1, result.stderr
     data = output(result)
-    assert data["phase"] == "completed"
+    assert data["status"] == "completed"
     assert data["promoted_model"] is not None
     assert data["evaluation"]["status"] == "failed"
     assert "evaluate" in data["evaluation"]["next_command"]
@@ -749,7 +796,7 @@ def test_the_retry_after_a_failed_train_evaluate_pins_its_settings(
             "256",
             "--eval-seed",
             "3",
-            "--eval-max-cases-per-trajectory",
+            "--eval-max-cases",
             "2",
         )
         result = invoke(*train_args(dataset, run, "--evaluate", *settings, "--confirm"))
@@ -758,7 +805,7 @@ def test_the_retry_after_a_failed_train_evaluate_pins_its_settings(
     words = shlex.split(retry)
     for flag, value in (("--max-tokens", "256"), ("--seed", "3")):
         assert words[words.index(flag) + 1] == value, retry
-    assert words[words.index("--max-cases-per-trajectory") + 1] == "2", retry
+    assert words[words.index("--max-cases") + 1] == "2", retry
     assert "--judge-model" in words
     # Followed as written (with --confirm), evaluation.json's identity check accepts it.
     followed = invoke(*words[2:], "--confirm")
@@ -857,11 +904,10 @@ def test_train_evaluate_stops_at_the_spend_cap(
     result = invoke(*args, "--eval-concurrency", "1", "--confirm")
     assert result.exit_code == 0, result.stderr
     data = output(result)
-    assert data["phase"] == "completed"
+    assert data["status"] == "completed"
     evaluation = data["evaluation"]
     assert evaluation["status"] == "partial"
     assert evaluation["pending"] > 0
-    assert "spend cap" in evaluation["reason"]
     assert any("spend cap" in warning for warning in evaluation["warnings"])
     assert shlex.split(evaluation["next_command"])[:3] == ["pup", "finetune", "evaluate"]
 
@@ -874,7 +920,7 @@ def test_train_evaluate_skips_a_cancelled_run_that_evaluate_then_evaluates(
     monkeypatch.setattr(RunState, "cancel_requested", lambda self: self.best is not None)
     trained = invoke(*train_args(dataset, run, "--evaluate", "--confirm"))
     data = output(trained)
-    assert (data["phase"], data["stopped_reason"]) == ("cancelled", "cancelled"), trained.stderr
+    assert (data["status"], data["stopped_reason"]) == ("cancelled", "cancelled"), trained.stderr
     assert data["best_epoch"] == 1
     evaluation = data["evaluation"]
     assert evaluation["status"] == "skipped"
@@ -903,11 +949,10 @@ def test_a_cancel_during_the_evaluation_keeps_the_trained_run(
     result = invoke(*args)
     assert result.exit_code == 0, result.stderr
     data = output(result)
-    assert data["phase"] == "completed"
+    assert data["status"] == "completed"
     assert data["promoted_model"] is not None
     evaluation = data["evaluation"]
     assert evaluation["status"] == "partial"
-    assert evaluation["cancelled"] is True
     assert evaluation["pending"] > 0
     monkeypatch.setattr(runner_module, "open_judge_client", OPEN_JUDGE_CLIENT)
     again = rerun(evaluation["next_command"] + " --confirm")  # it previews without
@@ -949,8 +994,9 @@ def test_cases_too_long_for_the_judge_say_a_retry_cannot_fix_them(
     use_judge(monkeypatch, TooLong())
     result = invoke("evaluate", str(run_dir), "--skip-calibration", "--confirm")
     data = output(result)
-    cases = data["summary"]["n_cases"]
+    cases = data["headline"]["cases"]
     assert data["status"] == "complete_with_errors"
-    assert data["summary"]["targets"]["tuned"]["errors_too_long"] == cases
+    summary = json.loads((run_dir / "eval" / "summary.json").read_text())
+    assert summary["targets"]["tuned"]["errors_too_long"] == cases
     assert "retry cannot fix" in data["hint"]
     assert "larger context window" in data["hint"]

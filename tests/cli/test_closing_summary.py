@@ -14,6 +14,7 @@ the summary off, never the warnings.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -109,7 +110,7 @@ def test_train_ends_with_its_outcome_in_one_line(dataset: Path, tmp_path: Path) 
     data = output_of(result)
     last = result.stderr.splitlines()[-1]
     assert last.startswith(f"run {data['run_id']} completed in ")
-    assert ": 2 epochs, best epoch 2 (validation loss 2.10 -> 1.60); promoted model: " in last
+    assert ": 2 epochs, best epoch 2 (validation loss 2.100 -> 1.600); promoted model: " in last
     assert last.endswith(f". Next: {data['next_command']}")
 
 
@@ -132,7 +133,7 @@ def test_evaluate_prints_its_warning_then_one_summary_line(run_dir: Path) -> Non
     assert warning.startswith("warning: the evaluation was not published: ")
     assert summary == (
         "evaluation complete: 4 cases from 2 test conversations; judge fake-judge, calibration "
-        "passed; judge agreement: base 0/4 (0%), tuned 1/4 (25%), tuned - base +25 pts (95% CI "
+        "passed; judge agreement: base 0%, tuned 25%, tuned - base +25 pts (95% CI "
         f"0 to +50); 1 win, 0 regressions, 3 ties, 0 errors; {CAVEAT}; not published (see the "
         "warning above)"
     )
@@ -147,12 +148,12 @@ def test_status_ends_with_the_status_line(run_dir: Path) -> None:
     result = invoke("status", str(run_dir))
     data = output_of(result)
     assert result.stderr == (
-        f"completed: epoch 2/2 step 2/2 loss 1.40 val 1.60 (best e2). Next: "
+        f"completed: epoch 2/2 step 2/2 loss 1.400 val 1.600 (best epoch 2). Next: "
         f"{data['next_command']}\n"
     )
 
 
-def test_a_preview_prints_its_warnings_and_ends_with_the_confirmation_lines(
+def test_a_preview_prints_its_card_then_its_warnings_then_the_next_line(
     tmp_path: Path,
 ) -> None:
     ds = tmp_path / "ds"
@@ -164,10 +165,14 @@ def test_a_preview_prints_its_warnings_and_ends_with_the_confirmation_lines(
     assert result.exit_code == 2
     data = output_of(result)
     lines = result.stderr.splitlines()
-    assert data["preview"]["warnings"]  # nothing to validate on
-    assert [f"warning: {text}" for text in data["preview"]["warnings"]] == lines[:-2]
-    assert lines[-2].startswith("Confirmation required: preview only")
+    warnings = [f"warning: {text}" for text in data["preview"]["warnings"]]
+    assert warnings  # nothing to validate on
+    card = lines[: -len(warnings) - 1]
+    assert card[0] == "Preview only, nothing was run: train fake-model on fake"
+    assert 1 < len(card) <= 6
+    assert lines[len(card) : -1] == warnings
     assert lines[-1] == f"Next: {data['next_command']}"
+    assert "\x1b" not in result.stderr  # off a terminal: plain text
 
 
 def test_quiet_turns_off_the_summary_but_not_the_warnings(
@@ -190,7 +195,13 @@ def test_steps_progress_restores_a_line_per_step_and_per_pair(
     evaluated = invoke(
         "evaluate", str(tmp_path / "run"), "--judge-model", "fake-judge", "--confirm"
     )
-    assert "18:03:16 evaluated 2/8: tuned row-units-001:1 (judged pass)" in evaluated.stderr
+    # One line per pair; which pair finishes when depends on the thread pool.
+    pairs = re.findall(
+        r"^18:03:16 evaluated (\d)/8: (?:base|tuned) \S+ \(judged (?:pass|fail)\)$",
+        evaluated.stderr,
+        re.MULTILINE,
+    )
+    assert sorted(pairs) == [str(n) for n in range(1, 9)], evaluated.stderr
 
 
 # --- on a terminal: a few lines ------------------------------------------------------------
@@ -223,7 +234,12 @@ def test_on_a_terminal_evaluate_shows_the_table(run_dir: Path) -> None:
     result = invoke("evaluate", str(run_dir), "--judge-model", "fake-judge", "--confirm")
     assert result.exit_code == 0, result.stderr
     lines = result.stderr.splitlines()
-    assert "evaluated 2/8: tuned row-units-001:1 (judged pass)" in lines
+    # A line per pair, in the order the thread pool finishes them.
+    assert "evaluated 8/8: " in result.stderr
+    assert any(
+        re.fullmatch(r"evaluated \d/8: tuned row-units-001:1 \(judged pass\)", line)
+        for line in lines
+    )
     start = lines.index(
         "evaluation complete: 4 cases from 2 test conversations; judge fake-judge, "
         "calibration passed"
@@ -231,7 +247,7 @@ def test_on_a_terminal_evaluate_shows_the_table(run_dir: Path) -> None:
     assert lines[start:] == [
         lines[start],
         "                     base       tuned      tuned - base",
-        "judge agreement      0/4 0%     1/4 25%    +25 pts (95% CI 0 to +50)",
+        "judge agreement      0%         25%        +25 pts (95% CI 0 to +50)",
         "paired: 1 win, 0 regressions, 3 ties, 0 errors",
         CAVEAT,
         "not published (see the warning above)",
@@ -289,7 +305,7 @@ EXAMPLES: dict[str, dict[str, Any]] = {
         "next_command": None,
     },
     "deploy": {
-        "model_id": "ft-1",
+        "model": "accounts/a/models/ft-1",
         "deployment_id": "ft-1",
         "state": "READY",
         "smoke_test": {"ok": True},
@@ -479,6 +495,8 @@ def test_a_summary_that_fails_prints_its_traceback_in_debug_mode(
 
 
 def test_the_deploy_headline_names_a_different_deployment_id() -> None:
-    found = summarize("deploy", {"model_id": "m", "deployment_id": "d", "smoke_test": {"ok": True}})
+    found = summarize(
+        "deploy", {"model": "accounts/a/models/m", "deployment_id": "d", "smoke_test": {"ok": True}}
+    )
     assert found is not None
     assert found.lines[0] == "deployed m as d (ready)"

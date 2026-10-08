@@ -141,9 +141,12 @@ def test_criteria_need_a_rubric_or_rules() -> None:
 
 def test_judges_parse_in_order_without_repeats() -> None:
     assert parse_judges(None) == DEFAULT_JUDGES
-    assert parse_judges(" judge-a, openai/b ,judge-a,") == ("judge-a", "openai/b")
+    assert parse_judges(" fireworks/a, openai/b ,fireworks/a,") == ("fireworks/a", "openai/b")
+    assert parse_judges("glm-5p3-flash") == ("accounts/fireworks/models/glm-5p3-flash",)
     with pytest.raises(UsageError):
         parse_judges(" , ")
+    with pytest.raises(UsageError, match="unknown judge 'fake-judge'"):
+        parse_judges("fake-judge")  # the offline fake judge is evaluate's only
 
 
 def test_judges_are_written_one_way() -> None:
@@ -302,12 +305,12 @@ def test_the_plan_counts_calls_and_writes_nothing(tmp_path: Path) -> None:
     before = sorted(p.name for p in dataset.path.iterdir())
     plan = plan_triage(dataset, RUBRIC, (J1, J2))
     preview = plan.preview()
-    assert preview["rows_to_review"] == 4
+    assert preview["rows"]["to_review"] == 4
     assert preview["judge_calls"] == 8
     assert preview["judge_calls_pending"] == 8
     assert preview["votes_reused"] == 0
-    assert preview["judges"] == [J1, J2]
-    assert preview["rubric_sha256"] == RUBRIC.sha256
+    assert [judge["model"] for judge in preview["judges"]] == [J1, J2]
+    assert preview["rubric_hash"] == RUBRIC.sha256[:12]
     assert "api.fireworks.ai" in preview["data_destination"]
     assert sorted(p.name for p in dataset.path.iterdir()) == before
 
@@ -841,26 +844,38 @@ def test_the_preview_names_every_provider_the_rows_are_sent_to(tmp_path: Path) -
         "full rows -> Fireworks api.fireworks.ai (judge), Anthropic api.anthropic.com (judge), "
         "OpenAI api.openai.com (judge)"
     ]
-    assert preview["judge_endpoints"] == [
+    # Each judge once, with its provider, endpoint and credential.
+    assert preview["judges"] == [
         {
+            "model": J1,
             "provider": "fireworks",
             "endpoint": "https://api.fireworks.ai/inference/v1",
             "credential": "fireworks",
-            "judges": [J1, J2],
         },
         {
+            "model": CLAUDE,
             "provider": "anthropic",
             "endpoint": "https://api.anthropic.com",
             "credential": "anthropic",
-            "judges": [CLAUDE],
         },
         {
+            "model": GPT,
             "provider": "openai",
             "endpoint": "https://api.openai.com/v1",
             "credential": "openai",
-            "judges": [GPT],
+        },
+        {
+            "model": J2,
+            "provider": "fireworks",
+            "endpoint": "https://api.fireworks.ai/inference/v1",
+            "credential": "fireworks",
         },
     ]
+    # One billing sentence per provider, never a price.
+    billing = preview["billing"]
+    assert [billing.count(name) for name in ("Fireworks", "Anthropic", "OpenAI")] == [1, 1, 1]
+    assert "$" not in billing
+    assert "approximate" in billing
 
 
 def test_the_frozen_settings_hold_the_provider_qualified_judges(tmp_path: Path) -> None:

@@ -92,3 +92,25 @@ def test_a_stale_file_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     stale_doc.write_text("old\n")
     monkeypatch.setattr(gen, "COMMANDS_DOC", stale_doc)
     assert gen.stale() == [stale_doc]
+
+
+def test_the_docs_keep_what_help_cuts_and_every_example_and_safety_line() -> None:
+    from pup_finetune.cli._presentation import DOCS
+
+    text = " ".join(gen.render_commands().split())
+    for name, doc in DOCS.items():
+        assert " ".join(doc.description.split()) in text, name
+        if doc.more:  # cut from --help at \f, kept here
+            assert " ".join(gen.md(doc.more).split()) in text, name
+        for example in doc.examples:
+            assert example in text, (name, example)
+        assert f"Safety: {gen.md(doc.safety.footer())}." in text, name
+        row = " | ".join(gen.md(cell, cell=True) for cell in doc.safety.table_row())
+        assert f"| `pup finetune {name}` | {row} |" in text, name
+
+
+def test_a_default_written_into_the_help_goes_to_the_default_column() -> None:
+    text = gen.render_commands()
+    assert "| `--run-id` | `ID` | generated | Run and model id. |" in text
+    assert "[dim]" not in text
+    assert "\f" not in text

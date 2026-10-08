@@ -47,7 +47,11 @@ from pup_finetune.providers.base import (
     Endpoint,
     ModelProfile,
     ModelRef,
+    SamplingUsage,
     SmokeTest,
+    TrainingUsage,
+    sampling_usage_text,
+    training_usage_text,
 )
 from pup_finetune.providers.fireworks import PROVIDER_NAME
 from pup_finetune.providers.fireworks.models import PROFILES
@@ -252,9 +256,21 @@ class FireworksProvider:
             raise UsageError(
                 f"the max_seq_len provider option of {cap} is over the "
                 f"{profile.max_seq_len}-token context of {profile.alias}",
-                hint=f"pass --provider-option max_seq_len=N with N at most {profile.max_seq_len}",
+                hint=f"pass --max-seq-len N with N at most {profile.max_seq_len}",
             )
         return dataclasses.replace(profile, max_seq_len=cap)
+
+    def training_billing(self, usage: TrainingUsage) -> str:
+        return (
+            "Fireworks bills the serverless training session at its own rates, which "
+            f"pup-finetune does not know: it trains on {training_usage_text(usage)}"
+        )
+
+    def sampling_billing(self, usage: SamplingUsage) -> str:
+        return (
+            "Fireworks bills sampling in the training session at its own rates, which "
+            f"pup-finetune does not know: {sampling_usage_text(usage)}"
+        )
 
     def backend(self) -> FireworksBackend:
         """The training backend. Builds nothing remote: the client is made per session.

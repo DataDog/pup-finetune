@@ -48,7 +48,15 @@ from pup_finetune.data.push import (
     record_digest,
 )
 from pup_finetune.datadog.pup import Pup
-from pup_finetune.errors import FinetuneError, StateError, UsageError
+from pup_finetune.display import display_path, quoted
+from pup_finetune.errors import (
+    FinetuneError,
+    Interrupted,
+    SettingsConflict,
+    StateError,
+    UsageError,
+    WrongPhase,
+)
 from pup_finetune.next_steps import PROGRAM, command, step, template
 from pup_finetune.output import info
 from pup_finetune.progress import EvaluationProgress
@@ -139,7 +147,7 @@ _CANCEL_NOTICE: Final = (
 
 
 def _q(value: object) -> str:
-    return shlex.quote(str(value))
+    return quoted(value)
 
 
 def _free_dir(path: Path) -> Path:
@@ -255,12 +263,13 @@ def plan_publishing(
     try:
         push = read_push_state(dataset)
     except StateError as exc:
-        raise StateError(exc.message, hint=_push_hint(dataset.path, no_publish)) from exc
+        # The same class (a settings conflict stays one), with the hint for this command.
+        raise type(exc)(exc.message, hint=_push_hint(dataset.path, no_publish)) from exc
     if push is None:
         return Publishing(
             enabled=True,
             dataset_dir=dataset.path,
-            skipped=f"{dataset.path} has no push receipt ({push_path(dataset).name}), and "
+            skipped=f"{display_path(dataset.path)} has no push receipt ({push_path(dataset).name}), and "
             "experiments attach to the pushed dataset; " + _push_hint(dataset.path, no_publish),
             remedy="push",
         )
@@ -269,7 +278,7 @@ def plan_publishing(
             enabled=True,
             dataset_dir=dataset.path,
             push=push,
-            skipped=f"the last push of {dataset.path} did not finish; "
+            skipped=f"the last push of {display_path(dataset.path)} did not finish; "
             + _push_hint(dataset.path, no_publish),
             remedy="push_again",
         )
@@ -280,7 +289,7 @@ def plan_publishing(
             enabled=True,
             dataset_dir=dataset.path,
             push=push,
-            skipped=f"{len(missing)} test row(s) of {dataset.path} were not pushed (e.g. "
+            skipped=f"{len(missing)} test row(s) of {display_path(dataset.path)} were not pushed (e.g. "
             f"{missing[0]}); " + _push_hint(dataset.path, no_publish),
             remedy="push_again",
         )
@@ -296,7 +305,7 @@ def plan_publishing(
             enabled=True,
             dataset_dir=dataset.path,
             push=push,
-            skipped=f"{len(changed)} test row(s) of {dataset.path} changed after they were "
+            skipped=f"{len(changed)} test row(s) of {display_path(dataset.path)} changed after they were "
             f"pushed (e.g. {changed[0]}), so their remote records hold the content pushed "
             f"earlier, not what is evaluated; to publish, move {push_path(dataset).name} aside "
             f"and push to a new --name, or pass {no_publish}",
@@ -344,6 +353,16 @@ class EvalPlan:
     def out_dir(self) -> Path:
         return self.settings.out_dir
 
+    @property
+    def offline(self) -> bool:
+        """Whether nothing it does leaves the machine: the fake provider generates, the fake
+        judge judges and nothing is published. ``PUP_READ_ONLY`` allows such a run."""
+        return (
+            self.provider == "fake"
+            and self.judge.provider == "fake"
+            and not (self.publishing.ready)
+        )
+
     def identity(self, tuned_checkpoint: CheckpointRef) -> dict[str, Any]:
         from pup_finetune.evaluation.replay import evaluation_identity
 
@@ -358,6 +377,20 @@ class EvalPlan:
             seed=self.settings.seed,
             max_cases_per_trajectory=self.settings.max_cases_per_trajectory,
         )
+
+    def approval_value(self) -> dict[str, Any]:
+        """What approving this evaluation pins (see :mod:`pup_finetune.approval`): the
+        judge, the cases and the settings that change what is called."""
+        settings = self.settings
+        return {
+            "judge": self.judge.identity(),
+            "cases": [case.id for case in self.cases],
+            "max_tokens": settings.max_tokens,
+            "seed": settings.seed,
+            "max_cases_per_trajectory": settings.max_cases_per_trajectory,
+            "skip_calibration": settings.skip_calibration,
+            "publish": self.publishing.status()["status"],
+        }
 
     def calibration_calls(self) -> int:
         if self.settings.skip_calibration:
@@ -374,11 +407,11 @@ class EvalPlan:
         """
         settings, defaults = self.settings, EvalSettings(out_dir=self.default_out_dir)
         pin = not self.standalone
-        words = [*PROGRAM, "evaluate", str(self.run_dir)]
+        words = [*PROGRAM, "evaluate", display_path(self.run_dir)]
         if pin or settings.out_dir != defaults.out_dir:
-            words += ["--out-dir", str(settings.out_dir)]
+            words += ["--out-dir", display_path(settings.out_dir)]
         if pin or settings.max_cases_per_trajectory != defaults.max_cases_per_trajectory:
-            words += ["--max-cases-per-trajectory", str(settings.max_cases_per_trajectory)]
+            words += ["--max-cases", str(settings.max_cases_per_trajectory)]
         words += ["--judge-model", self.judge.spec]
         if pin or settings.concurrency != defaults.concurrency:
             words += ["--concurrency", str(settings.concurrency)]
@@ -402,9 +435,9 @@ class EvalPlan:
         settings, defaults = self.settings, EvalSettings(out_dir=self.default_out_dir)
         words = ["--evaluate"]
         if settings.out_dir != defaults.out_dir:
-            words += ["--eval-out-dir", str(settings.out_dir)]
+            words += ["--eval-out-dir", display_path(settings.out_dir)]
         if settings.max_cases_per_trajectory != defaults.max_cases_per_trajectory:
-            words += ["--eval-max-cases-per-trajectory", str(settings.max_cases_per_trajectory)]
+            words += ["--eval-max-cases", str(settings.max_cases_per_trajectory)]
         words += ["--eval-judge-model", self.judge.spec]
         if settings.concurrency != defaults.concurrency:
             words += ["--eval-concurrency", str(settings.concurrency)]
@@ -493,7 +526,7 @@ class EvalPlan:
                     calibration = 0
             elif eval_dir.has_work():
                 # --confirm would refuse (EvalDir.check_identity): fail now, never offer it.
-                raise UsageError(
+                raise SettingsConflict(
                     f"{self.out_dir} holds an evaluation with other settings (changed: "
                     f"{', '.join(identity_changes(stored, wanted))}), so its results cannot be "
                     "reused",
@@ -522,9 +555,28 @@ class EvalPlan:
                 ", and the cases with the generated answers and their scores are published to "
                 "Datadog as experiments on the pushed dataset"
             )
+        from pup_finetune.judges import billing as judge_billing
+        from pup_finetune.providers.base import SamplingUsage
+
+        judge_calls = remaining["judge"] + calibration
+        sampling = get_provider(self.provider, self.runtime).sampling_billing(
+            SamplingUsage(calls=remaining["generate"], max_tokens_per_call=settings.max_tokens)
+        )
+        judge_name = "the fake judge" if self.judge.provider == "fake" else self.judge.spec
+        action = (
+            f"evaluate {_cases(len(self.cases))} from {trajectories} test conversations: "
+            f"generate each with the base and the tuned model on {self.provider}, and judge "
+            f"each answer with {judge_name}"
+        )
+        if publish["status"] == "planned":
+            action += ", then publish two experiments to Datadog"
         return {
+            "action": action,
+            # Each part names who bills it: the generation's provider, then the judge's.
+            "billing": f"{sampling}; {judge_billing(self.judge, judge_calls)}",
             "run_id": self.run_id,
-            "out_dir": str(self.out_dir),
+            "out_dir": display_path(self.out_dir),
+            "rows": {"test": trajectories},
             "cases": len(self.cases),
             "trajectories": trajectories,
             "targets": {"base": self.profile.base_model, "tuned": tuned},
@@ -536,16 +588,25 @@ class EvalPlan:
             "judge_calls": remaining["judge"] + calibration,
             "calibration_calls": calibration,
             "max_generated_tokens": remaining["generate"] * settings.max_tokens,
-            "max_tokens": settings.max_tokens,
-            "concurrency": settings.concurrency,
-            "seed": settings.seed,
-            "max_cases_per_trajectory": settings.max_cases_per_trajectory,
+            "settings": {
+                "judge_model": self.judge.spec,
+                "max_cases": settings.max_cases_per_trajectory,
+                "max_tokens": settings.max_tokens,
+                "concurrency": settings.concurrency,
+                "seed": settings.seed,
+                "calibration": not settings.skip_calibration,
+                "publish": settings.publish,
+            },
             "publish": publish,
             "data_destination": destination,
             "data_recipients": self.recipients(),
             "caveat": CAVEAT,
             "warnings": warnings,
         }
+
+
+def _cases(count: int) -> str:
+    return f"{count} case{'' if count == 1 else 's'}"
 
 
 def resolve_judge(judge_model: str | None, *, provider: str, runtime: Runtime) -> JudgeConfig:
@@ -613,7 +674,7 @@ def plan_evaluation(
     if not cases:
         rows = len(dataset.rows_for_split("test"))
         raise UsageError(
-            f"nothing to evaluate: the test split of {dataset.path} has {rows} kept rows and "
+            f"nothing to evaluate: the test split of {display_path(dataset.path)} has {rows} kept rows and "
             "no assistant turn to replay",
             hint="import more rows so the test split holds some conversations",
         )
@@ -703,7 +764,7 @@ def calibration_failed(plan: EvalPlan, report: Mapping[str, Any]) -> dict[str, A
     return {
         "status": "calibration_failed",
         "run_id": plan.run_id,
-        "out_dir": str(plan.out_dir),
+        "out_dir": display_path(plan.out_dir),
         "judge_model": plan.judge.spec,
         "calibration": dict(report),
         "hint": "the judge passed a corrupted action or failed a recorded one, so its "
@@ -849,8 +910,8 @@ def replay_result(
     publication = _publication(plan, outcome)
     if errors:
         hint = (
-            f"{errors} case(s) ended in an error, left out of every rate (see results.jsonl "
-            "in out_dir); run next_command to retry them"
+            f"{errors} case(s) ended in an error, left out of every rate (see the file "
+            "files.results names); run next_command to retry them"
         )
         too_long = sum(
             int(target.get("errors_too_long", 0)) for target in summary["targets"].values()
@@ -872,7 +933,7 @@ def replay_result(
         warnings.append(
             f"{no_verdict} judge answer(s) held no verdict (unparseable, cut off at the "
             "judge's max_tokens, or refused by the judge's provider) and count as failures; "
-            "see judge_no_verdict per target"
+            "see judge_no_verdict per target in the file files.summary names"
         )
     warnings.extend(str(warning) for warning in publication.get("warnings") or [])
     if publication["status"] == "skipped":
@@ -893,7 +954,7 @@ def replay_result(
         {
             "status": status,
             "run_id": plan.run_id,
-            "out_dir": str(outcome.out_dir),
+            "out_dir": display_path(outcome.out_dir),
             "judge_model": plan.judge.spec,
             "summary": summary,
             "pending": outcome.pending,
@@ -1046,7 +1107,7 @@ class EvaluateAfterTraining:
             self.outcome = {
                 "status": "failed",
                 "error": error_json(exc),
-                "out_dir": str(self.plan.out_dir),
+                "out_dir": display_path(self.plan.out_dir),
                 "next_command": next_command,
             }
             raise
@@ -1110,14 +1171,14 @@ class EvaluateAfterTraining:
 def finished_result(run: RunDir) -> TrainResult:
     """The training result of a completed or cancelled run (:data:`FINISHED_PHASES`).
 
-    Raises :class:`UsageError` for another phase. A cancelled run that finished no epoch has
+    Raises :class:`WrongPhase` for another phase. A cancelled run that finished no epoch has
     nothing to evaluate either, which
     :func:`~pup_finetune.evaluation.targets.best_training_checkpoint` refuses.
     """
     state = run.load_state()
     if state.phase not in FINISHED_PHASES:
-        raise UsageError(
-            f"the run in {run.path} is {state.phase}, not completed or cancelled, so there is "
+        raise WrongPhase(
+            f"the run in {display_path(run.path)} is {state.phase}, not completed or cancelled, so there is "
             "nothing to evaluate yet",
             hint=f"see `pup finetune status {_q(run.path)}`",
         )
@@ -1131,8 +1192,9 @@ def _check_run_inputs(run: RunDir, manifest: Mapping[str, Any], dataset: Dataset
     """The dataset must hold the rows the run trained on, so the test split stays held out."""
     dataset.settings()  # a clear error when it is not a dataset directory any more
     if dataset_content_hash(dataset) != manifest.get("dataset_sha256"):
-        raise StateError(
-            f"the dataset in {dataset.path} changed since the run in {run.path} was trained, "
+        raise SettingsConflict(
+            f"the dataset in {display_path(dataset.path)} changed since the run in "
+            f"{display_path(run.path)} was trained, "
             "so its test split may no longer be held out",
             hint="restore the dataset the run trained on, or train a new run",
         )
@@ -1142,8 +1204,8 @@ def _check_renderer(run: RunDir, manifest: Mapping[str, Any], provider: Provider
     provider.validate_options(run.spec().provider_options)
     profile = run.profile()
     if provider.renderer(profile).identity() != manifest.get("rendering"):
-        raise StateError(
-            f"the {profile.alias} renderer changed since the run in {run.path} was trained, "
+        raise SettingsConflict(
+            f"the {profile.alias} renderer changed since the run in {display_path(run.path)} was trained, "
             "so the tuned model would be prompted differently from how it learned",
             hint="evaluate with the version of pup-finetune the run was trained with",
         )
@@ -1163,7 +1225,7 @@ class StandaloneEvaluation:
     def preview(self) -> dict[str, Any]:
         tuned = f"epoch {self.result.best_epoch} of run {self.plan.run_id} ({self.training.name})"
         preview = self.plan.preview(tuned=tuned, tuned_checkpoint=self.training)
-        preview["run_dir"] = str(self.plan.run_dir)
+        preview["run_dir"] = display_path(self.plan.run_dir)
         return preview
 
     def execute(self) -> dict[str, Any]:
@@ -1183,9 +1245,10 @@ class StandaloneEvaluation:
                 with cancel_on_signals(cancel):
                     return self._replay(client, cancel, report)
             except KeyboardInterrupt:
-                raise FinetuneError(
-                    f"evaluation stopped at once (Ctrl-C); what finished is kept in {plan.out_dir}",
-                    hint=f"continue it with `{shlex.join(plan.evaluate_command())}`",
+                raise Interrupted(
+                    f"evaluation stopped at once (Ctrl-C); what finished is kept in {display_path(plan.out_dir)}",
+                    hint=f"preview what is left with `{shlex.join(plan.evaluate_command())}`; "
+                    "its next_command continues it",
                 ) from None
 
     def _replay(
@@ -1196,7 +1259,9 @@ class StandaloneEvaluation:
 
         plan = self.plan
         if remaining_work(EvalDir(plan.out_dir), plan.cases)["generate"] == 0:
-            info(f"nothing left to generate in {plan.out_dir}: judging and summarizing only")
+            info(
+                f"nothing left to generate in {display_path(plan.out_dir)}: judging and summarizing only"
+            )
             outcome = replay(plan, {}, client, self.training, cancel=cancel)
             return replay_result(plan, outcome, calibration=report, tuned_sampler=None)
         info(

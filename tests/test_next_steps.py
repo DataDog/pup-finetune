@@ -18,7 +18,10 @@ from pup_finetune.next_steps import command, problems, step, template
 
 def test_command_quotes_every_word() -> None:
     assert command("dataset", "show", Path("my ds")) == "pup finetune dataset show 'my ds'"
-    assert command("dataset", "sample", "ds", "--n", 20) == "pup finetune dataset sample ds --n 20"
+    assert (
+        command("dataset", "sample", "ds", "--count", 20)
+        == "pup finetune dataset sample ds --count 20"
+    )
 
 
 def test_template_leaves_only_placeholders_unquoted() -> None:

@@ -23,6 +23,7 @@ from pup_finetune.cli import app
 from pup_finetune.cli import dataset as dataset_cli
 from pup_finetune.datadog.pup import Pup
 from pup_finetune.datadog.spans import EXPORT_PATH
+from pup_finetune.display import display_path
 from tests.fakes.llmobs import FakeExportApi, fixture_pages, page, span_item
 from tests.fakes.pup import FakePup
 
@@ -307,7 +308,8 @@ def test_preview_s_pull_command_runs_as_written(api: FakeExportApi) -> None:
     words = shlex.split(data["next_command"])
     pulled = invoke(*words[3:])
     assert pulled.exit_code == 0, pulled.stderr
-    assert output_json(pulled)["dataset_dir"] == str(Path(words[4]).resolve())
+    # Relative to the current directory, which holds it.
+    assert output_json(pulled)["dataset_dir"] == str(Path(words[4]))
     assert output_json(pulled)["accepted"] == 3
 
 
@@ -452,7 +454,7 @@ def test_pull_end_to_end(api: FakeExportApi, tmp_path: Path) -> None:
     result = pull(target, "--tag", "env:synthetic")
     assert result.exit_code == 0, result.stderr
     data = output_json(result)
-    assert data["dataset_dir"] == str(target.resolve())
+    assert data["dataset_dir"] == display_path(target)
     assert (data["accepted"], data["excluded"]) == (FIXTURE_ROWS, FIXTURE_EXCLUSIONS)
     assert data["excluded_by_code"] == {
         "no_assistant_message": 1,
@@ -464,7 +466,10 @@ def test_pull_end_to_end(api: FakeExportApi, tmp_path: Path) -> None:
     assert data["pull"]["matched_spans"] == 10
     assert data["pull"]["added"] == FIXTURE_ROWS
     assert data["pull"]["pages_fetched"] == 2
-    assert data["next_command"] == f"pup finetune dataset sample {shlex.quote(str(target))} --n 20"
+    assert (
+        data["next_command"]
+        == f"pup finetune dataset sample {shlex.quote(display_path(target))} --count 20"
+    )
     assert data["next_steps"][0]["command"].endswith(" --file <LABELS_FILE>")
     assert "review" in data["hint"]
 
@@ -608,7 +613,8 @@ def test_pulling_with_other_settings_is_rejected(
     assert pull(target).exit_code == 0
     requests = len(api.requests)
     result = pull(target, *changed)
-    assert result.exit_code == 1
+    assert result.exit_code == 2
+    assert "Error [settings_conflict]: " in result.stderr
     assert "settings changed" in result.stderr
     # Rejected before anything was fetched.
     assert len(api.requests) == requests
@@ -629,15 +635,25 @@ def test_pull_into_an_imported_dataset_is_rejected(api: FakeExportApi, tmp_path:
     target = tmp_path / "ds"
     assert invoke("import", str(target), "--file", str(rows)).exit_code == 0
     result = pull(target)
-    assert result.exit_code == 1
-    assert "settings changed" in result.stderr
+    assert result.exit_code == 2
+    # The cause is in the message, not only in the hint.
+    assert result.stderr.startswith(
+        "Error [settings_conflict]: ds was built by `dataset import`; pull into a new DIR\n"
+    )
     assert api.requests == []
 
 
-def test_a_non_ascii_digit_time_is_passed_through_as_text(api: FakeExportApi) -> None:
-    result = preview("--from", "²")
-    assert result.exit_code == 0, result.stderr
-    assert output_json(result)["query"]["filter"]["from"] == "²"
+@pytest.mark.parametrize("bad", ["yesterday", "²", "2026-13-01", "last week"])
+def test_a_time_that_is_no_accepted_form_is_a_usage_error_before_anything_is_frozen(
+    api: FakeExportApi, tmp_path: Path, bad: str
+) -> None:
+    for result in (preview("--from", bad), pull(tmp_path / "ds", "--from", bad)):
+        assert result.exit_code == 2
+        assert result.stderr.startswith(f"Error [usage]: cannot read --from {bad!r}\n")
+        assert "ISO 8601" in result.stderr and "now-<n><unit>" in result.stderr
+        assert "resume" not in result.stderr
+    assert api.requests == []
+    assert not (tmp_path / "ds").exists()  # nothing frozen to poison the directory
 
 
 # --- the time range -------------------------------------------------------------------------
@@ -713,6 +729,6 @@ def test_an_unreadable_relative_time_is_a_usage_error(
 ) -> None:
     for result in (preview("--from", bad), pull(tmp_path / "ds", "--to", bad)):
         assert result.exit_code == 2
-        assert "cannot read the relative time" in result.stderr
+        assert "Error [usage]: cannot read --" in result.stderr
     assert api.requests == []
     assert not (tmp_path / "ds").exists()

@@ -679,7 +679,7 @@ def test_emit_error_redacts_message_and_hint(capsys: pytest.CaptureFixture[str])
     emit_error(UsageError(f"bad key {SECRET}", hint=f"try {SECRET}"), runtime=Runtime())
     captured = capsys.readouterr()
     assert SECRET not in captured.err
-    assert captured.err == "Error: bad key ***\nHint: try ***\n"
+    assert captured.err == "Error [usage]: bad key ***\nHint: try ***\n"
 
 
 @pytest.mark.parametrize("debug", [False, True])
@@ -707,7 +707,7 @@ def test_emit_error_redacts_a_confirmation_preview(capsys: pytest.CaptureFixture
     captured = capsys.readouterr()
     assert SECRET not in captured.err
     assert SECRET not in captured.out
-    assert "Confirmation required: would send ***" in captured.err
+    assert "Would send ***" in captured.err
     assert "Next: pup finetune x --token *** --confirm" in captured.err
     assert "Hint: check ***" in captured.err
     assert '"key": "***"' in captured.out

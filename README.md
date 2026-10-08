@@ -57,15 +57,16 @@ variable instead.
 LLM judges (for `evaluate`, `train --evaluate` and `dataset triage`) run on Fireworks by
 default, with the same key. To judge on Anthropic or OpenAI instead, name the judge with its
 provider's prefix, `anthropic/<model>` or `openai/<model>` (a bare
-`accounts/<account>/models/<model>` stays Fireworks), and configure that provider's key the
-same way:
+`accounts/<account>/models/<model>` stays Fireworks, and `deepseek-v4p1-flash` and
+`glm-5p3-flash` are short for the two default Fireworks judges), and configure that
+provider's key the same way:
 
 ```sh
 pup finetune auth login anthropic    # or set ANTHROPIC_API_KEY
 pup finetune auth login openai       # or set OPENAI_API_KEY
 pup finetune evaluate ./run --judge-model anthropic/claude-opus-5-5
 pup finetune dataset triage ./ds --rubric rubric.md \
-  --judges accounts/fireworks/models/deepseek-v4p1-flash,openai/gpt-6-astra
+  --judges deepseek-v4p1-flash,openai/gpt-6-astra
 ```
 
 Anthropic judges use the official Anthropic SDK, an optional extra: `uv sync --all-extras`
@@ -99,7 +100,7 @@ Review a sample and record which rows to keep. `labels.jsonl` holds one
 a row:
 
 ```sh
-pup finetune dataset sample ./ds --n 20
+pup finetune dataset sample ./ds --count 20
 pup finetune dataset label ./ds --file labels.jsonl
 ```
 
@@ -124,7 +125,7 @@ pup finetune train --provider fireworks --model qwen3p8-27b --dataset ./ds --run
 pup finetune status ./run --watch
 ```
 
-The watch prints a progress line to stderr (`epoch 3/5 step 21/35 loss 1.10 val 1.35 (best e2)
+The watch prints a progress line to stderr (`epoch 3/5 step 21/35 loss 1.100 val 1.350 (best epoch 2)
 4m12s elapsed, eta ~6m`) until training ends, then the status. Every command ends its stderr
 with the result's warnings and a short summary of the outcome (one line when stderr is not a
 terminal; `PUP_FINETUNE_QUIET=1` turns the summary off). Ctrl-C stops only the watch:
@@ -133,6 +134,9 @@ default under a coding agent); it then exits `0` with `watch_timed_out: true`.
 
 If the run is interrupted, `pup finetune resume ./run --confirm` continues it from its last
 checkpoint, and `pup finetune cancel ./run --confirm` stops it while keeping the best epoch.
+Results print what decides the next step (each epoch's losses, the best epoch, the promoted
+model); `./run/result.json` keeps every checkpoint. Add `pup --output table` before `finetune`
+for a table of a list, such as `pup --output table finetune models list --provider fireworks`.
 
 Compare the tuned model with the base model on the test split:
 
@@ -141,10 +145,21 @@ pup finetune evaluate ./run
 pup finetune evaluate ./run --confirm
 ```
 
-The result reports pass rates per model, the tuned-minus-base difference with a 95%
-confidence interval, and the IDs of the two Agent Observability experiments it published.
-Replay measures how closely each model matches the recorded behavior, not whether the task
-succeeded.
+The result leads with its `headline`, and the files it names under `files` hold the rest:
+
+```json
+"headline": {
+  "judge_pass_rate": {"base": 0.0, "tuned": 0.25, "delta": 0.25, "ci95": [0.0, 0.5]},
+  "paired": {"wins": 1, "regressions": 0, "ties": 3},
+  "cases": 4,
+  "trajectories": 2
+},
+"files": {"summary": "run/eval/summary.json", "results": "run/eval/results.jsonl"}
+```
+
+It also reports each tool-call metric per model and the IDs of the two Agent Observability
+experiments it published. Replay measures how closely each model matches the recorded
+behavior, not whether the task succeeded.
 
 Deploy the tuned model, and undeploy it when you're done:
 
@@ -192,7 +207,8 @@ Datadog or your disk only.
 
 Set `PUP_READ_ONLY=true` (or run `pup --read-only`) to refuse remote writes: `--confirm` on
 `train`, `resume`, `evaluate`, `dataset push`, `deploy` and `undeploy` is refused, while their
-previews still run and say so (`read_only`). Any value but `0`, `false`, `no`, `off` or empty
+previews still run and say so (`read_only`); a development run on the offline `fake` provider
+(and judge) is allowed, since nothing leaves the machine. Any value but `0`, `false`, `no`, `off` or empty
 counts as read-only, so `PUP_READ_ONLY=yes` is read-only too. Read-only mode does not stop
 data from leaving: `dataset triage` writes nothing to Datadog, so it is still allowed and still
 sends rows to the provider.

@@ -13,19 +13,36 @@ from typing import Annotated, Any
 import typer
 
 from pup_finetune.cli._common import CommandResult, get_runtime, run_command
+from pup_finetune.cli._presentation import SET_UP, CommandDoc, Safety, group
 from pup_finetune.errors import FinetuneError
 from pup_finetune.providers import get_provider
 from pup_finetune.providers.base import ModelProfile, Provider
 from pup_finetune.redaction import redact
 
-models_app = typer.Typer(
-    name="models",
-    short_help="List the models a provider can fine-tune.",
-    help=(
-        "List the model profiles a provider can fine-tune. Read-only, so it is allowed with "
-        "PUP_READ_ONLY set."
+models_app = group(
+    "models",
+    short="List the models a provider can fine-tune.",
+    description="List the model profiles a provider can fine-tune.",
+)
+
+LIST_DOC = CommandDoc(
+    path="models list",
+    short="List a provider's model profiles.",
+    description=(
+        "List a provider's model profiles: alias, provider model, renderer, pinned "
+        "tokenizer, context length and default LoRA rank; this needs no API key. With "
+        "--check, also asks the provider whether each model can be fine-tuned now, and "
+        "exits 1 when any cannot."
     ),
-    no_args_is_help=True,
+    examples=(
+        "pup finetune models list --provider fireworks",
+        "pup finetune models list --provider fireworks --check",
+    ),
+    safety=Safety(
+        data="--check makes read-only provider calls",
+        recipients="nowhere (--check: read-only calls to the provider)",
+        without="lists the profiles",
+    ),
 )
 
 
@@ -54,24 +71,18 @@ def _preflight(provider: Provider, profile: ModelProfile) -> dict[str, Any]:
     return {"ok": True}
 
 
-@models_app.command(
-    "list",
-    short_help="List a provider's model profiles.",
-    help=(
-        "List a provider's model profiles: alias, provider model, renderer, pinned tokenizer, "
-        "context length and default LoRA rank. Needs no API key. With --check, also asks the "
-        "provider whether each model can be fine-tuned right now (a read-only call that needs "
-        "the provider's API key) and exits 1 when any cannot."
-    ),
-)
+@models_app.command(**LIST_DOC.typer())
 @run_command
 def list_models(
     provider_name: Annotated[
-        str, typer.Option("--provider", help="The training provider.", show_default=False)
+        str,
+        typer.Option(
+            "--provider", metavar="NAME", help="The training provider.", show_default=False
+        ),
     ],
     check: Annotated[
         bool,
-        typer.Option("--check", help="Preflight each model with the provider (read-only)."),
+        typer.Option("--check", help="Preflight each model with the provider (needs its API key)."),
     ] = False,
 ) -> dict[str, Any] | CommandResult:
     provider = get_provider(provider_name, get_runtime())
@@ -91,4 +102,4 @@ def list_models(
 
 def register(app: typer.Typer) -> None:
     """Add the `models` command group to ``app``."""
-    app.add_typer(models_app, name="models")
+    app.add_typer(models_app, name="models", rich_help_panel=SET_UP)

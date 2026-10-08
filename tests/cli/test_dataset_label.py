@@ -143,7 +143,7 @@ def test_label_rejects_unknown_ids(dataset: Path, tmp_path: Path) -> None:
     file = label_file(tmp_path, {"id": FIXTURE_IDS[0], "keep": True}, {"id": "nope", "keep": True})
     result = label(dataset, file)
     assert result.exit_code == 2
-    assert "1 labeled ids are not accepted rows of the dataset: 'nope'" in result.stderr
+    assert "1 labeled id is not an accepted row of the dataset: 'nope'" in result.stderr
     assert result.stdout == ""
     assert not (dataset / "labels.jsonl").exists()
 
@@ -216,7 +216,7 @@ def sample(directory: Path, *extra: str) -> dict[str, Any]:
 
 
 def test_sample_shows_rows_in_brief(dataset: Path) -> None:
-    data = sample(dataset, "--n", "3")
+    data = sample(dataset, "--count", "3")
     assert data["dataset_dir"] == str(dataset.resolve())
     assert (data["split"], data["seed"], data["eligible"]) == ("all", 0, len(FIXTURE_IDS))
     assert len(data["rows"]) == 3
@@ -240,17 +240,17 @@ def test_sample_shows_rows_in_brief(dataset: Path) -> None:
 
 
 def test_sample_is_deterministic_for_a_seed(dataset: Path) -> None:
-    first = sample(dataset, "--n", "4", "--seed", "11")
-    assert sample(dataset, "--n", "4", "--seed", "11") == first
+    first = sample(dataset, "--count", "4", "--seed", "11")
+    assert sample(dataset, "--count", "4", "--seed", "11") == first
     assert (
-        sample(dataset, "--n", "100")["rows"]
-        == sample(dataset, "--n", "100", "--seed", "5")["rows"]
+        sample(dataset, "--count", "100")["rows"]
+        == sample(dataset, "--count", "100", "--seed", "5")["rows"]
     )
 
 
 def test_sample_of_one_split(dataset: Path) -> None:
     train = {row.id for row in DatasetDir(dataset).rows_for_split("train")}
-    data = sample(dataset, "--split", "train", "--n", "100")
+    data = sample(dataset, "--split", "train", "--count", "100")
     assert {row["id"] for row in data["rows"]} == train
     assert {row["split"] for row in data["rows"]} == {"train"}
 
@@ -258,9 +258,9 @@ def test_sample_of_one_split(dataset: Path) -> None:
 def test_sample_hides_dropped_rows_unless_asked(dataset: Path, tmp_path: Path) -> None:
     dropped = FIXTURE_IDS[0]
     output_json(label(dataset, label_file(tmp_path, {"id": dropped, "keep": False, "reason": "x"})))
-    shown = {row["id"] for row in sample(dataset, "--n", "100")["rows"]}
+    shown = {row["id"] for row in sample(dataset, "--count", "100")["rows"]}
     assert dropped not in shown
-    everything = sample(dataset, "--n", "100", "--include-dropped")["rows"]
+    everything = sample(dataset, "--count", "100", "--include-dropped")["rows"]
     assert {row["id"]: row["label"] for row in everything}[dropped] == "drop"
 
 

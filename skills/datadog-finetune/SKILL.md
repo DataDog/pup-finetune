@@ -19,7 +19,8 @@ OpenAI for judges) stay in the environment or the OS keychain.
 - **Results:** Pup wraps each result in its envelope, `{status, data, metadata}`. That
   `status` is Pup's own and always reads `success`, even for a failure or a preview. Read our
   fields (`status`, `warnings`, `next_command`, ...) under `data`, and trust the exit code:
-  `0` done, `1` failed, `2` a usage error or a preview awaiting `--confirm`.
+  `0` done, `1` failed, `2` a mistake to fix in the command or a preview awaiting
+  `--confirm`.
 - **Pup's flags** (`--jq`, `--output`) go before `finetune`: `pup --output yaml finetune
   doctor`. After `finetune` they are refused as unknown options.
 
@@ -28,17 +29,26 @@ OpenAI for judges) stay in the environment or the OS keychain.
 1. **Parse the JSON result.** Every `pup finetune` command prints exactly one JSON document on
    stdout; progress, the warnings and a one-line summary go to stderr (the JSON is the
    source of truth). Read `status`, `warnings`, `hint`, `next_command` and `next_steps`
-   from it. `next_command` runs exactly as written: run it
+   from it. `train`, `status` and `evaluate` print what decides the next step; the full
+   record (checkpoints, per-target detail) is in the files their `files` names. `next_command` runs exactly as written: run it
    instead of rebuilding it (after the user's authorization when it ends in `--confirm`). It
    is `null` when no command can be chosen without the user, for example after a deployment.
    `next_steps` lists alternatives as `{"command", "why"}`; a step's command may hold a
    placeholder such as `<NAME>` or `<LABELS_FILE>`. Fill it in with a real value agreed with
-   the user, and write any file it names first. Exit codes: `0` success, `1` external or
-   runtime failure, `2` usage, validation or a preview that needs `--confirm`.
+   the user, and write any file it names first. Exit codes: `0` success; `2` fix the command
+   or the directory (a usage error, a preview that needs `--confirm`, read-only, the wrong
+   directory, other frozen settings, the wrong phase); `1` something outside failed or local
+   state is broken. A failure prints `Error [<code>]: <message>` and `Hint: ...` on stderr;
+   the Debugging table below keys on that code.
 2. **Preview before you pay or write remotely.** Training, triage, evaluation, dataset pushes,
    deployments and cancels preview by default: they exit `2` with
    `"status": "confirmation_required"`, a `preview` and a `next_command` that adds `--confirm`.
-   Show the user the preview (token counts, calls, what is sent where, what bills) and ask.
+   Present the preview from its JSON, not the stderr card: what runs (`action`), where the
+   data goes (`data_recipients`), what bills (`billing`) and the `settings` it uses, then the
+   exact `next_command`, and wait for the user's yes. Run `next_command` as written: its
+   `--expect <digest>` makes `--confirm` refuse with `Error [settings_conflict]` when the
+   rows or settings changed since the preview; then preview again and show the user what
+   changed.
    **Never add `--confirm` without the user's explicit authorization for that specific
    operation.** An earlier yes covers only the operation it was given for. `PUP_AUTO_APPROVE`,
    Pup's agent mode, `--yes` or a general "go ahead" are not authorization.
@@ -142,7 +152,7 @@ Check:
 The default is to review a sample yourself with the user and record labels:
 
 ```sh
-pup finetune dataset sample <dataset_dir> --n 20
+pup finetune dataset sample <dataset_dir> --count 20
 pup finetune dataset label <dataset_dir> --file labels.jsonl
 ```
 
@@ -158,9 +168,11 @@ serverless models (or to Anthropic or OpenAI for `--judges` entries named
 ```sh
 pup finetune dataset triage --print-template > rubric.md
 pup finetune dataset triage <dataset_dir> --rubric rubric.md --max-rows 20
-pup finetune dataset triage <dataset_dir> --rubric rubric.md --max-rows 20 --confirm
 pup finetune dataset triage <dataset_dir> --rubric rubric.md
 ```
+
+Each triage command previews; after the user's yes, run the preview's `next_command` as
+written (it adds `--expect <digest> --confirm`).
 
 Write the rubric (Task / Keep / Drop / Examples) with the user. A rubric whose Task section
 is still the template's gets a warning, and its `--confirm` is refused (unless
@@ -170,8 +182,9 @@ first:
 
 ```sh
 pup finetune dataset triage <dataset_dir> --rubric rubric.md --agreement
-pup finetune dataset triage <dataset_dir> --rubric rubric.md --agreement --confirm
 ```
+
+Run its preview's `next_command` after the user's yes, as above.
 
 It labels nothing. Show the user `agreement.rate`, `agreement.kappa` and
 `agreement.disagreements_shown`; where their labels are right, sharpen the rubric and measure again
@@ -192,8 +205,10 @@ Check:
 
 ```sh
 pup finetune dataset push <dataset_dir> --name <dataset_name> --project <project>
-pup finetune dataset push <dataset_dir> --name <dataset_name> --project <project> --confirm
 ```
+
+The command previews the push; after the user's yes, run its `next_command` as written (it
+adds `--expect <digest> --confirm`).
 
 The push creates an Agent Observability dataset with one record per kept row and saves the
 receipt, `push.json`, in the dataset directory. Evaluations are published as Agent
@@ -208,10 +223,13 @@ Check:
 ## Step 5: train
 
 ```sh
-pup finetune train --provider fireworks --model qwen3p8-27b --dataset <dataset_dir> --run-dir <run_dir>
-pup finetune train --provider fireworks --model qwen3p8-27b --dataset <dataset_dir> --run-dir <run_dir> --detach --confirm
+pup finetune train --provider fireworks --model qwen3p8-27b --dataset <dataset_dir> --run-dir <run_dir> --detach
 pup finetune status <run_dir> --watch --timeout 90s
 ```
+
+The first command is the preview. After the user's yes, run its `next_command` exactly as
+written: it pins the run and adds `--expect <digest> --confirm`, so a dataset that changed
+since the preview is refused rather than trained on. Never type the `--confirm` yourself.
 
 The preview shows the rendered tokens per split, rows left out (for example
 `exceeds_context`), the tokens per epoch and in total, and where the data goes. Show it to the
@@ -232,10 +250,12 @@ checkpoint. A resume bills training again: show the user its preview and run it 
 step, saves a checkpoint and promotes the best epoch so far.
 
 ```sh
-pup finetune resume <run_dir>
-pup finetune resume <run_dir> --detach --confirm
+pup finetune resume <run_dir> --detach
 pup finetune cancel <run_dir> --confirm
 ```
+
+`resume <run_dir> --detach` previews where it resumes; after the user's yes, run its
+`next_command` as written (it adds `--expect <digest> --confirm`).
 
 Check:
 
@@ -267,10 +287,13 @@ to continue an evaluation that stopped.
 
 Report to the user:
 
-- the summary: the judge pass rate and the tool-call metrics per target (`summary.targets`);
-- the delta, `summary.tuned_minus_base.judge_pass_rate`, with its 95% interval
-  (`summary.tuned_minus_base.ci95`) and the number of cases and trajectories behind it. An
-  interval that includes 0 is not a clear difference;
+- the judge pass rate per target (`headline.judge_pass_rate.base` and `.tuned`) and the
+  tool-call metrics (`metrics.<name>.base` and `.tuned`);
+- the delta, `headline.judge_pass_rate.delta`, with its 95% interval
+  (`headline.judge_pass_rate.ci95`), the paired wins and regressions (`headline.paired`) and
+  the number of cases and trajectories behind it (`headline.cases`,
+  `headline.trajectories`). An interval that includes 0 is not a clear difference. The rest
+  (per-trajectory agreement, tokens, errors by stage) is in the file `files.summary` names;
 - the Agent Observability experiment ids (`publication.experiments.base.experiment_id` and
   `publication.experiments.tuned.experiment_id`);
 - the caveat: replay measures agreement with the recorded behavior, not task success.
@@ -314,20 +337,44 @@ Check:
 
 ## Debugging
 
+Errors read `Error [<code>]: <message>`. The codes, with their exit codes:
+
+| Code | Exit | Meaning |
+| --- | --- | --- |
+| `usage` | `2` | a flag, argument or input is wrong; the message says which |
+| `confirmation_required` | `2` | a preview: nothing was run; stdout holds it, with the `--confirm` command |
+| `read_only` | `2` | a paid run or a remote write while PUP_READ_ONLY is set; changing that is the user's call |
+| `not_a_dataset_dir` | `2` | the directory is missing or is not a dataset directory |
+| `not_a_run_dir` | `2` | the directory is missing or is not a training run's |
+| `run_dir_not_empty` | `2` | a new run needs a new or empty directory |
+| `settings_conflict` | `2` | the directory records other settings (pass the same ones, or use a new directory), or what `--confirm` would use changed since its preview (`--expect`): preview again |
+| `wrong_phase` | `2` | the run is not in a phase the command acts on (`status` says which) |
+| `lock_busy` | `1` | another pup-finetune process is using the directory; wait for it |
+| `provider_auth` | `1` | the provider rejected the API key; log in again |
+| `provider_capacity` | `1` | the provider has no capacity or quota right now; retry later |
+| `transient` | `1` | a timeout or a dropped connection; retrying is safe |
+| `external` | `1` | pup, Datadog or a provider failed |
+| `state` | `1` | a local file is unreadable or inconsistent |
+| `interrupted` | `1` | Ctrl-C or SIGTERM stopped the command; rerun or resume it to continue |
+| `unexpected` | `1` | a bug; PUP_FINETUNE_DEBUG=1 prints the traceback |
+
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | `doctor` fails `datadog_auth` | Pup is not signed in, or signed in to another site | Ask the user to run `pup auth login`, then rerun `pup finetune doctor`. |
-| `auth status` shows no `fireworks` key, or a call fails with HTTP 401 or 403 | No key, or a revoked key | Ask the user to run `pup finetune auth login fireworks` (or `anthropic` / `openai`, for a judge there) in their own terminal. Never ask for the key in chat. |
-| A judge answer is `refused` (`judge_no_verdict_by_error`, or a triage failure `refused`) | The judge's provider declined to answer that case | It counts as no verdict, not a pass or a keep. Tell the user; if many cases are refused, pick another judge with them. |
+| `auth status` shows no `fireworks` key, or `Error [provider_auth]` (HTTP 401 or 403) | No key, or a revoked key | Ask the user to run `pup finetune auth login fireworks` (or `anthropic` / `openai`, for a judge there) in their own terminal. Never ask for the key in chat. |
+| A judge answer is `refused` (`judge_no_verdict_by_error` in the file `files.summary` names, or a triage failure `refused`) | The judge's provider declined to answer that case | It counts as no verdict, not a pass or a keep. Tell the user; if many cases are refused, pick another judge with them. |
 | Triage reports `too_long` rows | A row is longer than a judge's context window; it was dropped, never truncated | Tell the user; to review such rows, pick judges with a larger context window with them. |
 | `dataset preview` matches no spans | Wrong ml_app, filter or time range | Go back to step 1 and build the filter only from values seen in real spans; widen `--from`. |
 | Most rows are excluded | Spans that cannot train, by code | Read `excluded_by_code` in `dataset show`; `span_error` rows come back only with `--include-errors`, after the user agrees. |
-| `ReadOnlyError`: PUP_READ_ONLY is set | Read-only mode blocks remote writes | Tell the user; changing `PUP_READ_ONLY` is their call. Every preview and local command still works; only `--confirm` on a remote write is refused. |
-| A different `--from`, filter or seed is refused | Settings are frozen per directory | Use a new dataset directory. |
-| `ProviderCapacityError` or HTTP 429 | The provider has no capacity right now | Wait and retry later; read the hint for whether anything is still running. |
-| `status` shows `worker.stale` or a run that is not running | The worker died or hung | Read `<run_dir>/worker.log`; `cancel` a live but stale worker, then preview `resume <run_dir>` and run `resume <run_dir> --detach --confirm` after authorization. |
-| `resume` is refused | The run already finished, or it is still running | Check `status`; resume only an `interrupted`, `failed` or `cancelled` run. |
-| `evaluate` fails with an identity mismatch | The evaluation directory holds results for other settings | Evaluate into a new `--out-dir`. |
+| `Error [read_only]` | Read-only mode blocks remote writes | Tell the user; changing `PUP_READ_ONLY` is their call. Every preview and local command still works; only `--confirm` on a paid run or a remote write is refused. |
+| `Error [settings_conflict]` from a dataset command | Settings are frozen per directory: a different `--from`, filter or seed | Use a new dataset directory, or pass the recorded settings the hint names. |
+| `Error [settings_conflict]: ... changed since the preview` | The rows, records or settings changed between the preview and `--confirm` (`--expect` caught it) | Run the preview command the hint names, show the user the new preview, and confirm only after their yes. |
+| `Error [not_a_run_dir]`, `[not_a_dataset_dir]` or `[run_dir_not_empty]` | The wrong directory, or a run directory that is already used | Follow the hint: run commands take the run directory, dataset commands the dataset one, and `train` a new `--run-dir`. |
+| `Error [provider_capacity]` (HTTP 429) or `Error [transient]` | The provider has no capacity right now | Wait and retry later; read the hint for whether anything is still running. |
+| `status` shows `worker.state` `stale` or `exited` while the run is `training` | The worker died or hung | Read the worker's log (`worker.log`); `cancel` a live but stale worker, then preview `resume <run_dir> --detach` and, after authorization, run the preview's `next_command` as written. |
+| `Error [wrong_phase]` (`resume`, `evaluate`, `deploy`, `cancel`) | The run already finished, is still training, or has no deployment | Check `status`; resume only an `interrupted`, `failed` or `cancelled` run, and evaluate or deploy one that has finished. |
+| `Error [settings_conflict]` from `evaluate` | The evaluation directory holds results for other settings | Evaluate into a new `--out-dir`. |
+| `Error [interrupted]` | Ctrl-C or SIGTERM stopped the command; what finished is kept | Rerun the same command (or `resume` the run) after the user's authorization. |
 | The judge fails calibration | The judge model cannot tell references from corrupted answers | Pick another `--judge-model` with the user; skip calibration only if the user accepts the risk. |
 | The evaluation was not published | The dataset has no push receipt (`push.json`), or the push did not cover the test split | `next_command` is `null`; follow `next_steps`: run `dataset push` (step 4) with authorization, then rerun the evaluation with `--confirm`, which reuses every finished result (a complete evaluation makes no new model calls) and publishes it. |
 | `deploy` times out, or the smoke test fails | The deployment did not serve in time, or did not answer | `deployment.json` records it and it may still bill: run `undeploy <run_dir> --confirm`. A run has one deployment at a time, so deploy again (with a longer `--timeout-minutes`) only after the undeploy and the user's authorization. |

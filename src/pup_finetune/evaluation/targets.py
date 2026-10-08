@@ -25,7 +25,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Final
 
-from pup_finetune.errors import StateError
+from pup_finetune.errors import WrongPhase
 from pup_finetune.output import info
 from pup_finetune.providers.base import CheckpointRef, Provider, Sampler, TrainingSession
 from pup_finetune.redaction import redact
@@ -56,7 +56,7 @@ class EvalTargets:
 def best_training_checkpoint(result: TrainResult) -> CheckpointRef:
     """The best epoch's training checkpoint: the weights the tuned target evaluates."""
     if result.best_epoch is None or result.best_training_ckpt is None:
-        raise StateError(
+        raise WrongPhase(
             "the run has no best epoch with a training checkpoint to evaluate",
             hint="evaluate a run that finished at least one epoch",
         )

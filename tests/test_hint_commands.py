@@ -107,7 +107,9 @@ def _parse_problem(command: str) -> str | None:
         except Exception as exc:
             kind = type(exc).__name__
             message = str(getattr(exc, "message", exc))
-            if kind == "MissingParameter" or "does not exist" in message:
+            # Click's own, or ours naming every missing parameter (raised from Click's).
+            missing = "MissingParameter" in (kind, type(exc.__cause__).__name__)
+            if missing or "does not exist" in message:
                 return None
             return f"{kind}: {message}"
     if words:
@@ -117,7 +119,7 @@ def _parse_problem(command: str) -> str | None:
 
 def test_the_scan_finds_the_hints() -> None:
     found = [command for _, _, command in commands()]
-    assert sum(command.startswith("pup finetune ") for command in found) >= 25
+    assert sum(command.startswith("pup finetune ") for command in found) >= 20
     assert any(command.startswith("uv ") for command in found)
 
 

@@ -30,6 +30,7 @@ from pup_finetune.cli import deploy as deploy_module
 from pup_finetune.cli import train as train_module
 from pup_finetune.providers.base import Provider
 from pup_finetune.providers.baseten import client
+from pup_finetune.runs import RunDir
 from pup_finetune.runtime import Runtime
 from pup_finetune.training import inputs as inputs_module
 from tests.fakes.baseten import FakeLoops
@@ -105,7 +106,8 @@ def test_the_preview_asks_baseten_nothing_paid(
     data = output(result)
     preview = data["preview"]
     assert (preview["provider"], preview["model"]) == ("baseten", "qwen3p5-9b")
-    assert preview["profile"]["renderer"] == "qwen3_5"
+    # The preview shows what identifies the model; run.json records the whole profile.
+    assert set(preview["profile"]) == {"alias", "base_model", "max_seq_len"}
     assert preview["examples"]["train"] > 0
     assert preview["data_destination"] == "training data is sent to baseten"
     assert shlex.split(data["next_command"])[-1] == "--confirm"
@@ -120,9 +122,10 @@ def test_a_confirmed_run_trains_leaves_nothing_running_and_cannot_deploy_yet(
     result = train(dataset, run_dir, "--confirm")
     assert result.exit_code == 0, result.stderr
     data = output(result)
-    assert data["phase"] == "completed"
+    assert data["status"] == "completed"
     assert data["promoted_model"] is None
-    checkpoint = data["deployable_checkpoint"]
+    checkpoint = (RunDir(run_dir).read_result() or {})["deployable_checkpoint"]
+    assert data["deployable_checkpoint"] == checkpoint["name"]
     assert checkpoint["kind"] == "sampler"
     assert checkpoint["uri"].startswith("bt://loops:run1/sampler_weights/")
     assert loops.runs

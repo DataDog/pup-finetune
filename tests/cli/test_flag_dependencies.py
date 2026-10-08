@@ -74,7 +74,8 @@ def _command(*path: str) -> Any:
 
 EVAL_FLAGS: list[tuple[str, ...]] = [
     ("--eval-out-dir", "x"),
-    ("--eval-max-cases-per-trajectory", "3"),
+    ("--eval-max-cases", "3"),
+    ("--eval-max-cases-per-trajectory", "3"),  # the old name, hidden
     ("--eval-judge-model", "anthropic/claude-opus-5-5"),
     ("--eval-concurrency", "8"),
     ("--eval-max-tokens", "256"),
@@ -135,7 +136,7 @@ def test_the_spend_reserve_needs_a_spend_cap(dataset: Path, tmp_path: Path) -> N
         )
     )
     assert capped.exit_code == 2, capped.stderr
-    assert output(capped)["preview"]["spec"]["spend_reserve_fraction"] == 0.2
+    assert output(capped)["preview"]["settings"]["spend_reserve_fraction"] == 0.2
 
 
 def test_a_falsy_enabler_value_still_counts_as_given(dataset: Path, tmp_path: Path) -> None:
@@ -183,8 +184,15 @@ def test_each_dependent_option_s_help_names_what_it_needs(
     params = {param.name: param for param in command.params}
     for name, enabler in needs.items():
         assert name in params and enabler in params, name
-        help_text = getattr(params[name], "help", None) or ""
-        assert help_text.startswith(f"With {flag_name(command, enabler)}:"), (name, help_text)
+        param = params[name]
+        needed = flag_name(command, enabler)
+        help_text = getattr(param, "help", None) or ""
+        panel = getattr(param, "rich_help_panel", None) or ""
+        if getattr(param, "hidden", False):
+            assert help_text.startswith(f"With {needed}:"), (name, help_text)
+        else:
+            # Its help, or the title of the panel it is listed in, names what it needs.
+            assert needed in help_text or f"(with {needed})" in panel, (name, help_text, panel)
 
 
 @pytest.mark.parametrize(

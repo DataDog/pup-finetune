@@ -26,14 +26,21 @@ from pup_finetune.cli import (
     triage,
 )
 from pup_finetune.cli._common import PROG_NAME, run_app
+from pup_finetune.cli._presentation import FLOW, Group
 
 app = typer.Typer(
     name=PROG_NAME,
+    cls=Group,
     help=(
         "Curate a dataset from your Datadog Agent Observability traces, fine-tune an "
-        "open-weight model, evaluate it against the base model, and deploy it. "
-        "Runs as the pup extension `pup finetune`."
+        "open-weight model on it, evaluate it against the base model, and deploy it. "
+        f"Runs as the pup extension `pup finetune`.\n\nFlow: {FLOW}"
     ),
+    epilog=(
+        "Examples:\n  pup finetune doctor\n  pup finetune help dataset pull\n\n"
+        "Paid and remote-changing commands only preview without --confirm."
+    ),
+    context_settings={"help_option_names": ["-h", "--help"]},
     no_args_is_help=True,
     add_completion=False,
     pretty_exceptions_enable=False,

@@ -55,6 +55,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Any
 
+from pup_finetune.approval import Part
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.jsonl import to_provider_dict
 from pup_finetune.data.schema import TrainingRow
@@ -65,7 +66,13 @@ from pup_finetune.datadog.datasets import (
     RecordsListTruncated,
 )
 from pup_finetune.datadog.pup import Pup
-from pup_finetune.errors import ExternalError, FinetuneError, StateError, UsageError
+from pup_finetune.errors import (
+    ExternalError,
+    Interrupted,
+    SettingsConflict,
+    StateError,
+    UsageError,
+)
 from pup_finetune.storage import (
     DirectoryLock,
     atomic_write_json,
@@ -360,6 +367,21 @@ class PushPlan:
             counts[item.split] += 1
         return counts
 
+    def approval_parts(self) -> list[Part]:
+        """What approving this push pins (see :mod:`pup_finetune.approval`): the records to
+        send, and where they go."""
+        records = [[item.row_id, item.split, record_digest(item.record)] for item in self.pending]
+        target = {
+            "project": self.project,
+            "dataset_name": self.dataset_name,
+            "dataset_id": self.dataset_id,
+            "in_flight": list(self.in_flight),
+        }
+        return [
+            Part("the records to push", records, now=f"{len(self.pending)} records"),
+            Part("the target dataset", target),
+        ]
+
     def require_rows(self) -> None:
         """Raise :class:`UsageError` when the plan is :attr:`empty`."""
         if self.empty:
@@ -427,7 +449,7 @@ def plan_push(dataset: DatasetDir, *, project: str, name: str) -> PushPlan:
     )
 
 
-class PushTerminated(FinetuneError):
+class PushTerminated(Interrupted):
     """The push stopped because the process received SIGTERM; rerun it to resume."""
 
 
@@ -440,13 +462,16 @@ def push_dataset(
     batch_size: int = RECORDS_BATCH_SIZE,
     progress: Progress | None = None,
     clock: Clock = _utc_now,
+    approve: Callable[[PushPlan], None] | None = None,
 ) -> PushReceipt:
     """Push the kept rows of ``dataset`` to dataset ``name`` in ``project``.
 
     Holds the directory lock throughout, so labels cannot change mid-push and two pushes of
     one directory cannot race. SIGTERM stops it like Ctrl-C, removing the batch file. See the
     module docstring for resuming and the receipt. ``clock`` gives the time batches are sent
-    and pushed at.
+    and pushed at. ``approve`` is called with the plan made under the lock, before anything
+    is sent, and refuses by raising (``--expect`` checks the preview's digest against it, so
+    a row relabeled after the preview is never pushed unseen).
     """
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
@@ -455,6 +480,8 @@ def push_dataset(
     with _sigterm_raises(), DirectoryLock(dataset.path):
         plan = plan_push(dataset, project=project, name=name)
         plan.require_rows()
+        if approve is not None:
+            approve(plan)
         if not plan.needs_remote:
             return plan.receipt()
         api = LLMObsDatasets(pup)
@@ -707,12 +734,12 @@ def _check_state(
 ) -> None:
     path = push_path(dataset)
     if state.settings_hash != digest:
-        raise StateError(
+        raise SettingsConflict(
             f"{path} was written for a dataset directory with other settings",
             hint=f"move {path} aside to push this directory as a new dataset",
         )
     if state.project != project or state.dataset_name != name:
-        raise UsageError(
+        raise SettingsConflict(
             f"{dataset.path} was pushed to dataset {state.dataset_name!r} in project "
             f"{state.project!r}, not {name!r} in {project!r}",
             hint=(

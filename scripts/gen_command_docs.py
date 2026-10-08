@@ -9,10 +9,12 @@
 
 Usage: uv run python scripts/gen_command_docs.py [--check]
 
-Writes ``docs/commands.md`` from the Typer app (every visible command, its help, arguments
-and options) and the exclusion-code table between the markers in ``docs/data-format.md``
-from ``pup_finetune.data.exclusions``. With ``--check``, writes nothing and exits 1 when
-either file is out of date.
+Writes ``docs/commands.md`` from the Typer app (every visible command, its full help,
+arguments, options, examples and safety, the safety table built from every command's
+``Safety`` record in ``pup_finetune.cli._presentation``, and the exit-code rule and error
+codes from ``pup_finetune.errors.ERROR_CODES``) and the exclusion-code table between
+the markers in ``docs/data-format.md`` from ``pup_finetune.data.exclusions``. With
+``--check``, writes nothing and exits 1 when either file is out of date.
 
 The output is deterministic: it is built from the commands' parameters, not from rendered
 ``--help`` (which depends on the terminal width, color settings and ``GITHUB_ACTIONS``).
@@ -34,32 +36,8 @@ PROG = "pup finetune"
 EXCLUSIONS_BEGIN = "<!-- BEGIN GENERATED: exclusion codes (scripts/gen_command_docs.py) -->"
 EXCLUSIONS_END = "<!-- END GENERATED: exclusion codes -->"
 
-# Commands in workflow order; any command not listed follows, sorted by name.
-ORDER: tuple[str, ...] = (
-    "doctor",
-    "help",
-    "auth login",
-    "auth status",
-    "auth logout",
-    "models list",
-    "dataset preview",
-    "dataset pull",
-    "dataset import",
-    "dataset show",
-    "dataset sample",
-    "dataset label",
-    "dataset triage",
-    "dataset push",
-    "train",
-    "status",
-    "resume",
-    "cancel",
-    "evaluate",
-    "deploy",
-    "undeploy",
-    "skill show",
-    "skill install",
-)
+_DEFAULT_NOTE = re.compile(r"\s*\[dim\]\\\[default: (?P<default>.*?)\]\[/dim\]")
+"""A default written into an option's help (``_presentation.default_note``)."""
 
 _TYPE_NAMES = {
     "STR": "TEXT",
@@ -82,8 +60,20 @@ def iter_commands(command: Any, ctx: Any, path: tuple[str, ...] = ()) -> Iterato
 
 
 def ordered(commands: Sequence[tuple[str, Any]]) -> list[tuple[str, Any]]:
-    rank = {name: index for index, name in enumerate(ORDER)}
-    return sorted(commands, key=lambda item: (rank.get(item[0], len(ORDER)), item[0]))
+    """``commands`` in workflow order (``COMMAND_ORDER``); any not listed follow, by name."""
+    from pup_finetune.cli._presentation import COMMAND_ORDER
+
+    rank = {name: index for index, name in enumerate(COMMAND_ORDER)}
+    return sorted(commands, key=lambda item: (rank.get(item[0], len(COMMAND_ORDER)), item[0]))
+
+
+def split_default(help_text: str) -> tuple[str, str | None]:
+    """``help_text`` without the default written into it, and that default (or ``None``)."""
+    found = _DEFAULT_NOTE.search(help_text)
+    if found is None:
+        return help_text, None
+    rest = (help_text[: found.start()] + help_text[found.end() :]).strip()
+    return rest, found["default"].replace("\\[", "[")
 
 
 def md(text: str, *, cell: bool = False) -> str:
@@ -107,14 +97,14 @@ def paragraphs(text: str) -> list[str]:
 
 
 def value_of(param: Any) -> str:
-    """What an option takes, e.g. ``INTEGER (x>=1)`` or ``omit|preserve``; empty for flags."""
+    """What an option takes, e.g. ``N (x>=1)`` or ``omit|preserve``; empty for flags."""
     if getattr(param, "is_flag", False):
         return ""
     kind = param.type
-    if param.metavar:
-        value = str(param.metavar)
-    elif hasattr(kind, "choices"):
+    if hasattr(kind, "choices"):
         value = "|".join(str(choice) for choice in kind.choices)
+    elif param.metavar:
+        value = str(param.metavar)
     elif hasattr(kind, "file_okay") and hasattr(kind, "dir_okay"):
         value = "FILE" if not kind.dir_okay else "DIR" if not kind.file_okay else "PATH"
     else:
@@ -122,8 +112,8 @@ def value_of(param: Any) -> str:
         if name.endswith(" RANGE"):
             name = name.removesuffix(" RANGE")
         value = _TYPE_NAMES.get(name, name or "VALUE")
-        if hasattr(kind, "min") and hasattr(kind, "max"):
-            value += f" ({_range(kind)})"
+    if hasattr(kind, "min") and hasattr(kind, "max"):
+        value += f" ({_range(kind)})"
     if param.multiple:
         value += ", repeatable"
     return value
@@ -142,6 +132,9 @@ def _range(kind: Any) -> str:
 def default_of(param: Any) -> str:
     if param.required:
         return "required"
+    written = split_default(param.help or "")[1]
+    if written is not None:
+        return md(written, cell=True)
     if getattr(param, "is_flag", False) or not getattr(param, "show_default", True):
         return ""
     default = param.default
@@ -164,6 +157,8 @@ def usage(name: str, command: Any) -> str:
 
 
 def render_command(name: str, command: Any) -> list[str]:
+    from pup_finetune.cli._presentation import DOCS
+
     lines = [f"## `{PROG} {name}`", ""]
     for paragraph in paragraphs(command.help or command.short_help or ""):
         lines += [md(paragraph), ""]
@@ -175,17 +170,99 @@ def render_command(name: str, command: Any) -> list[str]:
         for param in arguments:
             metavar = str(param.metavar or param.name.upper())
             required = "" if param.required else " Optional."
-            lines.append(f"| `{metavar}` | {md(param.help or '', cell=True)}{required} |")
+            text = md(split_default(param.help or "")[0], cell=True)
+            lines.append(f"| `{metavar}` | {text}{required} |")
         lines.append("")
     if options:
         lines += ["| Option | Value | Default | Description |", "| --- | --- | --- | --- |"]
+        shown_panel = None
         for param in options:
+            panel = getattr(param, "rich_help_panel", None)
+            if panel and panel != shown_panel:  # the option panels of --help, as rows
+                lines.append(f"| **{md(panel, cell=True)}** | | | |")
+                shown_panel = panel
             names = ", ".join(f"`{opt}`" for opt in [*param.opts, *param.secondary_opts])
             value = value_of(param)
             cell = f"`{value}`".replace("|", "\\|") if value else ""
-            help_text = md(param.help or "", cell=True)
+            help_text = md(split_default(param.help or "")[0], cell=True)
             lines.append(f"| {names} | {cell} | {default_of(param)} | {help_text} |")
         lines.append("")
+    doc = DOCS.get(name)
+    if doc is not None:
+        lines += ["Examples:", "", "```sh", *doc.examples, "```", ""]
+        lines += [f"Safety: {md(doc.safety.footer())}.", ""]
+    return lines
+
+
+def render_safety_table(names: Sequence[str]) -> list[str]:
+    """The table of what every command costs and where its data goes."""
+    from pup_finetune.cli._presentation import DOCS
+
+    lines = [
+        "| Command | Without `--confirm` | With `--confirm` | Data goes to | `PUP_READ_ONLY` |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for name in names:
+        doc = DOCS.get(name)
+        if doc is None:
+            continue
+        cells = [md(cell, cell=True) for cell in doc.safety.table_row()]
+        lines.append(f"| `{PROG} {name}` | {' | '.join(cells)} |")
+    return lines
+
+
+def render_errors() -> list[str]:
+    """The exit-code rule, the error line and its codes, and the outputs that are not JSON."""
+    from pup_finetune.errors import ERROR_CODES
+
+    lines = [
+        "## Exit codes and errors",
+        "",
+        "- `0`: success.",
+        "- `2`: you can fix it by changing the command or the directory: a usage or "
+        "validation error, a preview that needs `--confirm`, a paid run or a remote write "
+        "while `PUP_READ_ONLY` is set, a wrong, missing or non-empty directory, a directory that "
+        "records other settings, or a run in the wrong phase (still training, not completed, "
+        "already deployed).",
+        "- `1`: something outside failed or local state is broken: pup, Datadog or a "
+        "provider failed, a local file is unreadable or inconsistent, another process holds "
+        "the directory's lock, or Ctrl-C or SIGTERM stopped the command.",
+        "",
+        "A failure leaves stdout empty and prints two lines on stderr: "
+        "`Error [<code>]: <message>`, then `Hint: <what to do>` when there is a hint, for "
+        "example `Error [run_dir_not_empty]: run1 already holds run ft-... (completed)`. "
+        "The code is stable and listed below; the message is for people and may change. "
+        "Usage errors that Click finds (an unknown command or option, a missing or malformed "
+        "value) print the same way with the code `usage`, name every missing required option "
+        "at once (`Error [usage]: train needs --dataset and --model`), keep Click's "
+        "suggestions (`Did you mean ...`, `Possible options: ...`) and point to "
+        f"`{PROG} help <command>`. A preview is not a failure: it prints its JSON on stdout "
+        '(`"status": "confirmation_required"`, with `next_command`), then on stderr a card '
+        "of at most seven lines generated from it (`Preview only, nothing was run: ...`, then "
+        "the data, settings, recipients, who bills it and the cost; a longer card drops the "
+        "settings first, never the cost or a refusal), its warnings and `Next: <command>`, and "
+        "exits `2`; its code is `confirmation_required`. The previews of `train`, `resume`, "
+        "`dataset triage` and `dataset push` carry an `inputs_digest`, and their "
+        "`next_command` passes it back as `--expect <digest>`: with `--confirm`, the command "
+        "refuses with `settings_conflict` when what it would use changed since the preview "
+        "(for example a row labeled in between); without `--expect`, `--confirm` runs as "
+        "the inputs are now. A run records the error that stopped it, with the same `code`, "
+        "under `error` in `state.json`.",
+        "",
+        "| Code | Exit | Meaning |",
+        "| --- | --- | --- |",
+    ]
+    for code, (exit_code, meaning) in ERROR_CODES.items():
+        lines.append(f"| `{code}` | `{exit_code}` | {md(meaning, cell=True)} |")
+    lines += [
+        "",
+        "These print text on stdout instead of one JSON document: `help` (alone or with a "
+        "command), `--help` or `-h` after any command, `--version`, "
+        "`dataset triage --print-template`, and a group run without a command "
+        f"(`{PROG}`, `{PROG} dataset`, `{PROG} auth`, ...), which prints the group's help "
+        "and exits `2`.",
+        "",
+    ]
     return lines
 
 
@@ -215,21 +292,20 @@ def render_commands() -> str:
         f"Every `{PROG}` command, with its arguments and options. `{PROG}` builds a training "
         "dataset from your Datadog Agent Observability traces, fine-tunes a model on it, "
         "evaluates it and deploys it. Each command prints one JSON "
-        "result on stdout and its progress on stderr, and exits `0` on success, `1` on an "
-        "external or runtime failure and `2` on a usage or validation error or a preview that "
-        "needs `--confirm`. Paid and remote-changing commands preview unless you pass "
-        "`--confirm`. A result's `next_command` is a command that runs exactly as written "
+        "result on stdout and its progress on stderr; "
+        "[Exit codes and errors](#exit-codes-and-errors) has the exit-code rule, the error "
+        "codes and the few outputs that are not JSON. Paid and remote-changing commands "
+        "preview unless you pass `--confirm`. A result's `next_command` is a command that runs exactly as written "
         "(after your yes, when it ends in `--confirm`), or `null`; it never holds a "
         "placeholder or `...`. Alternatives, and commands that need a value only you can "
         'supply, are in `next_steps`, a list of `{"command", "why"}` whose commands mark '
         "such a value as `<UPPER_CASE>`, for example `--name <NAME>`. "
         "Run `pup finetune help <command>` for the same text in your terminal "
-        "(under a coding agent, Pup answers `--help` after `pup finetune` with its own help). "
-        "Three print text on stdout instead of JSON: `help`, `--help` and "
-        "`dataset triage --print-template`.",
+        "(under a coding agent, Pup answers `--help` after `pup finetune` with its own help).",
         "",
         "Outside Pup, run the same commands as `pup-finetune <command>`.",
         "",
+        *render_errors(),
         "## Commands",
         "",
     ]
@@ -237,7 +313,22 @@ def render_commands() -> str:
         anchor = re.sub(r"[^a-z0-9 -]", "", f"{PROG} {name}".lower()).replace(" ", "-")
         summary = md(summary_of(command))
         lines.append(f"- [`{PROG} {name}`](#{anchor}): {summary}")
-    lines.append("")
+    lines += [
+        "",
+        "## Safety",
+        "",
+        "What each command does without and with `--confirm`, where its data goes, and what "
+        "`PUP_READ_ONLY` allows. `--confirm` is never implied by `PUP_AUTO_APPROVE` or agent "
+        "mode. Every preview runs with `PUP_READ_ONLY` set; `--confirm` is refused where the "
+        "table says so: training, evaluating and remote writes (`dataset triage` writes "
+        "nothing remote, so its paid `--confirm` is allowed, and a training or evaluation that "
+        "stays offline, on the fake provider and judge, is allowed too). Each command's help "
+        "ends with "
+        "the same facts in one line.",
+        "",
+        *render_safety_table([name for name, _ in commands]),
+        "",
+    ]
     for name, command in commands:
         lines += render_command(name, command)
     return "\n".join(lines).rstrip("\n") + "\n"

@@ -59,7 +59,9 @@ ticks every box:
 - [ ] **Registration.** Register the provider lazily in `providers/__init__.py` with
       `register_provider("<name>", "pup_finetune.providers.<name>.provider:<Name>Provider")`,
       so listing providers imports no provider implementation; keep the implementation in
-      `provider.py` and the package `__init__.py` light.
+      `provider.py` and the package `__init__.py` light. Name its `--provider-option` keys
+      with `options=(...)` (`train --help` lists them, and a test holds them to the
+      provider's options model).
 - [ ] **Credentials.** Add a `CredentialSpec` for the provider's API key to the registry in
       `credentials.py`, from the package's `__init__.py` (keep it free of heavy imports), and
       import the package at the bottom of `providers/__init__.py` with

@@ -16,6 +16,7 @@ import typer
 from pup_finetune import __version__
 from pup_finetune import providers as _providers  # noqa: F401 - registers provider API keys
 from pup_finetune.cli._common import CommandResult, run_command
+from pup_finetune.cli._presentation import SET_UP, CommandDoc, Safety
 from pup_finetune.datadog.pup import MIN_PUP_VERSION, Pup, format_version
 from pup_finetune.doctor import CheckResult, error_detail, run_registered_checks
 from pup_finetune.errors import ExternalError
@@ -77,16 +78,31 @@ def build_report(pup: Pup) -> dict[str, Any]:
     }
 
 
+DOC = CommandDoc(
+    path="doctor",
+    short="Check that pup, its Datadog login and this install are ready.",
+    description=(
+        "Check that pup is installed and recent enough and signed in to Datadog, and report "
+        "which provider API keys are set. Prints the report, and exits 1 when a required "
+        "check fails."
+    ),
+    examples=("pup finetune doctor", "PUP_FINETUNE_PUP=/opt/pup/bin/pup pup finetune doctor"),
+    safety=Safety(
+        data="asks pup for its version and Datadog login",
+        recipients="nowhere: pup reports its own login",
+        without="checks the setup",
+    ),
+    panel=SET_UP,
+)
+
+
 @run_command
 def doctor() -> CommandResult:
-    """Check that pup, its Datadog login and this install are ready.
-
-    Prints the report, and exits 1 when a required check fails.
-    """
+    """Print the doctor report, and exit 1 when a required check fails."""
     report = build_report(Pup())
     return CommandResult(report, exit_code=0 if report["ok"] else 1)
 
 
 def register(app: typer.Typer) -> None:
     """Add the `doctor` command to ``app``."""
-    app.command(name="doctor")(doctor)
+    app.command(**DOC.typer())(doctor)

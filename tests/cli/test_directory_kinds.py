@@ -67,7 +67,9 @@ def test_a_dataset_given_to_a_run_command_is_named_as_one(dataset: Path, command
     result = invoke(command, str(dataset))
     assert result.exit_code == 2
     assert result.stdout == ""
-    assert f"Error: {dataset} is a dataset directory, not a training run" in result.stderr
+    assert f"Error [not_a_run_dir]: {dataset} is a dataset directory, not a training run" in (
+        result.stderr
+    )
     assert f"--dataset {dataset} --run-dir <RUN_DIR>" in result.stderr
     assert "run.json does not exist" not in result.stderr
 
@@ -100,7 +102,9 @@ def test_a_run_given_to_a_dataset_command_is_named_as_one(
     result = invoke(*args[:2], str(run), *args[2:])
     assert result.exit_code == 2
     assert result.stdout == ""
-    assert f"Error: {run} is a training run directory, not a dataset" in result.stderr
+    assert f"Error [not_a_dataset_dir]: {run} is a training run directory, not a dataset" in (
+        result.stderr
+    )
     assert f"the run trained on the dataset in {dataset.resolve()}" in result.stderr
     assert f"`pup finetune status {run}`" in result.stderr
     # Nothing was written into the run, e.g. by an import or a pull, and nothing was called.

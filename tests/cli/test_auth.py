@@ -427,7 +427,7 @@ def test_the_key_never_leaks_through_auth_commands_or_errors(
     assert [r.exit_code for r in results] == [0, 0, 0, 1, 2, 0, 1, 0]
     beta_error = results[3].stderr
     assert "RuntimeError: provider rejected ***" in beta_error
-    assert "Error: bad key ***" in results[4].stderr
+    assert "Error [usage]: bad key ***" in results[4].stderr
     assert "Bearer ***" in results[4].stderr
     assert "Traceback" in results[6].stderr
     for result in results:

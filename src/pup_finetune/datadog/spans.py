@@ -33,13 +33,14 @@ import re
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from pup_finetune.datadog.pup import Pup
-from pup_finetune.errors import ExternalError, StateError, UsageError
+from pup_finetune.errors import ExternalError, SettingsConflict, StateError, UsageError
 from pup_finetune.storage import (
     atomic_write_json,
     finite_json,
@@ -79,6 +80,36 @@ RELATIVE_TIME_UNITS_MS: Mapping[str, int] = {
 
 _RELATIVE_TIME = re.compile(r"now(?:-([0-9]+)([smhdw]))?")
 _RELATIVE_TIME_FORMS = "now, or now-<n><unit> with unit s, m, h, d or w (such as now-7d)"
+
+
+TIME_FORMS: Final = (
+    "ISO 8601 (such as 2026-10-01 or 2026-10-01T12:00:00Z), epoch milliseconds, now, or "
+    "now-<n><unit> with unit s, m, h, d or w (such as now-7d)"
+)
+"""Every form a ``--from`` or ``--to`` takes, for a usage error."""
+
+
+def parse_time_bound(text: str, flag: str) -> str | int:
+    """The ``flag`` (``--from`` or ``--to``) value ``text`` as a bound: epoch milliseconds
+    as an integer, ISO 8601 or a relative time as written.
+
+    Checked here, before anything is frozen or fetched, so a value Datadog would refuse
+    (``yesterday``) is a :class:`UsageError` naming the forms it takes (:data:`TIME_FORMS`).
+    """
+    value = text.strip()
+    if not value:
+        raise UsageError(f"{flag} must not be empty", hint=f"pass {TIME_FORMS}")
+    if value.isascii() and value.isdigit():
+        return int(value)
+    if is_relative_time(value):
+        if _RELATIVE_TIME.fullmatch(value) is None:
+            raise UsageError(f"cannot read {flag} {text!r}", hint=f"pass {TIME_FORMS}")
+        return value
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        raise UsageError(f"cannot read {flag} {text!r}", hint=f"pass {TIME_FORMS}") from None
+    return value
 
 
 def is_relative_time(value: TimeBound) -> bool:
@@ -714,7 +745,7 @@ def _read_cursor(cache_dir: Path, query_hash: str, account: Account) -> _Cursor:
             hint=f"delete {cache_dir} to export from the start",
         )
     if data.get("settings_hash") != query_hash:
-        raise StateError(
+        raise SettingsConflict(
             f"{cache_dir} holds spans exported for a different query",
             hint="use a new directory, or delete this one to export from the start",
         )
@@ -725,7 +756,7 @@ def _read_cursor(cache_dir: Path, query_hash: str, account: Account) -> _Cursor:
             and recorded.get("org") is None
             and not recorded.get("org_id")
         )
-        raise StateError(
+        raise SettingsConflict(
             f"{cache_dir} holds spans exported from {_describe_account(recorded)}, "
             f"but pup is logged in to {_describe_account(account)}",
             hint=(

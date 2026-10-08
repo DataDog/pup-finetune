@@ -100,7 +100,9 @@ an assistant message. `transformers` comes from the optional `hf` extra and load
 credentials, validation of provider-specific `provider_options`, `training_profile` (the
 profile as those options train it, e.g. with a shorter context: rows are rendered against
 it and the run records it, so a preview shows its effect and a resume renders the same rows),
-and `deploy` / `smoke_test` / `undeploy`.
+the billing sentences previews show (`training_billing` and `sampling_billing`: what the
+provider bills for, with the usage the preview counts, never a price it cannot know), and
+`deploy` / `smoke_test` / `undeploy`.
 
 ## Training matches inference
 
@@ -518,7 +520,8 @@ Using Baseten as the example:
    `tokenizer`-marked tests against its real template, including the `RendererContract`.
 4. **Profiles.** Return `ModelProfile`s from `models()`, with the tokenizer pinned to a
    40-character revision, and check in `preflight` that the provider's model matches the
-   profile.
+   profile. Say what the provider bills for in `training_billing` and `sampling_billing`
+   (wrap `training_usage_text` and `sampling_usage_text`; no dollar figure).
 5. **Credentials.** Register a `CredentialSpec` for `BASETEN_API_KEY` in `credentials.py`'s
    registry from the package's lightweight `__init__.py` (as `providers/fireworks/` does), and
    import that package at the bottom of `providers/__init__.py` with
@@ -533,8 +536,10 @@ Using Baseten as the example:
    one a `DeploymentRequest` creates) and an idempotent `undeploy` for a promoted `ModelRef`. Callers
    gate them behind `--confirm` and `PUP_READ_ONLY`.
 7. **Registration and install.** Call `register_provider("baseten",
-   "pup_finetune.providers.baseten.provider:BasetenProvider")` in the registry (the
-   implementation lives in `provider.py`, so the package `__init__.py` stays light), and add a `baseten`
+   "pup_finetune.providers.baseten.provider:BasetenProvider", options=("max_seq_len",))` in
+   the registry (the implementation lives in `provider.py`, so the package `__init__.py` stays
+   light; `options` names the `--provider-option` keys, which `train --help` lists, and a
+   provider that takes `max_seq_len` gets `train --max-seq-len` too), and add a `baseten`
    extra to `pyproject.toml` for the SDK (with its rows in `LICENSE-3rdparty.csv`).
 8. **Tests.** Subclass the contract suites in `tests/providers/contract/`
    (`RendererContract`, `BackendContract`, `ProviderContract`) against a fake of the SDK

@@ -65,9 +65,19 @@ from pup_finetune import next_steps
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.schema import TrainingRow, row_content_hash
 from pup_finetune.data.split import SplitName
-from pup_finetune.errors import ExternalError, FinetuneError, StateError, UsageError
+from pup_finetune.errors import (
+    ExternalError,
+    FinetuneError,
+    Interrupted,
+    NotARunDir,
+    RunDirNotEmpty,
+    StateError,
+    UsageError,
+    WrongPhase,
+)
 from pup_finetune.providers.base import (
     MAX_MODEL_ID_LEN,
+    MAX_SEQ_LEN_FLAG,
     MODEL_ID_PATTERN,
     CheckpointRef,
     ModelProfile,
@@ -129,9 +139,22 @@ def resume_command(run_dir: Path) -> str:
 
 
 def resume_hint(run_dir: Path, hint: str | None = None) -> str:
-    """``hint`` (by default, that the run can be resumed) with the resume command after it."""
-    said = (hint or "the run is resumable from its last training checkpoint").rstrip(". ")
+    """``hint`` (by default, where the run resumes from, :func:`resumes_from`) with the
+    resume command after it."""
+    said = (hint or f"the run {resumes_from(run_dir)}").rstrip(". ")
     return f"{said}. Next: {resume_command(run_dir)}"
+
+
+def resumes_from(run_dir: Path) -> str:
+    """Where resuming the run in ``run_dir`` starts, in words: from its last training
+    checkpoint, or from the start when it saved none (``state.json`` has no resume point)."""
+    try:
+        point = RunDir(run_dir).load_state().resume_point
+    except Exception:  # an unreadable state says nothing more than "resumable"
+        return "is resumable"
+    if point is None:
+        return "is resumable from the start: it saved no training checkpoint yet"
+    return "is resumable from its last training checkpoint"
 
 
 Clock = Callable[[], datetime]
@@ -279,9 +302,14 @@ def _ckpt_json(ref: CheckpointRef | None) -> dict[str, Any] | None:
 
 
 def error_json(error: BaseException) -> dict[str, Any]:
-    """``error`` as run files record it: its type, and its message and notes redacted."""
+    """``error`` as run files record it: its type, the code the error line shows for it
+    (:data:`~pup_finetune.errors.ERROR_CODES`), and its message and notes redacted."""
+    code = error.error_code if isinstance(error, FinetuneError) else FinetuneError.error_code
     return {
         "type": type(error).__name__,
+        "code": Interrupted.error_code
+        if isinstance(error, KeyboardInterrupt | TerminationRequested)
+        else code,
         "message": redact(str(error)),
         "notes": [redact(str(note)) for note in getattr(error, "__notes__", [])],
     }
@@ -308,12 +336,19 @@ class RunDir:
         dataset_sha256: str,
         rendering: Mapping[str, str],
         run_id: str | None = None,
+        defaults_used: Sequence[str] = (),
+        max_seq_len_flag: str = MAX_SEQ_LEN_FLAG,
         now: Clock = utcnow,
     ) -> RunDir:
         """Create a run in ``path``, which must be new or empty, and write ``run.json``.
 
         ``run_id`` defaults to :func:`new_run_id`. ``rendering`` is the renderer's
-        :meth:`~pup_finetune.rendering.base.Renderer.identity`.
+        :meth:`~pup_finetune.rendering.base.Renderer.identity`. ``run.json`` also records the
+        values the run trains with (``settings``,
+        :meth:`~pup_finetune.providers.base.TrainSpec.recorded_settings`) and the settings
+        the user left at their defaults (``defaults_used``; ``max_seq_len_flag`` names the
+        flag that cut the context, if one did); both follow from the rest, so
+        neither is part of ``settings_hash``, and a run recorded before them has neither.
         """
         run_id = check_run_id(run_id if run_id is not None else new_run_id(now()))
         run_dir = cls(path)
@@ -333,6 +368,8 @@ class RunDir:
                 **settings,
                 "dataset_dir": str(Path(dataset_dir).resolve()),
                 "settings_hash": settings_hash(settings),
+                "settings": spec.recorded_settings(profile, max_seq_len_flag=max_seq_len_flag),
+                "defaults_used": list(defaults_used),
                 "created_at": _iso(now()),
             }
             atomic_write_json(run_dir.run_path, manifest)
@@ -376,8 +413,14 @@ class RunDir:
     # --- reading --------------------------------------------------------------------
 
     def manifest(self) -> dict[str, Any]:
-        """``run.json``."""
-        return self._read_object(self.run_path, hint="pass the directory of a training run")
+        """``run.json``; :class:`NotARunDir` when there is none."""
+        if not self.run_path.exists():
+            what = "does not exist" if not self.path.exists() else "is not a training run"
+            raise NotARunDir(
+                f"{self.path} {what} (it has no {self.run_path.name})",
+                hint="pass the directory of a training run, which `train --run-dir` created",
+            )
+        return self._read_object(self.run_path)
 
     @property
     def run_id(self) -> str:
@@ -462,6 +505,8 @@ class RunDir:
             "best": state.best,
             "elapsed_seconds": state.elapsed_seconds,
             "hourly_rate_usd": spec.get("hourly_rate_usd"),
+            "settings": manifest.get("settings"),
+            "defaults_used": manifest.get("defaults_used"),
             "heartbeat_at": state.heartbeat_at,
             "pid": state.pid,
             "error": state.error,
@@ -487,13 +532,25 @@ class RunDir:
     # --- checks ---------------------------------------------------------------------
 
     def require_empty(self) -> None:
-        """Raise :class:`StateError` unless :attr:`path` is missing or an empty directory."""
+        """Raise :class:`RunDirNotEmpty` unless :attr:`path` is missing or an empty directory,
+        saying what it holds when that is a run."""
         if self.path.exists() and not self.path.is_dir():
-            raise StateError(f"{self.path} exists and is not a directory")
+            raise RunDirNotEmpty(
+                f"{self.path} exists and is not a directory", hint="use a new run directory"
+            )
         if self.path.is_dir() and any(e.name != LOCK_FILE_NAME for e in self.path.iterdir()):
-            raise StateError(f"{self.path} is not empty", hint="use a new run directory")
+            raise RunDirNotEmpty(f"{self.path} {self._holds()}", hint="use a new run directory")
 
     # --- internals ------------------------------------------------------------------
+
+    def _holds(self) -> str:
+        """What a non-empty :attr:`path` holds, for the error that refuses a new run in it."""
+        try:
+            run_id = self.manifest().get("run_id")
+            phase = self.load_state().phase
+        except FinetuneError:
+            return "is not empty"
+        return f"already holds run {run_id} ({phase})"
 
     def _read_object(self, path: Path, *, hint: str | None = None) -> dict[str, Any]:
         try:
@@ -719,7 +776,7 @@ class RunState:
     def start(self) -> None:
         """Enter ``training`` in this process, for a run that never trained."""
         if self.phase != "created":
-            raise StateError(
+            raise WrongPhase(
                 f"a run cannot go from {self.phase} to training",
                 hint="resume an interrupted, failed or cancelled run instead",
             )
@@ -729,7 +786,7 @@ class RunState:
     def resume(self) -> None:
         """Enter ``training`` again in this process, for an interrupted, failed or cancelled run.
 
-        Raises :class:`UsageError` for a run in any other phase.
+        Raises :class:`WrongPhase` for a run in any other phase.
         """
         require_resumable(self)
         self.pid = os.getpid()
@@ -828,7 +885,7 @@ class RunState:
 
 
 def require_resumable(state: RunState) -> None:
-    """Raise :class:`UsageError` unless ``state``'s run is interrupted, failed or cancelled."""
+    """Raise :class:`WrongPhase` unless ``state``'s run is interrupted, failed or cancelled."""
     if state.phase in RESUMABLE_PHASES:
         return
     why = {
@@ -836,7 +893,7 @@ def require_resumable(state: RunState) -> None:
         "training": "it is still training; wait for it, or cancel it",
         "completed": "it already completed; start a new run to train again",
     }
-    raise UsageError(
+    raise WrongPhase(
         f"cannot resume the run in {state.run_dir.path}: it is {state.phase}",
         hint=f"only an interrupted, failed or cancelled run can be resumed, and {why[state.phase]}",
     )
@@ -849,7 +906,7 @@ class TerminationRequested(BaseException):
     """SIGTERM arrived; a BaseException so no ``except Exception`` swallows it before cleanup."""
 
 
-class TrainingTerminated(FinetuneError):
+class TrainingTerminated(Interrupted):
     """Training stopped because the process received SIGTERM; the run is ``interrupted``.
 
     :func:`execute_run` raises it from the :class:`TerminationRequested` once the result is
@@ -1176,7 +1233,7 @@ def execute_run(
     ``train`` gets the :class:`RunState` to pass to the loop, typically opening a session and
     calling :func:`~pup_finetune.training.loop.run_training` in it. A new run must be
     ``created``. With ``resume`` it must be interrupted, failed or cancelled
-    (:class:`UsageError` otherwise), or ``training`` with no process holding the lock: that
+    (:class:`WrongPhase` otherwise), or ``training`` with no process holding the lock: that
     process died without recording it, and the run is first marked ``interrupted``.
 
     The phase becomes ``completed`` or ``cancelled`` from the result. Any error during

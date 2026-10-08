@@ -36,6 +36,7 @@ listed on :class:`FakeOptions`; string values are decoded as JSON.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import re
@@ -46,7 +47,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, NoReturn
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Final, Literal, NoReturn
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt
@@ -54,6 +55,7 @@ from pydantic import BaseModel, ConfigDict, Field, PositiveInt
 from pup_finetune.errors import FinetuneError, StateError, UsageError
 from pup_finetune.providers.base import (
     MODEL_ID_PATTERN,
+    OFFLINE_BILLING,
     AdamConfig,
     Check,
     CheckpointRef,
@@ -64,8 +66,12 @@ from pup_finetune.providers.base import (
     LoraConfig,
     ModelProfile,
     ModelRef,
+    SamplingUsage,
     SmokeTest,
     StepMetrics,
+    TrainingUsage,
+    sampling_usage_text,
+    training_usage_text,
 )
 from pup_finetune.providers.options import parse_options
 from pup_finetune.rendering.base import (
@@ -449,7 +455,8 @@ class FakeOptions(BaseModel):
     ``fail_at_step`` makes the ``forward_backward`` of that global step (1-based) fail with
     :class:`FakeCrash` once per lineage: only a fresh session crashes, so a session resumed
     from a checkpoint (with the same options) trains on past that step; ``prefix_stable``
-    configures the renderer.
+    configures the renderer; ``max_seq_len`` caps the profile's context, as the real
+    providers' option does (``train --max-seq-len``).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
@@ -463,6 +470,7 @@ class FakeOptions(BaseModel):
     step_delay_s: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     fail_at_step: PositiveInt | None = None
     prefix_stable: bool = True
+    max_seq_len: PositiveInt | None = None
 
     @classmethod
     def parse(cls, options: Mapping[str, Any]) -> FakeOptions:
@@ -476,7 +484,10 @@ class FakeOptions(BaseModel):
 
 
 class FakeCrash(FinetuneError):
-    """The simulated crash ``fail_at_step`` asks for."""
+    """The simulated crash ``fail_at_step`` asks for: a provider failure, as the error line
+    reports it."""
+
+    error_code: ClassVar[str] = "external"
 
 
 class _Pending[T]:
@@ -1089,7 +1100,24 @@ class FakeProvider:
         return FakeRenderer(profile, prefix_stable=self.options.prefix_stable)
 
     def training_profile(self, profile: ModelProfile) -> ModelProfile:
-        return profile  # no fake option narrows a profile
+        """``profile`` with its context cut to the ``max_seq_len`` option, if one is set."""
+        self._own(profile)
+        cap = self.options.max_seq_len
+        if cap is None or cap == profile.max_seq_len:
+            return profile
+        if cap > profile.max_seq_len:
+            raise UsageError(
+                f"the max_seq_len provider option of {cap} is over the "
+                f"{profile.max_seq_len}-token context of {profile.alias}",
+                hint=f"pass --max-seq-len N with N at most {profile.max_seq_len}",
+            )
+        return dataclasses.replace(profile, max_seq_len=cap)
+
+    def training_billing(self, usage: TrainingUsage) -> str:
+        return f"{OFFLINE_BILLING}: it would train on {training_usage_text(usage)}"
+
+    def sampling_billing(self, usage: SamplingUsage) -> str:
+        return f"{OFFLINE_BILLING}: {sampling_usage_text(usage)}"
 
     def backend(self) -> FakeBackend:
         return self._backend

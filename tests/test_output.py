@@ -52,13 +52,112 @@ class FakePupRunner:
         )
 
 
-def test_standalone_prints_sorted_indented_json(capsys: pytest.CaptureFixture[str]) -> None:
+def test_standalone_prints_indented_json_in_the_order_it_was_built(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     runner = FakePupRunner()
-    emit({"b": 1, "a": {"path": Path("runs/x")}}, runtime=STANDALONE, runner=runner)
+    emit(
+        {"b": 1, "a": {"path": Path("runs/x"), "nested": [1, {"deep": True}]}},
+        runtime=STANDALONE,
+        runner=runner,
+    )
     out, err = capsys.readouterr()
-    assert out == json.dumps({"a": {"path": "runs/x"}, "b": 1}, indent=2, sort_keys=True) + "\n"
+    assert out == (
+        "{\n"
+        '  "b": 1,\n'
+        '  "a": {\n'
+        '    "path": "runs/x",\n'
+        '    "nested": [\n'
+        "      1,\n"
+        '      {"deep": true}\n'
+        "    ]\n"
+        "  }\n"
+        "}\n"
+    )
     assert err == ""
     assert runner.calls == []
+
+
+def test_a_list_or_object_of_plain_values_fits_on_one_line() -> None:
+    epochs = [{"epoch": 1, "train_loss": 2.0, "val_loss": None}]
+    text = to_json({"epochs": epochs, "losses": [2.1, 1.6], "empty": [], "none": {}})
+    assert text.splitlines() == [
+        "{",
+        '  "epochs": [',
+        '    {"epoch": 1, "train_loss": 2.0, "val_loss": null}',
+        "  ],",
+        '  "losses": [2.1, 1.6],',
+        '  "empty": [],',
+        '  "none": {}',
+        "}",
+    ]
+
+
+def test_a_line_that_would_be_too_wide_is_split() -> None:
+    wide = {"command": "x" * output.LINE_WIDTH}
+    lines = to_json({"step": wide}).splitlines()
+    assert lines[1] == '  "step": {'
+    assert max(len(line) for line in to_json({"a": [1, 2, 3]}).splitlines()) <= output.LINE_WIDTH
+    assert json.loads(to_json({"step": wide})) == {"step": wide}
+
+
+def test_text_keeps_its_characters_and_keys_that_are_not_strings_read_as_json() -> None:
+    text = to_json({"weather": "21°C", 1: True, None: 2.5})
+    assert '"weather": "21°C"' in text
+    assert json.loads(text) == {"weather": "21°C", "1": True, "null": 2.5}
+
+
+def test_floats_print_with_four_significant_digits(capsys: pytest.CaptureFixture[str]) -> None:
+    emit(
+        {"elapsed": 0.014949082979001105, "loss": 1234.5678, "steps": 7, "lr": 1e-4},
+        runtime=STANDALONE,
+    )
+    assert json.loads(capsys.readouterr().out) == {
+        "elapsed": 0.01495,
+        "loss": 1235.0,
+        "steps": 7,
+        "lr": 0.0001,
+    }
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_emit_still_refuses_a_non_finite_float(value: float) -> None:
+    with pytest.raises(ValueError, match="JSON compliant"):
+        emit({"loss": [value]}, runtime=STANDALONE)
+
+
+@pytest.mark.parametrize(
+    ("output_format", "jq_filter", "expected"),
+    [
+        ("table", None, ".models"),
+        ("csv", None, ".models"),
+        ("TSV", None, ".models"),
+        ("table", ".provider", None),
+        ("json", None, None),
+        ("yaml", None, None),
+    ],
+)
+def test_a_table_view_applies_to_tables_without_a_filter_of_the_user_s(
+    output_format: str, jq_filter: str | None, expected: str | None
+) -> None:
+    runtime = Runtime(output_format=output_format, jq_filter=jq_filter)
+    assert output.table_filter(runtime, ".models") == expected
+    assert output.table_filter(runtime, None) is None
+
+
+def test_under_pup_a_table_view_goes_to_pup_format_as_its_jq_filter() -> None:
+    runner = FakePupRunner()
+    result = {"models": [{"alias": "m"}], "provider": "fake"}
+    emit(
+        result,
+        runtime=Runtime(output_format="table"),
+        runner=runner,
+        command="finetune models list",
+        table_view=".models",
+    )
+    assert runner.calls == [
+        (["format", "--command=finetune models list", "--jq=.models"], to_json(result))
+    ]
 
 
 def test_under_pup_pipes_json_through_pup_format(capsys: pytest.CaptureFixture[str]) -> None:
@@ -72,14 +171,14 @@ def test_under_pup_pipes_json_through_pup_format(capsys: pytest.CaptureFixture[s
 
 def test_under_pup_the_envelope_gets_the_command_and_next_action() -> None:
     runner = FakePupRunner()
-    result = {"rows": 3, "next_command": "pup finetune dataset sample ./ds --n 20"}
+    result = {"rows": 3, "next_command": "pup finetune dataset sample ./ds --count 20"}
     emit(result, runtime=UNDER_PUP, runner=runner, command="finetune dataset show")
     assert runner.calls == [
         (
             [
                 "format",
                 "--command=finetune dataset show",
-                "--next-action=pup finetune dataset sample ./ds --n 20",
+                "--next-action=pup finetune dataset sample ./ds --count 20",
             ],
             to_json(result),
         )
@@ -188,7 +287,7 @@ def test_emit_error_writes_message_and_hint_to_stderr(
     emit_error(UsageError("bad flag", hint="try --help"), runtime=STANDALONE)
     out, err = capsys.readouterr()
     assert out == ""
-    assert err == "Error: bad flag\nHint: try --help\n"
+    assert err == "Error [usage]: bad flag\nHint: try --help\n"
 
 
 def test_confirm_required_also_emits_preview_json(capsys: pytest.CaptureFixture[str]) -> None:
@@ -202,7 +301,7 @@ def test_confirm_required_also_emits_preview_json(capsys: pytest.CaptureFixture[
         "preview": {"rows": 3},
         "next_command": "pup finetune dataset push d --confirm",
     }
-    assert "preview only" in stderr
+    assert "Preview only" in stderr
     assert "pup finetune dataset push d --confirm" in stderr
 
 
@@ -382,13 +481,14 @@ def test_confirm_required_prints_its_warnings_then_the_confirmation_lines_last(
         rerun="pup finetune evaluate run --confirm",
         hint="see the preview",
     )
-    emit_error(err, runtime=STANDALONE)
+    emit_error(err, runtime=STANDALONE, card=["Preview only: evaluate run", "  data      4 cases"])
     out, stderr = capsys.readouterr()
     assert json.loads(out)["preview"]["warnings"] == ["--confirm will refuse; pass a new --out-dir"]
     assert stderr.splitlines() == [
+        "Preview only: evaluate run",
+        "  data      4 cases",
         "warning: --confirm will refuse; pass a new --out-dir",
         "Hint: see the preview",
-        "Confirmation required: preview only",
         "Next: pup finetune evaluate run --confirm",
     ]
 

@@ -26,6 +26,7 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Any, Final
 
+from pup_finetune.display import loss_text
 from pup_finetune.output import info, stderr_is_terminal
 from pup_finetune.runtime import Runtime
 
@@ -63,7 +64,7 @@ def every_line(runtime: Runtime | None = None) -> bool:
 
 
 def _loss(value: object) -> str:
-    return f"{value:.3f}" if isinstance(value, int | float) else "n/a"
+    return loss_text(value) or "n/a"
 
 
 class TrainingProgress:

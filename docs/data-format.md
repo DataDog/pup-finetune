@@ -188,3 +188,24 @@ were last added (`pushed_at`), a random `push_id` written into the dataset's des
 the hash of the dataset settings. It is saved after every batch, so pushing again sends only
 rows not yet pushed and an interrupted push resumes without adding a row twice. `evaluate`
 publishes its Agent Observability experiments on the dataset and version this receipt names.
+
+## What a command prints, and what its files keep
+
+Each command prints one JSON result on stdout, and it differs from the files the command
+writes. The result holds what decides the next step: keys in the order they are read,
+measurements (losses, rates and their deltas and intervals, elapsed times, ETAs, spend
+estimates, ages) rounded to 4 significant digits while values you set (flags, `settings`)
+read exactly as given, and paths relative to the current directory when they are
+inside it (else absolute). The files keep everything, at full precision and as recorded
+(`run.json` names the dataset by its absolute path). A result's `files` names where the rest
+is:
+
+| Command | It prints | The rest is in |
+| --- | --- | --- |
+| `train`, `resume` | How the run ended (`status`), the best epoch and its validation loss, each epoch's losses (`best: true` on the best one), the promoted model, the deployable checkpoint's name, the elapsed seconds and what next. | `files.result` (`result.json`: every checkpoint with its URI, and each epoch's checkpoints and tokens) and `files.epochs` (`epochs.json`). |
+| `status` | The phase, epoch and step against their maximums, the last training loss, the validation losses, the best epoch, the elapsed time and ETA, the promoted model, what next; `resume_mode` only for a resumable run, and `worker` (`pid`, `state`: `running`, `starting`, `stale` or `exited`, `heartbeat_age_s`, `log`) only when the run has a worker or is training. | `files.state` (`state.json`), `files.epochs` and `files.result` (`null` until the run has one). |
+| `evaluate` | `headline` (the judge pass rate of `base` and `tuned`, their `delta` with its `ci95`, the paired `wins`, `regressions` and `ties`, and the numbers of `cases` and `trajectories`), each metric's rate per target, the errors per target, the publication and the caveat. | `files.summary` (`summary.json`: per target the judge's passes, every metric's `n`, `passed` and `rate`, the agreement per trajectory, tokens and errors by stage; the paired counts; the bootstrap's resamples and seed) and `files.results` (`results.jsonl`, one line per judged pair). |
+
+Under pup, `--output table` (or `csv`) without a `--jq` filter shows the rows of a list:
+`models list` one row per model, `auth status` per provider, `doctor` per check and
+`dataset sample` per sampled row.

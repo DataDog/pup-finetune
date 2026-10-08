@@ -78,7 +78,7 @@ def test_import_emits_counts_and_next_command(tmp_path: Path) -> None:
     }
     # Nothing is labeled yet: review a sample; labeling is a step, with a file to write first.
     quoted = shlex.quote(str(target))
-    assert data["next_command"] == f"pup finetune dataset sample {quoted} --n 20"
+    assert data["next_command"] == f"pup finetune dataset sample {quoted} --count 20"
     assert [step["command"] for step in data["next_steps"]] == [
         f"pup finetune dataset label {quoted} --file <LABELS_FILE>",
         f"pup finetune dataset triage {quoted} --rubric <RUBRIC_FILE> --max-rows 20",
@@ -150,8 +150,9 @@ def test_import_rejects_a_known_id_with_different_content(tmp_path: Path) -> Non
     changed = tmp_path / "changed.jsonl"
     changed.write_text(json.dumps(row) + "\n")
     result = import_rows(target, changed)
-    assert result.exit_code == 1
+    assert result.exit_code == 2
     assert result.stdout == ""
+    assert "Error [usage]: " in result.stderr
     assert "'row-weather-001' is already in the dataset with different content" in result.stderr
 
 
@@ -159,8 +160,8 @@ def test_import_rejects_changed_split_settings(tmp_path: Path) -> None:
     target = tmp_path / "ds"
     import_rows(target, TOOL_USE, extra=("--seed", "7"))
     result = import_rows(target, TOOL_USE)
-    assert result.exit_code == 1
-    assert "split settings changed" in result.stderr
+    assert result.exit_code == 2
+    assert "Error [settings_conflict]: split settings changed" in result.stderr
     assert "--seed 7 --validation-fraction 0.1 --test-fraction 0.1" in result.stderr
     assert import_rows(target, TOOL_USE, extra=("--seed", "7")).exit_code == 0
 
@@ -253,7 +254,9 @@ def test_show_emits_summary_settings_samples_and_next_command(
     assert data["sample_row_ids"] == {split: ids[:5] for split, ids in expected.items()}
     for split, ids in data["sample_row_ids"].items():
         assert len(ids) == min(5, imported["splits"][split])
-    assert data["next_command"] == f"pup finetune dataset sample {shlex.quote(str(target))} --n 20"
+    assert (
+        data["next_command"] == f"pup finetune dataset sample {shlex.quote(str(target))} --count 20"
+    )
 
 
 def test_show_on_a_missing_directory_is_a_usage_error(tmp_path: Path) -> None:

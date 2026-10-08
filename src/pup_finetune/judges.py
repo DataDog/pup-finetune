@@ -13,9 +13,12 @@ its provider by prefix:
   ``anthropic`` key (or the Anthropic SDK's own login), through the official SDK (the
   ``anthropic`` extra).
 - ``openai/<model>``: the OpenAI API, with the ``openai`` key.
-- Anything else is a Fireworks model id, used as written (e.g.
-  ``accounts/fireworks/models/<model>``): Fireworks serverless inference, with the
-  ``fireworks`` key. The default judge is one.
+- Anything else is a Fireworks model id (e.g. ``accounts/fireworks/models/<model>``):
+  Fireworks serverless inference, with the ``fireworks`` key. The default judge is one. An
+  alias of :data:`JUDGE_ALIASES` (``deepseek-v4p1-flash``) stands for the full id, and the
+  full id is what a spec resolves to (:attr:`~pup_finetune.inference.JudgeConfig.spec`), so a
+  preview prints it and ``triage.json`` and ``evaluation.json`` freeze it: an alias that later
+  names another model never changes the judge of an existing directory.
 
 :func:`parse_judge` turns a spec into a :class:`~pup_finetune.inference.JudgeConfig` with
 the provider's defaults (:data:`PROVIDERS`: endpoint, credential, whether a temperature is
@@ -38,6 +41,7 @@ no reasoning effort, so it thinks as its provider's default does.
 
 from __future__ import annotations
 
+import difflib
 import importlib.util
 from collections.abc import Iterable, Iterator
 from contextlib import ExitStack, contextmanager
@@ -52,12 +56,14 @@ from pup_finetune.inference import (
     JudgeConfig,
     JudgeProvider,
 )
+from pup_finetune.judge_models import JUDGE_ALIASES, resolve_alias
 
 if TYPE_CHECKING:
     from pup_finetune.anthropic_client import AnthropicChatClient
 
 __all__ = [
     "FIREWORKS_REASONING",
+    "JUDGE_ALIASES",
     "OPENAI_PLAIN_MODELS",
     "PROVIDERS",
     "SPEC_FORMS",
@@ -65,6 +71,7 @@ __all__ = [
     "ProviderDefaults",
     "RemoteProvider",
     "anthropic_client_class",
+    "billing",
     "check_available",
     "destination",
     "open_client",
@@ -76,9 +83,15 @@ __all__ = [
 RemoteProvider = Literal["fireworks", "anthropic", "openai"]
 """The providers a judge spec can name."""
 
+UNKNOWN_JUDGE_FORMS: Final = (
+    f"an alias ({', '.join(JUDGE_ALIASES)}), anthropic/MODEL, openai/MODEL, or a Fireworks "
+    "model id, accounts/<acct>/models/<id>"
+)
+"""The forms an unknown judge's hint names."""
+
 SPEC_FORMS: Final = (
-    "anthropic/<model>, openai/<model>, or a Fireworks model id such as "
-    "accounts/fireworks/models/<model>"
+    f"an alias ({', '.join(JUDGE_ALIASES)}), anthropic/<model>, openai/<model>, or a "
+    "Fireworks model id such as accounts/fireworks/models/<model>"
 )
 """How a judge spec may be written, for help texts and errors."""
 
@@ -150,9 +163,11 @@ def parse_judge(spec: str) -> JudgeConfig:
     """The judge ``spec`` names (see the module docstring), with its provider's defaults.
 
     ``anthropic/<model>`` and ``openai/<model>`` name those providers (the prefix in any
-    case); any other spec is a Fireworks model id. The reasoning effort is the lowest the
-    model takes (see the module docstring). Raises :class:`UsageError` for an empty spec or an empty model
-    after a provider prefix.
+    case); any other spec with a ``/`` is a Fireworks model id, and a spec without one must
+    be an alias of one (:data:`JUDGE_ALIASES`), resolved to the id, so a mistyped alias is
+    never sent to a paid run. The reasoning effort is the lowest the model takes (see the
+    module docstring). Raises :class:`UsageError` for an empty spec, an empty model after a
+    provider prefix, or an unknown alias (with the closest known one).
     """
     text = spec.strip()
     if not text:
@@ -163,8 +178,10 @@ def parse_judge(spec: str) -> JudgeConfig:
         provider, model = cast(RemoteProvider, prefix.lower()), rest.strip()
         if not model:
             raise UsageError(f"the judge model {text!r} has no model after {prefix}/")
-    else:
+    elif slash:
         provider, model = "fireworks", text
+    else:
+        provider, model = "fireworks", _known_alias(text)
     defaults = PROVIDERS[provider]
     effort = defaults.reasoning_effort
     if provider == "fireworks":
@@ -179,6 +196,19 @@ def parse_judge(spec: str) -> JudgeConfig:
         temperature=defaults.temperature,
         max_tokens=defaults.max_tokens,
         reasoning_effort=effort,
+    )
+
+
+def _known_alias(text: str) -> str:
+    """The Fireworks model id the alias ``text`` stands for; raises :class:`UsageError`
+    naming the closest alias when it is none."""
+    if text in JUDGE_ALIASES:
+        return resolve_alias(text)
+    close = difflib.get_close_matches(text, list(JUDGE_ALIASES), n=1)
+    mean = f"did you mean {close[0]}? " if close else ""
+    raise UsageError(
+        f"unknown judge {text!r}: a judge without a '/' must be one of the aliases",
+        hint=f"{mean}name the judge as {UNKNOWN_JUDGE_FORMS}",
     )
 
 
@@ -199,6 +229,23 @@ def recipient(config: JudgeConfig) -> str:
     ``Anthropic api.anthropic.com``."""
     name, host = _name_and_host(config)
     return f"{name} {host}"
+
+
+def billing(config: JudgeConfig, calls: int, *, input_tokens: int | None = None) -> str:
+    """What ``calls`` calls to ``config``'s judge bill, in one sentence for a preview: the
+    provider bills per token at its own rates, which pup-finetune does not know.
+
+    ``input_tokens`` is a rough estimate of the tokens the calls send, when known.
+    """
+    sent = f", about {input_tokens:,} input tokens in all (approximate)" if input_tokens else ""
+    what = f"{calls:,} calls{sent}, at most {config.max_tokens:,} output tokens each"
+    if config.provider == "fake":
+        return f"the fake judge is offline and bills nothing: {what}"
+    name, _ = _name_and_host(config)
+    return (
+        f"{name} bills each judge call per token at its own rates, which pup-finetune does "
+        f"not know: {what}"
+    )
 
 
 def check_available(config: JudgeConfig) -> None:

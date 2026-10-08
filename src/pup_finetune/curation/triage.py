@@ -75,11 +75,14 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
+from pup_finetune.approval import Part
 from pup_finetune.concurrency import DaemonPool
 from pup_finetune.curation.labels import Label, LabelReport, apply_labels
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.schema import TrainingRow
-from pup_finetune.errors import ExternalError, StateError, UsageError
+from pup_finetune.display import display_path
+from pup_finetune.errors import ExternalError, SettingsConflict, StateError, UsageError
+from pup_finetune.judge_models import alias_of
 from pup_finetune.providers.base import ProviderAuthError
 from pup_finetune.redaction import redact
 from pup_finetune.storage import (
@@ -143,6 +146,10 @@ JUDGE_MAX_TOKENS: Final = 1024
 JUDGE_TEMPERATURE: Final = 0.0
 TOP_DROP_REASONS: Final = 10
 FAILURES_SHOWN: Final = 5
+CHARS_PER_TOKEN: Final = 4
+"""The characters per token a preview's rough estimate of input tokens assumes."""
+RUBRIC_HASH_SHOWN: Final = 12
+"""How many hex characters of the rubric's sha256 a preview shows."""
 DISAGREEMENTS_SHOWN: Final = 10
 TOO_LONG: Final = "too_long"
 """Why a judge cast no ordinary vote on a row longer than its context window."""
@@ -416,6 +423,10 @@ def _review_order(row: TrainingRow) -> str:
     return hashlib.sha256(f"triage:{row.id}".encode()).hexdigest()
 
 
+def _rows(count: int) -> str:
+    return f"{count} row{'' if count == 1 else 's'}"
+
+
 @dataclass(slots=True)
 class TriagePlan:
     """What a triage of ``dataset`` reviews, and what it has already. See :func:`plan_triage`."""
@@ -493,38 +504,103 @@ class TriagePlan:
                 stale.append(row_id)
         return stale
 
+    def approx_input_tokens(self) -> dict[str, int]:
+        """A rough count of the tokens the pending calls send, by judge: the characters of
+        each call's messages over :data:`CHARS_PER_TOKEN`. The providers count exactly."""
+        sizes: dict[str, int] = {}
+        chars: dict[str, int] = {}
+        for row, judge in self.pending:
+            if row.id not in sizes:
+                sizes[row.id] = sum(
+                    len(str(message.get("content") or ""))
+                    for message in build_messages(row, self.criteria)
+                )
+            chars[judge] = chars.get(judge, 0) + sizes[row.id]
+        return {judge: -(-count // CHARS_PER_TOKEN) for judge, count in chars.items()}
+
+    def approval_parts(self) -> list[Part]:
+        """What approving this triage pins (see :mod:`pup_finetune.approval`): the rows to
+        review with the calls left (and, measuring agreement, each row's reference label,
+        ``[row_id, keep]``, which the council is measured against), and the criteria,
+        judges and mode."""
+        rows: dict[str, Any] = {
+            "rows": [[row.id, row_digest(row)] for row in self.rows],
+            "pending": [[row.id, judge] for row, judge in self.pending],
+        }
+        if self.references is not None:
+            rows["references"] = [
+                [row_id, label.keep] for row_id, label in sorted(self.references.items())
+            ]
+        criteria = {
+            "rubric_sha256": self.criteria.sha256,
+            "judges": list(self.judges),
+            "mode": self.mode,
+            "reset": self.reset,
+        }
+        return [
+            Part(
+                "the rows to review",
+                rows,
+                now=f"{len(self.rows)} rows, {len(self.pending)} judge calls",
+            ),
+            Part("the rubric and judges", criteria),
+        ]
+
     def preview(self) -> dict[str, Any]:
         """What :func:`run_triage` would do, and every provider the rows are sent to."""
-        from pup_finetune.judges import destination, recipient
+        from pup_finetune.judges import billing, destination, recipient
 
-        endpoints: dict[str, dict[str, Any]] = {}
-        for spec in self.judges:
-            config = judge_config(spec)
-            entry = endpoints.setdefault(
-                config.provider,
+        configs = {spec: judge_config(spec) for spec in self.judges}
+        firsts: dict[str, JudgeConfig] = {}
+        for config in configs.values():
+            firsts.setdefault(config.provider, config)
+        places = [destination(config) for config in firsts.values()]
+        judged_at = ", ".join(f"{recipient(config)} (judge)" for config in firsts.values())
+        pending = Counter(judge for _row, judge in self.pending)
+        tokens = self.approx_input_tokens()
+        names = ", ".join(alias_of(spec) for spec in self.judges)
+        if self.references is None:
+            action = (
+                f"have {len(self.judges)} judge{'' if len(self.judges) == 1 else 's'} "
+                f"({names}) vote keep or drop on {_rows(len(self.rows))}, and label the rows "
+                "a strict majority decides"
+            )
+        else:
+            action = (
+                f"have {len(self.judges)} judge{'' if len(self.judges) == 1 else 's'} "
+                f"({names}) vote on the {_rows(len(self.rows))} you or the agent labeled, and "
+                "report how often they agree; nothing is labeled"
+            )
+        preview: dict[str, Any] = {
+            "action": action,
+            "billing": "; ".join(
+                billing(
+                    config,
+                    sum(pending[spec] for spec in group),
+                    input_tokens=sum(tokens.get(spec, 0) for spec in group),
+                )
+                for config, group in _by_provider(configs)
+            ),
+            "dataset_dir": display_path(self.dataset.path),
+            "mode": self.mode,
+            "rows": {"to_review": len(self.rows), "skipped_labeled": self.skipped_labeled},
+            "judges": [
                 {
+                    "model": spec,
                     "provider": config.provider,
                     "endpoint": config.base_url,
                     "credential": config.credential,
-                    "judges": [],
-                },
-            )
-            entry["judges"].append(spec)
-        firsts = [judge_config(entry["judges"][0]) for entry in endpoints.values()]
-        places = [destination(config) for config in firsts]
-        judged_at = ", ".join(f"{recipient(config)} (judge)" for config in firsts)
-        preview: dict[str, Any] = {
-            "dataset_dir": str(self.dataset.path),
-            "mode": self.mode,
-            "rows_to_review": len(self.rows),
-            "rows_skipped_labeled": self.skipped_labeled,
-            "judges": list(self.judges),
+                }
+                for spec, config in configs.items()
+            ],
             "judge_calls": self.calls,
             "judge_calls_pending": len(self.pending),
             "votes_reused": self.votes_reused,
+            "approx_input_tokens": sum(tokens.values()),
+            "approx_input_tokens_note": f"approximate: about {CHARS_PER_TOKEN} characters "
+            "per token of each call's messages; each provider counts its own",
             "criteria": self.criteria.source,
-            "rubric_sha256": self.criteria.sha256,
-            "judge_endpoints": list(endpoints.values()),
+            "rubric_hash": self.criteria.sha256[:RUBRIC_HASH_SHOWN],
             "data_destination": f"each row's full content is sent to {_and(places)} for "
             "judging (paid, per token)",
             "data_recipients": [f"full rows -> {judged_at}"],
@@ -554,6 +630,17 @@ class TriagePlan:
             if self.votes_unreadable:
                 preview["reset"]["judgments_unreadable"] = True
         return preview
+
+
+def _by_provider(
+    configs: Mapping[str, JudgeConfig],
+) -> list[tuple[JudgeConfig, list[str]]]:
+    """The judges grouped by provider, in order: each provider's first judge's config (whose
+    output limit every judge of that provider shares in a triage) and its judges' specs."""
+    groups: dict[str, tuple[JudgeConfig, list[str]]] = {}
+    for spec, config in configs.items():
+        groups.setdefault(config.provider, (config, []))[1].append(spec)
+    return list(groups.values())
 
 
 def _unread(votes: Mapping[str, Vote]) -> bool:
@@ -695,7 +782,7 @@ def _check_frozen(dataset: DatasetDir, settings: Mapping[str, Any], votes: int) 
         for key in set(stored) | set(settings)
         if canonical_json(stored.get(key)) != canonical_json(settings.get(key))
     )
-    raise StateError(
+    raise SettingsConflict(
         f"{dataset.path} holds {votes} triage votes cast under other settings "
         f"({', '.join(changed)} changed)",
         hint="keep the same --rubric, --rule and --judges to resume, use a new dataset "

@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Literal, Self, cast
 
 from pup_finetune.data.schema import TrainingRow, row_content_hash, split_key
-from pup_finetune.errors import StateError, UsageError
+from pup_finetune.errors import SettingsConflict, StateError, UsageError
 from pup_finetune.storage import atomic_write_json, read_json
 
 SplitName = Literal["train", "validation", "test"]
@@ -147,7 +147,7 @@ class SplitAssignments:
             return cls(params)
         loaded = cls.from_json(data, where=str(path))
         if loaded.params != params:
-            raise StateError(
+            raise SettingsConflict(
                 f"{path} was written with different split settings",
                 hint="use the split settings the dataset was created with, or a new directory",
             )

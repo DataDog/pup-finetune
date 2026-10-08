@@ -237,7 +237,7 @@ def test_preflight_refuses_a_context_over_the_workspace_limit(option: str | None
     needed = option or str(QWEN.max_seq_len)
     with pytest.raises(UsageError, match=f"at most 32768 tokens .* the {needed} to train at") as e:
         provider.preflight(provider.training_profile(QWEN))
-    assert e.value.hint == "pass --provider-option max_seq_len=N with N at most 32768"
+    assert e.value.hint == "pass --max-seq-len N with N at most 32768"
     provider.validate_options({"max_seq_len": "32768"})
     provider.preflight(provider.training_profile(QWEN))
     provider.preflight(QWEN)  # the option, not the uncut profile, is what trains

@@ -114,7 +114,7 @@ def test_finetune_errors_map_to_exit_codes(error: FinetuneError, code: int) -> N
     result = runner.invoke(make_app(error), ["fail"])
     assert result.exit_code == code
     assert result.stdout == ""
-    assert result.stderr.startswith(f"Error: {error}\n")
+    assert result.stderr.startswith(f"Error [{error.error_code}]: {error}\n")
     if error.hint:
         assert f"Hint: {error.hint}" in result.stderr
 
@@ -148,7 +148,7 @@ def test_unexpected_error_is_one_line_without_traceback() -> None:
     assert result.exit_code == 1
     assert result.stdout == ""
     assert result.stderr == (
-        "Error: unexpected RuntimeError: kaboom (set PUP_FINETUNE_DEBUG=1 for a traceback)\n"
+        "Error [unexpected]: RuntimeError: kaboom (set PUP_FINETUNE_DEBUG=1 for a traceback)\n"
     )
     assert "second line" not in result.stderr
 
@@ -159,7 +159,7 @@ def test_unexpected_error_shows_traceback_in_debug() -> None:
     )
     assert result.exit_code == 1
     assert "Traceback" in result.stderr
-    assert "Error: unexpected RuntimeError: kaboom" in result.stderr
+    assert "Error [unexpected]: RuntimeError: kaboom" in result.stderr
 
 
 def test_click_usage_errors_keep_exit_2() -> None:
@@ -325,7 +325,7 @@ def run_and_exit_code(app: typer.Typer, args: list[str]) -> int:
 
 def test_run_app_maps_escaped_finetune_errors(capsys: pytest.CaptureFixture[str]) -> None:
     assert run_and_exit_code(make_bare_app(StateError("locked")), []) == 1
-    assert capsys.readouterr().err == "Error: locked\n"
+    assert capsys.readouterr().err == "Error [state]: locked\n"
 
 
 def test_run_app_emits_confirm_preview(capsys: pytest.CaptureFixture[str]) -> None:
@@ -333,13 +333,13 @@ def test_run_app_emits_confirm_preview(capsys: pytest.CaptureFixture[str]) -> No
     assert run_and_exit_code(make_bare_app(error), []) == 2
     out, err = capsys.readouterr()
     assert json.loads(out)["next_command"] == "pup finetune x --confirm"
-    assert "preview only" in err
+    assert "Preview only" in err
 
 
 def test_run_app_maps_unexpected_errors(capsys: pytest.CaptureFixture[str]) -> None:
     assert run_and_exit_code(make_bare_app(KeyError("k")), []) == 1
     err = capsys.readouterr().err
-    assert err.startswith("Error: unexpected KeyError: 'k' (set PUP_FINETUNE_DEBUG=1")
+    assert err.startswith("Error [unexpected]: KeyError: 'k' (set PUP_FINETUNE_DEBUG=1")
     assert err.count("\n") == 1
     assert "Traceback" not in err
 

@@ -45,7 +45,11 @@ from pup_finetune.providers.base import (
     Endpoint,
     ModelProfile,
     ModelRef,
+    SamplingUsage,
     SmokeTest,
+    TrainingUsage,
+    sampling_usage_text,
+    training_usage_text,
 )
 from pup_finetune.providers.baseten import CREDENTIALS, PROVIDER_NAME
 from pup_finetune.providers.baseten.backend import MIN_SEQ_LEN, BasetenBackend, Sleep
@@ -275,7 +279,7 @@ class BasetenProvider:
             raise UsageError(
                 f"Baseten trains {profile.base_model} on at most {limit} tokens in this "
                 f"workspace, shorter than the {max_seq_len} to train at",
-                hint=f"pass --provider-option max_seq_len=N with N at most {limit}",
+                hint=f"pass --max-seq-len N with N at most {limit}",
             )
 
     def renderer(self, profile: ModelProfile) -> HFChatTemplateRenderer:
@@ -302,9 +306,21 @@ class BasetenProvider:
             raise UsageError(
                 f"the max_seq_len provider option of {cap} is over the "
                 f"{profile.max_seq_len}-token context of {profile.alias}",
-                hint=f"pass --provider-option max_seq_len=N with N at most {profile.max_seq_len}",
+                hint=f"pass --max-seq-len N with N at most {profile.max_seq_len}",
             )
         return dataclasses.replace(profile, max_seq_len=cap)
+
+    def training_billing(self, usage: TrainingUsage) -> str:
+        return (
+            "Baseten bills the training job's GPUs for the time they run, at its own rates, "
+            f"which pup-finetune does not know: it trains on {training_usage_text(usage)}"
+        )
+
+    def sampling_billing(self, usage: SamplingUsage) -> str:
+        return (
+            "Baseten bills each sampler's GPU for the time it runs, at its own rates, which "
+            f"pup-finetune does not know: {sampling_usage_text(usage)}"
+        )
 
     def backend(self) -> BasetenBackend:
         """The training backend. Builds nothing remote; the key is resolved per session.

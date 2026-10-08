@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from pup_finetune import skill
-from pup_finetune.errors import StateError, UsageError
+from pup_finetune.errors import ERROR_CODES, StateError, UsageError
 
 REPO_SKILL = Path(__file__).resolve().parents[1] / "skills" / "datadog-finetune" / "SKILL.md"
 
@@ -92,6 +92,7 @@ def test_the_body_keeps_each_safety_rule(phrase: str) -> None:
 
 
 def test_the_debugging_table_covers_each_failure() -> None:
+    # Keyed on the error codes the error line shows, never on class names that no output has.
     table = skill.skill_text().split("## Debugging", 1)[1]
     rows = [line for line in table.splitlines() if line.startswith("| ") and "---" not in line]
     for term in (
@@ -99,16 +100,35 @@ def test_the_debugging_table_covers_each_failure() -> None:
         "fireworks",  # provider auth
         "matches no spans",  # empty pulls
         "excluded_by_code",  # exclusions
-        "ReadOnlyError",  # read-only mode
-        "ProviderCapacityError",  # capacity
-        "worker.stale",  # stale worker
-        "`resume` is refused",  # resume
-        "identity mismatch",  # evaluation identity
+        "Error [read_only]",  # read-only mode
+        "Error [provider_capacity]",  # capacity
+        "Error [provider_auth]",  # a rejected key
+        "worker.state",  # a stale or exited worker
+        "Error [wrong_phase]",  # resume, evaluate or deploy in the wrong phase
+        "Error [settings_conflict]",  # frozen settings, evaluation identity
+        "[not_a_run_dir]",  # the wrong directory
         "calibration",  # judge calibration
         "push.json",  # publishing without a push receipt
         "times out",  # deployment timeouts
     ):
         assert any(term in row for row in rows), f"no debugging row mentions {term!r}"
+
+
+def test_the_skill_lists_every_error_code_itself() -> None:
+    # The installed skill ships alone, without docs/commands.md: its own table is the list.
+    table = skill.skill_text().split("## Debugging", 1)[1]
+    assert "docs/commands.md" not in skill.skill_text()
+    for code, (exit_code, meaning) in ERROR_CODES.items():
+        assert f"| `{code}` | `{exit_code}` | {meaning} |" in table, code
+
+
+def test_the_skill_never_types_a_confirm_that_skips_expect() -> None:
+    # train, resume, triage and push pin their preview with --expect: the agent runs the
+    # preview's next_command rather than typing --confirm itself.
+    text = skill.skill_text()
+    for command in ("train", "resume", "dataset triage", "dataset push"):
+        typed = re.findall(rf"pup finetune {command} [^`\n]*--confirm", text)
+        assert typed == [], typed
 
 
 def _fake_files(root: Path) -> Callable[[str], Path]:

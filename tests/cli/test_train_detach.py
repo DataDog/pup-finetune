@@ -135,7 +135,8 @@ def test_a_detached_run_completes_and_status_watch_follows_it(
     final = watch(run_dir)
     assert final["phase"] == "completed"
     assert final["promoted_model"]["model_id"] == data["run_id"]
-    assert final["worker"]["running"] is False
+    assert final["worker"]["state"] == "exited"
+    assert final["worker"]["log"] == str(run_dir / "worker.log")
     assert final["next_command"] == f"pup finetune evaluate {run_dir}"
     assert json.loads((run_dir / "worker.json").read_text())["pid"] == data["pid"]
 
@@ -160,7 +161,8 @@ def test_cancel_stops_a_slow_worker_gracefully_and_promotes(dataset: Path, tmp_p
     previewed = cli(*train_args(dataset, run_dir, *slow, "--detach"))
     assert previewed.returncode == 2, previewed.stderr
     detach = shlex.split(one_json(previewed.stdout)["next_command"])
-    assert detach[:2] == ["pup", "finetune"] and detach[-2:] == ["--detach", "--confirm"]
+    assert detach[:2] == ["pup", "finetune"] and detach[-1] == "--confirm"
+    assert "--detach" in detach
     started = cli(*detach[2:])
     assert started.returncode == 0, started.stderr
     pid = one_json(started.stdout)["pid"]
@@ -203,7 +205,8 @@ def test_ctrl_c_stops_watching_a_detached_run_but_never_its_training(
     previewed = cli(*train_args(dataset, run_dir, *slow, "--detach"))
     assert previewed.returncode == 2, previewed.stderr
     detach = shlex.split(one_json(previewed.stdout)["next_command"])
-    assert detach[:2] == ["pup", "finetune"] and detach[-2:] == ["--detach", "--confirm"]
+    assert detach[:2] == ["pup", "finetune"] and detach[-1] == "--confirm"
+    assert "--detach" in detach
     started = cli(*detach[2:])
     assert started.returncode == 0, started.stderr
     pid = one_json(started.stdout)["pid"]
@@ -266,7 +269,7 @@ def test_ctrl_c_cancels_a_foreground_run_gracefully(dataset: Path, tmp_path: Pat
             process.wait()
     assert process.returncode == 0, stderr
     result = one_json(stdout)
-    assert result["phase"] == "cancelled"
+    assert result["status"] == "cancelled"
     assert result["promoted_model"] is not None
     assert "cancel requested" in stderr
 
@@ -310,3 +313,19 @@ def test_a_detached_resume_completes_a_crashed_run(dataset: Path, tmp_path: Path
     final = watch(run_dir)
     assert final["phase"] == "completed"
     assert final["promoted_model"] is not None
+
+
+def test_a_crashed_worker_s_hints_name_the_run_by_its_absolute_path(
+    dataset: Path, tmp_path: Path
+) -> None:
+    """The worker runs in the run directory, so a relative path would read ``resume .``."""
+    run_dir = tmp_path / "run"
+    crash = ("--batch-size", "1", "--provider-option", "fail_at_step=2")
+    started = cli(*train_args(dataset, run_dir, *crash, "--detach", "--confirm"))
+    assert started.returncode == 0, started.stderr
+    wait_until(lambda: state(run_dir).get("phase") == "interrupted", "the crash")
+    log = run_dir / "worker.log"
+    wait_until(lambda: "Next: " in log.read_text(), "the worker's hint")
+    text = log.read_text()
+    assert f"Next: pup finetune resume {run_dir.resolve()}" in text, text
+    assert "resume ." not in text

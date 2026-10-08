@@ -13,18 +13,18 @@ Each error names what the directory is and the command that takes it.
 
 from __future__ import annotations
 
-import shlex
 from pathlib import Path
 
 from pup_finetune.data.dataset_dir import DatasetDir
-from pup_finetune.errors import FinetuneError, UsageError
+from pup_finetune.display import quoted
+from pup_finetune.errors import FinetuneError, NotADatasetDir, NotARunDir, RunDirNotEmpty
 from pup_finetune.runs import RUN_FILE, RunDir
 
 __all__ = ["require_dataset_dir", "require_new_run_dir", "require_run_dir"]
 
 
 def _q(path: Path) -> str:
-    return shlex.quote(str(path))
+    return quoted(path)
 
 
 def _train_command(dataset: Path) -> str:
@@ -39,7 +39,7 @@ def _is_run(path: Path) -> bool:
 
 
 def require_run_dir(path: Path, command: str) -> None:
-    """Raise :class:`UsageError` when ``path`` is a dataset directory rather than the run
+    """Raise :class:`NotARunDir` when ``path`` is a dataset directory rather than the run
     directory ``command`` (e.g. ``evaluate``) takes."""
     if _is_run(path) or not DatasetDir(path).is_dataset():
         return
@@ -54,11 +54,11 @@ def require_run_dir(path: Path, command: str) -> None:
             f"{command} takes a training run's directory; to train on this dataset: "
             f"{_train_command(path)}"
         )
-    raise UsageError(f"{path} is a dataset directory, not a training run", hint=hint)
+    raise NotARunDir(f"{path} is a dataset directory, not a training run", hint=hint)
 
 
 def require_dataset_dir(path: Path) -> None:
-    """Raise :class:`UsageError` when ``path`` is a training run's directory rather than a
+    """Raise :class:`NotADatasetDir` when ``path`` is a training run's directory rather than a
     dataset directory, naming the dataset the run trained on."""
     if not _is_run(path) or DatasetDir(path).is_dataset():
         return
@@ -71,16 +71,17 @@ def require_dataset_dir(path: Path) -> None:
         if dataset
         else "pass a dataset directory instead, or "
     )
-    raise UsageError(
+    raise NotADatasetDir(
         f"{path} is a training run directory, not a dataset",
         hint=f"{where}see the run with `pup finetune status {_q(path)}`",
     )
 
 
 def require_new_run_dir(path: Path) -> None:
-    """Raise :class:`UsageError` when ``path``, given as a new run directory, is a dataset."""
+    """Raise :class:`RunDirNotEmpty` when ``path``, given as a new run directory, is a
+    dataset."""
     if DatasetDir(path).is_dataset():
-        raise UsageError(
+        raise RunDirNotEmpty(
             f"{path} is a dataset directory, not a new run directory",
             hint=f"train on it with --dataset {_q(path)}, and pass a new or empty --run-dir",
         )
