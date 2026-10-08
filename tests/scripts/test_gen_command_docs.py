@@ -76,6 +76,7 @@ def test_the_table_of_what_each_step_needs_comes_from_the_registries() -> None:
             "`BASETEN_API_KEY`, `FIREWORKS_API_KEY`",
             "`baseten`, `hf`",
         ),
+        ("`deploy`, `undeploy` on Baseten", "", "`BASETEN_API_KEY`", ""),
         ("`anthropic/<model>` judges", "", "`ANTHROPIC_API_KEY`", "`anthropic`"),
         ("`openai/<model>` judges", "", "`OPENAI_API_KEY`", ""),
     ]

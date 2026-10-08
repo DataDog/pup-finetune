@@ -17,8 +17,8 @@ import pytest
 
 from pup_finetune import credentials
 from pup_finetune.errors import UsageError
-from pup_finetune.providers import get_provider, provider_info, provider_infos
-from pup_finetune.providers.base import DeployOptions, LoraConfig, ModelRef
+from pup_finetune.providers import provider_info, provider_infos
+from pup_finetune.providers.base import LoraConfig
 from pup_finetune.providers.baseten import backend as baseten_backend
 from pup_finetune.providers.baseten.provider import PROFILES as BASETEN_PROFILES
 from pup_finetune.providers.fireworks import client as fireworks_client
@@ -66,11 +66,7 @@ def test_baseten_refuses_the_lora_alpha_in_the_preview_as_its_backend_does() -> 
 def test_only_providers_that_deploy_say_so() -> None:
     assert provider_info("fireworks", DEV).deploys
     assert provider_info("fake", DEV).deploys
-    assert not provider_info("baseten", DEV).deploys
-    baseten = get_provider("baseten", DEV)
-    model = ModelRef(provider="baseten", model_id="m", uri="baseten://m")
-    with pytest.raises(UsageError, match="not available"):
-        baseten.deploy(model, DeployOptions(deployment_id="d", display_name="d"))
+    assert provider_info("baseten", DEV).deploys
 
 
 def test_the_fake_is_the_only_offline_provider() -> None:

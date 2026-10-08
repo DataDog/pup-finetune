@@ -12,7 +12,7 @@
   the response body (a refused create quotes Baseten's reason, short and redacted). HTTP 401
   or 403 is a :class:`ProviderAuthError` and HTTP 429 a :class:`ProviderCapacityError`, for
   any call. It is a :class:`TransientError` for a call that is safe to repeat (a read, a
-  deactivation or a deletion) and failed in a way worth retrying (a timeout, a dropped
+  deactivation, an update or a deletion) and failed in a way worth retrying (a timeout, a dropped
   connection, HTTP 408, 500, 502, 503 or 504), for a create Baseten accepted whose answer
   cannot be read, as what it created exists and may bill, and for a checkpoint deployment
   whose outcome is unknown, which the caller finds again by name.
@@ -225,17 +225,17 @@ class BasetenHTTP:
         label = "the Loops capabilities request"
         return _object(self._request("GET", f"{API_BASE}/v1/loops/capabilities", label), label)
 
-    def get_checkpoint(self, checkpoint_path: str) -> dict[str, Any]:
-        """The one checkpoint record Baseten has for ``checkpoint_path``."""
+    def get_checkpoint(self, checkpoint_path: str) -> dict[str, Any] | None:
+        """The checkpoint record Baseten has for ``checkpoint_path``; ``None`` when it has none."""
         label = "the Loops checkpoint lookup"
         params = {"checkpoint_path": checkpoint_path}
         found = self._request("GET", f"{API_BASE}/v1/loops/checkpoints", label, params=params)
         records = _object(found, label).get("checkpoints")
-        if not isinstance(records, list) or len(records) != 1:
+        if not isinstance(records, list) or len(records) > 1:
             raise ExternalError(
-                f"Baseten must return exactly one checkpoint for {checkpoint_path}", source=SOURCE
+                f"Baseten must return at most one checkpoint for {checkpoint_path}", source=SOURCE
             )
-        return _object(records[0], label)
+        return _object(records[0], label) if records else None
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         """The Loops run, or ``None`` when Baseten no longer has it."""
@@ -286,6 +286,28 @@ class BasetenHTTP:
         url = f"{_deployment_url(model_id, deployment_id)}/deactivate"
         self._request("POST", url, "the deployment deactivation", idempotent=True)
 
+    def list_deployments(self, model_id: str) -> list[dict[str, Any]]:
+        """The model's deployments; none when Baseten no longer has the model."""
+        label = "the deployment listing"
+        url = f"{API_BASE}/v1/models/{_id(model_id, 'model')}/deployments"
+        found = self._request("GET", url, label, missing_ok=True)
+        return [] if found is None else _records(found, "deployments", label)
+
+    def deployment_config(self, model_id: str, deployment_id: str) -> dict[str, Any]:
+        """The deployment's parsed config (``training_checkpoints``, ``resources``...)."""
+        label = "the deployment config lookup"
+        url = f"{_deployment_url(model_id, deployment_id)}/config"
+        found = self._request("GET", url, label, params={"output_format": "parsed"})
+        config = _object(found, label).get("config")
+        return {} if config is None else _object(config, label)
+
+    def set_autoscaling(
+        self, model_id: str, deployment_id: str, *, min_replica: int, max_replica: int
+    ) -> None:
+        url = f"{_deployment_url(model_id, deployment_id)}/autoscaling_settings"
+        body = {"min_replica": min_replica, "max_replica": max_replica}
+        self._request("PATCH", url, "the autoscaling update", body=body, idempotent=True)
+
     # --- Dedicated checkpoint deployment ----------------------------------------------
 
     def instance_types(self) -> list[dict[str, Any]]:
@@ -335,6 +357,13 @@ class BasetenHTTP:
                 model_id=_id(created.get("model_id"), "model"),
                 deployment_id=_id(created.get("deployment_id"), "deployment"),
             )
+
+    def get_model(self, model_id: str) -> dict[str, Any] | None:
+        """The model, or ``None`` when Baseten no longer has it."""
+        label = "the model lookup"
+        url = f"{API_BASE}/v1/models/{_id(model_id, 'model')}"
+        found = self._request("GET", url, label, missing_ok=True)
+        return None if found is None else _object(found, label)
 
     def delete_model(self, model_id: str) -> bool:
         """Delete the model and its deployments; ``False`` when Baseten no longer has it."""

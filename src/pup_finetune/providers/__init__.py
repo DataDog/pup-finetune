@@ -490,7 +490,6 @@ register_provider(
             field="lora_alpha", flag="--lora-alpha", reason="Baseten sets the LoRA alpha itself"
         ),
     ),
-    deploys=False,
 )
 
 # Providers with an API key register its CredentialSpec in their (lightweight) package, so

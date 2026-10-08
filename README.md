@@ -78,6 +78,7 @@ installs every extra. `evaluate` also uses the Datadog login to publish its expe
 | `deploy`, `undeploy` on Fireworks | - | `FIREWORKS_API_KEY` | `fireworks` |
 | `train` on Baseten | - | `BASETEN_API_KEY` | `baseten`, `hf` |
 | `evaluate` on Baseten | - | `BASETEN_API_KEY`, `FIREWORKS_API_KEY` | `baseten`, `hf` |
+| `deploy`, `undeploy` on Baseten | - | `BASETEN_API_KEY` | - |
 | `anthropic/<model>` judges | - | `ANTHROPIC_API_KEY` | `anthropic` |
 | `openai/<model>` judges | - | `OPENAI_API_KEY` | - |
 <!-- END GENERATED: what each step needs -->
@@ -155,7 +156,10 @@ The preview shows the rendered tokens per split, the rows left out (such as `exc
 and where the rows go. The provider follows from the model, and the run goes in
 `runs/<run id>`. `--detach` trains in a background worker (its log is `worker.log`). Cap the
 spend with `--max-train-tokens`, or `--max-spend-usd` with `--hourly-rate-usd`. The epoch with
-the best validation loss is promoted to a provider model, also when a cap stops the run.
+the best validation loss is kept, also when a cap stops the run: promoted to a Fireworks model,
+or recorded as the run's `deployable_checkpoint` on Baseten, which has no promotion. The
+Baseten models are `qwen3p5-9b` and `glm-5p3-flash`:
+`pup finetune train --dataset datasets/my-agent --model qwen3p5-9b --detach`.
 
 `pup finetune runs` lists your runs. Run commands take a run id or a run directory, and
 `status` alone shows the newest run. `status --watch` prints progress until training ends;
@@ -210,10 +214,16 @@ smoke test. It bills per GPU-second while a replica runs (it
 scales to zero when idle) until you undeploy it. The result's `usage` gives the base URL, the
 model to request and an example request. Undeploying keeps the model.
 
+On Baseten, `deploy` serves the run's `deployable_checkpoint` as a dedicated model on exactly
+the GPUs of `--shape TYPE:COUNT` (default `H100:1`); the workspace needs BDN volumes and an
+`hf_access_token` secret. It scales between 0 and 1 replicas and bills per GPU-second while a
+replica runs, until you undeploy it. Undeploying deletes that model and keeps the checkpoint.
+
 ## Credentials and judges
 
 `pup-finetune` never asks for Datadog API or application keys: Datadog access is Pup's. A
-provider key comes from its environment variable or the OS keychain:
+provider key comes from its environment variable or the OS keychain (for Baseten, without
+either, the key of your default Baseten remote in `~/.trussrc`, read only):
 
 ```sh
 pup finetune auth login fireworks    # hidden prompt; also baseten, anthropic, openai

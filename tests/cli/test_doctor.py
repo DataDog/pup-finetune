@@ -169,7 +169,7 @@ def test_a_healthy_pup_is_ready_without_any_provider_key(use_pup: UsePup) -> Non
         },
         {
             "command": "pup finetune auth login baseten",
-            "why": f"{doctor_cli.LOGIN_WHY}, for training and evaluation on baseten",
+            "why": f"{doctor_cli.LOGIN_WHY}, for training, evaluation and deployment on baseten",
         },
     ]
     assert "Bearer" not in result.stdout
@@ -190,10 +190,11 @@ def test_ready_says_which_steps_can_run(use_pup: UsePup) -> None:
         "deploy on fireworks": False,
         "train on baseten": False,
         "evaluate on baseten": False,
+        "deploy on baseten": False,
     }
     assert ready["dataset triage"]["blocked_by"] == ["fireworks:key"]
     assert ready["evaluate on baseten"]["blocked_by"] == ["baseten:key", "fireworks:key"]
-    # Baseten does not deploy, so it has no deploy step.
+    assert ready["deploy on baseten"]["blocked_by"] == ["baseten:key"]
     assert ready["deploy on fireworks"]["blocked_by"] == ["fireworks:key"]
 
 
@@ -261,7 +262,8 @@ def test_the_ready_line_says_which_steps_read_only_mode_blocks(
     assert ready == (
         "Ready: dataset preview, pull, show, triage.  Not ready: dataset push (read-only), "
         "train on fireworks (read-only), evaluate on fireworks (read-only), deploy on "
-        "fireworks (read-only), train on baseten (read-only), evaluate on baseten (read-only)."
+        "fireworks (read-only), train on baseten (read-only), evaluate on baseten (read-only), "
+        "deploy on baseten (read-only)."
     )
 
 
@@ -604,15 +606,16 @@ def test_the_checklist_follows_the_report_on_stderr(
         "--    Fireworks Training SDK missing               only for training, evaluation and "
         "deployment on fireworks",
         "ok    Fireworks renderer (transformers) installed  rendering rows for fireworks",
-        "--    Baseten key not set                          only for training and evaluation on "
-        "baseten",
+        "--    Baseten key not set                          only for training, evaluation and "
+        "deployment on baseten",
         "ok    Baseten Loops SDK installed                  training and evaluation on baseten",
         "ok    Baseten renderer (transformers) installed    rendering rows for baseten",
         "--    Anthropic/OpenAI keys not set                only for anthropic/... or openai/... "
         "judges",
         "ok    Anthropic SDK installed                      anthropic/... judges",
         "Ready: dataset preview, pull, show, push, triage.  Not ready: train on fireworks, "
-        "evaluate on fireworks, deploy on fireworks, train on baseten, evaluate on baseten.",
+        "evaluate on fireworks, deploy on fireworks, train on baseten, evaluate on baseten, "
+        "deploy on baseten.",
         "Next: pup finetune dataset preview --ml-app <ML_APP> --from 7d",
     ]
 

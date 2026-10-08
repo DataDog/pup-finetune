@@ -6,11 +6,14 @@
 # Copyright 2026-present Datadog, Inc.
 """Every `pup finetune` command and flag the skill and the README mention exists in the CLI.
 
+So does every `--provider` and `--model` they pass, and both name each real provider.
+
 Also: the README names the Pup version `doctor` requires.
 """
 
 from __future__ import annotations
 
+import itertools
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -22,6 +25,8 @@ import typer.main
 
 from pup_finetune.cli import app
 from pup_finetune.datadog.pup import MIN_PUP_VERSION
+from pup_finetune.providers import get_provider, known_models
+from pup_finetune.runtime import Runtime
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCS = [REPO_ROOT / "skills" / "datadog-finetune" / "SKILL.md", REPO_ROOT / "README.md"]
@@ -165,6 +170,28 @@ def test_every_flag_mentioned_belongs_to_a_command(doc: Path) -> None:
     flags = set(_FLAG.findall(doc.read_text(encoding="utf-8")))
     unknown = sorted(flags - known)
     assert not unknown, f"{doc.name} mentions flags no command has: {unknown}"
+
+
+@pytest.mark.parametrize("doc", DOCS, ids=lambda path: path.name)
+def test_every_provider_and_model_passed_exists(doc: Path) -> None:
+    # A --model without --provider names its provider, as train infers it.
+    offered_by = {
+        alias: name for name, aliases in known_models(Runtime()).items() for alias in aliases
+    }
+    providers: set[str] = set()
+    for snippet in code_snippets(doc.read_text(encoding="utf-8")):
+        for words in invocations(snippet):
+            values = dict(itertools.pairwise(words))
+            name, model = values.get("--provider"), values.get("--model")
+            if model is not None and not model.startswith("<"):
+                name = name or offered_by.get(model)
+                assert name is not None, f"{doc.name}: no provider offers --model {model}"
+                get_provider(name, Runtime()).resolve_model(model)
+                providers.add(name)
+            elif name is not None:
+                get_provider(name, Runtime())
+                providers.add(name)
+    assert {"fireworks", "baseten"} <= providers, f"{doc.name} names only {providers}"
 
 
 def test_the_checker_catches_a_wrong_command_and_flag() -> None:

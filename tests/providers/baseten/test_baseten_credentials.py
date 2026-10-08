@@ -53,7 +53,7 @@ def test_the_spec_is_registered() -> None:
     assert CREDENTIALS.description
     assert CREDENTIALS.config_reader is read_trussrc_key
     assert CREDENTIALS.validator is validate_key
-    assert CREDENTIALS.needed_for == "training and evaluation on baseten"
+    assert CREDENTIALS.needed_for == "training, evaluation and deployment on baseten"
 
 
 def test_the_cli_registers_the_key_without_heavy_imports() -> None:

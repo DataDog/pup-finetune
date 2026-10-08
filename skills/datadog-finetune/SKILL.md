@@ -219,7 +219,7 @@ run goes in `runs/<run id>`. After a yes, run its `next_command`. Cap spend with
 Always train with `--detach`; its `next_command` watches with `--timeout 90s`. Never watch
 without `--timeout`: a run takes hours, and the timeout leaves it training. `--evaluate` needs
 the foreground (no `--detach`), so evaluate a detached run in step 6. `pup finetune runs` lists runs. The best epoch by
-validation loss is promoted. Both of these preview; run their `next_command` after a yes. A
+validation loss is promoted (on Baseten, kept as `deployable_checkpoint`). Both of these preview; run their `next_command` after a yes. A
 resume bills again. A cancel finishes the step and promotes the best epoch so far:
 
 ```sh
@@ -230,7 +230,8 @@ pup finetune cancel ft-20261007183443-a8b181
 Check:
 
 - [ ] The user saw the token counts and authorized this training (and any resume).
-- [ ] `status` ends `completed` (or `cancelled`) with a `best_epoch` and a `promoted_model`.
+- [ ] `status` ends `completed` (or `cancelled`) with a `best_epoch` and a `promoted_model`
+      (Fireworks) or a `deployable_checkpoint` (Baseten).
 - [ ] Validation loss improved over the first epoch; if not, tell the user before evaluating.
 
 ## Step 6: evaluate
@@ -270,9 +271,39 @@ Check:
 - [ ] The user authorized this deployment after seeing the billing line.
 - [ ] The smoke test passed, and the user knows the undeploy command.
 
+## Provider notes
+
+### Baseten
+
+| `--model` | Base model | Notes |
+| --- | --- | --- |
+| `qwen3p5-9b` | `Qwen/Qwen3.5-9B` | Supports reasoning |
+| `glm-5p3-flash` | `zai-org/GLM-5.3-Flash` | No reasoning |
+
+- **Setup.** The `baseten` and `hf` extras and a key: `pup finetune auth login baseten`, or
+  read only, the default remote's key in `~/.trussrc`. These `--model`s select Baseten:
+  `pup finetune train --dataset datasets/my-agent --model qwen3p5-9b --detach`.
+  `--max-seq-len <n>` (at least 1024) caps the context; never pass `--lora-alpha`.
+- **Billing.** `train`, `resume` and `evaluate` provision a dedicated Loops trainer (and
+  samplers) that bills until the run is deactivated; every exit deactivates it. Never `kill -9`
+  a pup-finetune process. On `could not deactivate Baseten run <id> (...); it may still bill`,
+  tell the user at once. A standalone `evaluate` starts a new trainer; `train --evaluate`
+  reuses one.
+- **Checkpoints.** No promotion: the best epoch's sampler checkpoint is the run's
+  `deployable_checkpoint` (`bt://loops:<run>/sampler_weights/<name>`). An expired checkpoint
+  needs a new run.
+- **Deploy.** A dedicated model on exactly the GPUs of `--shape TYPE:COUNT` (default `H100:1`),
+  0 to 1 replicas. The workspace needs BDN volumes and an `hf_access_token` secret. `undeploy`
+  deletes the model and keeps the checkpoint.
+- **Environment.** pup-finetune refuses `LOOPS_REQUEST_LOG`, `LOOPS_REUSE_FROM_RUN_ID`,
+  `LOOPS_REUSE_FROM_SESSION_ID`, `INTERNAL_LOOPS_BACKEND_VERSION`, `LOOPS_TEAM`, and
+  `LOOPS_BASE_URL` (`LOOPS_BASE_URL must be unset or https://api.baseten.co`). Ask the user to
+  unset them.
+
 ## End state
 
-- [ ] A reviewed dataset and a run with a `promoted_model`.
+- [ ] A reviewed dataset and a run with a `promoted_model` or a
+      `deployable_checkpoint`.
 - [ ] An evaluation reported with its delta, interval, experiment ids and caveat.
 - [ ] No deployment left running unless the user asked to keep it.
 - [ ] No API key in the chat, the shell history or any file you wrote.
@@ -316,3 +347,6 @@ Errors read `Error [<code>]: <message>`, then `Hint: ...`. The codes, with their
 | The evaluation was not published | No `push.json`, or the push missed the test split | Publishing is optional; `next_command` goes on to deploy. To publish, follow `next_steps`: push with a yes, then rerun; finished results are reused. |
 | `deploy` times out, or the smoke test fails | It did not serve in time | It may still bill: undeploy now. Redeploy only after a yes, with a longer `--timeout-minutes`. |
 | `undeploy` refuses: not the requested deployment | The deployment id holds another deployment | Nothing was deleted; never delete it. With an OK, follow the error's steps. |
+| `could not deactivate Baseten run <id> (...); it may still bill` | Cleanup failed; the trainer may still bill | Tell the user at once: they deactivate it in the Baseten UI or with the hinted `curl` command. |
+| Hint `a run may remain in Loops session <id>` or `a sampler may remain ...` | Creating a Baseten trainer or sampler was interrupted; it may bill | Tell the user at once: they deactivate it in the Baseten UI. |
+| `deploy` on Baseten fails with a hint about BDN volumes | The workspace has no BDN volumes; nothing was created | The user asks Baseten to enable them, then deploys again. |

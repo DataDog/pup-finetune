@@ -155,7 +155,7 @@ def deploy(
         typer.Option(
             "--shape",
             metavar="SHAPE",
-            help=f"The deployment shape. {default_note('the first validated one')}",
+            help="The deployment shape. " + default_note("the provider's default for the model"),
             show_default=False,
         ),
     ] = None,

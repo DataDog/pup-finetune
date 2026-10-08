@@ -268,7 +268,7 @@ Baseten Loops through `providers/baseten/client.py`, the only module that loads 
   capacity, nothing is left running.
 - **Checkpoints.** `bt://loops:` paths that outlive the run; a resume loads a training
   checkpoint with its optimizer state into a new run. There is no promotion: the best sampler
-  checkpoint is the run's deployable checkpoint.
+  checkpoint is the run's deployable checkpoint, which `deploy` serves (see Deploying).
 - **Sampling.** Each sampler runs on its own dedicated deployment, sized to the profile's
   context, and renders, samples and parses as on Fireworks. The `max_seq_len` provider option
   cuts the training profile, so it also sizes the samplers and the trainer a standalone
@@ -432,6 +432,21 @@ in another account than the key resolves to, where a 404 would not mean it is go
 Fireworks' own CLI refuses to create deployments when an AI agent runs it; pup-finetune uses
 the API and relies on `--confirm`, so an agent confirms only with the user's explicit
 authorization.
+
+On Baseten, [`providers/baseten/deploy.py`](../src/pup_finetune/providers/baseten/deploy.py)
+serves the run's deployable checkpoint as a dedicated Baseten model named after the deployment
+id. Before `on_creating` it checks Baseten's record of the checkpoint, finds an instance type
+with exactly the GPUs of `--shape TYPE:COUNT` (default `H100:1`), and refuses a name Baseten
+already has, since a create under it would add a deployment to that model. It then sends
+`POST /v1/loops/checkpoints/deploy` once (the workspace needs BDN volumes, and the
+`hf_access_token` secret supplies `HF_TOKEN`). A 4xx created nothing; after any other failure
+the model is read back by name and adopted only when its one deployment serves the checkpoint
+(the `training_checkpoints` of its config) on that instance type. It reads the deployment
+every 15 seconds until `ACTIVE`, sets its autoscaling to 0 to 1 replicas, and smoke-tests one
+chat completion naming the checkpoint on the deployment's `/sync/v1` route. Baseten assigns
+the model and deployment ids, so `deployment_name` is `None`; `owns_deployment` reads the
+model back by name, and `undeploy` deletes the model with its deployment, which keeps the
+checkpoint and frees the name for the next deploy.
 
 ## Judges
 
