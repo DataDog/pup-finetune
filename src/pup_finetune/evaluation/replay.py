@@ -57,7 +57,7 @@ from pathlib import Path
 from typing import Any, Final, Literal, Protocol, get_args
 
 from pup_finetune.concurrency import DaemonPool
-from pup_finetune.errors import StateError
+from pup_finetune.errors import SettingsConflict, StateError
 from pup_finetune.evaluation.cases import ReplayCase
 from pup_finetune.evaluation.judge import Judgment
 from pup_finetune.evaluation.metrics import aggregate, score_case
@@ -254,7 +254,7 @@ class EvalDir:
             atomic_write_json(self.identity_path, wanted)
             return
         changed = identity_changes(stored, wanted)
-        raise StateError(
+        raise SettingsConflict(
             f"{self.path} holds an evaluation with other settings "
             f"(changed: {', '.join(changed)}), so its results cannot be reused",
             hint="pass a new --out-dir to evaluate with these settings",

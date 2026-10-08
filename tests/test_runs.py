@@ -24,7 +24,7 @@ import pytest
 from pup_finetune.data.dataset_dir import DatasetDir, DatasetSettings
 from pup_finetune.data.schema import TrainingRow, validate_row
 from pup_finetune.data.split import SplitParams
-from pup_finetune.errors import ExternalError, StateError, UsageError
+from pup_finetune.errors import ExternalError, RunDirNotEmpty, StateError, UsageError
 from pup_finetune.providers.base import LoraConfig, TrainSpec
 from pup_finetune.providers.fake import (
     FAKE_PROFILE,
@@ -151,7 +151,7 @@ def test_the_run_dir_must_be_new_or_empty(tmp_path: Path) -> None:
     (target / "notes.txt").write_text("hello")
     with pytest.raises(StateError, match="is not empty"):
         create(target)
-    with pytest.raises(StateError, match="is not empty"):
+    with pytest.raises(RunDirNotEmpty, match="used already holds run ft-test-run \\(created\\)"):
         create(create(tmp_path / "used").path)
 
 
@@ -409,7 +409,7 @@ def test_an_unknown_phase_on_disk_is_an_error(tmp_path: Path) -> None:
 
 
 def test_reading_a_missing_run_is_an_error(tmp_path: Path) -> None:
-    with pytest.raises(StateError, match="does not exist"):
+    with pytest.raises(StateError, match="no such run directory or run id"):
         RunDir(tmp_path / "nothing").status()
 
 
@@ -528,6 +528,18 @@ def test_sigterm_interrupts_the_run_and_still_writes_the_result(tmp_path: Path) 
     assert read(run_dir.result_path)["phase"] == "interrupted"
     assert run_dir.load_state().phase == "interrupted"
     assert signal.getsignal(signal.SIGTERM) == before
+    # The run files record the code the error line shows.
+    assert read(run_dir.state_path)["error"]["code"] == "interrupted"
+    assert read(run_dir.result_path)["error"]["code"] == "interrupted"
+
+
+def test_a_crash_is_recorded_with_the_code_its_error_line_shows(tmp_path: Path) -> None:
+    run_dir = create(tmp_path / "run")
+    with pytest.raises(FakeCrash):
+        execute_run(run_dir, fake_training(FakeOptions(fail_at_step=1)))
+    for path in (run_dir.state_path, run_dir.result_path):
+        error = read(path)["error"]
+        assert (error["type"], error["code"]) == ("FakeCrash", "external"), path.name
 
 
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
@@ -985,6 +997,16 @@ def test_every_error_that_leaves_the_run_resumable_names_the_resume_command(
     with pytest.raises(ExternalError) as other:
         execute_run(run_dir, broken, resume=True)
     assert other.value.hint == f"the run is resumable from its last training checkpoint. {resume}"
+
+
+def test_a_run_that_saved_no_checkpoint_resumes_from_the_start(tmp_path: Path) -> None:
+    run_dir = create(tmp_path / "run")
+    with pytest.raises(FakeCrash) as crash:
+        execute_run(run_dir, fake_training(FakeOptions(fail_at_step=1)))
+    assert run_dir.load_state().resume_point is None
+    assert (crash.value.hint or "").startswith(
+        "the run is resumable from the start: it saved no training checkpoint yet. Next: "
+    )
 
 
 def test_an_error_after_the_end_was_recorded_names_no_resume(tmp_path: Path) -> None:

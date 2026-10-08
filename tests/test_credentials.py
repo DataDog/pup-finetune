@@ -424,19 +424,16 @@ def stored_in(backend: MemoryKeyring) -> str | None:
 # --- doctor -----------------------------------------------------------------------------
 
 
-def test_registering_adds_an_optional_doctor_check(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_registering_adds_no_doctor_check_and_reports_the_key_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     credentials.register(SPEC)
-    [missing] = doctor_registry.run_registered_checks()
-    assert missing.name == "credentials:acme"
-    assert missing.required is False
-    assert missing.ok is False
-    assert "pup finetune auth login acme" in missing.detail
+    # doctor builds its key checks from every registered spec (pup_finetune.readiness).
+    assert doctor_registry.run_registered_checks() == []
+    assert credentials.key_source("acme") is None
 
     monkeypatch.setenv("ACME_API_KEY", SECRET)
-    [present] = doctor_registry.run_registered_checks()
-    assert present.ok is True
-    assert present.detail == "acme API key found (source: env)"
-    assert SECRET not in present.detail
+    assert credentials.key_source("acme") == "env"
 
 
 @pytest.mark.parametrize("debug", [False, True])
@@ -479,12 +476,11 @@ def test_doctor_redacts_returned_check_details(capsys: pytest.CaptureFixture[str
     assert failing.detail == "Authorization: Bearer ***"
 
 
-def test_doctor_check_reports_a_locked_keychain(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_key_source_reports_a_locked_keychain(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(keyring.core, "_keyring_backend", LockedKeyring())
     credentials.register(SPEC)
-    [check] = doctor_registry.run_registered_checks()
-    assert check.ok is False
-    assert "could not read the acme key" in check.detail
+    with pytest.raises(ExternalError, match="could not read the acme key"):
+        credentials.key_source("acme")
 
 
 # --- redaction --------------------------------------------------------------------------
@@ -679,7 +675,7 @@ def test_emit_error_redacts_message_and_hint(capsys: pytest.CaptureFixture[str])
     emit_error(UsageError(f"bad key {SECRET}", hint=f"try {SECRET}"), runtime=Runtime())
     captured = capsys.readouterr()
     assert SECRET not in captured.err
-    assert captured.err == "Error: bad key ***\nHint: try ***\n"
+    assert captured.err == "Error [usage]: bad key ***\nHint: try ***\n"
 
 
 @pytest.mark.parametrize("debug", [False, True])
@@ -707,7 +703,7 @@ def test_emit_error_redacts_a_confirmation_preview(capsys: pytest.CaptureFixture
     captured = capsys.readouterr()
     assert SECRET not in captured.err
     assert SECRET not in captured.out
-    assert "Confirmation required: would send ***" in captured.err
+    assert "Would send ***" in captured.err
     assert "Next: pup finetune x --token *** --confirm" in captured.err
     assert "Hint: check ***" in captured.err
     assert '"key": "***"' in captured.out

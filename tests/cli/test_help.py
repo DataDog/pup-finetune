@@ -20,7 +20,6 @@ from typer.testing import CliRunner
 
 from pup_finetune.cli import app
 from pup_finetune.cli._common import prog_name, run_app
-from pup_finetune.cli.help import HELP_WIDTH
 from pup_finetune.runtime import Runtime
 
 runner = CliRunner()
@@ -47,13 +46,6 @@ def all_paths() -> list[list[str]]:
     return list(command_paths(root, typer.Context(root, info_name="pup-finetune")))
 
 
-@pytest.fixture
-def width(monkeypatch: pytest.MonkeyPatch) -> int:
-    """A fixed rendering width above HELP_WIDTH, so `help` and `--help` render alike."""
-    monkeypatch.setattr(rich_utils, "MAX_WIDTH", 150)
-    return 150
-
-
 def test_every_command_is_covered() -> None:
     names = {" ".join(path) for path in all_paths()}
     assert {"", "help", "train", "dataset", "dataset pull", "auth login"} <= names
@@ -61,8 +53,7 @@ def test_every_command_is_covered() -> None:
 
 
 @pytest.mark.parametrize("path", all_paths(), ids=lambda path: " ".join(path) or "<root>")
-def test_help_prints_what_dash_dash_help_prints(path: list[str], width: int) -> None:
-    del width
+def test_help_prints_what_dash_dash_help_prints(path: list[str]) -> None:
     expected = runner.invoke(app, [*path, "--help"])
     result = runner.invoke(app, ["help", *path])
     assert expected.exit_code == 0
@@ -72,8 +63,7 @@ def test_help_prints_what_dash_dash_help_prints(path: list[str], width: int) -> 
     assert f"Usage: pup-finetune {' '.join(path)}".rstrip() in plain(result.stdout)
 
 
-def test_help_alone_prints_the_top_level_help(width: int) -> None:
-    del width
+def test_help_alone_prints_the_top_level_help() -> None:
     result = runner.invoke(app, ["help"])
     assert result.exit_code == 0
     assert result.stdout == runner.invoke(app, ["--help"]).stdout
@@ -85,7 +75,7 @@ def test_an_unknown_command_is_a_usage_error_naming_the_commands() -> None:
     assert result.exit_code == 2
     assert result.stdout == ""
     error = result.stderr.splitlines()[0]
-    assert error.startswith("Error: `pup-finetune dataset` has no command `nope`")
+    assert error.startswith("Error [usage]: `pup-finetune dataset` has no command `nope`")
     for name in ("pull", "show", "push", "triage"):
         assert name in error
     assert "Hint: run `pup-finetune help dataset`" in result.stderr
@@ -104,35 +94,25 @@ def test_words_past_a_command_or_a_hidden_command_are_refused(words: list[str]) 
     result = runner.invoke(app, ["help", *words])
     assert result.exit_code == 2
     assert result.stdout == ""
-    assert result.stderr.startswith("Error: ")
+    assert result.stderr.startswith("Error [usage]: ")
 
 
 def longest_line(text: str) -> int:
     return max(len(line) for line in plain(text).splitlines())
 
 
-def test_off_a_terminal_help_is_at_least_help_width_wide(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("columns", ["80", "200"])
+def test_off_a_terminal_help_renders_at_the_width_dash_dash_help_does(
+    columns: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(rich_utils, "MAX_WIDTH", None)
-    result = runner.invoke(app, ["help", "train"], env={"COLUMNS": "80"})
-    assert result.exit_code == 0
-    assert longest_line(result.stdout) == HELP_WIDTH
-    assert "…" not in result.stdout  # nothing cut off
-    assert "--eval-max-cases-per-trajectory" in plain(result.stdout)
-    assert rich_utils.MAX_WIDTH is None  # restored
-    narrow = runner.invoke(app, ["train", "--help"], env={"COLUMNS": "80"})
-    assert longest_line(narrow.stdout) == 80  # --help itself is unchanged
-
-
-@pytest.mark.parametrize("env", [{"COLUMNS": "200"}, {}])
-def test_off_a_terminal_a_larger_width_is_kept(
-    env: dict[str, str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(rich_utils, "MAX_WIDTH", None if env else 200)
+    env = {"COLUMNS": columns}
     result = runner.invoke(app, ["help", "train"], env=env)
     assert result.exit_code == 0
-    assert longest_line(result.stdout) == 200
+    assert result.stdout == runner.invoke(app, ["train", "--help"], env=env).stdout
+    assert longest_line(result.stdout) <= int(columns)
+    assert "…" not in result.stdout  # nothing cut off, even at 80
+    assert "--eval-max-cases" in plain(result.stdout)
 
 
 def usage_error(capsys: pytest.CaptureFixture[str], args: list[str]) -> str:
@@ -144,24 +124,21 @@ def usage_error(capsys: pytest.CaptureFixture[str], args: list[str]) -> str:
     return plain(err)
 
 
-def test_standalone_usage_errors_name_pup_finetune_and_point_to_help(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_standalone_usage_errors_point_to_help(capsys: pytest.CaptureFixture[str]) -> None:
     err = usage_error(capsys, ["train", "--bogus"])
-    assert "Usage: pup-finetune train [OPTIONS]" in err
-    assert "Try 'pup-finetune help train' for help." in err
-    assert "--help'" not in err
+    assert err == ("Error [usage]: No such option: --bogus\nHint: see `pup-finetune help train`\n")
 
 
-def test_under_pup_usage_errors_name_pup_finetune_and_point_to_help(
+def test_under_pup_usage_errors_point_to_pup_finetune_help(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("PUP_OUTPUT", "json")
     err = usage_error(capsys, ["dataset", "show"])
-    assert "Usage: pup finetune dataset show [OPTIONS]" in err
-    assert "Try 'pup finetune help dataset show' for help." in err
+    assert err == (
+        "Error [usage]: dataset show needs DIR\nHint: see `pup finetune help dataset show`\n"
+    )
     err = usage_error(capsys, ["nope"])
-    assert "Try 'pup finetune help' for help." in err
+    assert err.endswith("Hint: see `pup finetune help`\n")
 
 
 def test_under_pup_help_prints_its_text_on_stdout_naming_pup_finetune(

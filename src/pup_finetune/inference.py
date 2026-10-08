@@ -75,6 +75,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from pup_finetune import credentials
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.http_common import CLIENT_SOURCE, bearer_key, error_detail, exception_reason
+from pup_finetune.judge_models import DEFAULT_JUDGE_MODEL
 from pup_finetune.providers.base import ProviderAuthError, ProviderCapacityError, TransientError
 
 __all__ = [
@@ -103,7 +104,6 @@ BASE_BACKOFF_S: Final = 1.0
 MAX_WAIT_S: Final = 30.0
 """The longest wait before any retry, ``Retry-After`` included."""
 
-DEFAULT_JUDGE_MODEL: Final = "accounts/fireworks/models/deepseek-v4p1-flash"
 DEFAULT_JUDGE_BASE_URL: Final = "https://api.fireworks.ai/inference/v1"
 
 JudgeProvider = Literal["fireworks", "anthropic", "openai", "fake"]

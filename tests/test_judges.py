@@ -25,8 +25,10 @@ from pup_finetune.inference import (
     ChatCompleter,
     JudgeConfig,
 )
+from pup_finetune.judge_models import JUDGE_SHORT_NAMES, alias_of
 from pup_finetune.judges import (
     ANTHROPIC_INSTALL_HINT,
+    FIREWORKS_REASONING,
     anthropic_client_class,
     check_available,
     destination,
@@ -99,7 +101,7 @@ def test_an_openai_judge_sends_an_effort_only_to_a_reasoning_model(
         ("accounts/fireworks/models/deepseek-v4p1-flash", "none"),
         ("accounts/fireworks/models/glm-5p3-flash", "low"),  # thinking only: refuses none
         ("accounts/fireworks/models/another-judge", None),
-        ("judge-x", None),
+        ("accounts/test/models/judge-x", None),
     ],
 )
 def test_a_fireworks_judge_asks_for_the_lowest_effort_its_model_takes(
@@ -108,13 +110,31 @@ def test_a_fireworks_judge_asks_for_the_lowest_effort_its_model_takes(
     assert parse_judge(model).reasoning_effort == effort
 
 
+@pytest.mark.parametrize(
+    ("spec", "close"), [("glm-5p3-flsh", "glm-5p3-flash"), ("fake-judge", None), ("judge-x", None)]
+)
+def test_a_spec_without_a_slash_must_be_a_known_alias(spec: str, close: str | None) -> None:
+    # A mistyped alias would otherwise be sent, as a model id, to a paid run.
+    with pytest.raises(UsageError, match=rf"^unknown judge '{spec}'") as info:
+        parse_judge(spec)
+    hint = info.value.hint or ""
+    if close is not None:
+        assert hint.startswith(f"did you mean {close}? ")
+    else:
+        assert not hint.startswith("did you mean")
+    for form in ("deepseek-v4p1-flash", "anthropic/MODEL", "openai/MODEL", "accounts/<acct>"):
+        assert form in hint
+
+
 def test_a_bare_fireworks_id_of_another_account_stays_fireworks() -> None:
     config = parse_judge("accounts/my-team/models/judge")
     assert (config.provider, config.model) == ("fireworks", "accounts/my-team/models/judge")
 
 
-@pytest.mark.parametrize("spec", ["judge-one", "gemini/pro", "fireworks/judge-x"])
-def test_any_other_spec_is_a_fireworks_model_id_as_written(spec: str) -> None:
+@pytest.mark.parametrize(
+    "spec", ["accounts/test/models/judge-one", "gemini/pro", "fireworks/judge-x"]
+)
+def test_any_other_spec_with_a_slash_is_a_fireworks_model_id_as_written(spec: str) -> None:
     # Only anthropic/ and openai/ name a provider; there is no fireworks/ alias.
     config = parse_judge(spec)
     assert (config.provider, config.model) == ("fireworks", spec)
@@ -129,7 +149,8 @@ def test_a_provider_prefix_is_read_in_any_case() -> None:
 
 
 @pytest.mark.parametrize(
-    "spec", ["anthropic/claude-opus-5-5", "openai/gpt-x", DEFAULT_JUDGE_MODEL, "judge-x"]
+    "spec",
+    ["anthropic/claude-opus-5-5", "openai/gpt-x", DEFAULT_JUDGE_MODEL, "glm-5p3-flash"],
 )
 def test_a_spec_round_trips(spec: str) -> None:
     assert parse_judge(parse_judge(spec).spec) == parse_judge(spec)
@@ -260,7 +281,7 @@ def test_a_council_gets_one_client_per_provider(monkeypatch: pytest.MonkeyPatch)
         parse_judge("openai/gpt-x"),
         JudgeConfig(),
         parse_judge("openai/gpt-y"),
-        parse_judge("judge-x"),
+        parse_judge("accounts/test/models/judge-x"),
     ]
     with open_clients(configs) as clients:
         assert sorted(clients) == ["fireworks", "openai"]
@@ -305,3 +326,24 @@ def test_the_fake_judge_has_no_remote_client() -> None:
 def test_the_providers_table_covers_every_remote_provider() -> None:
     assert sorted(judges.PROVIDERS) == ["anthropic", "fireworks", "openai"]
     assert all(d.base_url.startswith("https://") for d in judges.PROVIDERS.values())
+
+
+@pytest.mark.parametrize("alias", sorted(JUDGE_SHORT_NAMES))
+def test_an_alias_resolves_to_its_fireworks_model_id(alias: str) -> None:
+    config = parse_judge(alias)
+    assert config.provider == "fireworks"
+    assert config.model == JUDGE_SHORT_NAMES[alias]
+    # The spec a preview prints and a directory freezes is the full id, never the alias.
+    assert config.spec == JUDGE_SHORT_NAMES[alias]
+    assert parse_judge(config.spec) == config
+    assert config.reasoning_effort == FIREWORKS_REASONING[JUDGE_SHORT_NAMES[alias]]
+
+
+def test_the_default_judges_have_aliases() -> None:
+    assert alias_of(DEFAULT_JUDGE_MODEL) == "deepseek-v4p1-flash"
+    assert alias_of("accounts/my-team/models/judge") == "accounts/my-team/models/judge"
+    assert "deepseek-v4p1-flash" in judges.SPEC_FORMS
+
+
+def test_prefixed_specs_are_never_aliases() -> None:
+    assert parse_judge("openai/glm-5p3-flash").model == "glm-5p3-flash"

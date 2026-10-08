@@ -40,17 +40,18 @@ refused until it is undeployed. Both hold the run directory's lock.
 from __future__ import annotations
 
 import json
-import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 
 from pup_finetune import next_steps
-from pup_finetune.errors import FinetuneError, StateError, UsageError
+from pup_finetune.display import display_path, quoted
+from pup_finetune.errors import FinetuneError, StateError, UsageError, WrongPhase
 from pup_finetune.output import info
 from pup_finetune.providers.base import (
     MAX_MODEL_ID_LEN,
     MODEL_ID_PATTERN,
+    OFFLINE_BILLING,
     DeploymentNotReady,
     DeploymentRequest,
     DeployOptions,
@@ -68,6 +69,7 @@ __all__ = [
     "DEPLOYABLE_PHASES",
     "REQUESTED",
     "DeployTarget",
+    "deploy_billing",
     "deploy_preview",
     "deploy_target",
     "deployment_id_for",
@@ -93,12 +95,13 @@ BILLING: Final = (
 
 
 def _q(value: object) -> str:
-    return shlex.quote(str(value))
+    return quoted(value)
 
 
 def undeploy_command(run_dir: RunDir) -> str:
-    """The exact command that deletes the run's deployment."""
-    return next_steps.command("undeploy", run_dir.path, "--confirm")
+    """The command that deletes the run's deployment, in its preview form: it names what is
+    deleted and prints the ``--confirm`` command, which is the user's to approve."""
+    return next_steps.command("undeploy", run_dir.path)
 
 
 def deployment_usage(receipt: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -141,7 +144,7 @@ class DeployTarget:
 def deploy_target(run_dir: RunDir) -> DeployTarget:
     """The model a finished run deploys: its promoted model, else its deployable checkpoint.
 
-    Raises :class:`StateError` when the run has not finished, or ended without either.
+    Raises :class:`WrongPhase` when the run has not finished, or ended without either.
     """
     manifest = run_dir.manifest()
     run_id = str(manifest["run_id"])
@@ -150,7 +153,7 @@ def deploy_target(run_dir: RunDir) -> DeployTarget:
     result = run_dir.read_result()
     status = next_steps.command("status", run_dir.path)
     if state.phase not in DEPLOYABLE_PHASES or result is None:
-        raise StateError(
+        raise WrongPhase(
             f"run {run_id} is {state.phase}, not completed: there is no final model to deploy",
             hint=f"check it with `{status}`; deploy once it has completed",
         )
@@ -174,7 +177,7 @@ def deploy_target(run_dir: RunDir) -> DeployTarget:
             ),
             source="deployable_checkpoint",
         )
-    raise StateError(
+    raise WrongPhase(
         f"run {run_id} has neither a promoted model nor a deployable checkpoint",
         hint=f"see `{status}`: the promotion may have failed; resume the run to retry it",
     )
@@ -209,23 +212,35 @@ def deployment_id_for(run_id: str, override: str | None) -> str:
 
 
 def require_not_deployed(run_dir: RunDir) -> None:
-    """Raise :class:`StateError` when the run has a deployment that was not undeployed."""
+    """Raise :class:`WrongPhase` when the run has a deployment that was not undeployed."""
     receipt = run_dir.read_deployment()
     if receipt is None or receipt.get("deleted_at"):
         return
-    raise StateError(
-        f"run {run_dir.path} already has the deployment {receipt.get('deployment_id')} "
-        f"(state {receipt.get('state')}, see {run_dir.deployment_path})",
+    raise WrongPhase(
+        f"the run in {display_path(run_dir.path)} already has the deployment "
+        f"{receipt.get('deployment_id')} (state {receipt.get('state')}, see "
+        f"{display_path(run_dir.deployment_path)})",
         hint=f"undeploy it first: {undeploy_command(run_dir)}",
     )
 
 
-def deploy_preview(target: DeployTarget, options: DeployOptions) -> dict[str, Any]:
-    """What ``deploy --confirm`` would create, and how to tear it down."""
+def deploy_billing(*, offline: bool = False) -> str:
+    """What a deployment bills: :data:`BILLING`, or, on the offline fake provider,
+    that it bills nothing (how a training preview says it too)."""
+    if offline:
+        return f"{OFFLINE_BILLING}: its deployment is only a record in memory"
+    return BILLING
+
+
+def deploy_preview(
+    target: DeployTarget, options: DeployOptions, *, offline: bool = False
+) -> dict[str, Any]:
+    """What ``deploy --confirm`` would create, who is sent what, and how to tear it down.
+    ``offline`` is the provider's (:attr:`~pup_finetune.providers.ProviderInfo.offline`)."""
     minutes = options.timeout_s / 60
     return {
         "run_id": target.run_id,
-        "run_dir": str(target.run_dir.path),
+        "run_dir": display_path(target.run_dir.path),
         "provider": target.provider,
         "model": target.model.uri,
         "model_source": target.source,
@@ -237,9 +252,13 @@ def deploy_preview(target: DeployTarget, options: DeployOptions) -> dict[str, An
             f"up to {minutes:g} minutes for it to serve, then send one chat completion as a "
             "smoke test"
         ),
-        "billing": f"{BILLING}: run `{undeploy_command(target.run_dir)}`",
+        "billing": f"{deploy_billing(offline=offline)}: run `{undeploy_command(target.run_dir)}`",
         "undeploy_command": undeploy_command(target.run_dir),
-        "receipt_file": str(target.run_dir.deployment_path),
+        "receipt_file": display_path(target.run_dir.deployment_path),
+        "data_recipients": [
+            f"the deployment request and one fixed smoke-test prompt (no rows) -> {target.provider}"
+        ],
+        "warnings": [],
     }
 
 
@@ -397,12 +416,14 @@ def _restore(run_dir: RunDir, previous: Mapping[str, Any] | None) -> None:
 def undeploy_preview(run_dir: RunDir, receipt: Mapping[str, Any]) -> dict[str, Any]:
     """What ``undeploy --confirm`` would delete."""
     return {
-        "run_dir": str(run_dir.path),
+        "run_dir": display_path(run_dir.path),
         "provider": receipt.get("provider"),
         "deployment_id": receipt.get("deployment_id"),
         "deployment_name": receipt.get("deployment_name"),
         "state": receipt.get("state"),
         "action": _undeploy_action(receipt),
+        "data_recipients": [f"the delete request -> {receipt.get('provider')}"],
+        "warnings": [],
     }
 
 
@@ -428,8 +449,9 @@ def execute_undeploy(provider: Provider, run_dir: RunDir, *, now: Clock = utcnow
     with run_dir.lock():
         receipt = run_dir.read_deployment()
         if receipt is None:
-            raise StateError(
-                f"run {run_dir.path} has no deployment ({run_dir.deployment_path} does not exist)",
+            raise WrongPhase(
+                f"the run in {display_path(run_dir.path)} has no deployment "
+                f"({display_path(run_dir.deployment_path)} does not exist)",
                 hint=f"deploy it with `{next_steps.command('deploy', run_dir.path)}`",
             )
         if receipt.get("deleted_at"):
@@ -444,7 +466,8 @@ def execute_undeploy(provider: Provider, run_dir: RunDir, *, now: Clock = utcnow
                     f"the deployment {endpoint.deployment_id} is not the one run {run_dir.path} "
                     "requested (its creation was never confirmed, and the id holds another "
                     "deployment): nothing was deleted",
-                    hint=f"this run made no deployment: remove {run_dir.deployment_path} to "
+                    hint="this run made no deployment: remove "
+                    f"{display_path(run_dir.deployment_path)} to "
                     "forget the request, and deploy with another --deployment-id",
                 )
             deleted = owned is True and provider.undeploy(endpoint)
@@ -474,5 +497,5 @@ def _request_of(receipt: Mapping[str, Any], run_dir: RunDir) -> DeploymentReques
         "but not what was requested, so the deployment under its id cannot be told to be "
         "this run's",
         hint=f"check the deployment {receipt.get('deployment_id')} with the provider; if this "
-        f"run did not create it, remove {run_dir.deployment_path}",
+        f"run did not create it, remove {display_path(run_dir.deployment_path)}",
     )

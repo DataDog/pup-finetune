@@ -8,43 +8,40 @@
 
 Under a coding agent, pup answers ``pup finetune <command> --help`` with its own schema and
 never runs us. ``pup finetune help <command>`` has no ``--help`` token, so it reaches us, and
-prints the help that ``<command> --help`` prints, rendered from the same Click objects. It is
-one of the few commands whose stdout is text rather than one JSON document.
+prints the help that ``<command> --help`` prints, rendered from the same Click objects at the
+same width. It is one of the few commands whose stdout is text rather than one JSON document.
 
-Click's usage errors end with a line pointing to this command (``Try 'pup finetune help
-train' for help.``) instead of to ``--help`` (:func:`install_help_hint`).
+Usage errors end with a hint pointing to this command (``Hint: see `pup finetune help
+train```) instead of to ``--help`` (:func:`~pup_finetune.cli._common.report_click_error`).
 """
 
 from __future__ import annotations
 
-import os
-import sys
-from collections.abc import Iterator
-from contextlib import contextmanager
 from typing import Annotated, Any
 
 import typer
-from typer import rich_utils
 
-from pup_finetune.cli._common import PROG_NAME, PUP_PROG_NAME, run_command
+from pup_finetune.cli._common import help_command, run_command
+from pup_finetune.cli._presentation import SET_UP, CommandDoc, Safety
 from pup_finetune.errors import UsageError
 
-HELP_WIDTH = 120
-"""The narrowest width help renders at off a terminal, so no flag name or default is cut."""
+DOC = CommandDoc(
+    path="help",
+    short="Show the help for a command, as --help does.",
+    description=(
+        "Show the help for a command: the same text as `COMMAND --help`, or the top-level "
+        "help with no command. Under a coding agent pup answers --help itself, so use this "
+        "instead. Prints text, not JSON."
+    ),
+    examples=("pup finetune help train", "pup finetune help dataset pull"),
+    safety=Safety(data="reads nothing", recipients="nowhere", without="prints the help"),
+    panel=SET_UP,
+)
 
 
 def register(app: typer.Typer) -> None:
-    """Add ``help`` to the root ``app`` and point usage errors to it."""
-    app.command(
-        "help",
-        help=(
-            "Show the help for a command: the same text as `<command> --help`. "
-            "Under a coding agent pup answers `--help` itself, so use this instead. "
-            "With no command, shows the top-level help. Prints text, not JSON."
-        ),
-        short_help="Show the help for a command.",
-    )(show_help)
-    install_help_hint()
+    """Add ``help`` to the root ``app``."""
+    app.command(**DOC.typer())(show_help)
 
 
 @run_command
@@ -54,16 +51,15 @@ def show_help(
         list[str] | None,
         typer.Argument(
             metavar="COMMAND",
-            help="The command, such as `train` or `dataset pull`; none for the top-level help.",
+            help="A command, such as `train` or `dataset pull`.",
             show_default=False,
         ),
     ] = None,
 ) -> None:
     """Print the help of ``command`` (the program's own with none), as ``--help`` does."""
     target = resolve(ctx.find_root(), command or [])
-    with _help_width():
-        # As Click's own --help callback prints it.
-        typer.echo(target.get_help(), color=target.color)
+    # As Click's own --help callback prints it, at the same width.
+    typer.echo(target.get_help(), color=target.color)
 
 
 def resolve(root: Any, words: list[str]) -> Any:
@@ -98,63 +94,4 @@ def _unknown(ctx: Any, word: str) -> UsageError:
 
 
 def _help_hint(command_path: str) -> str:
-    return _help_for(command_path) or f"{command_path} --help"
-
-
-def _stdout_is_tty() -> bool:
-    try:
-        return sys.stdout.isatty()
-    except (AttributeError, ValueError):
-        return False
-
-
-@contextmanager
-def _help_width() -> Iterator[None]:
-    """Render help at :data:`HELP_WIDTH` columns or more when stdout is not a terminal.
-
-    A larger width (``TERMINAL_WIDTH``, which Typer reads, or ``COLUMNS``) is kept. On a
-    terminal the help fits the terminal, as ``--help`` does.
-    """
-    previous = rich_utils.MAX_WIDTH
-    if not _stdout_is_tty():
-        columns = os.environ.get("COLUMNS", "")
-        current = previous or (int(columns) if columns.isdigit() else 0)
-        rich_utils.MAX_WIDTH = max(current, HELP_WIDTH)
-    try:
-        yield
-    finally:
-        rich_utils.MAX_WIDTH = previous
-
-
-def _help_for(command_path: str) -> str | None:
-    """The ``help`` command for ``command_path`` (e.g. ``pup finetune help train``).
-
-    ``None`` when ``command_path`` is not under this program.
-    """
-    for prog in (PUP_PROG_NAME, PROG_NAME):
-        if command_path == prog or command_path.startswith(f"{prog} "):
-            return f"{prog} help{command_path.removeprefix(prog)}"
-    return None
-
-
-class _HelpHint(str):
-    """Typer's "Try ..." line for usage errors, pointing to ``help`` for our commands.
-
-    Typer formats the line with ``command_path`` and ``help_option``; for any other program
-    it reads as before.
-    """
-
-    __slots__ = ()
-
-    def format(self, *args: object, **kwargs: object) -> str:
-        command_path = str(kwargs.get("command_path", ""))
-        command = _help_for(command_path)
-        if command is None:
-            return super().format(*args, **kwargs)
-        return f"Try [blue]'{command}'[/] for help."
-
-
-def install_help_hint() -> None:
-    """Make Click's usage errors say ``Try 'pup finetune help <command>'`` (idempotent)."""
-    if not isinstance(rich_utils.RICH_HELP, _HelpHint):
-        rich_utils.RICH_HELP = _HelpHint(rich_utils.RICH_HELP)
+    return help_command(command_path) or f"{command_path} --help"

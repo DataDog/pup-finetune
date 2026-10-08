@@ -25,6 +25,8 @@ import shlex
 from collections.abc import Mapping, Sequence
 from typing import Any, Final
 
+from pup_finetune.display import word
+
 __all__ = ["PLACEHOLDER", "PROGRAM", "command", "problems", "step", "template"]
 
 PROGRAM: Final = ("pup", "finetune")
@@ -35,15 +37,18 @@ PLACEHOLDER: Final = re.compile(r"<[A-Z][A-Z0-9_]*>")
 
 
 def command(*words: object) -> str:
-    """``pup finetune`` and ``words``, each shell-quoted: a command that runs as written."""
-    return shlex.join([*PROGRAM, *(str(word) for word in words)])
+    """``pup finetune`` and ``words``, each shell-quoted: a command that runs as written.
+
+    A path word reads as results show paths (:func:`~pup_finetune.display.display_path`).
+    """
+    return shlex.join([*PROGRAM, *(word(value) for value in words)])
 
 
 def template(*words: object) -> str:
     """Like :func:`command`, but a word that is a :data:`PLACEHOLDER` is left unquoted."""
     return " ".join(
         text if PLACEHOLDER.fullmatch(text) else shlex.quote(text)
-        for text in (*PROGRAM, *(str(word) for word in words))
+        for text in (*PROGRAM, *(word(value) for value in words))
     )
 
 

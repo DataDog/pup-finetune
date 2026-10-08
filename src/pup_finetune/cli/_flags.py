@@ -10,9 +10,12 @@ A command keeps a table next to its options, mapping each dependent option's par
 name to the parameter that enables it (``{"eval_judge_model": "evaluate"}``), and calls
 :func:`require_enablers` with it first: an option given on the command line without its
 enabler is a :class:`~pup_finetune.errors.UsageError` (exit 2), never silently ignored.
-Each dependent option's help starts with ``With <enabler>:`` (a test holds the help to the
-table). :func:`require_alone` refuses anything given with an option that does something
-else entirely (``dataset triage --print-template``).
+Each dependent option's help names its enabler (``With <enabler>:``, or ``Share of
+<enabler> ...``), or the title of its option panel does (``Evaluate after training (with
+--evaluate)``); a test holds the help to the table. :func:`require_alone` refuses anything
+given with an option that does something else entirely (``dataset triage
+--print-template``). :func:`renamed` reads a renamed option, accepting its old name (a hidden
+option) for one release.
 """
 
 from __future__ import annotations
@@ -22,8 +25,9 @@ from typing import Any
 
 from pup_finetune.cli._common import current_context
 from pup_finetune.errors import UsageError
+from pup_finetune.output import warn
 
-__all__ = ["flag_name", "given", "require_alone", "require_enablers"]
+__all__ = ["flag_name", "given", "renamed", "require_alone", "require_enablers"]
 
 _NOT_GIVEN = frozenset({"DEFAULT", "DEFAULT_MAP"})
 """Click's parameter sources that mean the user did not pass the option."""
@@ -105,3 +109,22 @@ def require_alone(name: str) -> None:
             f"{flag} takes nothing else, but {', '.join(others)} was given too",
             hint=f"run {flag} on its own",
         )
+
+
+def renamed(name: str, old: str) -> Any:
+    """The value of the parameter ``name``, or of ``old`` (a hidden option under the name
+    ``name`` had before) when only that was given, with a warning that it was renamed.
+
+    Raises :class:`UsageError` when both are given.
+    """
+    ctx = _context()
+    if not given(ctx, old):
+        return ctx.params[name]
+    new_flag, old_flag = flag_name(ctx.command, name), flag_name(ctx.command, old)
+    if given(ctx, name):
+        raise UsageError(
+            f"{old_flag} is the old name of {new_flag}, but both were given",
+            hint=f"pass {new_flag} only",
+        )
+    warn(f"{old_flag} is now {new_flag}; the old name will be removed in a later release")
+    return ctx.params[old]

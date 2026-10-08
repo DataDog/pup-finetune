@@ -39,7 +39,6 @@ import pytest
 from pup_finetune.errors import FinetuneError, UsageError
 from pup_finetune.providers.base import (
     AdamConfig,
-    Check,
     CheckpointRef,
     DeploymentRequest,
     DeployOptions,
@@ -49,9 +48,11 @@ from pup_finetune.providers.base import (
     ModelProfile,
     ModelRef,
     Provider,
+    SamplingUsage,
     StepMetrics,
     TrainingBackend,
     TrainingSession,
+    TrainingUsage,
 )
 from pup_finetune.rendering.base import (
     ChatMessage,
@@ -682,10 +683,6 @@ class ProviderContract:
         assert isinstance(provider, Provider)
         assert provider.name
 
-    def test_check_reports_without_raising(self, provider: Provider) -> None:
-        checks = provider.check()
-        assert all(isinstance(check, Check) and check.name for check in checks)
-
     def test_models_belong_to_the_provider(self, provider: Provider) -> None:
         profiles = provider.models()
         assert profiles
@@ -715,6 +712,21 @@ class ProviderContract:
         provider.validate_options({})
         for profile in provider.models():
             assert provider.training_profile(profile) == profile
+
+    def test_billing_sentences_count_the_usage_and_name_no_price(self, provider: Provider) -> None:
+        usage = TrainingUsage(tokens_per_epoch=1187, epochs=5, validation_tokens_per_epoch=959)
+        training = provider.training_billing(usage)
+        assert "1,187 tokens per epoch" in training and "at most 5,935" in training
+        assert "959 validation tokens" in training
+        assert "no spend cap" in training
+        sampling = provider.sampling_billing(SamplingUsage(calls=8, max_tokens_per_call=1024))
+        assert "8 generations" in sampling
+        # A price we cannot know is never printed; a cap the user gave is theirs.
+        assert "$" not in training and "$" not in sampling
+        capped = TrainingUsage(
+            tokens_per_epoch=1187, epochs=5, max_spend_usd=5.0, hourly_rate_usd=2.5
+        )
+        assert "$5" in provider.training_billing(capped)
 
     def test_backend_is_a_training_backend(self, provider: Provider) -> None:
         assert provider.backend().max_checkpoint_name_len > 0

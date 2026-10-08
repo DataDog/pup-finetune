@@ -70,14 +70,23 @@ def sample_rows(
 def describe_row(
     row: TrainingRow, split: SplitName | None, labels: Mapping[str, Label]
 ) -> dict[str, Any]:
-    """``row`` in brief, for a person or an agent to read: :func:`row_brief` and more."""
+    """``row`` in brief, for a person or an agent to read: :func:`row_summary`, its split
+    and its label."""
     label = labels.get(row.id)
+    return {
+        **row_summary(row),
+        "split": split,
+        "label": "none" if label is None else "keep" if label.keep else "drop",
+    }
+
+
+def row_summary(row: TrainingRow) -> dict[str, Any]:
+    """:func:`row_brief` with the first user message and the final assistant message, cut
+    to :data:`MAX_TEXT_CHARS`: enough to judge whether a span filter picks the right rows."""
     users = [message for message in row.messages if message.role == "user"]
     assistants = [message for message in row.messages if message.role == "assistant"]
     return {
         **row_brief(row),
-        "split": split,
-        "label": "none" if label is None else "keep" if label.keep else "drop",
         "first_user_message": truncate(users[0].content) if users else None,
         "final_assistant_message": render_assistant(assistants[-1]) if assistants else None,
     }

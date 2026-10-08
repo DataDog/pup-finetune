@@ -11,33 +11,157 @@ imports no provider implementation, so ``--help`` and commands that never train 
 :func:`get_provider` imports the module on first use and calls ``attr`` with the
 :class:`~pup_finetune.runtime.Runtime`; it must return a
 :class:`~pup_finetune.providers.base.Provider`. Development-only providers are visible only
-when ``PUP_FINETUNE_DEV=1``. The protocols live in :mod:`pup_finetune.providers.base`.
+when ``PUP_FINETUNE_DEV=1``. Each entry also names the provider's ``--provider-option``
+keys (:func:`registered_option_keys`), so help can list them without importing a provider; a
+test holds them to the providers' option models. It names the model aliases each provider
+serves too (:func:`providers_for_model`), so ``train`` can infer ``--provider`` from
+``--model`` without importing a provider; a test holds them to the providers' profiles.
+Finally, it says what a provider needs before anything is paid for (:class:`ProviderInfo`):
+its display label, the API key it signs in with, the optional packages each step needs
+(:class:`Package`, found with :func:`importlib.util.find_spec`, never imported:
+:func:`module_state`), the
+training flags it refuses (:class:`RefusedFlag`) and whether it deploys. ``doctor`` and the
+``train``, ``resume``, ``evaluate`` and ``deploy`` previews read it
+(:func:`require_packages`, :func:`require_supported_flags`, :func:`require_deploys`), so
+nothing a preview can know fails only after ``--confirm``. The protocols live in
+:mod:`pup_finetune.providers.base`.
 """
 
 from __future__ import annotations
 
 import importlib
-from collections.abc import Callable
+import importlib.util
+import sys
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import Any, Final, Literal
 
-from pup_finetune.errors import FinetuneError, UsageError
+from pup_finetune.errors import FinetuneError, UsageError, install_hint
 from pup_finetune.providers.base import Provider
+from pup_finetune.redaction import redact
 from pup_finetune.runtime import Runtime
 
-__all__ = ["get_provider", "known_providers", "register_provider"]
+__all__ = [
+    "STEPS",
+    "ModuleState",
+    "Package",
+    "ProviderInfo",
+    "RefusedFlag",
+    "Step",
+    "get_provider",
+    "installed",
+    "known_models",
+    "known_providers",
+    "missing_packages",
+    "module_state",
+    "provider_info",
+    "provider_infos",
+    "providers_for_model",
+    "register_provider",
+    "registered_option_keys",
+    "registered_providers",
+    "require_deploys",
+    "require_packages",
+    "require_supported_flags",
+]
+
+Step = Literal["train", "evaluate", "deploy"]
+"""What a provider is asked to do; ``resume`` is ``train``."""
+
+STEPS: Final[tuple[Step, ...]] = ("train", "evaluate", "deploy")
+
+_DOING: Final[dict[Step, str]] = {
+    "train": "training",
+    "evaluate": "evaluating",
+    "deploy": "deploying",
+}
 
 
-@dataclass(frozen=True, slots=True)
-class _Entry:
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Package:
+    """An optional package a provider needs for some steps, from one of our extras.
+
+    ``key`` names its ``doctor`` check (``<provider>:<key>``); ``modules`` are the import
+    names that must all be findable (:func:`installed`: found, never imported), ``extra`` the
+    extra that installs them, ``label`` what it is called (``Fireworks Training SDK``),
+    ``steps`` the steps that need it and ``needed_for`` that in words. ``short`` names it in
+    ``doctor``'s checklist after the provider's label (``renderer (transformers)``) when the
+    label does not name the provider.
+    """
+
+    key: str
+    label: str
+    modules: tuple[str, ...]
+    extra: str
+    steps: tuple[Step, ...]
+    needed_for: str
+    short: str = ""
+
+    @property
+    def fix(self) -> str:
+        """How to install it without losing the other extras."""
+        return install_hint(self.extra)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RefusedFlag:
+    """A ``train`` flag a provider cannot honor: ``field`` is its :class:`TrainSpec` field,
+    ``flag`` the option, ``reason`` why (``Baseten sets the LoRA alpha itself``)."""
+
+    field: str
+    flag: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ProviderInfo:
+    """What the registry knows about a provider without importing it.
+
+    ``label`` is its display name (``Fireworks``); ``credential`` the
+    :class:`~pup_finetune.credentials.CredentialSpec` its key is registered under (``None``
+    for one without a key); ``packages`` what it needs installed, by step; ``refuses`` the
+    flags it cannot honor; ``deploys`` whether it deploys a promoted model; ``offline``
+    whether it never leaves the machine (so ``PUP_READ_ONLY`` allows its runs).
+    """
+
+    name: str
     target: str
-    dev_only: bool
+    dev_only: bool = False
+    label: str = ""
+    options: tuple[str, ...] = ()
+    models: tuple[str, ...] = ()
+    credential: str | None = None
+    packages: tuple[Package, ...] = ()
+    refuses: tuple[RefusedFlag, ...] = ()
+    deploys: bool = True
+    offline: bool = False
+
+    def packages_for(self, step: Step) -> tuple[Package, ...]:
+        """The packages ``step`` needs."""
+        return tuple(package for package in self.packages if step in package.steps)
 
 
-_REGISTRY: dict[str, _Entry] = {}
+_REGISTRY: dict[str, ProviderInfo] = {}
 
 
-def register_provider(name: str, target: str, *, dev_only: bool = False) -> None:
-    """Register ``name`` as the provider ``target`` (``"package.module:attr"``) builds.
+def register_provider(
+    name: str,
+    target: str,
+    *,
+    dev_only: bool = False,
+    options: tuple[str, ...] = (),
+    models: tuple[str, ...] = (),
+    label: str = "",
+    credential: str | None = None,
+    packages: tuple[Package, ...] = (),
+    refuses: tuple[RefusedFlag, ...] = (),
+    deploys: bool = True,
+    offline: bool = False,
+) -> None:
+    """Register ``name`` as the provider ``target`` (``"package.module:attr"``) builds, with
+    the ``--provider-option`` keys it takes (``options``), the aliases of the model
+    profiles it serves (``models``) and what it needs (see :class:`ProviderInfo`; ``label``
+    defaults to ``name`` capitalized).
 
     Nothing is imported. Registering the same entry again is a no-op; a different entry under
     a taken name raises ``ValueError``.
@@ -47,7 +171,19 @@ def register_provider(name: str, target: str, *, dev_only: bool = False) -> None
     module, sep, attr = target.partition(":")
     if not (module and sep and attr):
         raise ValueError(f"provider target must look like 'module:attr', got {target!r}")
-    entry = _Entry(target, dev_only)
+    entry = ProviderInfo(
+        name=name,
+        target=target,
+        dev_only=dev_only,
+        label=label or name.capitalize(),
+        options=tuple(options),
+        models=tuple(models),
+        credential=credential,
+        packages=tuple(packages),
+        refuses=tuple(refuses),
+        deploys=deploys,
+        offline=offline,
+    )
     existing = _REGISTRY.get(name)
     if existing is not None and existing != entry:
         raise ValueError(f"provider {name!r} is already registered")
@@ -57,6 +193,144 @@ def register_provider(name: str, target: str, *, dev_only: bool = False) -> None
 def known_providers(runtime: Runtime) -> list[str]:
     """The provider names ``runtime`` may use, sorted. Imports no provider module."""
     return sorted(name for name, entry in _REGISTRY.items() if _visible(entry, runtime))
+
+
+def registered_providers(*, include_dev: bool = False) -> list[str]:
+    """Every registered provider name, in registration order (the built-in ones: fireworks
+    first); development-only ones only with ``include_dev``. What help lists, so it reads the
+    same in every environment. Imports no provider module."""
+    return [name for name, entry in _REGISTRY.items() if include_dev or not entry.dev_only]
+
+
+def provider_infos(runtime: Runtime) -> list[ProviderInfo]:
+    """What the registry knows about each provider ``runtime`` may use, in registration
+    order (the built-in ones: fireworks first). Imports no provider module."""
+    return [entry for entry in _REGISTRY.values() if _visible(entry, runtime)]
+
+
+def provider_info(name: str, runtime: Runtime) -> ProviderInfo:
+    """What the registry knows about ``name``, without importing it; a :class:`UsageError`
+    listing the known names when ``runtime`` may not use it."""
+    entry = _REGISTRY.get(name)
+    if entry is None or not _visible(entry, runtime):
+        raise _unknown(name, runtime, dev_only=entry is not None)
+    return entry
+
+
+ModuleState = Literal["installed", "missing", "broken"]
+"""Whether a module is found (``installed``), absent (``missing``), or there but failing
+to load (``broken``: a parent package raises on import)."""
+
+
+def module_state(module: str) -> tuple[ModuleState, str]:
+    """Whether ``module`` is installed, found with :func:`importlib.util.find_spec` and not
+    imported (a dotted name imports its parent packages only), and, when it is ``broken``,
+    why (one redacted line).
+
+    It is ``missing`` when it is not found or a :class:`ModuleNotFoundError` names it or one
+    of its parent packages; any other failure (a parent that raises on import, or needs a
+    module that is missing) makes it ``broken``. Never raises.
+    """
+    try:
+        found = importlib.util.find_spec(module) is not None
+    except ModuleNotFoundError as exc:
+        missing = exc.name or ""
+        if missing and (module == missing or module.startswith(f"{missing}.")):
+            return "missing", ""
+        return "broken", _reason(exc)
+    except ValueError as exc:
+        # find_spec raises it for a module already imported without a spec.
+        if sys.modules.get(module) is not None:
+            return "installed", ""
+        return "broken", _reason(exc)
+    except Exception as exc:
+        return "broken", _reason(exc)
+    return ("installed", "") if found else ("missing", "")
+
+
+def _reason(exc: BaseException) -> str:
+    lines = str(exc).strip().splitlines()
+    return redact(f"{type(exc).__name__}: {lines[0]}" if lines else type(exc).__name__)
+
+
+def installed(module: str) -> bool:
+    """Whether ``module`` is installed and loads (:func:`module_state`), without importing
+    it."""
+    return module_state(module)[0] == "installed"
+
+
+def missing_packages(name: str, runtime: Runtime, step: Step) -> list[Package]:
+    """The packages provider ``name`` needs for ``step`` that are not installed."""
+    info = provider_info(name, runtime)
+    return [
+        package
+        for package in info.packages_for(step)
+        if not all(installed(module) for module in package.modules)
+    ]
+
+
+def require_packages(name: str, runtime: Runtime, step: Step) -> None:
+    """Raise :class:`UsageError` (exit 2) with the install hint when provider ``name`` lacks
+    a package ``step`` needs, e.g. ``training on Fireworks needs the Fireworks Training SDK,
+    which is not installed``. Imports nothing."""
+    missing = missing_packages(name, runtime, step)
+    if missing:
+        info = provider_info(name, runtime)
+        package = missing[0]
+        broken = [reason for state, reason in map(module_state, package.modules) if reason]
+        why = (
+            f"which is installed but cannot be loaded ({broken[0]})"
+            if broken
+            else "which is not installed"
+        )
+        raise UsageError(
+            f"{_DOING[step]} on {info.label} needs the {package.label}, {why}",
+            hint=package.fix,
+        )
+
+
+def require_supported_flags(name: str, runtime: Runtime, values: Mapping[str, Any]) -> None:
+    """Raise :class:`UsageError` when ``values`` (``TrainSpec`` fields) set a flag provider
+    ``name`` refuses, e.g. ``--lora-alpha is not supported on baseten: Baseten sets the LoRA
+    alpha itself``."""
+    for refused in provider_info(name, runtime).refuses:
+        if values.get(refused.field) is not None:
+            raise UsageError(
+                f"{refused.flag} is not supported on {name}: {refused.reason}",
+                hint=f"drop {refused.flag}",
+            )
+
+
+def require_deploys(name: str, runtime: Runtime) -> None:
+    """Raise :class:`UsageError` when provider ``name`` cannot deploy a model."""
+    info = provider_info(name, runtime)
+    if not info.deploys:
+        raise UsageError(
+            f"deploying on {info.label} is not available in this version of pup-finetune",
+            hint="use the promoted model on the provider directly",
+        )
+
+
+def registered_option_keys(*, include_dev: bool = False) -> dict[str, tuple[str, ...]]:
+    """Each registered provider's ``--provider-option`` keys, by name; development-only
+    providers only with ``include_dev``. Imports no provider module."""
+    return {
+        name: entry.options
+        for name, entry in _REGISTRY.items()
+        if include_dev or not entry.dev_only
+    }
+
+
+def known_models(runtime: Runtime) -> dict[str, tuple[str, ...]]:
+    """The model aliases of each provider ``runtime`` may use, by provider name, sorted by
+    name. Imports no provider module."""
+    return {name: _REGISTRY[name].models for name in known_providers(runtime)}
+
+
+def providers_for_model(alias: str, runtime: Runtime) -> list[str]:
+    """The providers ``runtime`` may use that serve the model ``alias``, sorted: what
+    ``train`` infers ``--provider`` from. Imports no provider module."""
+    return [name for name, models in known_models(runtime).items() if alias in models]
 
 
 def get_provider(name: str, runtime: Runtime) -> Provider:
@@ -79,7 +353,7 @@ def get_provider(name: str, runtime: Runtime) -> Provider:
     return provider
 
 
-def _visible(entry: _Entry, runtime: Runtime) -> bool:
+def _visible(entry: ProviderInfo, runtime: Runtime) -> bool:
     return runtime.dev_mode or not entry.dev_only
 
 
@@ -142,9 +416,82 @@ def _is_first_party(missing: str, module_name: str) -> bool:
 
 # Built-in providers register below by import path only, so listing them imports no
 # provider implementation.
-register_provider("fake", "pup_finetune.providers.fake:FakeProvider", dev_only=True)
-register_provider("fireworks", "pup_finetune.providers.fireworks.provider:FireworksProvider")
-register_provider("baseten", "pup_finetune.providers.baseten.provider:BasetenProvider")
+register_provider(
+    "fake",
+    "pup_finetune.providers.fake:FakeProvider",
+    dev_only=True,
+    options=(
+        "loss_curve",
+        "val_curve",
+        "step_delay_s",
+        "fail_at_step",
+        "prefix_stable",
+        "max_seq_len",
+        "hold_file",
+    ),
+    models=("fake-model",),
+    offline=True,
+)
+register_provider(
+    "fireworks",
+    "pup_finetune.providers.fireworks.provider:FireworksProvider",
+    options=("max_seq_len",),
+    models=("qwen3p8-27b",),
+    label="Fireworks",
+    credential="fireworks",
+    packages=(
+        Package(
+            key="sdk",
+            label="Fireworks Training SDK",
+            modules=("fireworks", "tinker"),
+            extra="fireworks",
+            steps=("train", "evaluate", "deploy"),
+            needed_for="training, evaluation and deployment on fireworks",
+        ),
+        Package(
+            key="renderer",
+            label="Hugging Face transformers package",
+            modules=("transformers",),
+            extra="hf",
+            steps=("train", "evaluate"),
+            needed_for="rendering rows for fireworks",
+            short="renderer (transformers)",
+        ),
+    ),
+)
+register_provider(
+    "baseten",
+    "pup_finetune.providers.baseten.provider:BasetenProvider",
+    options=("max_seq_len",),
+    models=("qwen3p5-9b", "glm-5p3-flash"),
+    label="Baseten",
+    credential="baseten",
+    packages=(
+        Package(
+            key="sdk",
+            label="Baseten Loops SDK",
+            modules=("baseten.loops",),
+            extra="baseten",
+            steps=("train", "evaluate"),
+            needed_for="training and evaluation on baseten",
+        ),
+        Package(
+            key="renderer",
+            label="Hugging Face transformers package",
+            modules=("transformers",),
+            extra="hf",
+            steps=("train", "evaluate"),
+            needed_for="rendering rows for baseten",
+            short="renderer (transformers)",
+        ),
+    ),
+    refuses=(
+        RefusedFlag(
+            field="lora_alpha", flag="--lora-alpha", reason="Baseten sets the LoRA alpha itself"
+        ),
+    ),
+    deploys=False,
+)
 
 # Providers with an API key register its CredentialSpec in their (lightweight) package, so
 # `auth`, `doctor` and every command that imports this registry know about the key. The
