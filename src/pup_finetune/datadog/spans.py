@@ -469,12 +469,27 @@ class SpanQuery:
         }
 
 
+_QUERY_TERMS = (("ml_app", "@ml_app"), ("span_kind", "@meta.span.kind"), ("span_name", "@name"))
+
+
 def _wire_filter(filter_: dict[str, Any]) -> dict[str, Any]:
-    """``filter_`` as the Export API reads it: an epoch-ms ``from`` or ``to`` as a string."""
-    return {
+    """``filter_`` as the Export API reads it: an epoch-ms ``from`` or ``to`` as a string.
+
+    The API ignores the other fields when a ``query`` is set, so they are added to the query.
+    """
+    wire = {
         key: str(value) if key in ("from", "to") and isinstance(value, int) else value
         for key, value in filter_.items()
     }
+    if "query" in wire:
+        terms = [f"{name}:{_quoted(wire[key])}" for key, name in _QUERY_TERMS if key in wire]
+        terms += [f"{key}:{_quoted(value)}" for key, value in filter_.get("tags", {}).items()]
+        wire["query"] = " ".join([*terms, f"({wire['query']})"])
+    return wire
+
+
+def _quoted(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 # --- the export -----------------------------------------------------------------------------
