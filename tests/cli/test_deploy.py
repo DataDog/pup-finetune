@@ -24,6 +24,7 @@ import pytest
 from pydantic import SecretStr
 from typer.testing import CliRunner, Result
 
+from pup_finetune import providers
 from pup_finetune.cli import app
 from pup_finetune.cli import deploy as deploy_module
 from pup_finetune.cli import train as train_module
@@ -112,10 +113,23 @@ def test_deploy_previews_then_deploys_and_undeploys(fake_run: Path) -> None:
     preview = invoke("deploy", str(fake_run))
     assert preview.exit_code == 2, preview.stderr
     data = output(preview)
-    undeploy = f"pup finetune undeploy {fake_run} --confirm"
+    undeploy = f"pup finetune undeploy {fake_run}"
     assert data["preview"]["undeploy_command"] == undeploy
-    assert "bills per GPU-second" in data["preview"]["billing"]
-    assert undeploy in data["preview"]["billing"]
+    # The offline fake bills nothing, and says so as a training preview does.
+    assert data["preview"]["billing"] == (
+        f"the fake provider is offline and bills nothing: its deployment is only a record in "
+        f"memory: run `{undeploy}`"
+    )
+    assert data["preview"]["data_recipients"] == [
+        "the deployment request and one fixed smoke-test prompt (no rows) -> fake"
+    ]
+    assert data["preview"]["warnings"] == []
+    card = preview.stderr.splitlines()
+    assert (
+        "  sends     the deployment request and one fixed smoke-test prompt (no rows) to fake"
+        in card
+    )
+    assert "  cost      nothing: the fake provider runs offline" in card
     assert data["preview"]["deployment_id"] == model_id_for_run(RUN_ID)
     assert data["preview"]["replicas"] == {"min": 0, "max": 1}
     assert data["next_command"] == f"pup finetune deploy {fake_run} --confirm"
@@ -125,6 +139,7 @@ def test_deploy_previews_then_deploys_and_undeploys(fake_run: Path) -> None:
     assert deployed.exit_code == 0, deployed.stderr
     result = output(deployed)
     assert result["state"] == "READY"
+    assert result["billing"].startswith("the fake provider is offline and bills nothing")
     # Each fact once: how to call it is in usage, what the create sent in the receipt file.
     assert not {"inference_model", "url", "api_key_env", "request", "model_id"} & set(result)
     assert result["smoke_test"]["ok"] is True
@@ -154,9 +169,14 @@ def test_deploy_previews_then_deploys_and_undeploys(fake_run: Path) -> None:
 
     undeploy_preview = invoke("undeploy", str(fake_run))
     assert undeploy_preview.exit_code == 2
-    assert output(undeploy_preview)["preview"]["deployment_id"] == model_id_for_run(RUN_ID)
+    shown = output(undeploy_preview)["preview"]
+    assert shown["deployment_id"] == model_id_for_run(RUN_ID)
+    assert shown["data_recipients"] == ["the delete request -> fake"]
+    assert shown["warnings"] == []
 
-    removed = rerun(undeploy)
+    # The undeploy command is the preview; its next_command adds --confirm.
+    assert rerun(undeploy).exit_code == 2
+    removed = rerun(output(undeploy_preview)["next_command"])
     assert removed.exit_code == 0, removed.stderr
     removed_data = output(removed)
     assert removed_data["state"] == "DELETED"
@@ -392,7 +412,7 @@ def test_fireworks_deploy_reports_the_inference_model(
     assert data["usage"]["base_url"] == "https://api.fireworks.ai/inference/v1"
     assert data["smoke_test"]["ok"] is True
     assert data["next_command"] is None
-    assert data["undeploy_command"] == f"pup finetune undeploy {fireworks_run} --confirm"
+    assert data["undeploy_command"] == f"pup finetune undeploy {fireworks_run}"
     inference = data["usage"]["model"]
     # The key is named as a variable for the shell to expand, never as its value.
     assert data["usage"] == {
@@ -434,12 +454,57 @@ def test_a_read_only_fireworks_deploy_preview_makes_no_call(
     assert not RunDir(fireworks_run).deployment_path.exists()
 
 
+def test_a_missing_sdk_fails_the_deploy_preview(
+    world: FireworksWorld, fireworks_run: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(providers, "installed", lambda module: module != "fireworks")
+    preview = invoke("deploy", str(fireworks_run))
+    assert preview.exit_code == 2
+    assert preview.stdout == ""
+    assert (
+        "deploying on Fireworks needs the Fireworks Training SDK, which is not installed"
+    ) in preview.stderr
+    assert not RunDir(fireworks_run).deployment_path.exists()
+
+
+def test_the_fireworks_deploy_preview_names_its_billing_and_recipients(
+    world: FireworksWorld, fireworks_run: Path
+) -> None:
+    preview = invoke("deploy", str(fireworks_run))
+    assert preview.exit_code == 2, preview.stderr
+    data = output(preview)["preview"]
+    undeploy = f"pup finetune undeploy {fireworks_run}"
+    assert "bills per GPU-second" in data["billing"]
+    assert undeploy in data["billing"]
+    assert data["data_recipients"] == [
+        "the deployment request and one fixed smoke-test prompt (no rows) -> fireworks"
+    ]
+    lines = preview.stderr.splitlines()
+    assert any(line.startswith("  sends     the deployment request") for line in lines)
+    assert any(line.startswith("  cost      the deployment bills per GPU-second") for line in lines)
+
+
+def test_a_missing_sdk_fails_the_undeploy_preview(
+    world: FireworksWorld, fireworks_run: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert invoke("deploy", str(fireworks_run), "--confirm").exit_code == 0
+    monkeypatch.setattr(providers, "installed", lambda module: module != "fireworks")
+    preview = invoke("undeploy", str(fireworks_run))
+    assert preview.exit_code == 2
+    assert preview.stdout == ""
+    assert (
+        "deploying on Fireworks needs the Fireworks Training SDK, which is not installed"
+    ) in preview.stderr
+    receipt = RunDir(fireworks_run).read_deployment()
+    assert receipt is not None and receipt["deleted_at"] is None
+
+
 def test_a_timed_out_deploy_leaves_a_receipt(world: FireworksWorld, fireworks_run: Path) -> None:
     world.sdk.states = ["CREATING"]
     result = invoke("deploy", str(fireworks_run), "--timeout-minutes", "1", "--confirm")
     assert result.exit_code == 1
     assert "not ready after 1 minutes" in result.stderr
-    assert f"pup finetune undeploy {fireworks_run} --confirm" in result.stderr
+    assert f"pup finetune undeploy {fireworks_run}" in result.stderr
     receipt = RunDir(fireworks_run).read_deployment()
     assert receipt is not None
     assert receipt["state"] == "CREATING"
@@ -696,7 +761,7 @@ def test_a_smoke_test_that_raises_is_recorded_with_an_undeploy_hint(
     world.chat.api_key = "fw-synthetic-other-key"  # the inference call is refused: 401
     result = invoke("deploy", str(fireworks_run), "--confirm")
     assert result.exit_code == 1
-    assert f"pup finetune undeploy {fireworks_run} --confirm" in result.stderr
+    assert f"pup finetune undeploy {fireworks_run}" in result.stderr
     receipt = RunDir(fireworks_run).read_deployment()
     assert receipt is not None
     assert receipt["state"] == "READY"

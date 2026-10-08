@@ -28,9 +28,14 @@ from typing import Annotated, Any
 
 import typer
 
-from pup_finetune.approval import with_settings
-from pup_finetune.cli._common import CommandResult, current_context, get_runtime, run_command
-from pup_finetune.cli._dirs import require_run_dir
+from pup_finetune.cli._common import (
+    CommandResult,
+    current_context,
+    get_runtime,
+    run_command,
+    with_settings,
+)
+from pup_finetune.cli._dirs import RUN_DIR_BY_ID, resolve_run_ref
 from pup_finetune.cli._flags import given
 from pup_finetune.cli._presentation import (
     EVALUATE_AND_SHIP,
@@ -41,6 +46,7 @@ from pup_finetune.cli._presentation import (
 )
 from pup_finetune.deployment import (
     BILLING,
+    deploy_billing,
     deploy_preview,
     deploy_target,
     deployment_id_for,
@@ -60,7 +66,12 @@ from pup_finetune.errors import (
     require_writable,
 )
 from pup_finetune.next_steps import PROGRAM, command, step
-from pup_finetune.providers import get_provider
+from pup_finetune.providers import (
+    get_provider,
+    provider_info,
+    require_deploys,
+    require_packages,
+)
 from pup_finetune.providers.base import DeployOptions
 from pup_finetune.runs import RunDir
 
@@ -73,7 +84,10 @@ _AGENT_RULE = (
 )
 
 RunDirArgument = Annotated[
-    Path, typer.Argument(metavar="RUN_DIR", help="A completed run directory.", show_default=False)
+    Path,
+    typer.Argument(
+        metavar="RUN_DIR", help="A completed run: its directory or run id.", show_default=False
+    ),
 ]
 
 DEPLOY_DOC = CommandDoc(
@@ -93,7 +107,7 @@ DEPLOY_DOC = CommandDoc(
         f"(undeploy_command). {BILLING[0].upper()}{BILLING[1:]}. A failed smoke test exits 1 "
         f"and keeps the deployment. {_AGENT_RULE}",
     ),
-    examples=("pup finetune deploy run", "pup finetune deploy run --timeout-minutes 45 --confirm"),
+    examples=("pup finetune deploy run", "pup finetune deploy run --timeout-minutes 45"),
     safety=Safety(
         data="creates a deployment that bills until undeploy",
         recipients="the provider: a deployment of the model",
@@ -112,7 +126,7 @@ UNDEPLOY_DOC = CommandDoc(
         "record when; the model is kept and can be deployed again. Deleting a deployment that "
         "is already gone succeeds. Without --confirm, previews what would be deleted."
     ),
-    examples=("pup finetune undeploy run", "pup finetune undeploy run --confirm"),
+    examples=("pup finetune undeploy run", "pup finetune undeploy ft-20261007183443-a8b181"),
     safety=Safety(
         data="--confirm deletes the deployment",
         recipients="the provider: the delete request",
@@ -155,10 +169,15 @@ def deploy(
     ] = False,
 ) -> dict[str, Any] | CommandResult:
     runtime = get_runtime()
-    require_run_dir(run_dir, "deploy")
+    run_dir, source = resolve_run_ref(run_dir, "deploy")
+    by_id = {"run_dir_source": source} if source == RUN_DIR_BY_ID else {}
     run = RunDir(run_dir)
     target = deploy_target(run)
     require_not_deployed(run)
+    # What the preview can know fails here, not after --confirm.
+    require_deploys(target.provider, runtime)
+    require_packages(target.provider, runtime, "deploy")
+    offline = provider_info(target.provider, runtime).offline
     try:
         options = DeployOptions(
             deployment_id=deployment_id_for(target.run_id, deployment_id),
@@ -195,7 +214,12 @@ def deploy(
     # PUP_READ_ONLY.
     require_confirm(
         confirm,
-        with_settings(deploy_preview(target, options), settings, defaults_used),
+        {
+            **with_settings(
+                deploy_preview(target, options, offline=offline), settings, defaults_used
+            ),
+            **by_id,
+        },
         shlex.join([*rerun, "--confirm"]),
         read_only=runtime.read_only,
     )
@@ -206,8 +230,9 @@ def deploy(
     data: dict[str, Any] = {
         **_deploy_shown(receipt, usage),
         "run_dir": display_path(run.path),
+        **by_id,
         "receipt_file": display_path(run.deployment_path),
-        "billing": BILLING,
+        "billing": deploy_billing(offline=offline),
         "usage": usage,
         "undeploy_command": undeploy_command(run),
         "next_command": None,
@@ -259,7 +284,8 @@ def undeploy(
     ] = False,
 ) -> dict[str, Any]:
     runtime = get_runtime()
-    require_run_dir(run_dir, "undeploy")
+    run_dir, source = resolve_run_ref(run_dir, "undeploy")
+    by_id = {"run_dir_source": source} if source == RUN_DIR_BY_ID else {}
     run = RunDir(run_dir)
     receipt = run.read_deployment()
     if receipt is None:
@@ -270,11 +296,14 @@ def undeploy(
         )
     deleted_before = receipt.get("deleted_at")
     if not deleted_before:
+        # What the preview can know fails here, as for deploy: the delete goes through the
+        # same packages.
+        require_packages(str(receipt.get("provider")), runtime, "deploy")
         if confirm:
             require_writable(runtime, "undeploy")
         require_confirm(
             confirm,
-            undeploy_preview(run, receipt),
+            {**undeploy_preview(run, receipt), **by_id},
             command("undeploy", run_dir, "--confirm"),
             read_only=runtime.read_only,
         )
@@ -289,6 +318,7 @@ def undeploy(
         "already_deleted": bool(deleted_before) or bool(receipt.get("already_deleted")),
         "model_kept": receipt.get("model"),
         "receipt_file": display_path(run.deployment_path),
+        **by_id,
     }
     if deleted_before:
         data["message"] = f"already deleted at {deleted_before}; nothing to do"

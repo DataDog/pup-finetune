@@ -151,6 +151,7 @@ def _setup(command: str, tmp_path: Path) -> list[str]:
         "models list": ["models", "list", "--provider", "fireworks"],
         "auth status": ["auth", "status"],
         "doctor": ["doctor"],
+        "runs": ["runs", "--dir", str(tmp_path)],
     }[command]
 
 

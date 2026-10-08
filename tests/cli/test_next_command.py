@@ -218,7 +218,8 @@ def test_deploy_and_undeploy_previews(run_dir: Path, raised: list[BaseException]
     assert deployed["state"] == "READY"
     assert deployed["next_command"] is None
     undeploy = previewed(["undeploy", str(run_dir)])
-    assert undeploy["next_command"] == deployed["undeploy_command"]
+    # undeploy_command is the preview form: the user approves the --confirm it prints.
+    assert undeploy["next_command"] == f"{deployed['undeploy_command']} --confirm"
     assert output(follow(undeploy["next_command"], raised))["state"] == "DELETED"
 
 
@@ -250,10 +251,10 @@ def test_following_next_command_from_a_dataset_to_a_deployment(
     evaluate = output(follow(trained["next_command"], raised))  # a free preview
     evaluated = output(follow(evaluate["next_command"], raised))
     assert evaluated["status"] == "complete"
-    # Not published (nothing was pushed): no command runs as written, the steps say how.
-    assert evaluated["next_command"] is None
+    # Not published (nothing was pushed): deploying goes on; the steps say how to publish.
+    assert evaluated["next_command"].startswith("pup finetune deploy ")
     assert evaluated["next_steps"][0]["command"].endswith("--name <NAME>")
-    deploy = output(follow(f"pup finetune deploy {tmp_path / 'run'}", raised))
+    deploy = output(follow(evaluated["next_command"], raised))
     deployed = output(follow(deploy["next_command"], raised))
     assert deployed["next_command"] is None
     receipt = RunDir(tmp_path / "run").read_deployment() or {}

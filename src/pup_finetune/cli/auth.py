@@ -22,7 +22,8 @@ from pup_finetune.cli._presentation import SET_UP, CommandDoc, Safety, default_n
 from pup_finetune.errors import ExternalError, UsageError
 
 PROVIDERS = ", ".join(spec.provider for spec in credentials.all_specs())
-"""The providers whose keys ``auth`` manages, for help texts."""
+"""The providers whose keys ``auth`` manages, for help texts: every registered credential
+(:func:`pup_finetune.credentials.all_specs`)."""
 
 auth_app = group(
     "auth",
@@ -60,7 +61,7 @@ STATUS_DOC = CommandDoc(
     description=(
         "Report, per provider, whether an API key is configured and where it comes from: "
         "env, keychain, provider-config, or anthropic-sdk when the Anthropic SDK can sign in "
-        "on its own. Never prints the key."
+        "on its own, and what the key is needed for. Never prints the key."
     ),
     examples=("pup finetune auth status", "pup finetune auth status fireworks"),
     safety=Safety(
@@ -146,6 +147,7 @@ def _status_entry(spec: credentials.CredentialSpec) -> dict[str, Any]:
         "env_var": spec.env_var,
         "configured": False,
         "source": None,
+        "needed_for": spec.needed_for or None,
     }
     try:
         found = credentials.lookup(spec.provider)

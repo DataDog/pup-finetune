@@ -15,7 +15,7 @@ its provider by prefix:
 - ``openai/<model>``: the OpenAI API, with the ``openai`` key.
 - Anything else is a Fireworks model id (e.g. ``accounts/fireworks/models/<model>``):
   Fireworks serverless inference, with the ``fireworks`` key. The default judge is one. An
-  alias of :data:`JUDGE_ALIASES` (``deepseek-v4p1-flash``) stands for the full id, and the
+  alias of :data:`JUDGE_SHORT_NAMES` (``deepseek-v4p1-flash``) stands for the full id, and the
   full id is what a spec resolves to (:attr:`~pup_finetune.inference.JudgeConfig.spec`), so a
   preview prints it and ``triage.json`` and ``evaluation.json`` freeze it: an alias that later
   names another model never changes the judge of an existing directory.
@@ -56,14 +56,14 @@ from pup_finetune.inference import (
     JudgeConfig,
     JudgeProvider,
 )
-from pup_finetune.judge_models import JUDGE_ALIASES, resolve_alias
+from pup_finetune.judge_models import JUDGE_SHORT_NAMES, resolve_alias
 
 if TYPE_CHECKING:
     from pup_finetune.anthropic_client import AnthropicChatClient
 
 __all__ = [
     "FIREWORKS_REASONING",
-    "JUDGE_ALIASES",
+    "JUDGE_SHORT_NAMES",
     "OPENAI_PLAIN_MODELS",
     "PROVIDERS",
     "SPEC_FORMS",
@@ -84,13 +84,13 @@ RemoteProvider = Literal["fireworks", "anthropic", "openai"]
 """The providers a judge spec can name."""
 
 UNKNOWN_JUDGE_FORMS: Final = (
-    f"an alias ({', '.join(JUDGE_ALIASES)}), anthropic/MODEL, openai/MODEL, or a Fireworks "
+    f"an alias ({', '.join(JUDGE_SHORT_NAMES)}), anthropic/MODEL, openai/MODEL, or a Fireworks "
     "model id, accounts/<acct>/models/<id>"
 )
 """The forms an unknown judge's hint names."""
 
 SPEC_FORMS: Final = (
-    f"an alias ({', '.join(JUDGE_ALIASES)}), anthropic/<model>, openai/<model>, or a "
+    f"an alias ({', '.join(JUDGE_SHORT_NAMES)}), anthropic/<model>, openai/<model>, or a "
     "Fireworks model id such as accounts/fireworks/models/<model>"
 )
 """How a judge spec may be written, for help texts and errors."""
@@ -164,7 +164,7 @@ def parse_judge(spec: str) -> JudgeConfig:
 
     ``anthropic/<model>`` and ``openai/<model>`` name those providers (the prefix in any
     case); any other spec with a ``/`` is a Fireworks model id, and a spec without one must
-    be an alias of one (:data:`JUDGE_ALIASES`), resolved to the id, so a mistyped alias is
+    be an alias of one (:data:`JUDGE_SHORT_NAMES`), resolved to the id, so a mistyped alias is
     never sent to a paid run. The reasoning effort is the lowest the model takes (see the
     module docstring). Raises :class:`UsageError` for an empty spec, an empty model after a
     provider prefix, or an unknown alias (with the closest known one).
@@ -202,9 +202,9 @@ def parse_judge(spec: str) -> JudgeConfig:
 def _known_alias(text: str) -> str:
     """The Fireworks model id the alias ``text`` stands for; raises :class:`UsageError`
     naming the closest alias when it is none."""
-    if text in JUDGE_ALIASES:
+    if text in JUDGE_SHORT_NAMES:
         return resolve_alias(text)
-    close = difflib.get_close_matches(text, list(JUDGE_ALIASES), n=1)
+    close = difflib.get_close_matches(text, list(JUDGE_SHORT_NAMES), n=1)
     mean = f"did you mean {close[0]}? " if close else ""
     raise UsageError(
         f"unknown judge {text!r}: a judge without a '/' must be one of the aliases",

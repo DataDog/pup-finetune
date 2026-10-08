@@ -409,7 +409,7 @@ def test_an_unknown_phase_on_disk_is_an_error(tmp_path: Path) -> None:
 
 
 def test_reading_a_missing_run_is_an_error(tmp_path: Path) -> None:
-    with pytest.raises(StateError, match="does not exist"):
+    with pytest.raises(StateError, match="no such run directory or run id"):
         RunDir(tmp_path / "nothing").status()
 
 

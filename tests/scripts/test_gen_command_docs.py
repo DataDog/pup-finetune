@@ -46,6 +46,41 @@ def test_the_exclusion_table_in_data_format_md_is_up_to_date() -> None:
     assert gen.with_exclusions(text) == text, _FIX
 
 
+def test_the_table_of_what_each_step_needs_in_the_readme_is_up_to_date() -> None:
+    text = gen.README.read_text(encoding="utf-8")
+    assert gen.with_requirements(text) == text, _FIX
+
+
+def test_the_table_of_what_each_step_needs_comes_from_the_registries() -> None:
+    from pup_finetune import credentials
+    from pup_finetune.providers import registered_providers
+
+    table = gen.render_requirements()
+    for spec in credentials.all_specs():
+        assert f"`{spec.env_var}`" in table, spec.provider
+    for name in registered_providers():
+        assert f"`train` on {name.capitalize()}" in table or f"on {name.capitalize()} |" in table
+    assert "Fake" not in table  # development-only providers stay out of the README
+    assert gen.requirement_rows() == [
+        ("`dataset preview`, `dataset pull`", "yes", "", ""),
+        ("`dataset import`, `show`, `sample`, `label`; `status`, `runs`", "", "", ""),
+        ("`dataset triage`", "", "`FIREWORKS_API_KEY`", ""),
+        ("`dataset push`", "yes", "", ""),
+        ("`train`, `evaluate` on Fireworks", "", "`FIREWORKS_API_KEY`", "`fireworks`, `hf`"),
+        ("`deploy`, `undeploy` on Fireworks", "", "`FIREWORKS_API_KEY`", "`fireworks`"),
+        ("`train` on Baseten", "", "`BASETEN_API_KEY`", "`baseten`, `hf`"),
+        # Evaluating needs the default judge's key too.
+        (
+            "`evaluate` on Baseten",
+            "",
+            "`BASETEN_API_KEY`, `FIREWORKS_API_KEY`",
+            "`baseten`, `hf`",
+        ),
+        ("`anthropic/<model>` judges", "", "`ANTHROPIC_API_KEY`", "`anthropic`"),
+        ("`openai/<model>` judges", "", "`OPENAI_API_KEY`", ""),
+    ]
+
+
 def test_check_mode_reports_nothing_stale() -> None:
     assert gen.stale() == []
     assert gen.main(["--check"]) == 0

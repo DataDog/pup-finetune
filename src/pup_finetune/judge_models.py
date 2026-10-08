@@ -17,13 +17,13 @@ from __future__ import annotations
 
 from typing import Final
 
-__all__ = ["DEFAULT_JUDGE_MODEL", "JUDGE_ALIASES", "alias_of", "resolve_alias"]
+__all__ = ["DEFAULT_JUDGE_MODEL", "JUDGE_SHORT_NAMES", "alias_of", "resolve_alias"]
 
 DEFAULT_JUDGE_MODEL: Final = "accounts/fireworks/models/deepseek-v4p1-flash"
 """The judge ``evaluate`` uses unless told otherwise (re-exported by
 :mod:`pup_finetune.inference`)."""
 
-JUDGE_ALIASES: Final[dict[str, str]] = {
+JUDGE_SHORT_NAMES: Final[dict[str, str]] = {
     "deepseek-v4p1-flash": "accounts/fireworks/models/deepseek-v4p1-flash",
     "glm-5p3-flash": "accounts/fireworks/models/glm-5p3-flash",
 }
@@ -32,9 +32,9 @@ JUDGE_ALIASES: Final[dict[str, str]] = {
 
 def resolve_alias(model: str) -> str:
     """The Fireworks model id ``model`` stands for: itself unless it is an alias."""
-    return JUDGE_ALIASES.get(model, model)
+    return JUDGE_SHORT_NAMES.get(model, model)
 
 
 def alias_of(model: str) -> str:
     """The alias of the Fireworks model id ``model``, or ``model`` when it has none."""
-    return next((alias for alias, full in JUDGE_ALIASES.items() if full == model), model)
+    return next((alias for alias, full in JUDGE_SHORT_NAMES.items() if full == model), model)

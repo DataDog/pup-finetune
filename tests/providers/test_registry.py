@@ -6,6 +6,7 @@
 # Copyright 2026-present Datadog, Inc.
 from __future__ import annotations
 
+import importlib
 import json
 import subprocess
 import sys
@@ -16,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from pup_finetune import providers
-from pup_finetune.errors import FinetuneError, UsageError
+from pup_finetune.errors import FinetuneError, UsageError, install_hint
 from pup_finetune.providers import get_provider, known_providers, register_provider
 from pup_finetune.providers.base import Provider
 from pup_finetune.runtime import Runtime
@@ -232,6 +233,20 @@ def test_a_target_that_does_not_build_a_provider_is_an_error(
         get_provider("stub", USER)
 
 
+def test_a_model_alias_names_the_providers_that_offer_it() -> None:
+    register_provider("one", "pkg.one:Provider", models=("shared", "only-one"))
+    register_provider("two", "pkg.two:Provider", models=("shared",))
+    register_provider("dev", "pkg.dev:Provider", dev_only=True, models=("shared", "dev-model"))
+    assert providers.providers_for_model("only-one", USER) == ["one"]
+    assert providers.providers_for_model("shared", USER) == ["one", "two"]
+    assert providers.providers_for_model("shared", DEV) == ["dev", "one", "two"]
+    # A development-only provider's models are unknown outside development mode.
+    assert providers.providers_for_model("dev-model", USER) == []
+    assert providers.providers_for_model("dev-model", DEV) == ["dev"]
+    assert providers.providers_for_model("nope", DEV) == []
+    assert providers.known_models(USER) == {"one": ("shared", "only-one"), "two": ("shared",)}
+
+
 def test_registering_the_same_entry_twice_is_a_no_op() -> None:
     register_provider("real", "example.real:Provider")
     register_provider("real", "example.real:Provider")
@@ -260,7 +275,7 @@ def test_register_rejects_an_empty_name() -> None:
         register_provider("", "example.real:Provider")
 
 
-def test_importing_the_cli_imports_no_provider_module() -> None:
+def test_importing_the_cli_and_inferring_a_provider_import_no_provider_module() -> None:
     # A fresh interpreter, so modules other tests imported do not count.
     code = textwrap.dedent(
         """
@@ -274,10 +289,13 @@ def test_importing_the_cli_imports_no_provider_module() -> None:
             "unimportable", "pft_unimportable_xyz.provider:Provider", dev_only=True
         )
         assert "unimportable" in providers.known_providers(Runtime(dev_mode=True))
+        # What `train` infers --provider with: the registry's aliases, nothing imported.
+        inferred = providers.providers_for_model("qwen3p8-27b", Runtime())
         targets = sorted(
             entry.target.partition(":")[0] for entry in providers._REGISTRY.values()
         )
         print(json.dumps({
+            "inferred": inferred,
             "provider_modules": sorted(
                 name for name in sys.modules
                 if name.startswith("pup_finetune.providers.")
@@ -295,6 +313,7 @@ def test_importing_the_cli_imports_no_provider_module() -> None:
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
     )
     report = json.loads(completed.stdout)
+    assert report["inferred"] == ["fireworks"]
     # Only the protocols module and the light packages that register provider API keys,
     # never a provider implementation.
     assert set(report["provider_modules"]) <= {
@@ -305,3 +324,164 @@ def test_importing_the_cli_imports_no_provider_module() -> None:
     assert report["targets"]
     assert report["loaded_targets"] == []
     assert report["sdks"] == []
+
+
+# --- what a provider needs -----------------------------------------------------------------
+
+SDK = providers.Package(
+    key="sdk",
+    label="Toy SDK",
+    modules=("pft_toy_sdk_xyz",),
+    extra="toy",
+    steps=("train", "deploy"),
+    needed_for="training on toy",
+)
+
+
+def test_a_provider_s_needs_are_read_without_importing_it() -> None:
+    register_provider(
+        "toy",
+        "pft_unimportable_xyz.provider:Provider",
+        label="Toy",
+        credential="toy",
+        packages=(SDK,),
+        refuses=(providers.RefusedFlag(field="lora_alpha", flag="--lora-alpha", reason="no"),),
+        deploys=False,
+    )
+    info = providers.provider_info("toy", USER)
+    assert (info.label, info.credential, info.deploys, info.offline) == ("Toy", "toy", False, False)
+    assert info.packages_for("train") == (SDK,)
+    assert info.packages_for("evaluate") == ()
+    assert "pft_unimportable_xyz.provider" not in sys.modules
+
+
+def test_the_label_defaults_to_the_name() -> None:
+    register_provider("toy", "example.toy:Provider")
+    assert providers.provider_info("toy", USER).label == "Toy"
+
+
+def test_providers_are_listed_in_registration_order() -> None:
+    register_provider("zeta", "example.zeta:Provider")
+    register_provider("alpha", "example.alpha:Provider")
+    register_provider("dev", "example.dev:Provider", dev_only=True)
+    assert providers.registered_providers() == ["zeta", "alpha"]
+    assert providers.registered_providers(include_dev=True) == ["zeta", "alpha", "dev"]
+    assert [info.name for info in providers.provider_infos(USER)] == ["zeta", "alpha"]
+    assert [info.name for info in providers.provider_infos(DEV)] == ["zeta", "alpha", "dev"]
+    with pytest.raises(UsageError, match="unknown provider 'dev'"):
+        providers.provider_info("dev", USER)
+
+
+def test_a_missing_package_fails_with_the_install_hint() -> None:
+    register_provider("toy", "example.toy:Provider", label="Toy", packages=(SDK,))
+    assert providers.missing_packages("toy", USER, "train") == [SDK]
+    assert providers.missing_packages("toy", USER, "evaluate") == []
+    with pytest.raises(UsageError) as info:
+        providers.require_packages("toy", USER, "deploy")
+    assert info.value.message == "deploying on Toy needs the Toy SDK, which is not installed"
+    assert info.value.hint == install_hint("toy")
+    assert info.value.exit_code == 2
+    providers.require_packages("toy", USER, "evaluate")  # needs nothing
+
+
+def test_an_installed_package_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    register_provider("toy", "example.toy:Provider", packages=(SDK,))
+    monkeypatch.setattr(providers, "installed", lambda module: module == "pft_toy_sdk_xyz")
+    providers.require_packages("toy", USER, "train")
+
+
+def test_installed_finds_modules_without_importing_them() -> None:
+    assert providers.installed("json")
+    assert not providers.installed("pft_no_such_module_xyz")
+    assert not providers.installed("pft_no_such_module_xyz.sub")
+    assert "pft_no_such_module_xyz" not in sys.modules
+
+
+@pytest.fixture
+def packages_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A directory on ``sys.path`` for synthetic packages; their modules are forgotten
+    afterwards."""
+    monkeypatch.syspath_prepend(str(tmp_path))
+    return tmp_path
+
+
+def _package(root: Path, name: str, init: str) -> None:
+    (root / name).mkdir()
+    (root / name / "__init__.py").write_text(init)
+    importlib.invalidate_caches()
+
+
+def test_module_state_tells_missing_from_broken(packages_dir: Path) -> None:
+    _package(packages_dir, "pft_ok_pkg_xyz", "")
+    (packages_dir / "pft_ok_pkg_xyz" / "sub.py").write_text("")
+    _package(packages_dir, "pft_raising_pkg_xyz", "raise RuntimeError('bad build')\n")
+    _package(packages_dir, "pft_needy_pkg_xyz", "import pft_absent_dependency_xyz\n")
+    try:
+        assert providers.module_state("pft_ok_pkg_xyz.sub") == ("installed", "")
+        # Missing: the module itself, or a parent package.
+        assert providers.module_state("pft_ok_pkg_xyz.nope") == ("missing", "")
+        assert providers.module_state("pft_no_such_module_xyz.sub") == ("missing", "")
+        # Broken: a parent that raises, or that needs a module that is missing.
+        assert providers.module_state("pft_raising_pkg_xyz.sub") == (
+            "broken",
+            "RuntimeError: bad build",
+        )
+        assert providers.module_state("pft_needy_pkg_xyz.sub") == (
+            "broken",
+            "ModuleNotFoundError: No module named 'pft_absent_dependency_xyz'",
+        )
+        assert not providers.installed("pft_raising_pkg_xyz.sub")
+    finally:
+        for name in [name for name in sys.modules if name.startswith("pft_")]:
+            del sys.modules[name]
+
+
+def test_a_broken_package_says_it_cannot_be_loaded(packages_dir: Path) -> None:
+    _package(packages_dir, "pft_raising_sdk_xyz", "raise RuntimeError('bad build')\n")
+    sdk = providers.Package(
+        key="sdk",
+        label="Toy SDK",
+        modules=("pft_raising_sdk_xyz.client",),
+        extra="toy",
+        steps=("train",),
+        needed_for="training on toy",
+    )
+    register_provider("toy", "example.toy:Provider", label="Toy", packages=(sdk,))
+    try:
+        with pytest.raises(UsageError) as info:
+            providers.require_packages("toy", USER, "train")
+    finally:
+        for name in [name for name in sys.modules if name.startswith("pft_")]:
+            del sys.modules[name]
+    assert info.value.message == (
+        "training on Toy needs the Toy SDK, which is installed but cannot be loaded "
+        "(RuntimeError: bad build)"
+    )
+    assert info.value.hint == install_hint("toy")
+
+
+def test_a_refused_flag_fails_and_an_unset_one_passes() -> None:
+    register_provider(
+        "toy",
+        "example.toy:Provider",
+        refuses=(
+            providers.RefusedFlag(
+                field="lora_alpha", flag="--lora-alpha", reason="Toy sets the LoRA alpha itself"
+            ),
+        ),
+    )
+    providers.require_supported_flags("toy", USER, {"lora_alpha": None, "lora_rank": 8})
+    with pytest.raises(UsageError) as info:
+        providers.require_supported_flags("toy", USER, {"lora_alpha": 16})
+    assert info.value.message == (
+        "--lora-alpha is not supported on toy: Toy sets the LoRA alpha itself"
+    )
+    assert info.value.hint == "drop --lora-alpha"
+
+
+def test_a_provider_that_does_not_deploy_is_refused() -> None:
+    register_provider("toy", "example.toy:Provider", label="Toy", deploys=False)
+    register_provider("real", "example.real:Provider")
+    providers.require_deploys("real", USER)
+    with pytest.raises(UsageError, match="deploying on Toy is not available"):
+        providers.require_deploys("toy", USER)

@@ -75,7 +75,6 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
-from pup_finetune.approval import Part
 from pup_finetune.concurrency import DaemonPool
 from pup_finetune.curation.labels import Label, LabelReport, apply_labels
 from pup_finetune.data.dataset_dir import DatasetDir
@@ -98,11 +97,14 @@ if TYPE_CHECKING:
     from pup_finetune.inference import ChatCompleter, JudgeConfig, JudgeProvider
 
 TriageMode = Literal["label", "agreement"]
+TriageStatus = Literal["none", "incomplete", "complete", "unreadable"]
+"""Where a dataset's triage stands (:func:`triage_status`)."""
 
 __all__ = [
     "DEFAULT_CONCURRENCY",
     "DEFAULT_JUDGES",
     "JUDGMENTS_FILE",
+    "MIN_AGREEMENT_ROWS",
     "SETTINGS_FILE",
     "SYSTEM_PROMPT",
     "TOO_LONG",
@@ -113,6 +115,7 @@ __all__ = [
     "TriageMode",
     "TriagePlan",
     "TriageReport",
+    "TriageStatus",
     "Vote",
     "build_messages",
     "decide",
@@ -120,6 +123,7 @@ __all__ = [
     "has_template_task",
     "judge_config",
     "measure_agreement",
+    "noisy_agreement",
     "parse_judges",
     "parse_vote",
     "plan_triage",
@@ -128,6 +132,7 @@ __all__ = [
     "rubric_sections",
     "rubric_template",
     "run_triage",
+    "triage_status",
 ]
 
 DEFAULT_JUDGES: Final = (
@@ -151,6 +156,8 @@ CHARS_PER_TOKEN: Final = 4
 RUBRIC_HASH_SHOWN: Final = 12
 """How many hex characters of the rubric's sha256 a preview shows."""
 DISAGREEMENTS_SHOWN: Final = 10
+MIN_AGREEMENT_ROWS: Final = 20
+"""Below this many labeled rows, an agreement measure is too noisy to trust much."""
 TOO_LONG: Final = "too_long"
 """Why a judge cast no ordinary vote on a row longer than its context window."""
 TOO_LONG_REASON: Final = "longer than this judge's context window"
@@ -215,10 +222,12 @@ def has_template_task(rubric: str) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class Criteria:
-    """What the judges review against: a rubric, rules, or both. ``source`` says which."""
+    """What the judges review against: a rubric, rules, or both. ``source`` says which,
+    and ``rules`` how many rules there are."""
 
     text: str
     source: str
+    rules: int = 0
 
     @property
     def sha256(self) -> str:
@@ -242,7 +251,7 @@ class Criteria:
                 "triage needs a rubric or rules to judge rows against",
                 hint="pass --rubric FILE (see --print-template) or --rule TEXT, repeated",
             )
-        return cls("\n\n".join(parts), "+".join(sources))
+        return cls("\n\n".join(parts), "+".join(sources), len(cleaned))
 
 
 def parse_judges(value: str | None) -> tuple[str, ...]:
@@ -518,34 +527,6 @@ class TriagePlan:
             chars[judge] = chars.get(judge, 0) + sizes[row.id]
         return {judge: -(-count // CHARS_PER_TOKEN) for judge, count in chars.items()}
 
-    def approval_parts(self) -> list[Part]:
-        """What approving this triage pins (see :mod:`pup_finetune.approval`): the rows to
-        review with the calls left (and, measuring agreement, each row's reference label,
-        ``[row_id, keep]``, which the council is measured against), and the criteria,
-        judges and mode."""
-        rows: dict[str, Any] = {
-            "rows": [[row.id, row_digest(row)] for row in self.rows],
-            "pending": [[row.id, judge] for row, judge in self.pending],
-        }
-        if self.references is not None:
-            rows["references"] = [
-                [row_id, label.keep] for row_id, label in sorted(self.references.items())
-            ]
-        criteria = {
-            "rubric_sha256": self.criteria.sha256,
-            "judges": list(self.judges),
-            "mode": self.mode,
-            "reset": self.reset,
-        }
-        return [
-            Part(
-                "the rows to review",
-                rows,
-                now=f"{len(self.rows)} rows, {len(self.pending)} judge calls",
-            ),
-            Part("the rubric and judges", criteria),
-        ]
-
     def preview(self) -> dict[str, Any]:
         """What :func:`run_triage` would do, and every provider the rows are sent to."""
         from pup_finetune.judges import billing, destination, recipient
@@ -600,6 +581,7 @@ class TriagePlan:
             "approx_input_tokens_note": f"approximate: about {CHARS_PER_TOKEN} characters "
             "per token of each call's messages; each provider counts its own",
             "criteria": self.criteria.source,
+            "rule_count": self.criteria.rules,
             "rubric_hash": self.criteria.sha256[:RUBRIC_HASH_SHOWN],
             "data_destination": f"each row's full content is sent to {_and(places)} for "
             "judging (paid, per token)",
@@ -610,6 +592,8 @@ class TriagePlan:
                 "the council reviews the rows you or the agent labeled and labels nothing; "
                 "the result says how often it agrees with those labels"
             )
+            if (noisy := noisy_agreement(len(self.references))) is not None:
+                preview["warnings"] = [noisy]
         elif self.skipped_labeled:
             preview["agreement_note"] = (
                 f"{self.skipped_labeled} rows carry your or the agent's labels: --agreement "
@@ -768,6 +752,80 @@ def plan_triage(
     )
 
 
+def triage_status(dataset: DatasetDir) -> tuple[TriageStatus, str | None]:
+    """Where ``dataset``'s triage stands, from its files alone (no rubric needed), and a
+    warning when its files cannot be read.
+
+    ``none`` when no triage ran (no ``triage.json``, no votes and no judge label);
+    ``unreadable`` when ``triage.json`` or ``judgments.jsonl`` cannot be read, with a warning
+    naming the file and the problem; ``complete`` when every accepted row has a label in
+    force and every judge label is backed by the votes cast under the recorded rubric and
+    judges, so a triage over every row would change nothing; ``incomplete`` otherwise.
+    Agreement runs label nothing, so they leave the rows they did not label for a triage
+    to finish.
+    """
+    settings_path = dataset.path / SETTINGS_FILE
+    votes_path = dataset.path / JUDGMENTS_FILE
+    labels = dataset.labels()
+    rows = dataset.rows()
+    judged = [row for row in rows if (label := labels.get(row.id)) and label.by == "judge"]
+    if not settings_path.exists() and not votes_path.exists() and not judged:
+        return "none", None
+    settings: Any = None
+    try:
+        if settings_path.exists():
+            settings = read_json(settings_path)
+            if not _readable_settings(settings):
+                raise StateError(f"{settings_path}: not the settings of a triage")
+        votes = read_votes(votes_path)
+    except StateError as exc:
+        return "unreadable", _unreadable_warning(exc.message)
+    except OSError as exc:
+        return "unreadable", _unreadable_warning(f"{exc.filename or settings_path}: {exc.strerror}")
+    if any(row.id not in labels for row in rows):
+        return "incomplete", None
+    if not judged:
+        return "complete", None
+    if settings is None:
+        return "incomplete", None
+    judges, rubric = settings["judges"], settings["rubric_sha256"]
+    counted: dict[str, dict[str, Vote]] = {}
+    digests = {row.id: row_digest(row) for row in judged}
+    for vote in votes:
+        if (
+            vote.judge in judges
+            and vote.criteria_sha256 == rubric
+            and digests.get(vote.row_id) == vote.row_sha256
+        ):
+            counted.setdefault(vote.row_id, {})[vote.judge] = vote
+    for row in judged:
+        decision = decide(row.id, counted.get(row.id, {}), judges)
+        if decision.keep is None or decision.keep != labels[row.id].keep:
+            return "incomplete", None
+    return "complete", None
+
+
+def _readable_settings(settings: Any) -> bool:
+    """Whether ``settings`` (``triage.json``) names the judges and the rubric's hash."""
+    if not isinstance(settings, dict):
+        return False
+    judges = settings.get("judges")
+    return (
+        isinstance(judges, list)
+        and bool(judges)
+        and all(isinstance(judge, str) for judge in judges)
+        and isinstance(settings.get("rubric_sha256"), str)
+    )
+
+
+def _unreadable_warning(problem: str) -> str:
+    return (
+        f"the triage files cannot be read ({problem}), so whether the triage is complete is "
+        "unknown; fix or remove the file, or rerun `dataset triage` with --reset-triage to "
+        "discard every vote"
+    )
+
+
 def _check_frozen(dataset: DatasetDir, settings: Mapping[str, Any], votes: int) -> None:
     """Raise :class:`StateError` when ``votes`` stored votes exist under other settings than
     ``settings`` (see the module docstring)."""
@@ -879,6 +937,19 @@ def _kappa(pairs: Sequence[tuple[bool, bool]]) -> float | None:
 
 def _word(keep: bool) -> str:
     return "keep" if keep else "drop"
+
+
+def noisy_agreement(rows: int) -> str | None:
+    """The warning that an agreement measured on ``rows`` labeled rows is noisy, or ``None``
+    when there are :data:`MIN_AGREEMENT_ROWS` or more."""
+    if rows >= MIN_AGREEMENT_ROWS:
+        return None
+    return (
+        f"the agreement is measured on {_rows(rows)} you or the agent labeled; on fewer than "
+        f"{MIN_AGREEMENT_ROWS} it is noisy (one row moves it by {round(100 / max(rows, 1))} "
+        "points), so label more rows (`dataset sample`, then `dataset label`) before "
+        "trusting it"
+    )
 
 
 def measure_agreement(

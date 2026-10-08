@@ -96,7 +96,8 @@ an assistant message. `transformers` comes from the optional `hf` extra and load
   versions. A run records it, and a mismatch on resume means "prepare a new run".
 
 **Providers** (`Provider`) own everything outside the loop: the model profiles they support
-(`models`, `resolve_model`), a live `preflight`, readiness `check`s for `doctor`, their
+(`models`, `resolve_model`), a live `preflight` (which `doctor --provider NAME --check` and
+`models list --check` run), their
 credentials, validation of provider-specific `provider_options`, `training_profile` (the
 profile as those options train it, e.g. with a shorter context: rows are rendered against
 it and the run records it, so a preview shows its effect and a resume renders the same rows),
@@ -192,6 +193,26 @@ package's `__init__.py` does little more than register the provider's `Credentia
 `auth`, `doctor` and every other command know the API key without importing an SDK, an HTTP
 client or a tokenizer. The implementation lives in the package's `provider` module, which
 `get_provider` imports on first use.
+
+Each entry also says what the provider needs (`ProviderInfo`): the credential it signs in
+with, the optional packages each step needs (`Package`: the Training SDK and the renderer's
+`transformers`, found with `importlib.util.find_spec`, never imported), the `train` flags it
+refuses (`RefusedFlag`, e.g. Baseten's `--lora-alpha`) and whether it deploys. `doctor` builds
+its provider checks and its `ready` map from it (`readiness.py`), and the `train`, `resume`,
+`evaluate`, `deploy` and `undeploy` previews check it before any provider call, so a missing
+SDK or a flag the provider cannot honor fails the preview with the install hint or the
+reason, exit 2, rather than a detached worker or a paid session after `--confirm`. A
+provider has no readiness method of its own: `doctor` never builds one unless
+`--provider NAME --check` asks for its live `preflight`, and a failed preflight blocks
+`train` and `evaluate` on it in `ready`. A package that is found but fails to load (its
+parent package raises on import) is reported as installed but unloadable, apart from one
+that is missing.
+
+`doctor`'s JSON report changed shape in this version: the top-level `pup` and
+`datadog_auth` sections (and `python` and `package`) are gone. Scripts read the `pup` and
+`datadog_auth` checks in `checks` instead (the login's `detail` names when its token
+expires) and `versions` (`pup_finetune`, `checkout`, `pup`, `python`); `ok` stays for one
+release.
 
 ## Training on Fireworks
 
@@ -536,10 +557,14 @@ Using Baseten as the example:
    one a `DeploymentRequest` creates) and an idempotent `undeploy` for a promoted `ModelRef`. Callers
    gate them behind `--confirm` and `PUP_READ_ONLY`.
 7. **Registration and install.** Call `register_provider("baseten",
-   "pup_finetune.providers.baseten.provider:BasetenProvider", options=("max_seq_len",))` in
-   the registry (the implementation lives in `provider.py`, so the package `__init__.py` stays
-   light; `options` names the `--provider-option` keys, which `train --help` lists, and a
-   provider that takes `max_seq_len` gets `train --max-seq-len` too), and add a `baseten`
+   "pup_finetune.providers.baseten.provider:BasetenProvider", options=("max_seq_len",),
+   models=("qwen3p5-9b", "glm-5p3-flash"))` in the registry (the implementation lives in
+   `provider.py`, so the package `__init__.py` stays light; `options` names the
+   `--provider-option` keys, which `train --help` lists, and a provider that takes
+   `max_seq_len` gets `train --max-seq-len` too; `models` names the profiles' aliases, which
+   `train` infers `--provider` from, and an alias another provider offers too makes
+   `--provider` required for it; `label`, `credential`, `packages`, `refuses` and `deploys`
+   say what it needs, which `doctor` and the previews check), and add a `baseten`
    extra to `pyproject.toml` for the SDK (with its rows in `LICENSE-3rdparty.csv`).
 8. **Tests.** Subclass the contract suites in `tests/providers/contract/`
    (`RendererContract`, `BackendContract`, `ProviderContract`) against a fake of the SDK

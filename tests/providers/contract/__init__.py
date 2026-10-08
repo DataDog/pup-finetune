@@ -39,7 +39,6 @@ import pytest
 from pup_finetune.errors import FinetuneError, UsageError
 from pup_finetune.providers.base import (
     AdamConfig,
-    Check,
     CheckpointRef,
     DeploymentRequest,
     DeployOptions,
@@ -683,10 +682,6 @@ class ProviderContract:
     def test_is_a_provider(self, provider: Provider) -> None:
         assert isinstance(provider, Provider)
         assert provider.name
-
-    def test_check_reports_without_raising(self, provider: Provider) -> None:
-        checks = provider.check()
-        assert all(isinstance(check, Check) and check.name for check in checks)
 
     def test_models_belong_to_the_provider(self, provider: Provider) -> None:
         profiles = provider.models()

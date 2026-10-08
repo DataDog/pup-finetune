@@ -52,10 +52,12 @@ CAVEAT: Final = "agreement with recorded behavior, not task success"
 
 @dataclass(frozen=True, slots=True)
 class Summary:
-    """A closing summary: ``lines`` on a terminal, ``line`` off one."""
+    """A closing summary: ``lines`` on a terminal, ``line`` off one; ``lines`` either way
+    when ``full`` (a checklist, which is the point of its command)."""
 
     lines: tuple[str, ...]
     line: str
+    full: bool = False
 
 
 Summarizer = Callable[[Mapping[str, Any]], Summary | None]
@@ -163,6 +165,9 @@ def _splits(splits: object) -> str | None:
 
 # --- status ------------------------------------------------------------------------------
 
+STOPPED_PHASES: Final = frozenset({"interrupted", "failed"})
+"""The phases a run is in after an error stopped it."""
+
 
 def status_line(
     data: Mapping[str, Any],
@@ -174,9 +179,16 @@ def status_line(
     loss 1.100 val 1.350 (best epoch 2) 4m12s elapsed, eta ~6m``; parts that are not known yet are
     left out. With ``steps_per_epoch`` and ``epochs_completed`` (a watch knows them), an
     epoch whose last step is done but whose end is not recorded yet reads ``validating``."""
-    parts = [f"{data['phase']}: epoch {data['epoch']}/{data['max_epochs']}"]
+    phase = data["phase"]
+    error = data.get("error")
+    code = error.get("code") if isinstance(error, Mapping) else None
+    stopped = phase in STOPPED_PHASES
+    # A run that stopped on an error says which, and that its step is the last one done.
+    shown = f"{phase} ({code})" if stopped and code else str(phase)
+    parts = [f"{shown}: epoch {data['epoch']}/{data['max_epochs']}"]
     step, max_steps = data["step"], data["max_steps"]
-    parts.append(f"step {step}/{max_steps}" if max_steps else f"step {step}")
+    counted = f"step {step}/{max_steps}" if max_steps else f"step {step}"
+    parts.append(f"after {counted}" if stopped else counted)
     if (loss := _loss(data["last_train_loss"])) is not None:
         parts.append(f"loss {loss}")
     val_losses = data["val_losses"]
@@ -219,12 +231,57 @@ def _model_line(result: Mapping[str, Any]) -> str | None:
     return None
 
 
+def _recorded_evaluation(evaluation: object) -> str | None:
+    """The run's recorded evaluation in one line: how it stands, where, and its headline."""
+    if not isinstance(evaluation, Mapping):
+        return None
+    status = str(evaluation.get("status")).replace("_", " ")
+    text = f"evaluation {status} in {evaluation.get('out_dir')}"
+    found = evaluation.get("headline")
+    rates = found.get("judge_pass_rate") if isinstance(found, Mapping) else None
+    if isinstance(rates, Mapping):
+        text += (
+            f": judge agreement base {_agreement(rates.get('base'))}, tuned "
+            f"{_agreement(rates.get('tuned'))}, tuned - base {_difference(rates)}"
+        )
+    return text
+
+
 def status_summary(result: Mapping[str, Any]) -> Summary:
-    """``status``: the status line, and on a terminal the run's model."""
+    """``status``: the status line, and on a terminal the run's model, its recorded
+    evaluation and its error (off a terminal, the evaluation and the error)."""
     details = [line] if (line := _model_line(result)) is not None else []
+    brief: list[str] = []
+    if (evaluation := _recorded_evaluation(result.get("evaluation"))) is not None:
+        details.append(evaluation)
+        brief.append(evaluation)
     if (error := _error_text(result.get("error"))) is not None:
         details.append(f"error: {error}")
-    return _summary(status_line(result), details, next_command=result.get("next_command"))
+        brief.append(f"error: {error}")
+    return _summary(
+        status_line(result), details, brief=brief, next_command=result.get("next_command")
+    )
+
+
+def cancel_summary(result: Mapping[str, Any]) -> Summary:
+    """``cancel --confirm``: which process was signalled, and what the run does now."""
+    headline = (
+        f"sent SIGTERM to process {result.get('pid')}: run {result.get('run_id')} stops after "
+        "its current step, saves a resumable checkpoint and promotes its best epoch"
+    )
+    return _summary(headline, next_command=result.get("next_command"))
+
+
+def runs_summary(result: Mapping[str, Any]) -> Summary:
+    """``runs``: how many runs there are, and the newest one."""
+    found = [run for run in result.get("runs") or [] if isinstance(run, Mapping)]
+    where = result.get("dir")
+    if not found:
+        return _summary(f"no runs under {where}")
+    newest = found[0]
+    headline = f"{_n(len(found), 'run')} under {where}"
+    latest = f"newest {newest.get('run_id')} ({newest.get('phase')}, {newest.get('model')})"
+    return _summary(headline, [latest], brief=[latest], next_command=result.get("next_command"))
 
 
 # --- train and resume --------------------------------------------------------------------
@@ -480,6 +537,38 @@ def import_summary(result: Mapping[str, Any]) -> Summary:
     return _summary(headline, details, brief=[added], next_command=result.get("next_command"))
 
 
+def label_summary(result: Mapping[str, Any]) -> Summary:
+    """``dataset label``: the labels recorded from the file, and the dataset's kept and
+    dropped rows now."""
+    labeled = result.get("label") or {}
+    headline = (
+        f"recorded {_n(labeled.get('applied', 0), 'label')} from {labeled.get('file')} "
+        f"({labeled.get('kept', 0)} keep, {labeled.get('dropped', 0)} drop, "
+        f"{labeled.get('unchanged', 0)} unchanged)"
+    )
+    now = (
+        f"the dataset keeps {result.get('kept', 0)} of {_n(result.get('accepted', 0), 'row')}, "
+        f"{result.get('dropped', 0)} dropped"
+    )
+    return _summary(headline, [now], brief=[now], next_command=result.get("next_command"))
+
+
+def sample_summary(result: Mapping[str, Any]) -> Summary:
+    """``dataset sample``: how many rows were shown out of how many, never their content."""
+    rows = result.get("rows")
+    shown = len(rows) if isinstance(rows, list) else 0
+    split = result.get("split")
+    where = f"the {split} split of " if split and split != "all" else ""
+    headline = (
+        f"sampled {shown} of {_n(result.get('eligible', 0), 'row')} from "
+        f"{where}{result.get('dataset_dir')} (seed {result.get('seed')})"
+    )
+    if not result.get("include_dropped"):
+        headline += ", rows labeled drop left out"
+    full = f"full rows: {result.get('rows_file')}"
+    return _summary(headline, [full], next_command=result.get("next_command"))
+
+
 def triage_summary(result: Mapping[str, Any]) -> Summary:
     """``dataset triage``: kept, dropped, undecided and too long, or with ``--agreement`` how
     often the council agreed with the labels (and Cohen's kappa)."""
@@ -553,7 +642,9 @@ def deploy_summary(result: Mapping[str, Any]) -> Summary:
         details += [call, "example request: usage.example in the result"]
         brief.append(call)
     if undeploy := result.get("undeploy_command"):
-        stop = f"it bills while a replica runs; delete it with: {undeploy}"
+        offline = "bills nothing" in str(result.get("billing") or "")
+        bills = "it bills nothing (offline)" if offline else "it bills while a replica runs"
+        stop = f"{bills}; delete it with: {undeploy}"
         details.append(stop)
         brief.append(stop)
     return _summary(headline, details, brief=brief, next_command=result.get("next_command"))
@@ -569,19 +660,157 @@ def undeploy_summary(result: Mapping[str, Any]) -> Summary:
     return _summary(headline, [kept], brief=[kept], next_command=result.get("next_command"))
 
 
-def doctor_summary(result: Mapping[str, Any]) -> Summary:
-    """``doctor``: how many checks passed, and which required ones failed."""
-    checks = [check for check in result.get("checks") or [] if isinstance(check, Mapping)]
-    passed = sum(1 for check in checks if check.get("ok"))
-    failed = [
-        f"{check.get('name')} ({check.get('detail')})"
-        for check in checks
-        if not check.get("ok") and check.get("required", True)
+_MARKS: Final[dict[str, str]] = {"pass": "ok", "fail": "FAIL", "optional": "--", "skipped": "skip"}
+"""Each check status's mark in ``doctor``'s checklist."""
+
+_CHECK_WIDTH: Final = 44
+_UNSET_KEY: Final = " key not set"
+
+
+def _on(value: object) -> str:
+    return "on" if value else "off"
+
+
+def _doctor_header(result: Mapping[str, Any]) -> str:
+    versions = result.get("versions") or {}
+    mode = result.get("mode") or {}
+    # A checkout names its commit, read at run time: the build's local version part names
+    # the commit it was installed at, which may be stale.
+    version = str(versions.get("pup_finetune") or "unknown")
+    checkout = versions.get("checkout")
+    name = f"pup-finetune {version.split('+')[0] if checkout else version}"
+    if checkout:
+        name += f" (checkout {checkout})"
+    return f"{name}   read-only: {_on(mode.get('read_only'))}   dev: {_on(mode.get('dev'))}"
+
+
+def _check_rows(checks: Sequence[Mapping[str, Any]]) -> list[tuple[str, str, str, str | None]]:
+    """``(status, text, note, fix)`` per checklist line. Consecutive optional checks of keys
+    that are not set share one line (``Anthropic/OpenAI keys not set``)."""
+    rows: list[tuple[str, str, str, str | None]] = []
+    unset: list[Mapping[str, Any]] = []
+
+    def flush() -> None:
+        if len(unset) == 1:
+            check = unset[0]
+            rows.append(("optional", str(check.get("label")), _note(check), None))
+        elif unset:
+            names = "/".join(str(c.get("label"))[: -len(_UNSET_KEY)] for c in unset)
+            uses = _either([str(c.get("needed_for")) for c in unset if c.get("needed_for")])
+            rows.append(("optional", f"{names} keys not set", f"only for {uses}", None))
+        unset.clear()
+
+    for check in checks:
+        status = str(check.get("status"))
+        label = str(check.get("label") or check.get("detail") or check.get("name"))
+        if status == "optional" and label.endswith(_UNSET_KEY):
+            unset.append(check)
+            continue
+        flush()
+        fix = check.get("fix") if status == "fail" else None
+        rows.append((status, label, _note(check), str(fix) if fix else None))
+    flush()
+    return rows
+
+
+def _either(uses: Sequence[str]) -> str:
+    """``a/... or b/... judges`` for ``a/... judges`` and ``b/... judges``."""
+    last = {use.rpartition(" ")[2] for use in uses}
+    if len(last) == 1 and all(" " in use for use in uses):
+        return f"{' or '.join(use.rpartition(' ')[0] for use in uses)} {last.pop()}"
+    return " or ".join(uses)
+
+
+def _note(check: Mapping[str, Any]) -> str:
+    needed_for = check.get("needed_for")
+    if not needed_for:
+        return ""
+    return f"only for {needed_for}" if check.get("status") == "optional" else str(needed_for)
+
+
+def _steps_text(names: Sequence[str], marks: Mapping[str, str] | None = None) -> str:
+    """``dataset preview, pull, show`` for steps that share their first word and are one
+    word after it; every other step in full. ``marks`` adds a note after a step's name
+    (``dataset push (read-only)``)."""
+    parts: list[str] = []
+    previous = ""
+    for name in names:
+        first, _, rest = name.partition(" ")
+        part = rest if first == previous and rest and " " not in rest else name
+        mark = (marks or {}).get(name)
+        parts.append(f"{part} ({mark})" if mark else part)
+        previous = first if rest and " " not in rest else ""
+    return ", ".join(parts)
+
+
+def _other_provider(name: str, provider: object) -> bool:
+    """Whether ``name`` is a step on a provider other than ``provider`` (``doctor
+    --provider``), which the ``Not ready`` list leaves out."""
+    _, on, where = name.rpartition(" on ")
+    return bool(provider) and bool(on) and where != provider
+
+
+def _ready_line(ready: Mapping[str, Any], provider: object = None) -> str | None:
+    """``Ready: ...  Not ready: ...``. A step ``PUP_READ_ONLY`` blocks says ``(read-only)``;
+    with ``--provider``, the steps on other providers are not listed as not ready."""
+    from pup_finetune.readiness import READ_ONLY
+
+    steps = {name: step for name, step in ready.items() if isinstance(step, Mapping)}
+    if not steps:
+        return None
+    yes = [name for name, step in steps.items() if step.get("ready")]
+    no = [
+        name
+        for name, step in steps.items()
+        if not step.get("ready") and not _other_provider(name, provider)
     ]
-    line = f"doctor: {passed}/{len(checks)} checks passed"
-    if failed:
-        line += f"; failed: {'; '.join(failed)}"
-    return Summary((line,), line)
+    read_only = {
+        name: "read-only" for name in no if READ_ONLY in (steps[name].get("blocked_by") or [])
+    }
+    parts = []
+    if yes:
+        parts.append(f"Ready: {_steps_text(yes)}.")
+    if no:
+        parts.append(f"Not ready: {_steps_text(no, read_only)}.")
+    return "  ".join(parts)
+
+
+def _doctor_next(result: Mapping[str, Any], checks: Sequence[Mapping[str, Any]]) -> str | None:
+    """The command to run next, else the fix of the first required check that failed,
+    else the first of ``next_steps``."""
+    if isinstance(result.get("next_command"), str) and result["next_command"]:
+        return str(result["next_command"])
+    for check in checks:
+        if check.get("required") and check.get("status") != "pass" and check.get("fix"):
+            return str(check["fix"])
+    steps = result.get("next_steps") or []
+    for found in steps:
+        if isinstance(found, Mapping) and found.get("command"):
+            return str(found["command"])
+    return None
+
+
+def doctor_summary(result: Mapping[str, Any]) -> Summary:
+    """``doctor``: a checklist, in full on a terminal or off one. A header with the version
+    and mode, a line per check (mark, what it found, what needs it; a failure's fix below
+    it), the steps that are ready and not, and what to do next."""
+    checks = [check for check in result.get("checks") or [] if isinstance(check, Mapping)]
+    lines = [_doctor_header(result)]
+    rows = _check_rows(checks)
+    width = min(max((len(text) for _, text, _, _ in rows), default=0), _CHECK_WIDTH) + 2
+    for status, text, note, fix in rows:
+        mark = _MARKS.get(status, status)
+        line = f"{mark:<6}{text:<{width}}{note}" if note else f"{mark:<6}{text}"
+        lines.append(line.rstrip())
+        if fix:
+            lines.append(f"{'':<6}fix: {fix}")
+    ready = _ready_line(result.get("ready") or {}, result.get("provider"))
+    if ready:
+        lines.append(ready)
+    following = _doctor_next(result, checks)
+    if following:
+        lines.append(f"Next: {following}")
+    return Summary(tuple(lines), "\n".join(lines), full=True)
 
 
 # --- previews ----------------------------------------------------------------------------
@@ -737,7 +966,10 @@ def _train_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
     if isinstance(evaluation, Mapping):
         rows.append(_row("evaluate", _evaluation_calls(evaluation)))
     rows += [_row("sends", _sends(preview)), *_billing_rows(preview)]
-    return f"train {preview.get('model')} on {preview.get('provider')}", rows
+    headline = f"train {preview.get('model')} on {preview.get('provider')}"
+    if preview.get("run_dir"):
+        headline += f" in {preview['run_dir']}"
+    return headline, rows
 
 
 def _resume_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
@@ -797,10 +1029,28 @@ def _triage_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
     return headline, [
         _row("data", data),
         _row("judges", shown),
-        _row("rubric", f"{preview.get('criteria')}, {preview.get('rubric_hash')}"),
+        _row("rubric", _criteria(preview)),
         _row("sends", _sends(preview)),
         _row("bills", _bills(preview.get("billing")) or "nothing: the judges run offline"),
     ]
+
+
+def _criteria(preview: Mapping[str, Any]) -> str:
+    """What a triage judges by: ``rubric rubric.md + 2 rules (hash 0123456789ab)``."""
+    source = str(preview.get("criteria") or "")
+    parts: list[str] = []
+    if "rubric" in source.split("+"):
+        rubric_file = preview.get("rubric_file")
+        parts.append(f"rubric {rubric_file}" if rubric_file else "a rubric")
+    rules = preview.get("rule_count")
+    if isinstance(rules, int) and rules:
+        parts.append(_n(rules, "rule"))
+    elif "rules" in source.split("+"):
+        parts.append("rules")
+    text = " + ".join(parts) or source
+    if digest := preview.get("rubric_hash"):
+        text += f" (hash {digest})"
+    return text
 
 
 def _push_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
@@ -831,7 +1081,12 @@ def _deploy_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
         else None
     )
     headline = f"deploy {preview.get('model')} on {preview.get('provider')}"
-    return headline, [_row("settings", detail), _row("cost", preview.get("billing"))]
+    cost = OFFLINE if _offline(preview) else preview.get("billing")
+    return headline, [
+        _row("settings", detail),
+        _row("sends", _sends(preview)),
+        _row("cost", cost),
+    ]
 
 
 def _action_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
@@ -893,10 +1148,14 @@ SUMMARIES: Final[dict[str, Summarizer]] = {
     "train": train_summary,
     "resume": train_summary,
     "status": status_summary,
+    "cancel": cancel_summary,
+    "runs": runs_summary,
     "evaluate": evaluate_summary,
     "dataset preview": preview_summary,
     "dataset pull": pull_summary,
     "dataset import": import_summary,
+    "dataset label": label_summary,
+    "dataset sample": sample_summary,
     "dataset triage": triage_summary,
     "dataset push": push_summary,
     "deploy": deploy_summary,

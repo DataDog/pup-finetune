@@ -40,7 +40,7 @@ from tests.fakes.chat_api import FakeChatApi
 from tests.fakes.fireworks import FakeFireworksTrainingClient
 from tests.fakes.fireworks_api import API_KEY, FakeFireworksApi
 from tests.fakes.fireworks_deploy import FakeClock, FakeSdkFireworks, fake_deployer
-from tests.fakes.keyring import LockedKeyring, MemoryKeyring
+from tests.fakes.keyring import MemoryKeyring
 from tests.fakes.tokenizer import FakeChatTokenizer
 from tests.providers.contract import ProviderContract
 
@@ -416,7 +416,7 @@ def test_the_renderer_is_the_familys() -> None:
 def test_the_renderer_needs_the_hf_extra(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "transformers", None)  # what a missing package looks like
     provider = FireworksProvider(Runtime(), env=ENV)
-    with pytest.raises(UsageError, match="needs Hugging Face transformers") as caught:
+    with pytest.raises(UsageError, match="needs the Hugging Face transformers package") as caught:
         provider.renderer(PROFILE)
     assert caught.value.hint == INSTALL_HINT
 
@@ -435,7 +435,6 @@ def test_building_the_provider_and_renderer_imports_nothing_heavy() -> None:
         from pup_finetune.runtime import Runtime
 
         provider = get_provider("fireworks", Runtime())
-        provider.check()
         provider.validate_options({"max_seq_len": "1024"})
         try:
             provider.renderer(provider.resolve_model("qwen3p8-27b"))
@@ -484,53 +483,3 @@ def test_building_the_backend_loads_no_sdk() -> None:
         },
     )
     assert json.loads(completed.stdout) == []
-
-
-# --- checks ------------------------------------------------------------------------------
-
-
-def test_check_reports_the_key_source_without_the_key() -> None:
-    checks = provider_for().check()
-    assert [check.name for check in checks] == ["fireworks api key", "fireworks renderer"]
-    key, renderer = checks
-    assert key.ok
-    assert key.detail == "Fireworks API key found (source: env)"
-    assert renderer.ok
-    assert all(API_KEY not in check.detail for check in checks)
-
-
-def test_check_without_a_key_explains_how_to_add_one() -> None:
-    key = provider_for(env={}).check()[0]
-    assert not key.ok
-    assert "pup finetune auth login fireworks" in key.detail
-
-
-def test_check_never_raises_on_a_locked_keychain(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(keyring.core, "_keyring_backend", LockedKeyring())
-    key = provider_for(env={}).check()[0]
-    assert not key.ok
-    assert "could not read the fireworks key" in key.detail
-
-
-class _BrokenKeyring(MemoryKeyring):
-    """A keychain backend that fails with an error keyring does not define."""
-
-    def get_password(self, service: str, username: str) -> str | None:
-        raise RuntimeError(f"backend crashed holding {API_KEY}")
-
-
-def test_check_never_raises_on_an_unexpected_keychain_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(keyring.core, "_keyring_backend", _BrokenKeyring())
-    key = provider_for(env={}).check()[0]
-    assert not key.ok
-    assert key.detail == "could not look up the key (RuntimeError)"
-    assert API_KEY not in key.detail
-
-
-def test_check_reports_a_missing_hf_extra(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "transformers", None)
-    renderer = FireworksProvider(Runtime(), env=ENV).check()[1]
-    assert not renderer.ok
-    assert INSTALL_HINT in renderer.detail

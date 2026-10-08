@@ -34,14 +34,19 @@ runner = CliRunner()
 
 QWEN = {
     "alias": "qwen3p8-27b",
+    "provider": "fireworks",
     "base_model": "accounts/fireworks/models/qwen3p8-27b",
+    "max_seq_len": 131072,
+    "supports_reasoning": True,
+    "default_lora_rank": 8,
+    "provider_options": ["max_seq_len"],
+}
+QWEN_INTERNALS = {
     "renderer": "qwen3_8",
     "tokenizer": "Qwen/Qwen3.8-27B",
     "tokenizer_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
-    "max_seq_len": 131072,
-    "default_lora_rank": 8,
-    "supports_reasoning": True,
 }
+"""What only ``--check`` adds to a profile."""
 
 
 @pytest.fixture(autouse=True)
@@ -87,7 +92,8 @@ def test_lists_the_fake_profiles_in_dev_mode(monkeypatch: pytest.MonkeyPatch) ->
     assert result.exit_code == 0, result.stderr
     (model,) = output(result)["models"]
     assert model["alias"] == "fake-model"
-    assert model["renderer"] == "fake"
+    assert model["provider"] == "fake"
+    assert "renderer" not in model
 
 
 def test_the_fake_provider_needs_dev_mode() -> None:
@@ -102,8 +108,24 @@ def test_an_unknown_provider_lists_the_known_ones() -> None:
     assert "fireworks" in result.stderr
 
 
-def test_the_provider_is_required() -> None:
-    assert invoke().exit_code == 2
+def test_without_a_provider_it_lists_every_provider_s_models() -> None:
+    result = invoke()
+    assert result.exit_code == 0, result.stderr
+    body = output(result)
+    assert body["provider"] is None
+    assert [(m["provider"], m["alias"]) for m in body["models"]] == [
+        ("fireworks", "qwen3p8-27b"),
+        ("baseten", "qwen3p5-9b"),
+        ("baseten", "glm-5p3-flash"),
+    ]
+    assert body["models"][0] == QWEN
+    assert all("tokenizer" not in model for model in body["models"])
+
+
+def test_without_a_provider_dev_mode_lists_the_fake_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PUP_FINETUNE_DEV", "1")
+    providers = {model["provider"] for model in output(invoke())["models"]}
+    assert providers == {"fake", "fireworks", "baseten"}
 
 
 def test_check_preflights_each_model(fake: FakeFireworksApi) -> None:
@@ -111,7 +133,7 @@ def test_check_preflights_each_model(fake: FakeFireworksApi) -> None:
     assert result.exit_code == 0, result.stderr
     assert output(result) == {
         "provider": "fireworks",
-        "models": [{**QWEN, "preflight": {"ok": True}}],
+        "models": [{**QWEN, **QWEN_INTERNALS, "preflight": {"ok": True}}],
         "ok": True,
     }
     assert [request.url.path for request in fake.requests] == [
@@ -160,7 +182,7 @@ def test_check_reports_every_profile_on_its_own(
     assert missing["alias"] == "qwen-missing"
     assert missing["preflight"]["ok"] is False
     assert "has no model" in missing["preflight"]["error"]
-    assert qwen == {**QWEN, "preflight": {"ok": True}}
+    assert qwen == {**QWEN, **QWEN_INTERNALS, "preflight": {"ok": True}}
     assert [request.url.path for request in fake.requests] == [
         "/v1/accounts/fireworks/models/qwen-missing",
         "/v1/accounts/fireworks/models/qwen3p8-27b",
@@ -204,21 +226,34 @@ def test_check_works_for_the_fake_provider(monkeypatch: pytest.MonkeyPatch) -> N
     assert output(result)["models"][0]["preflight"] == {"ok": True}
 
 
-def test_listing_imports_no_sdk_or_tokenizer(tmp_path: Path) -> None:
-    code = textwrap.dedent(
-        """
+@pytest.mark.parametrize(
+    ("args", "heavy"),
+    [
+        (["--provider", "fireworks"], ["transformers", "fireworks", "tinker", "httpx"]),
+        ([], ["transformers", "fireworks", "tinker", "baseten"]),
+    ],
+)
+def test_listing_imports_no_sdk_or_tokenizer(
+    args: list[str], heavy: list[str], tmp_path: Path
+) -> None:
+    code = (
+        textwrap.dedent(
+            """
         import json, sys
         from pup_finetune.cli import app
         from pup_finetune.cli._common import run_app
 
         try:
-            run_app(app, ["models", "list", "--provider", "fireworks"])
+            run_app(app, ["models", "list", *ARGS])
         except SystemExit as exc:
             code = exc.code
-        heavy = {"transformers", "fireworks", "tinker", "httpx"}
+        heavy = set(HEAVY)
         loaded = sorted({name.partition(".")[0] for name in sys.modules} & heavy)
         print(json.dumps({"exit": code, "heavy": loaded}), file=sys.stderr)
         """
+        )
+        .replace("ARGS", repr(args))
+        .replace("HEAVY", repr(heavy))
     )
     env = {k: v for k, v in os.environ.items() if k != "FIREWORKS_API_KEY"}
     env.update(HOME=str(tmp_path), PYTHON_KEYRING_BACKEND="keyring.backends.fail.Keyring")

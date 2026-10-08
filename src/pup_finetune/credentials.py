@@ -31,7 +31,6 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import SecretStr
 
-from pup_finetune.doctor import CheckOutcome, register_check
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.redaction import RedactingFilter, install_log_redaction, redact, register_secret
 
@@ -49,6 +48,7 @@ __all__ = [
     "ensure_storable",
     "get_spec",
     "install_log_redaction",
+    "key_source",
     "login_hint",
     "lookup",
     "missing_key_error",
@@ -77,12 +77,17 @@ class CredentialSpec:
     SDK reads secrets from, so they are kept from child processes like the key's.
     ``validator`` checks a key with a cheap provider call before it is stored: it returns an
     account label (or ``None``), raises :class:`UsageError` when the provider rejects the
-    key, and :class:`ExternalError` when the provider cannot be reached.
+    key, and :class:`ExternalError` when the provider cannot be reached. ``needed_for`` says
+    in a few words what the key is for (``anthropic/... judges``), for ``doctor`` and
+    ``auth status``; ``label`` is the provider's display name (default: ``provider``
+    capitalized).
     """
 
     provider: str
     env_var: str
     description: str = ""
+    needed_for: str = ""
+    label: str = ""
     keychain_service: str = KEYCHAIN_SERVICE
     keychain_account: str = ""
     config_reader: Callable[[], str | None] | None = None
@@ -97,6 +102,8 @@ class CredentialSpec:
             raise ValueError(f"credential spec {self.provider!r} needs an env_var")
         if not self.keychain_account:
             object.__setattr__(self, "keychain_account", self.provider)
+        if not self.label:
+            object.__setattr__(self, "label", self.provider.capitalize())
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,7 +118,7 @@ _REGISTRY: dict[str, CredentialSpec] = {}
 
 
 def register(spec: CredentialSpec) -> None:
-    """Add a provider's credential spec, and its (optional) ``doctor`` check.
+    """Add a provider's credential spec; ``doctor`` and ``auth`` list every registered one.
 
     Registering an equal spec again is a no-op; a different spec under a taken provider name
     raises ``ValueError``. Cheap: nothing is resolved until a command asks.
@@ -122,7 +129,6 @@ def register(spec: CredentialSpec) -> None:
             raise ValueError(f"credentials for {spec.provider!r} are already registered")
         return
     _REGISTRY[spec.provider] = spec
-    register_check(f"credentials:{spec.provider}", _doctor_check(spec), required=False)
 
 
 def all_specs() -> list[CredentialSpec]:
@@ -399,18 +405,13 @@ def delete(provider: str, *, keyring_backend: KeyringBackend | None = None) -> b
     return deleted
 
 
-def _doctor_check(spec: CredentialSpec) -> Callable[[], CheckOutcome]:
-    def check() -> CheckOutcome:
-        found = lookup(spec.provider)
-        if found is None:
-            sdk = sdk_login_source(spec.provider)
-            if sdk is not None:
-                return CheckOutcome(
-                    True,
-                    f"no {spec.provider} API key, but the {spec.provider} SDK can sign in "
-                    f"on its own (source: {sdk})",
-                )
-            return CheckOutcome(False, f"no {spec.provider} API key; {login_hint(spec)}")
-        return CheckOutcome(True, f"{spec.provider} API key found (source: {found.source})")
+def key_source(provider: str, *, env: Mapping[str, str] = os.environ) -> str | None:
+    """Where ``provider``'s key would come from (:data:`Source`), ``<provider>-sdk`` when only
+    its SDK can sign in on its own, or ``None`` when nothing would. Never returns the key.
 
-    return check
+    Raises :class:`ExternalError` when the keychain cannot be read (e.g. it is locked).
+    """
+    found = lookup(provider, env=env)
+    if found is not None:
+        return found.source
+    return sdk_login_source(provider, env=env)

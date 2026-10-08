@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from pup_finetune.display import display_path
+from pup_finetune.evaluation.runner import RecordedEvaluation, headline
 from pup_finetune.runs import RESUMABLE_PHASES, RunDir
 from pup_finetune.training.worker import WorkerStatus
 
@@ -40,11 +41,15 @@ __all__ = [
 
 TABLE_VIEWS: Final[dict[str, str]] = {
     "models list": (
-        ".provider as $provider | .models | map({alias, provider: $provider, base_model, "
-        "max_seq_len, default_lora_rank, supports_reasoning})"
+        ".models | map({alias, provider, base_model, max_seq_len, default_lora_rank, "
+        "supports_reasoning})"
     ),
     "auth status": ".providers",
-    "doctor": ".checks",
+    "runs": (
+        ".runs | map({run_id, phase, model, provider, best_epoch, promoted_model, deployment, "
+        "run_dir})"
+    ),
+    "doctor": ".checks | map({name, status, detail, needed_for})",
     "dataset sample": (
         '.rows | map({id, split, label, turns, tools: (.tools_used | join(", ")), '
         "first_user_message})"
@@ -172,6 +177,7 @@ STATUS_KEYS: Final = (
     "phase",
     "run_id",
     "run_dir",
+    "run_dir_source",
     "provider",
     "model",
     "epoch",
@@ -188,6 +194,7 @@ STATUS_KEYS: Final = (
     "stopped_reason",
     "promoted_model",
     "deployable_checkpoint",
+    "evaluation",
     "error",
     "finalize_error",
     "resume_mode",
@@ -200,7 +207,8 @@ STATUS_KEYS: Final = (
     "files",
 )
 """What ``status`` prints, in order; ``estimated_spend_usd`` (with an hourly rate),
-``resume_mode`` (a resumable run), ``worker`` (one exists), ``watch_timed_out``
+``evaluation`` (the run was evaluated), ``resume_mode`` (a resumable run), ``worker`` (one
+exists), ``watch_timed_out``
 (``--watch``) and ``settings`` (what the run trains with that differs from the defaults,
 :func:`changed_settings`; every setting is in ``run.json``, ``files.run``) only when they
 apply."""
@@ -253,19 +261,35 @@ def status_view(data: Mapping[str, Any]) -> dict[str, Any]:
         shown.pop("resume_mode", None)
     if shown["worker"] is None:
         shown.pop("worker")
+    if shown.get("evaluation") is None:
+        shown.pop("evaluation", None)
     if shown.get("settings") is None:  # a run recorded before run.json had them
         shown.pop("settings", None)
     return {key: shown[key] for key in STATUS_KEYS if key in shown}
 
 
+def recorded_evaluation_view(found: RecordedEvaluation | None) -> dict[str, Any] | None:
+    """A run's recorded evaluation as ``status`` shows it: how it stands, its headline and
+    where it is (``None`` when the run was never evaluated)."""
+    if found is None:
+        return None
+    from pup_finetune.evaluation.replay import SUMMARY_FILE
+
+    summary = found.out_dir / SUMMARY_FILE
+    return {
+        "status": found.status,
+        "complete": found.complete,
+        "out_dir": display_path(found.out_dir),
+        "judge_model": found.judge_model,
+        "headline": found.headline,
+        "publication": found.publication,
+        "files": files(summary=summary if summary.exists() else None),
+    }
+
+
 # --- evaluate ----------------------------------------------------------------------------
 
 TARGETS: Final = ("base", "tuned")
-
-
-def _rate(target: Mapping[str, Any], key: str) -> Any:
-    found = target.get(key)
-    return found.get("rate") if isinstance(found, Mapping) else None
 
 
 def evaluation_view(result: Mapping[str, Any]) -> dict[str, Any]:
@@ -285,28 +309,16 @@ def evaluation_view(result: Mapping[str, Any]) -> dict[str, Any]:
     from pup_finetune.evaluation.replay import RESULTS_FILE, SUMMARY_FILE
 
     targets: Mapping[str, Any] = summary.get("targets") or {}
-    difference: Mapping[str, Any] = summary.get("tuned_minus_base") or {}
-    paired: Mapping[str, Any] = summary.get("paired") or {}
     found = {name for target in targets.values() for name in (target.get("metrics") or {})}
     # In the metrics' own order (whether it calls a tool first), then any others.
     names = [str(name) for name in MetricName if name in found]
     names += sorted(found - set(names))
     out_dir = Path(str(result["out_dir"]))
-    ci = difference.get("ci95")
     return {
         "status": result.get("status"),
         "run_id": result.get("run_id"),
         "judge_model": result.get("judge_model"),
-        "headline": {
-            "judge_pass_rate": {
-                **{name: _rate(targets.get(name) or {}, "judge_pass") for name in TARGETS},
-                "delta": difference.get("judge_pass_rate"),
-                "ci95": list(ci) if isinstance(ci, list | tuple) else None,
-            },
-            "paired": {key: paired.get(key, 0) for key in ("wins", "regressions", "ties")},
-            "cases": summary.get("n_cases"),
-            "trajectories": summary.get("n_trajectories"),
-        },
+        "headline": headline(summary),
         "metrics": {
             name: {
                 target: (((targets.get(target) or {}).get("metrics") or {}).get(name) or {}).get(

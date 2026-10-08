@@ -21,6 +21,7 @@ from pup_finetune.cli import (
     evaluate,
     help,
     models,
+    runs,
     skill,
     train,
     triage,
@@ -77,6 +78,7 @@ doctor.register(app)
 help.register(app)
 evaluate.register(app)
 models.register(app)
+runs.register(app)
 skill.register(app)
 train.register(app)
 

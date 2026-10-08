@@ -78,13 +78,13 @@ def test_label_applies_labels_and_emits_the_report(dataset: Path, tmp_path: Path
     assert (data["accepted"], data["kept"], data["dropped"]) == (len(FIXTURE_IDS), 13, 1)
     assert data["drop_reasons"] == [{"reason": "wrong tool", "count": 1}]
     assert sum(data["splits"].values()) == 13
-    # Training needs a provider, a model and a run directory nobody chose yet: steps only.
+    # Training needs a model nobody chose yet (the provider follows from it, and the run
+    # directory defaults to runs/RUN_ID): steps only.
     quoted = shlex.quote(str(dataset))
     assert data["next_command"] is None
     assert [step["command"] for step in data["next_steps"]] == [
-        "pup finetune models list --provider <PROVIDER>",
-        f"pup finetune train --provider <PROVIDER> --model <MODEL> --dataset {quoted} "
-        "--run-dir <RUN_DIR>",
+        "pup finetune models list",
+        f"pup finetune train --dataset {quoted} --model <MODEL>",
         f"pup finetune dataset push {quoted} --name <NAME>",
     ]
     assert FIXTURE_IDS[0] not in {row.id for row in DatasetDir(dataset).kept_rows()}
@@ -310,3 +310,40 @@ def test_label_and_sample_are_allowed_read_only(
     file = label_file(tmp_path, {"id": FIXTURE_IDS[0], "keep": False, "reason": "noise"})
     assert output_json(label(dataset, file))["dropped"] == 1
     assert sample(dataset, "--include-dropped")["eligible"] == len(FIXTURE_IDS)
+
+
+# --- closing summaries ------------------------------------------------------------------
+
+
+def test_label_and_sample_end_with_one_summary_line_of_their_result(
+    dataset: Path, tmp_path: Path
+) -> None:
+    from pup_finetune.cli._summary import summarize
+
+    file = label_file(
+        tmp_path,
+        {"id": FIXTURE_IDS[0], "keep": False, "reason": "synthetic drop"},
+        {"id": FIXTURE_IDS[1], "keep": True},
+    )
+    labeled = label(dataset, file)
+    data = output_json(labeled)
+    found = summarize("dataset label", data)
+    assert found is not None
+    assert labeled.stderr.splitlines()[-1] == found.line
+    assert found.line == (
+        f"recorded 2 labels from {file} (1 keep, 1 drop, 0 unchanged); the dataset keeps "
+        f"{len(FIXTURE_IDS) - 1} of {len(FIXTURE_IDS)} rows, 1 dropped"
+    )
+
+    sampled = invoke("sample", str(dataset), "--count", "3", "--split", "train")
+    data = output_json(sampled)
+    found = summarize("dataset sample", data)
+    assert found is not None
+    assert sampled.stderr.splitlines()[-1] == found.line
+    assert found.line.startswith(
+        f"sampled 3 of {data['eligible']} rows from the train split of {data['dataset_dir']} (seed "
+    )
+    assert "rows labeled drop left out" in found.line
+    # Never the rows' content: only counts and where the full rows are.
+    assert all(row["id"] not in found.line for row in data["rows"])
+    assert len(found.lines) <= 8 and "\n" not in found.line

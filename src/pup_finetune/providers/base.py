@@ -603,22 +603,6 @@ class StepMetrics:
         return self.loss_sum / self.weight if self.weight > 0 else math.nan
 
 
-@dataclass(frozen=True, slots=True)
-class Check:
-    """One provider readiness check, reported by ``doctor``. Never holds secret values.
-
-    It carries the same fields as :class:`pup_finetune.doctor.CheckResult`, but ``required``
-    defaults to ``False`` here and to ``True`` there, so copy it across explicitly
-    (``CheckResult(c.name, c.ok, c.detail, required=c.required)``) rather than relying on
-    either default.
-    """
-
-    name: str
-    ok: bool
-    detail: str
-    required: bool = False
-
-
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Generation:
     """One sampled assistant turn, parsed into an OpenAI assistant message."""
@@ -779,8 +763,10 @@ class TrainingBackend(Protocol):
 class Provider(Protocol):
     """Everything a training provider offers beyond the loop. Constructing one is cheap.
 
-    :meth:`check` reports readiness without raising. :meth:`resolve_model` and
-    :meth:`preflight` raise :class:`UsageError` for an unknown or unusable model;
+    Readiness is not the provider's to report: ``doctor`` checks what the registry says it
+    needs (:class:`~pup_finetune.providers.ProviderInfo`, :mod:`pup_finetune.readiness`),
+    offline, and calls only :meth:`models` and :meth:`preflight` for ``--check``.
+    :meth:`resolve_model` and :meth:`preflight` raise :class:`UsageError` for an unknown or unusable model;
     :meth:`validate_options` returns the normalized ``provider_options`` or raises
     :class:`UsageError`. :meth:`deploy` and :meth:`undeploy` are remote writes: callers gate
     them behind ``--confirm`` and ``PUP_READ_ONLY``; :meth:`smoke_test` is a paid call.
@@ -789,10 +775,6 @@ class Provider(Protocol):
     @property
     def name(self) -> str:
         """The provider's registry name, e.g. ``fireworks``."""
-        ...
-
-    def check(self) -> list[Check]:
-        """Readiness checks (credentials, SDK, reachability), for ``doctor``."""
         ...
 
     def models(self) -> list[ModelProfile]:

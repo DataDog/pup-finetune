@@ -100,7 +100,17 @@ API. Each span becomes one conversation: its input messages followed by its outp
 A content list is joined when every part is text. An assistant message with neither content
 nor tool calls is dropped. Within a trace, a conversation that is a prefix or a duplicate of
 another is dropped, so each sub-agent keeps its own row. A row's split comes from its trace,
-so every row of a trace lands in the same split.
+so every row of a trace lands in the same split. In a dataset of fewer than 50 traces, a
+validation or test split more than twice its fraction, or 10 or more points off it, is
+warned about (`validation has 5 of 14 rows (36%, 4 of 13 traces) though
+--validation-fraction is 0.1 ...`): splits are assigned per trace, so small datasets vary,
+and pulling more rows evens them out (the seed of a dataset is frozen).
+
+`--from` and `--to` take ISO 8601, epoch milliseconds (a bare number is milliseconds, while
+pup reads one as seconds; one below 10^11, such as `1728000000` or `20261001`, is refused
+with a hint at what it may mean), or a relative time: a number and a unit (`7d`, `24h`, `30m`, or
+pup's spelled-out `5min`, `2hours`, `5 minutes`), `now-<n><unit>` or `now`. A relative time
+is frozen as `now` or `now-<n><unit>` (`7d` is `now-7d`), with the window it resolved to.
 
 ## Why a row is left out
 
@@ -145,7 +155,7 @@ content. Keep it out of version control.
 
 | File | What it holds |
 | --- | --- |
-| `settings.json` | The source (`import` or `datadog`) and its settings, such as the span filter and time window, plus the split settings. Frozen on first use: later runs must pass the same ones. |
+| `settings.json` | The source (`import` or `datadog`) and its settings, such as the span filter and time window, plus the split settings. Frozen on first use: later runs may leave a flag out (it takes the frozen value), but may not pass another value (later imports pass the same split settings). |
 | `rows.jsonl` | The accepted rows, one canonical row per line. Never rewritten by labeling. |
 | `excluded.jsonl` | One `{"code", "detail", "row_id", "trace_id", "span_id", "line_sha256"}` per excluded row (fields that do not apply are left out). |
 | `labels.jsonl` | Keep/drop decisions appended by `dataset label` and `dataset triage`: `{"id", "keep", "reason", "by", "at"}`, where `by` is `manual` (recorded with `dataset label`) or `judge` (decided by the `dataset triage` council; triage never relabels a manual row). Older files that say `agent` or `human` read as `manual`. The last label of an id wins, a reason is required to drop, and a dropped row never trains and is never pushed. |
@@ -186,8 +196,31 @@ The receipt, `push.json`, records the project (`project`, `project_id`), the dat
 (`record_ids`, by row id), the batch being sent (`in_flight`, `in_flight_at`), when records
 were last added (`pushed_at`), a random `push_id` written into the dataset's description, and
 the hash of the dataset settings. It is saved after every batch, so pushing again sends only
-rows not yet pushed and an interrupted push resumes without adding a row twice. `evaluate`
-publishes its Agent Observability experiments on the dataset and version this receipt names.
+rows not yet pushed and an interrupted push resumes without adding a row twice, and it names
+the dataset, so a later push needs no `--name` or `--project`. `evaluate` publishes its Agent
+Observability experiments on the dataset and version this receipt names.
+
+## Where a dataset stands
+
+Every dataset command's result (`import`, `pull`, `show`, `sample`, `label`, `triage` and
+`push`) holds a `pipeline` block, read from the files above, and its `next_command` and
+`next_steps` follow from it:
+
+```json
+{
+  "rows": {"accepted": 14, "kept": 13, "dropped": 1, "unlabeled": 12},
+  "triage": "incomplete",
+  "push": {"status": "pushed_with_new_rows", "pending": 3}
+}
+```
+
+`triage` is `none` before any triage, `complete` once every row has a label and every judge
+label is backed by the votes under the frozen rubric and judges, `unreadable` when
+`triage.json` or `judgments.jsonl` cannot be read, and `incomplete` otherwise (for example
+after `--max-rows`). `push.status` is `not_pushed` without `push.json`, `pushed`
+when it lists every kept row, `pushed_with_new_rows` when `pending` kept rows are not pushed
+yet, and `unreadable` (with `pending` null) when `push.json` cannot be read. An `unreadable`
+part comes with a warning in the result that names the file and the problem.
 
 ## What a command prints, and what its files keep
 

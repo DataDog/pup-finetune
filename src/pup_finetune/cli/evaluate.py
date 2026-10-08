@@ -32,7 +32,7 @@ from typing import Annotated, Any
 import typer
 
 from pup_finetune.cli._common import CommandResult, current_context, get_runtime, run_command
-from pup_finetune.cli._dirs import require_run_dir
+from pup_finetune.cli._dirs import RUN_DIR_BY_ID, resolve_run_ref
 from pup_finetune.cli._flags import given, renamed
 from pup_finetune.cli._presentation import (
     EVALUATE_AND_SHIP,
@@ -49,7 +49,9 @@ from pup_finetune.judge_models import DEFAULT_JUDGE_MODEL, alias_of
 RunDirArgument = Annotated[
     Path,
     typer.Argument(
-        metavar="RUN_DIR", help="A completed or cancelled run directory.", show_default=False
+        metavar="RUN_DIR",
+        help="A completed or cancelled run: its directory or run id.",
+        show_default=False,
     ),
 ]
 
@@ -80,6 +82,20 @@ def _with_defaults_used(preview: dict[str, Any], ctx: Any) -> dict[str, Any]:
     return shown
 
 
+def _with_source(result: dict[str, Any], source: str) -> dict[str, Any]:
+    """``result`` with ``run_dir_source`` when the run was named by a bare run id: after its
+    ``run_dir`` (a preview), else after its ``run_id``."""
+    if source != RUN_DIR_BY_ID:
+        return result
+    after = "run_dir" if "run_dir" in result else "run_id"
+    shown: dict[str, Any] = {}
+    for key, value in result.items():
+        shown[key] = value
+        if key == after:
+            shown["run_dir_source"] = source
+    return shown
+
+
 CASES = "Cases"
 JUDGE = "Judge"
 RUN = "Run"
@@ -103,7 +119,7 @@ DOC = CommandDoc(
     ),
     examples=(
         "pup finetune evaluate run",
-        "pup finetune evaluate run --judge-model glm-5p3-flash --confirm",
+        "pup finetune evaluate run --judge-model glm-5p3-flash",
         "pup finetune evaluate run --max-cases 4 --out-dir run/eval-4",
     ),
     safety=Safety(
@@ -212,7 +228,7 @@ def evaluate(
 ) -> dict[str, Any] | CommandResult:
     max_cases = renamed("max_cases", "old_max_cases")
     runtime = get_runtime()
-    require_run_dir(run_dir, "evaluate")
+    run_dir, source = resolve_run_ref(run_dir, "evaluate")
     settings = runner.EvalSettings(
         out_dir=out_dir if out_dir is not None else run_dir / runner.DEFAULT_OUT_DIR_NAME,
         max_cases_per_trajectory=max_cases,
@@ -229,14 +245,14 @@ def evaluate(
     if confirm and not offline:
         require_writable(runtime, f"evaluating on {evaluation.provider.name}", what=PAID_RUN)
     rerun = [*evaluation.plan.evaluate_command(), "--confirm"]
-    preview = _with_defaults_used(evaluation.preview(), current_context())
+    preview = _with_source(_with_defaults_used(evaluation.preview(), current_context()), source)
     require_confirm(
         confirm, preview, shlex.join(rerun), read_only=runtime.read_only and not offline
     )
     outcome = evaluation.execute()
     code = runner.evaluation_exit_code(outcome)
     # What it prints is the decision; summary.json in the evaluation directory has the rest.
-    data = evaluation_view(outcome)
+    data = _with_source(evaluation_view(outcome), source)
     return CommandResult(data, exit_code=code) if code else data
 
 

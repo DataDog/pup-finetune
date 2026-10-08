@@ -316,11 +316,24 @@ def result_warnings(result: Any) -> list[str]:
 
 
 def echo_warnings(result: Any) -> None:
-    """Print ``warning: <text>`` on stderr for every warning in ``result``
-    (:func:`result_warnings`), redacted. Agents still read them in the JSON; this is so people
-    at a terminal see them too."""
+    """Print ``note: <text>`` on stderr for every note in ``result`` (:func:`result_notes`),
+    then ``warning: <text>`` for every warning in it (:func:`result_warnings`), redacted.
+    Agents still read them in the JSON; this is so people at a terminal see them too."""
+    for message in result_notes(result):
+        note(redact(message))
     for message in result_warnings(result):
         warn(redact(message))
+
+
+def result_notes(result: Any) -> list[str]:
+    """The notes of ``result``, each once, in order: the strings in its top-level ``notes``.
+
+    A note says what a command did besides its work (``created runs/.gitignore``); unlike a
+    warning, it asks nothing of anyone."""
+    items = result.get("notes") if isinstance(result, Mapping) else None
+    if not isinstance(items, list | tuple):
+        return []
+    return list(dict.fromkeys(text for text in items if isinstance(text, str) and text))
 
 
 def _stderr_is_tty() -> bool:
@@ -367,6 +380,11 @@ def info(message: str) -> None:
     console.print(line, markup=False)
 
 
+def note(message: str) -> None:
+    """Write one ``note: <text>`` line to stderr: something done in passing, not a problem."""
+    stderr_console().print(f"note: {message}", markup=False)
+
+
 def warn(message: str) -> None:
     """Write one warning line to stderr."""
     console = stderr_console()
@@ -388,11 +406,12 @@ def status(message: str) -> Iterator[None]:
         yield
 
 
-def summary(lines: Sequence[str], line: str) -> None:
+def summary(lines: Sequence[str], line: str, *, full: bool = False) -> None:
     """Print a command's closing summary on stderr, after its result: ``lines`` on a
-    terminal, else the one plain ``line`` (agents pay for every line). Redacted."""
+    terminal, else the one plain ``line`` (agents pay for every line), or ``lines`` either
+    way when ``full`` (``doctor``'s checklist). Redacted."""
     console = stderr_console()
-    if console.is_terminal:
+    if full or console.is_terminal:
         for text in lines:
             console.print(redact(text), markup=False)
     else:

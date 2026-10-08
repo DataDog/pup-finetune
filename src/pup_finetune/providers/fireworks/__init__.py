@@ -57,6 +57,7 @@ CREDENTIALS: Final = credentials.CredentialSpec(
     provider=PROVIDER_NAME,
     env_var=ENV_VAR,
     description="Fireworks API key, for training, evaluation and deployment on Fireworks",
+    needed_for="training, evaluation and deployment on fireworks, and the default judges",
     keychain_account=PROVIDER_NAME,
     validator=validate_key,
 )

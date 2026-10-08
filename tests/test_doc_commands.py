@@ -51,6 +51,7 @@ OTHER_TOOL_FLAGS = {
     "--jq",
     "--output",
     "--read-only",
+    "--no-agent",
     "--all-extras",
     "--extra",
 }
