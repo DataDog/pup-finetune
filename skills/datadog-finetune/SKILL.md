@@ -313,6 +313,6 @@ Errors read `Error [<code>]: <message>`, then `Hint: ...`. The codes, with their
 | `worker.state` `stale` or `exited` while `training` | The worker died or hangs | Read `worker.log`. Cancel a stale worker, then preview `resume` and ask. |
 | `Error [wrong_phase]` | The run is still training, or already finished | Check `status`. Resume only `interrupted`, `failed` or `cancelled` runs. |
 | The judge fails calibration, answers `refused`, or triage reports `too_long` rows | The judge cannot grade these | None is a pass or a keep. Pick another `--judge-model` or `--judges` with the user. |
-| The evaluation was not published | No `push.json`, or the push missed the test split | Follow `next_steps`: push with a yes, then rerun; finished results are reused. |
+| The evaluation was not published | No `push.json`, or the push missed the test split | Publishing is optional; `next_command` goes on to deploy. To publish, follow `next_steps`: push with a yes, then rerun; finished results are reused. |
 | `deploy` times out, or the smoke test fails | It did not serve in time | It may still bill: undeploy now. Redeploy only after a yes, with a longer `--timeout-minutes`. |
 | `undeploy` refuses: not the requested deployment | The deployment id holds another deployment | Nothing was deleted; never delete it. With an OK, follow the error's steps. |

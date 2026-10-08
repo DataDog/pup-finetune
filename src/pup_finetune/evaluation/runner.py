@@ -1001,9 +1001,10 @@ def _replay_next(
 
     One that stopped, has errors or whose publishing failed is continued by the evaluate
     command (a free preview first). A complete one is deployed (a free preview), unless the
-    run has a deployment already. One that could not be published has no next command:
-    the steps push the dataset, then rerun the evaluation, which then publishes; a complete
-    evaluation's rerun reuses every result, so it makes no new model calls.
+    run has a deployment already, whether or not it was published: publishing is optional.
+    One that could not be published also gets the steps to publish it: push the dataset,
+    then rerun the evaluation; a complete evaluation's rerun reuses every result, so it
+    makes no new model calls.
     """
     steps: list[dict[str, str]] = []
     rerun = plan.evaluate_command()
@@ -1022,8 +1023,6 @@ def _replay_next(
         steps.append(step(shlex.join([*rerun, "--confirm"]), why))
     if retry:
         next_command: str | None = shlex.join(rerun)
-    elif publication["status"] == "skipped":
-        next_command = None
     else:
         next_command = deploy_command(plan.run_dir)
     return {"next_command": next_command, "next_steps": steps}

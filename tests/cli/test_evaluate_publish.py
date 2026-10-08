@@ -229,9 +229,10 @@ def test_without_a_push_receipt_the_evaluation_is_not_published(
     assert any("dataset push" in warning for warning in data["warnings"])
     assert fake.calls == []
     assert (run_dir / "eval" / "summary.json").is_file()
-    # No command runs as written yet: push the dataset (a name only the user can pick), then
-    # rerun the evaluation, which reuses every result and publishes.
-    assert data["next_command"] is None
+    # Publishing is optional: the next command is the deploy preview, and the steps say how to
+    # publish (push the dataset, with a name only the user can pick, then rerun the evaluation,
+    # which reuses every result).
+    assert data["next_command"] == f"pup finetune deploy {run_dir}"
     push_step, rerun_step = data["next_steps"]
     dataset = Path(str(json.loads((run_dir / "run.json").read_text())["dataset_dir"]))
     assert push_step["command"] == f"pup finetune dataset push {dataset} --name <NAME>"
@@ -338,8 +339,8 @@ def test_an_unfinished_push_is_not_published(
     assert reason in data["publication"]["reason"]
     assert experiments_calls(fake) == 0
     assert experiments.experiments == {}
-    # The push to finish is known: the same dataset and project.
-    assert data["next_command"] is None
+    # The push to finish is known: the same dataset and project. Deploying needs none of it.
+    assert data["next_command"] == f"pup finetune deploy {run_dir}"
     assert data["next_steps"][0]["command"] == (
         f"pup finetune dataset push {dataset.resolve()} --name synthetic-replay "
         "--project pup-finetune"
