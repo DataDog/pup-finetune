@@ -21,27 +21,53 @@ import typer
 
 from pup_finetune import skill
 from pup_finetune.cli._common import run_command
+from pup_finetune.cli._presentation import SET_UP, CommandDoc, Safety, describe, group, local
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.output import info, warn
 
-_LOCAL_ONLY = "Reads and writes local files only, so it is allowed with PUP_READ_ONLY set."
-_NO_REMOTE_CALLS = (
-    "Makes no Datadog or provider call, so it is allowed with PUP_READ_ONLY set; the npx "
-    "path downloads the skills CLI from npm and runs it, without your secrets in its "
-    "environment."
-)
-
-skill_app = typer.Typer(
-    name="skill",
-    short_help="Show or install the datadog-finetune agent skill.",
-    help=(
+skill_app = group(
+    "skill",
+    short="Show or install the datadog-finetune agent skill.",
+    description=(
         f"The `{skill.SKILL_NAME}` agent skill teaches a coding agent the curate, train, "
         "evaluate and deploy workflow, with its rules: preview before paying, never confirm "
-        "without the user's authorization, and never ask for API keys in chat. "
-        "Its commands make no Datadog or provider call, so they are allowed with "
-        "PUP_READ_ONLY set."
+        "without the user's authorization, and never ask for API keys in chat."
     ),
-    no_args_is_help=True,
+)
+
+SHOW_DOC = CommandDoc(
+    path="skill show",
+    short="Print the skill's path and content.",
+    description=(
+        f"Print where the bundled `{skill.SKILL_NAME}` skill is and its SKILL.md content, "
+        "for an agent to read or a person to copy."
+    ),
+    examples=("pup finetune skill show",),
+    safety=local("prints the skill"),
+)
+INSTALL_DOC = CommandDoc(
+    path="skill install",
+    short="Install the skill for your coding agents.",
+    description=describe(
+        f"Install the `{skill.SKILL_NAME}` skill: with npx on PATH and no --dir, through "
+        "`npx skills add` for the agents you choose (it may prompt); otherwise by copying "
+        "SKILL.md into the project directory (--dir) or, with --global, your home directory.",
+        "The npx path runs `npx --yes skills add <bundled skills directory> --skill "
+        f"{skill.SKILL_NAME}`, passing on --agent, --global and --yes. The copy goes to "
+        f".agents/skills/{skill.SKILL_NAME}/ and .claude/skills/{skill.SKILL_NAME}/; a "
+        "different copy already there is replaced only with --yes. npx runs without your "
+        "secrets in its environment.",
+    ),
+    examples=(
+        "pup finetune skill install",
+        "pup finetune skill install -a claude-code -g -y",
+        "pup finetune skill install --dir .",
+    ),
+    safety=Safety(
+        data="writes skill files; npx fetches the skills CLI from npm",
+        recipients="nowhere: npx gets no secrets",
+        without="installs the skill",
+    ),
 )
 
 NpxRunner = Callable[[Sequence[str], Mapping[str, str]], int]
@@ -64,14 +90,7 @@ def find_npx() -> str | None:
     return shutil.which("npx")
 
 
-@skill_app.command(
-    "show",
-    short_help="Print the skill's path and content.",
-    help=(
-        f"Print where the bundled `{skill.SKILL_NAME}` skill is and its SKILL.md content, "
-        f"for an agent to read or a person to copy. {_LOCAL_ONLY}"
-    ),
-)
+@skill_app.command(**SHOW_DOC.typer())
 @run_command
 def show() -> dict[str, Any]:
     path = skill.skill_path()
@@ -82,20 +101,7 @@ def show() -> dict[str, Any]:
     }
 
 
-@skill_app.command(
-    "install",
-    short_help="Install the skill for your coding agents.",
-    help=(
-        f"Install the `{skill.SKILL_NAME}` skill. When npx is on PATH and --dir is not given, "
-        "runs `npx --yes skills add <bundled skills directory> --skill "
-        f"{skill.SKILL_NAME}`, passing on --agent, --global and --yes, so the skills CLI "
-        "installs it for the agents you choose (it may prompt). Otherwise copies SKILL.md to "
-        f".agents/skills/{skill.SKILL_NAME}/ and .claude/skills/{skill.SKILL_NAME}/ under "
-        "the project directory (--dir, default: the current directory) or, with --global, "
-        "your home directory; a different copy already there is replaced only with --yes. "
-        f"{_NO_REMOTE_CALLS}"
-    ),
-)
+@skill_app.command(**INSTALL_DOC.typer())
 @run_command
 def install(
     agents: Annotated[
@@ -103,8 +109,8 @@ def install(
         typer.Option(
             "--agent",
             "-a",
-            help="An agent to install for, as the skills CLI names it (e.g. claude-code); "
-            "repeat for more.",
+            metavar="AGENT",
+            help="An agent to install for (e.g. claude-code); repeatable.",
             show_default=False,
         ),
     ] = None,
@@ -117,14 +123,15 @@ def install(
         typer.Option(
             "--yes",
             "-y",
-            help="Skip the skills CLI's prompts; without npx, replace a different copy.",
+            help="Skip the prompts; without npx, replace a different copy.",
         ),
     ] = False,
     directory: Annotated[
         Path | None,
         typer.Option(
             "--dir",
-            help="Copy the skill into this project directory instead of running npx.",
+            metavar="DIR",
+            help="Copy the skill into this project directory, without npx.",
             file_okay=False,
             show_default=False,
         ),
@@ -185,4 +192,4 @@ def _install_with_npx(
 
 def register(app: typer.Typer) -> None:
     """Add the `skill` command group to ``app``."""
-    app.add_typer(skill_app, name="skill")
+    app.add_typer(skill_app, name="skill", rich_help_panel=SET_UP)

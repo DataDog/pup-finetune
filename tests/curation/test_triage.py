@@ -26,23 +26,28 @@ from pup_finetune.curation.triage import (
     JUDGMENTS_FILE,
     SETTINGS_FILE,
     SYSTEM_PROMPT,
+    TOO_LONG_REASON,
     Criteria,
     Vote,
     build_messages,
     decide,
+    has_template_task,
+    measure_agreement,
     parse_judges,
     parse_vote,
     plan_triage,
     read_votes,
+    rubric_sections,
     rubric_template,
     run_triage,
 )
 from pup_finetune.data.dataset_dir import DatasetDir, DatasetSettings
 from pup_finetune.data.exclusions import Exclusion, ExclusionCode
+from pup_finetune.data.labels import LabelSource
 from pup_finetune.data.schema import TrainingRow, validate_row
 from pup_finetune.data.split import SplitParams
 from pup_finetune.errors import ExternalError, StateError, UsageError
-from pup_finetune.inference import ChatCompletion
+from pup_finetune.inference import ChatCompletion, ContextLimitError
 from pup_finetune.providers.base import ProviderAuthError
 from tests.fakes.chat_api import block
 
@@ -82,6 +87,7 @@ class FakeCouncil:
         self.policy = policy
         self.calls: list[tuple[str, str]] = []
         self.messages: list[list[dict[str, Any]]] = []
+        self.efforts: list[str | None] = []
         self._lock = threading.Lock()
 
     def complete(
@@ -93,12 +99,14 @@ class FakeCouncil:
         temperature: float | None = None,
         max_tokens: int | None = None,
         response_schema: Mapping[str, Any] | None = None,
+        reasoning_effort: str | None = None,
     ) -> ChatCompletion:
         conversation = block(str(messages[-1]["content"]), "conversation")
         row_id = re.sub(r"^question ", "", conversation[0]["content"])
         with self._lock:
             self.calls.append((model, row_id))
             self.messages.append([dict(message) for message in messages])
+            self.efforts.append(reasoning_effort)
         answer = self.policy(model, row_id)
         if isinstance(answer, Exception):
             raise answer
@@ -133,9 +141,12 @@ def test_criteria_need_a_rubric_or_rules() -> None:
 
 def test_judges_parse_in_order_without_repeats() -> None:
     assert parse_judges(None) == DEFAULT_JUDGES
-    assert parse_judges(" judge-a, openai/b ,judge-a,") == ("judge-a", "openai/b")
+    assert parse_judges(" fireworks/a, openai/b ,fireworks/a,") == ("fireworks/a", "openai/b")
+    assert parse_judges("glm-5p3-flash") == ("accounts/fireworks/models/glm-5p3-flash",)
     with pytest.raises(UsageError):
         parse_judges(" , ")
+    with pytest.raises(UsageError, match="unknown judge 'fake-judge'"):
+        parse_judges("fake-judge")  # the offline fake judge is evaluate's only
 
 
 def test_judges_are_written_one_way() -> None:
@@ -157,6 +168,31 @@ def test_the_template_ships_with_the_package() -> None:
     text = rubric_template()
     for heading in ("## Task", "## Keep", "## Drop", "## Examples"):
         assert heading in text
+
+
+def _with_task(task: str) -> str:
+    template = rubric_template()
+    start = template.index("## Task") + len("## Task")
+    return template[:start] + f"\n\n{task}\n\n" + template[template.index("## Keep") :]
+
+
+def test_the_template_s_task_is_detected() -> None:
+    assert has_template_task(rubric_template())
+    # Rewrapped or with a note added, the placeholder is still there.
+    placeholder = rubric_sections(rubric_template())["task"]
+    assert has_template_task(_with_task(placeholder.replace(", ", ",\n")))
+    assert has_template_task(_with_task("A synthetic order agent. " + placeholder))
+
+
+def test_a_rubric_with_its_own_task_is_edited_even_with_the_template_s_lists() -> None:
+    assert not has_template_task(_with_task("A synthetic order agent that tracks parcels."))
+    assert not has_template_task("Keep rows that call the order tool.")
+    assert not has_template_task("## Task\n\n## Keep\n- anything")
+
+
+def test_rubric_sections_are_keyed_by_heading() -> None:
+    sections = rubric_sections("# Title\nintro\n## Task\n  one\n two\n### Keep ##\nthree\n")
+    assert sections == {"task": "one two", "keep": "three"}
 
 
 # --- the prompt ----------------------------------------------------------------------------
@@ -269,12 +305,12 @@ def test_the_plan_counts_calls_and_writes_nothing(tmp_path: Path) -> None:
     before = sorted(p.name for p in dataset.path.iterdir())
     plan = plan_triage(dataset, RUBRIC, (J1, J2))
     preview = plan.preview()
-    assert preview["rows_to_review"] == 4
+    assert preview["rows"]["to_review"] == 4
     assert preview["judge_calls"] == 8
     assert preview["judge_calls_pending"] == 8
     assert preview["votes_reused"] == 0
-    assert preview["judges"] == [J1, J2]
-    assert preview["rubric_sha256"] == RUBRIC.sha256
+    assert [judge["model"] for judge in preview["judges"]] == [J1, J2]
+    assert preview["rubric_hash"] == RUBRIC.sha256[:12]
     assert "api.fireworks.ai" in preview["data_destination"]
     assert sorted(p.name for p in dataset.path.iterdir()) == before
 
@@ -294,8 +330,8 @@ def test_rows_labeled_by_the_agent_or_a_person_are_not_reviewed(tmp_path: Path) 
     apply_labels(
         dataset,
         [
-            Label(id="row-0", keep=False, reason="off topic", by="human", at=AT),
-            Label(id="row-1", keep=True, by="agent", at=AT),
+            Label(id="row-0", keep=False, reason="off topic", by="manual", at=AT),
+            Label(id="row-1", keep=True, by="manual", at=AT),
             Label(id="row-2", keep=True, by="judge", at=AT),
         ],
     )
@@ -425,13 +461,13 @@ def test_a_label_written_after_planning_is_kept_and_its_row_skipped(tmp_path: Pa
     plan = plan_triage(dataset, RUBRIC, (J1,))
     assert plan.skipped_labeled == 0
     # The agent drops a row after the plan was made, before the judges label it.
-    apply_labels(dataset, [Label(id="row-1", keep=False, reason="off topic", by="agent", at=AT)])
+    apply_labels(dataset, [Label(id="row-1", keep=False, reason="off topic", by="manual", at=AT)])
     report = run_triage(plan, FakeCouncil(keep_all))
     assert report.skipped_labeled == 1
     assert "row-1" not in {decision.row_id for decision in report.decisions}
     assert report.complete
     labels = dataset.labels()
-    assert (labels["row-1"].keep, labels["row-1"].by) == (False, "agent")
+    assert (labels["row-1"].keep, labels["row-1"].by) == (False, "manual")
     assert {labels[row_id].by for row_id in ("row-0", "row-2")} == {"judge"}
 
 
@@ -804,39 +840,58 @@ def test_the_preview_names_every_provider_the_rows_are_sent_to(tmp_path: Path) -
     destination = preview["data_destination"]
     for place in ("Fireworks (api.fireworks.ai)", "Anthropic (api.anthropic.com)", "OpenAI"):
         assert place in destination
-    assert preview["judge_endpoints"] == [
+    assert preview["data_recipients"] == [
+        "full rows -> Fireworks api.fireworks.ai (judge), Anthropic api.anthropic.com (judge), "
+        "OpenAI api.openai.com (judge)"
+    ]
+    # Each judge once, with its provider, endpoint and credential.
+    assert preview["judges"] == [
         {
+            "model": J1,
             "provider": "fireworks",
             "endpoint": "https://api.fireworks.ai/inference/v1",
             "credential": "fireworks",
-            "judges": [J1, J2],
         },
         {
+            "model": CLAUDE,
             "provider": "anthropic",
             "endpoint": "https://api.anthropic.com",
             "credential": "anthropic",
-            "judges": [CLAUDE],
         },
         {
+            "model": GPT,
             "provider": "openai",
             "endpoint": "https://api.openai.com/v1",
             "credential": "openai",
-            "judges": [GPT],
+        },
+        {
+            "model": J2,
+            "provider": "fireworks",
+            "endpoint": "https://api.fireworks.ai/inference/v1",
+            "credential": "fireworks",
         },
     ]
+    # One billing sentence per provider, never a price.
+    billing = preview["billing"]
+    assert [billing.count(name) for name in ("Fireworks", "Anthropic", "OpenAI")] == [1, 1, 1]
+    assert "$" not in billing
+    assert "approximate" in billing
 
 
 def test_the_frozen_settings_hold_the_provider_qualified_judges(tmp_path: Path) -> None:
     dataset = make_dataset(tmp_path, n=1)
     run_triage(plan_triage(dataset, RUBRIC, (J1,)), FakeCouncil(keep_all))
     settings = json.loads((dataset.path / SETTINGS_FILE).read_text())
-    assert "judge_settings" not in settings  # a Fireworks council records what it always did
+    # A Fireworks judge sent no reasoning effort records nothing beyond the shared settings.
+    assert "judge_settings" not in settings
 
     other = make_dataset(tmp_path / "other", n=1)
     run_triage(plan_triage(other, RUBRIC, (J1, CLAUDE)), FakeCouncil(keep_all))
     settings = json.loads((other.path / SETTINGS_FILE).read_text())
     assert settings["judges"] == [J1, CLAUDE]
-    assert settings["judge_settings"] == {CLAUDE: {"max_tokens": 16000, "temperature": None}}
+    assert settings["judge_settings"] == {
+        CLAUDE: {"max_tokens": 16000, "temperature": None, "reasoning_effort": "low"}
+    }
     # The same model on another provider is another judge: a settings change.
     with pytest.raises(StateError, match="judges"):
         plan_triage(other, RUBRIC, (J1, "openai/claude-opus-5-5"))
@@ -845,3 +900,270 @@ def test_the_frozen_settings_hold_the_provider_qualified_judges(tmp_path: Path) 
 def test_a_judge_with_no_model_is_refused_when_planning(tmp_path: Path) -> None:
     with pytest.raises(UsageError, match="has no model"):
         plan_triage(make_dataset(tmp_path), RUBRIC, ("anthropic/",))
+
+
+# --- reasoning effort ---------------------------------------------------------------------
+
+
+def test_each_judge_is_sent_the_lowest_effort_its_model_takes(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path, n=1)
+    council = FakeCouncil(keep_all)
+    plan = plan_triage(dataset, RUBRIC, (*DEFAULT_JUDGES, "openai/gpt-6-astra", J1))
+    run_triage(plan, council, concurrency=1)
+    efforts = dict(zip((model for model, _ in council.calls), council.efforts, strict=True))
+    assert efforts == {
+        "accounts/fireworks/models/deepseek-v4p1-flash": "none",
+        "accounts/fireworks/models/glm-5p3-flash": "low",
+        "gpt-6-astra": "low",
+        J1: None,
+    }
+    settings = json.loads((dataset.path / SETTINGS_FILE).read_text())
+    assert settings["judge_settings"] == {
+        "accounts/fireworks/models/deepseek-v4p1-flash": {"reasoning_effort": "none"},
+        "accounts/fireworks/models/glm-5p3-flash": {"reasoning_effort": "low"},
+        "openai/gpt-6-astra": {"max_tokens": 16000, "temperature": None, "reasoning_effort": "low"},
+    }
+
+
+# --- rows too long for a judge ------------------------------------------------------------
+
+
+def too_long_for(judge: str, row_ids: set[str]) -> Policy:
+    def policy(model: str, row_id: str) -> bool | Exception:
+        if model == judge and row_id in row_ids:
+            return ContextLimitError("the request is longer than the context window", source="x")
+        return True
+
+    return policy
+
+
+def test_a_row_too_long_for_one_judge_is_dropped_and_its_other_calls_skipped(
+    tmp_path: Path,
+) -> None:
+    dataset = make_dataset(tmp_path, n=3)
+    long_row = plan_triage(dataset, RUBRIC, (J1, J2, J3)).rows[0].id
+    plan = plan_triage(dataset, RUBRIC, (J1, J2, J3))
+    too_long = too_long_for(J1, {long_row})
+
+    def policy(judge: str, row_id: str) -> bool | Exception:
+        if judge == J2 and row_id == long_row:
+            time.sleep(0.3)  # still in flight when J1's answer is handled
+        return too_long(judge, row_id)
+
+    council = FakeCouncil(policy)
+    report = run_triage(plan, council, concurrency=1)
+    # Two calls are queued at once: J2's was already sent when J1 found the row too long,
+    # and J3 is never asked about it.
+    assert [judge for judge, row_id in council.calls if row_id == long_row] == [J1, J2]
+    assert report.calls_skipped == 1
+    assert report.failures == ()
+    assert report.complete
+    assert report.too_long == 1
+    decision = next(d for d in report.decisions if d.row_id == long_row)
+    assert (decision.keep, decision.too_long) == (False, True)
+    assert J1 in decision.reason
+    assert report.counts() == {"keep": 2, "drop": 1, "undecided": 0}
+    label = dataset.labels()[long_row]
+    assert (label.keep, label.by) == (False, "judge")
+    (stored,) = [vote for vote in read_votes(dataset.path / JUDGMENTS_FILE) if vote.too_long]
+    assert (stored.row_id, stored.judge, stored.keep) == (long_row, J1, False)
+    assert stored.reason == TOO_LONG_REASON
+
+
+def test_a_row_found_too_long_is_not_asked_about_again(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path, n=2)
+    plan = plan_triage(dataset, RUBRIC, (J1, J2))
+    long_row = plan.rows[0].id
+    run_triage(plan, FakeCouncil(too_long_for(J2, {long_row})), concurrency=1)
+    again = FakeCouncil(keep_all)
+    replan = plan_triage(dataset, RUBRIC, (J1, J2))
+    assert replan.pending == []
+    report = run_triage(replan, again)
+    assert again.calls == []
+    assert report.too_long == 1
+    assert report.complete
+
+
+def test_only_a_too_long_vote_is_stored_with_the_flag(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path, n=2)
+    plan = plan_triage(dataset, RUBRIC, (J1,))
+    long_row = plan.rows[0].id
+    run_triage(plan, FakeCouncil(too_long_for(J1, {long_row})), concurrency=1)
+    lines = [json.loads(line) for line in (dataset.path / JUDGMENTS_FILE).read_text().splitlines()]
+    assert {line["row_id"]: line.get("too_long") for line in lines} == {
+        long_row: True,
+        next(row.id for row in plan.rows if row.id != long_row): None,
+    }
+    assert all(Vote.model_validate(line) for line in lines)
+
+
+def test_a_too_long_vote_drops_the_row_even_while_other_votes_are_missing() -> None:
+    def vote(judge: str, *, keep: bool, too_long: bool = False) -> Vote:
+        return Vote(
+            row_id="r",
+            row_sha256="x",
+            judge=judge,
+            criteria_sha256="y",
+            keep=keep,
+            reason="",
+            at=AT,
+            too_long=too_long,
+        )
+
+    decision = decide(
+        "r", {J2: vote(J2, keep=True), J3: vote(J3, keep=False, too_long=True)}, (J1, J2, J3)
+    )
+    assert (decision.keep, decision.too_long, decision.missing) == (False, True, 1)
+    assert decision.status == "drop"
+    assert J3 in decision.reason
+
+
+# --- agreement with the user's labels ------------------------------------------------------
+
+
+def label_rows(dataset: DatasetDir, labels: Mapping[str, bool], by: LabelSource = "manual") -> None:
+    apply_labels(
+        dataset,
+        [
+            Label(id=row_id, keep=keep, reason="" if keep else "off topic", by=by, at=AT)
+            for row_id, keep in labels.items()
+        ],
+    )
+
+
+def test_agreement_needs_rows_the_user_or_the_agent_labeled(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path, n=2)
+    with pytest.raises(UsageError, match="label"):
+        plan_triage(dataset, RUBRIC, (J1,), agreement=True)
+
+
+def test_agreement_reviews_only_labeled_rows_and_labels_nothing(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path, n=6)
+    label_rows(dataset, {"row-0": True, "row-1": False, "row-2": True, "row-3": False})
+    labels_before = (dataset.path / "labels.jsonl").read_text()
+
+    # Every judge keeps row-0 and row-1 and drops row-2 and row-3; J3 alone also keeps row-3.
+    def policy(judge: str, row_id: str) -> bool:
+        return row_id in {"row-0", "row-1"} or (judge == J3 and row_id == "row-3")
+
+    plan = plan_triage(dataset, RUBRIC, (J1, J2, J3), agreement=True)
+    assert plan.mode == "agreement"
+    assert sorted(row.id for row in plan.rows) == ["row-0", "row-1", "row-2", "row-3"]
+    assert plan.preview()["mode"] == "agreement"
+    council = FakeCouncil(policy)
+    report = run_triage(plan, council)
+    assert {row_id for _, row_id in council.calls} == {"row-0", "row-1", "row-2", "row-3"}
+    assert (dataset.path / "labels.jsonl").read_text() == labels_before
+    assert report.labels is None
+    assert report.complete
+    agreement = report.agreement
+    assert agreement is not None
+    assert (agreement.compared, agreement.agreed, agreement.rate) == (4, 2, 0.5)
+    assert agreement.confusion == {"keep_keep": 1, "keep_drop": 1, "drop_keep": 1, "drop_drop": 1}
+    assert agreement.kappa == 0.0
+    assert "by" not in agreement.to_json()
+    assert agreement.judges[J1] == {"rows_compared": 4, "rows_agreed": 2, "rate": 0.5, "kappa": 0.0}
+    assert agreement.judges[J3]["rows_agreed"] == 1
+    assert sorted(d["row_id"] for d in agreement.disagreements) == ["row-1", "row-2"]
+    row_1 = next(d for d in agreement.disagreements if d["row_id"] == "row-1")
+    assert row_1 == {
+        "row_id": "row-1",
+        "label": "drop",
+        "label_reason": "off topic",
+        "council": "keep",
+        "council_reason": "fine",
+        "keep_votes": 3,
+        "drop_votes": 0,
+    }
+    assert agreement.to_json()["disagreements"] == 2
+
+
+def test_agreement_votes_are_reused_and_frozen_like_any_other(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path, n=3)
+    label_rows(dataset, {"row-0": True})
+    run_triage(plan_triage(dataset, RUBRIC, (J1,), agreement=True), FakeCouncil(keep_all))
+    again = FakeCouncil(keep_all)
+    report = run_triage(plan_triage(dataset, RUBRIC, (J1,), agreement=True), again)
+    assert again.calls == []
+    assert report.agreement is not None and report.agreement.rate == 1.0
+    other = Criteria.build("A different rubric.", [])
+    with pytest.raises(StateError, match="rubric_sha256"):
+        plan_triage(dataset, other, (J1,), agreement=True)
+    # Labeling the rest afterwards reviews only the unlabeled rows, under the same rubric.
+    labeling = FakeCouncil(keep_all)
+    run_triage(plan_triage(dataset, RUBRIC, (J1,)), labeling)
+    assert sorted(row_id for _, row_id in labeling.calls) == ["row-1", "row-2"]
+
+
+def test_a_labeling_preview_points_to_agreement_when_rows_carry_labels(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path, n=3)
+    assert "agreement_note" not in plan_triage(dataset, RUBRIC, (J1,)).preview()
+    label_rows(dataset, {"row-0": True})
+    preview = plan_triage(dataset, RUBRIC, (J1,)).preview()
+    assert preview["mode"] == "label"
+    assert "--agreement" in preview["agreement_note"]
+
+
+def test_agreement_leaves_undecided_and_too_long_rows_out_of_the_rate(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path, n=3)
+    label_rows(dataset, {"row-0": True, "row-1": True, "row-2": False})
+
+    def policy(judge: str, row_id: str) -> bool | Exception:
+        if row_id == "row-1":
+            return outage()
+        if row_id == "row-2":
+            return ContextLimitError("too long", source="x")
+        return True
+
+    report = run_triage(plan_triage(dataset, RUBRIC, (J1,), agreement=True), FakeCouncil(policy))
+    agreement = report.agreement
+    assert agreement is not None
+    assert (agreement.compared, agreement.undecided, agreement.too_long) == (1, 1, 1)
+    assert agreement.rate == 1.0
+    assert agreement.kappa is None  # one row, labeled and kept: chance agreement is total
+    assert not report.complete
+    assert len(report.failures) == 1
+
+
+def test_kappa_rewards_agreement_beyond_chance() -> None:
+    def decision(row_id: str, keep: bool) -> Any:
+        return decide(
+            row_id,
+            {
+                J1: Vote(
+                    row_id=row_id, row_sha256="x", judge=J1, criteria_sha256="y", keep=keep, at=AT
+                )
+            },
+            (J1,),
+        )
+
+    labels = {
+        f"r{i}": Label(id=f"r{i}", keep=i < 5, reason="" if i < 5 else "no", by="manual", at=AT)
+        for i in range(10)
+    }
+    perfect = [decision(f"r{i}", i < 5) for i in range(10)]
+    assert measure_agreement(perfect, labels, {}, ()).kappa == 1.0
+    inverted = [decision(f"r{i}", i >= 5) for i in range(10)]
+    assert measure_agreement(inverted, labels, {}, ()).kappa == -1.0
+    one_off = [decision(f"r{i}", i < 4) for i in range(10)]
+    result = measure_agreement(one_off, labels, {}, ())
+    assert (result.rate, result.kappa) == (0.9, 0.8)
+
+
+def test_a_failed_call_on_a_row_found_too_long_needs_no_retry(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path, n=1)
+    plan = plan_triage(dataset, RUBRIC, (J1, J2))
+
+    def policy(judge: str, row_id: str) -> bool | Exception:
+        if judge == J1:
+            return ContextLimitError("too long", source="x")
+        time.sleep(0.2)  # in flight when J1's answer is handled
+        return outage()
+
+    report = run_triage(plan, FakeCouncil(policy), concurrency=1)
+    assert report.failures == ()
+    assert report.complete
+    replan = plan_triage(dataset, RUBRIC, (J1, J2))
+    assert replan.pending == []
+    # The call J2 never got to make is not a reused vote.
+    assert (replan.votes_reused, replan.preview()["votes_reused"]) == (1, 1)

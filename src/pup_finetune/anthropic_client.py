@@ -19,8 +19,9 @@ loaded only when an Anthropic judge is used (:func:`pup_finetune.judges.open_cli
   reject them.
 - A ``response_schema`` becomes structured output, ``output_config.format`` with that JSON
   schema, on the models that support it (:data:`STRUCTURED_OUTPUT_MODELS`).
-- The models that take an effort level (:data:`EFFORT_MODELS`) run at ``low`` effort,
-  plenty for a verdict.
+- The models that take an effort level (:data:`EFFORT_MODELS`) run at the requested
+  ``reasoning_effort`` (a judge asks for ``low``, plenty for a verdict), :data:`EFFORT` when
+  none is given.
 - The models with server-side refusal fallbacks (:data:`FALLBACK_MODELS`) are called through
   the beta Messages API with ``fallbacks="default"``, so a declined request is retried on
   the fallback model the API picks for the refusal's category.
@@ -36,8 +37,10 @@ explicitly): a rejected key, or a failed SDK sign-in (``CredentialsError``,
 ``WorkloadIdentityError``), is a :class:`~pup_finetune.providers.base.ProviderAuthError`;
 rate limiting (429) and overload (529) a
 :class:`~pup_finetune.providers.base.ProviderCapacityError`; other server errors, timeouts
-and connection failures a :class:`~pup_finetune.providers.base.TransientError`; anything
-else an :class:`~pup_finetune.errors.ExternalError`. Every message is redacted, and the key
+and connection failures a :class:`~pup_finetune.providers.base.TransientError`; a request
+refused as longer than the model's context window ("prompt is too long") a
+:class:`~pup_finetune.inference.ContextLimitError`; anything else an
+:class:`~pup_finetune.errors.ExternalError`. Every message is redacted, and the key
 is registered for redaction before it is used.
 
 Without a key from the environment or the keychain, the SDK client is built without one, so
@@ -61,7 +64,13 @@ from pydantic import SecretStr
 from pup_finetune import credentials
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.http_common import DETAIL_LIMIT, bearer_key
-from pup_finetune.inference import DEFAULT_MAX_ATTEMPTS, ChatCompletion, JudgeConfig
+from pup_finetune.inference import (
+    DEFAULT_MAX_ATTEMPTS,
+    ChatCompletion,
+    ContextLimitError,
+    JudgeConfig,
+    is_context_limit,
+)
 from pup_finetune.judges import PROVIDERS
 from pup_finetune.providers.base import ProviderAuthError, ProviderCapacityError, TransientError
 from pup_finetune.redaction import redact
@@ -255,6 +264,7 @@ class AnthropicChatClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
         response_schema: Mapping[str, Any] | None = None,
+        reasoning_effort: str | None = None,
     ) -> ChatCompletion:
         """One message from ``model``, mapped as the module docstring says.
 
@@ -270,7 +280,7 @@ class AnthropicChatClient:
         base = _base_model(model)
         output_config: dict[str, Any] = {}
         if base in EFFORT_MODELS:
-            output_config["effort"] = EFFORT
+            output_config["effort"] = reasoning_effort or EFFORT
         if response_schema is not None and base in STRUCTURED_OUTPUT_MODELS:
             output_config["format"] = {"type": "json_schema", "schema": dict(response_schema)}
         if output_config:
@@ -327,6 +337,13 @@ class AnthropicChatClient:
                 hint="Anthropic is rate limiting or overloaded; retry later",
             )
         if isinstance(exc, anthropic.APIStatusError):
+            if is_context_limit(exc.status_code, None, _detail(exc)):
+                return ContextLimitError(
+                    f"{what} failed: the request is longer than the model's context window "
+                    f"(HTTP {exc.status_code}): {_detail(exc)}",
+                    source=SOURCE,
+                    hint="pick a model with a larger context window",
+                )
             if exc.status_code >= 500:
                 return TransientError(
                     f"{what} failed with HTTP {exc.status_code} after retries: {_detail(exc)}",

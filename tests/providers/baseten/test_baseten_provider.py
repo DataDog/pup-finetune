@@ -16,7 +16,6 @@ import subprocess
 import sys
 import textwrap
 from collections.abc import Callable, Iterator
-from importlib import metadata
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +35,6 @@ from pup_finetune.providers.base import (
     Provider,
 )
 from pup_finetune.providers.baseten import client
-from pup_finetune.providers.baseten import provider as provider_module
 from pup_finetune.providers.baseten.provider import (
     MAX_SEQ_LEN,
     PROFILES,
@@ -237,7 +235,7 @@ def test_preflight_refuses_a_context_over_the_workspace_limit(option: str | None
     needed = option or str(QWEN.max_seq_len)
     with pytest.raises(UsageError, match=f"at most 32768 tokens .* the {needed} to train at") as e:
         provider.preflight(provider.training_profile(QWEN))
-    assert e.value.hint == "pass --provider-option max_seq_len=N with N at most 32768"
+    assert e.value.hint == "pass --max-seq-len N with N at most 32768"
     provider.validate_options({"max_seq_len": "32768"})
     provider.preflight(provider.training_profile(QWEN))
     provider.preflight(QWEN)  # the option, not the uncut profile, is what trains
@@ -307,66 +305,6 @@ def test_another_provider_s_profile_is_refused() -> None:
     with pytest.raises(UsageError, match="names unknown renderer 'nope'"):
         provider.renderer(dataclasses.replace(QWEN, renderer="nope"))
     assert transport.calls == []
-
-
-# --- checks ------------------------------------------------------------------------------
-
-
-def test_checks_pass_with_a_key_and_a_reachable_baseten() -> None:
-    provider, transport = provider_for()
-    checks = {check.name: check for check in provider.check()}
-    assert set(checks) == {"baseten loops sdk", "baseten api key", "baseten api"}
-    assert all(check.ok for check in checks.values())
-    assert "source: env" in checks["baseten api key"].detail
-    assert transport.calls == [CAPABILITIES_ROUTE]
-
-
-def test_without_a_key_the_check_says_how_to_add_one_and_calls_nothing() -> None:
-    provider, transport = provider_for(env={})
-    checks = {check.name: check for check in provider.check()}
-    assert not checks["baseten api key"].ok
-    assert "pup finetune auth login baseten" in checks["baseten api key"].detail
-    assert "baseten api" not in checks
-    assert transport.calls == []
-
-
-@pytest.mark.parametrize(
-    ("status", "detail"),
-    [
-        (403, "the Loops capabilities request returned HTTP 403"),
-        (503, "the Loops capabilities request returned HTTP 503; retry later"),
-    ],
-)
-def test_a_failing_baseten_fails_its_check_without_raising(status: int, detail: str) -> None:
-    provider, _ = provider_for(caps=(status, {}))
-    checks = {check.name: check for check in provider.check()}
-    assert not checks["baseten api"].ok
-    assert checks["baseten api"].detail.startswith(detail)
-    assert all(KEY.get_secret_value() not in check.detail for check in checks.values())
-
-
-@pytest.mark.parametrize(
-    ("installed", "ok", "detail"),
-    [
-        ("0.26.0", True, "baseten-loops 0.26.0 is installed"),
-        ("0.27.1", True, "tested with 0.26.0"),
-        (None, False, "the Baseten Loops SDK is not installed; install the baseten extra"),
-    ],
-)
-def test_the_sdk_check_reports_the_installed_version(
-    monkeypatch: pytest.MonkeyPatch, installed: str | None, ok: bool, detail: str
-) -> None:
-    def version(name: str) -> str:
-        assert name == "baseten-loops"
-        if installed is None:
-            raise metadata.PackageNotFoundError(name)
-        return installed
-
-    monkeypatch.setattr(provider_module.metadata, "version", version)
-    provider, _ = provider_for(env={})
-    (sdk, *_) = provider.check()
-    assert (sdk.name, sdk.ok) == ("baseten loops sdk", ok)
-    assert detail in sdk.detail
 
 
 # --- the key and the backend -------------------------------------------------------------

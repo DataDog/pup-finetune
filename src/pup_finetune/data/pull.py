@@ -78,6 +78,7 @@ from pup_finetune.datadog.spans import (
     iter_span_pages,
 )
 from pup_finetune.errors import ExternalError, UsageError
+from pup_finetune.next_steps import command
 from pup_finetune.storage import DirectoryLock, make_private_dir
 
 DEFAULT_TARGET_COUNT = 200
@@ -578,16 +579,38 @@ def resolve_window(options: PullOptions, dataset: DatasetDir, clock: Clock) -> P
     """
     if options.window is not None:
         return options
-    source = dataset.settings().get("source") if dataset.is_dataset() else None
-    if isinstance(source, dict):
-        frozen = source.get("filter")
-        same = (source.get("from_expr"), source.get("to_expr")) == (
-            options.query.from_,
-            options.query.to,
-        )
-        if same and isinstance(frozen, dict):
-            return options.with_window(frozen.get("from"), frozen.get("to"))
+    window = frozen_window(options, dataset)
+    if window is not None:
+        return options.with_window(*window)
     return options.resolved(epoch_ms(clock))
+
+
+def frozen_window(options: PullOptions, dataset: DatasetDir) -> tuple[TimeBound, TimeBound] | None:
+    """The window ``dataset`` froze for the ``from_expr`` and ``to_expr`` of ``options``, or
+    ``None`` when it froze none (a first pull) or froze other expressions."""
+    source = dataset.settings().get("source") if dataset.is_dataset() else None
+    if not isinstance(source, dict):
+        return None
+    frozen = source.get("filter")
+    same = (source.get("from_expr"), source.get("to_expr")) == (
+        options.query.from_,
+        options.query.to,
+    )
+    if same and isinstance(frozen, dict):
+        return frozen.get("from"), frozen.get("to")
+    return None
+
+
+def rerun_command(directory: Path, options: PullOptions) -> str:
+    """The ``dataset pull`` that resumes or continues a pull into ``directory`` with
+    ``options``: no source flag, as the directory's frozen settings fill them in, only the
+    limits that differ from the defaults (which are not frozen)."""
+    limits: list[object] = []
+    if options.target_count != DEFAULT_TARGET_COUNT:
+        limits += ["--target-count", options.target_count]
+    if options.max_candidates != DEFAULT_MAX_CANDIDATES:
+        limits += ["--max-candidates", options.max_candidates]
+    return command("dataset", "pull", directory, *limits)
 
 
 def pull(
@@ -629,7 +652,7 @@ def pull(
         try:
             collection = collect(pup, options, cache_dir=raw, sleep=sleep, progress=progress)
         except ExternalError as exc:
-            raise _with_resume_note(exc, raw) from exc
+            raise _with_resume_note(exc, raw, rerun_command(dataset.path, options)) from exc
         stored = dataset.rows()
         stored_exclusions = dataset.excluded()
         retired = [
@@ -650,9 +673,9 @@ def pull(
     return collection, added
 
 
-def _with_resume_note(error: ExternalError, raw: Path) -> ExternalError:
-    """``error`` with a hint that the pages read so far are cached and a re-run resumes."""
-    note = f"pages read so far are cached in {raw}; re-run the same command to resume"
+def _with_resume_note(error: ExternalError, raw: Path, rerun: str) -> ExternalError:
+    """``error`` with a hint that the pages read so far are cached and ``rerun`` resumes."""
+    note = f"pages read so far are cached in {raw}; `{rerun}` resumes (the frozen settings fill in the flags)"
     hint = (error.hint or "").removesuffix(f" {CACHED_PAGES_NOTE}")
     return ExternalError(
         error.message, source=error.source, hint=f"{hint}; {note}" if hint else note

@@ -43,11 +43,12 @@ import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Protocol
+from typing import Any, Protocol
 
 from pup_finetune.errors import ExternalError, StateError
 from pup_finetune.providers.base import MAX_MODEL_ID_LEN, CheckpointRef, TrainingSession
-from pup_finetune.training.loop import CheckpointNamer, checked_checkpoint_name
+from pup_finetune.storage import finite_json
+from pup_finetune.training.loop import CheckpointNamer, EventSink, checked_checkpoint_name
 from pup_finetune.training.records import TrainResult
 
 NOTHING_TO_PROMOTE = "no epoch finished, so there is no checkpoint to promote"
@@ -117,7 +118,9 @@ class Promotion:
     time less :data:`ADOPT_CLOCK_ALLOWANCE` as ``adopt_since``, so that a model this run
     already promoted from that checkpoint is adopted. Without it the checkpoint is promoted
     to ``model_id`` and no existing model is adopted. The returned result carries
-    ``promoted_model`` (``None`` without promotion) and ``deployable_ckpt``.
+    ``promoted_model`` (``None`` without promotion) and ``deployable_ckpt``. ``on_event``
+    (the loop's event sink) gets ``promoting`` (the epoch and its losses) right before the
+    promotion and ``promoted`` (the model id) after it.
     """
 
     model_id: str
@@ -126,6 +129,7 @@ class Promotion:
     max_checkpoint_name_len: int
     spend_guard: Callable[[], str | None] | None = None
     requests: PromotionRequests | None = None
+    on_event: EventSink | None = None
 
     def __call__(self, session: TrainingSession, result: TrainResult) -> TrainResult:
         if not self.supports_promotion or result.best_epoch is None:
@@ -137,8 +141,22 @@ class Promotion:
         if self.requests is not None:
             request = self._request(self.requests, best)
             model_id, since = request.model_id, request.requested_at - ADOPT_CLOCK_ALLOWANCE
+        self._emit(
+            {
+                "type": "promoting",
+                "epoch": result.best_epoch,
+                "val_loss": result.best_val_loss,
+                "train_loss": _train_loss(result),
+                "model_id": model_id,
+            }
+        )
         model = session.promote(best, model_id, adopt_since=since)
+        self._emit({"type": "promoted", "model_id": model.model_id, "epoch": result.best_epoch})
         return dataclasses.replace(result, promoted_model=model, deployable_ckpt=best)
+
+    def _emit(self, event: dict[str, Any]) -> None:
+        if self.on_event is not None:
+            self.on_event(finite_json(event))
 
     def _request(self, requests: PromotionRequests, best: CheckpointRef) -> PromotionRequest:
         """The recorded request to promote ``best``, recorded first if there is none."""
@@ -183,6 +201,13 @@ class Promotion:
             )
         session.load_weights(training)
         return session.save_sampler_checkpoint(name, epoch=training.epoch, step=training.step)
+
+
+def _train_loss(result: TrainResult) -> float | None:
+    """The best epoch's training loss, which picks it when there is no validation loss."""
+    return next(
+        (epoch.train_loss for epoch in result.epochs if epoch.epoch == result.best_epoch), None
+    )
 
 
 def _warned(result: TrainResult, message: str) -> TrainResult:

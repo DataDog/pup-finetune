@@ -215,6 +215,7 @@ class MemoryState:
 
     def __init__(self, *, cancel_after_steps: int | None = None) -> None:
         self.cancel_after_steps = cancel_after_steps
+        self.plans: list[tuple[int, int]] = []
         self.steps: list[tuple[int, int]] = []
         self.losses: list[float] = []
         self.checkpoints: list[CheckpointRef] = []
@@ -228,6 +229,9 @@ class MemoryState:
         self.cancel_checks += 1
         limit = self.cancel_after_steps
         return limit is not None and len(self.steps) >= limit
+
+    def record_plan(self, *, steps_per_epoch: int, max_steps: int) -> None:
+        self.plans.append((steps_per_epoch, max_steps))
 
     def record_step(self, *, epoch: int, step: int, loss: float) -> None:
         self.steps.append((epoch, step))

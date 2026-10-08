@@ -25,6 +25,7 @@ from typing import Any, ClassVar
 
 import pytest
 
+from pup_finetune.display import ABSOLUTE_PATHS_ENV
 from pup_finetune.errors import StateError, UsageError
 from pup_finetune.providers.base import TrainSpec
 from pup_finetune.providers.fake import FAKE_PROFILE, FakeProvider, FakeRenderer
@@ -244,7 +245,8 @@ def test_spawn_worker_runs_our_module_safely(tmp_path: Path, fake_popen: type[Fa
     assert kwargs["cwd"] == path
     assert kwargs["stdin"] is subprocess.DEVNULL
     assert kwargs["start_new_session"] is True
-    assert "env" not in kwargs  # this process's environment, nothing added
+    # This process's environment, with only the flag that shows paths absolute in the log.
+    assert kwargs["env"] == {**os.environ, ABSOLUTE_PATHS_ENV: "1"}
     assert stat.S_IMODE(run_dir.worker_log_path.stat().st_mode) == 0o600
     launched = run_dir.worker_path.read_text()
     assert '"pid": 4242' in launched

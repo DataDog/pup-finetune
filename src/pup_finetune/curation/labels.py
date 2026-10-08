@@ -27,6 +27,7 @@ from pup_finetune.data.labels import (
     read_labels,
 )
 from pup_finetune.errors import UsageError
+from pup_finetune.next_steps import command
 from pup_finetune.storage import DirectoryLock
 
 __all__ = [
@@ -81,7 +82,7 @@ def apply_labels(
     )
     with lock:
         row_ids = {row.id for row in dataset.rows()}
-        _check_known(batch, row_ids)
+        _check_known(batch, row_ids, dataset)
         current = dataset.labels()
         # Reduce the batch to its last label per id first: appending a file's intermediate
         # labels (drop, then keep) would grow labels.jsonl on every replay of that file.
@@ -100,7 +101,7 @@ def apply_labels(
     )
 
 
-def _check_known(batch: list[Label], row_ids: set[str]) -> None:
+def _check_known(batch: list[Label], row_ids: set[str], dataset: DatasetDir) -> None:
     unknown = list(dict.fromkeys(label.id for label in batch if label.id not in row_ids))
     if not unknown:
         return
@@ -108,9 +109,11 @@ def _check_known(batch: list[Label], row_ids: set[str]) -> None:
     more = len(unknown) - UNKNOWN_IDS_SHOWN
     suffix = f" and {more} more" if more > 0 else ""
     raise UsageError(
-        f"{len(unknown)} labeled ids are not accepted rows of the dataset: {shown}{suffix}",
+        f"{len(unknown)} labeled "
+        f"{'id is not an accepted row' if len(unknown) == 1 else 'ids are not accepted rows'} "
+        f"of the dataset: {shown}{suffix}",
         hint=(
-            "label only ids from rows.jsonl (see `pup finetune dataset sample DIR`); "
+            f"label only ids from rows.jsonl (see `{command('dataset', 'sample', dataset.path)}`); "
             "nothing was written"
         ),
     )

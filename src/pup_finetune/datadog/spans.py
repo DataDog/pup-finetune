@@ -24,7 +24,8 @@ A query's ``from_`` and ``to`` are sent as they are, epoch milliseconds as a dec
 the Export API accepts a time bound only as a string and rejects a JSON number. A relative
 time such as ``now-7d`` is resolved by Datadog when each page is fetched;
 :meth:`SpanQuery.resolved` turns it into epoch milliseconds first, so every page of an export
-reads the same window.
+reads the same window. pup's own forms (``7d``, ``5min``, ``'2 hours'``) are read as relative
+times too (:func:`canonical_relative_time`) and never sent as they are.
 """
 
 from __future__ import annotations
@@ -33,13 +34,14 @@ import re
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from pup_finetune.datadog.pup import Pup
-from pup_finetune.errors import ExternalError, StateError, UsageError
+from pup_finetune.errors import ExternalError, SettingsConflict, StateError, UsageError
 from pup_finetune.storage import (
     atomic_write_json,
     finite_json,
@@ -77,21 +79,137 @@ RELATIVE_TIME_UNITS_MS: Mapping[str, int] = {
 }
 """The units of a relative time, ``now-<n><unit>``, in milliseconds."""
 
-_RELATIVE_TIME = re.compile(r"now(?:-([0-9]+)([smhdw]))?")
-_RELATIVE_TIME_FORMS = "now, or now-<n><unit> with unit s, m, h, d or w (such as now-7d)"
+RELATIVE_TIME_UNIT_WORDS: Mapping[str, str] = {
+    **{word: "s" for word in ("sec", "secs", "second", "seconds")},
+    **{word: "m" for word in ("min", "mins", "minute", "minutes")},
+    **{word: "h" for word in ("hr", "hrs", "hour", "hours")},
+    **{word: "d" for word in ("day", "days")},
+    **{word: "w" for word in ("wk", "wks", "week", "weeks")},
+}
+"""The spelled-out units pup also takes (``5min``, ``2hours``, ``5 minutes``), any case, by
+the unit letter they mean. A one-letter unit is lowercase only: ``1M`` is not a minute."""
+
+_RELATIVE_TIME = re.compile(
+    r"(?:(?P<now>now)(?:\s*-\s*(?P<ago>[0-9]+)\s*(?P<unit>[a-z]+))?"
+    r"|(?P<bare>[0-9]+)\s*(?P<bare_unit>[a-z]+))",
+    re.IGNORECASE,
+)
+_UNIT_SUFFIX = re.compile(r"[0-9]+\s*[a-z]+", re.IGNORECASE)
+_RELATIVE_TIME_FORMS = (
+    "7d, 24h, 30m, now-7d or now (a number and a unit: s, m, h, d or w, or spelled out, "
+    "such as 5min, 2hours or '5 minutes')"
+)
+
+
+TIME_FORMS: Final = (
+    "ISO 8601 (such as 2026-10-01 or 2026-10-01T12:00:00Z), epoch milliseconds (a bare "
+    f"number), or a relative time: {_RELATIVE_TIME_FORMS}"
+)
+"""Every form a ``--from`` or ``--to`` takes, for a usage error."""
+
+MIN_EPOCH_MS: Final = 10**11
+"""The smallest bare number a ``--from`` or ``--to`` reads as epoch milliseconds (March
+1973). A smaller one is far more likely epoch seconds, a date without dashes or a count of
+days, so it is refused rather than read as a moment in 1970."""
+
+
+def _bare_number_hint(value: str) -> str:
+    """What a too-small bare number ``value`` probably meant, in the forms that say it."""
+    meant = (
+        f"{value} days? write {value}d"
+        if len(value) <= 4
+        else f"epoch seconds? append 000 ({value}000)"
+    )
+    date = (
+        f"a date? write {value[:4]}-{value[4:6]}-{value[6:]}"
+        if len(value) == 8
+        else "a date? write it as 2026-10-01"
+    )
+    return f"{meant}; {date}"
+
+
+def parse_time_bound(text: str, flag: str) -> str | int:
+    """The ``flag`` (``--from`` or ``--to``) value ``text`` as a bound: epoch milliseconds
+    as an integer, ISO 8601 as written, or a relative time in its canonical form.
+
+    A relative time (``7d``, ``24 hours``, ``now-7d``, ``NOW``) becomes ``now`` or
+    ``now-<n><unit>`` (:func:`canonical_relative_time`), so ``7d`` and ``now-7d`` freeze as
+    the same expression. A bare number is epoch **milliseconds** (pup's own ``--from`` reads
+    one as seconds); one below :data:`MIN_EPOCH_MS` is refused with a hint at what it
+    probably meant (epoch seconds, a date, days). Checked here, before anything is frozen or fetched, so a value Datadog
+    would refuse (``yesterday``) is a :class:`UsageError` naming the forms it takes
+    (:data:`TIME_FORMS`).
+    """
+    value = text.strip()
+    if not value:
+        raise UsageError(f"{flag} must not be empty", hint=f"pass {TIME_FORMS}")
+    if value.isascii() and value.isdigit():
+        number = int(value)
+        if number < MIN_EPOCH_MS:
+            raise UsageError(
+                f"{flag} {text!r} is too small for epoch milliseconds (a bare number)",
+                hint=_bare_number_hint(value),
+            )
+        return number
+    if is_relative_time(value):
+        canonical = _canonical(value)
+        if canonical is None:
+            raise UsageError(f"cannot read {flag} {text!r}", hint=f"pass {TIME_FORMS}")
+        return canonical
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        raise UsageError(f"cannot read {flag} {text!r}", hint=f"pass {TIME_FORMS}") from None
+    return value
 
 
 def is_relative_time(value: TimeBound) -> bool:
-    """Whether ``value`` is a relative time: text starting with ``now``, in any case."""
-    return isinstance(value, str) and value.strip().lower().startswith("now")
+    """Whether ``value`` is a relative time: text starting with ``now``, in any case, or a
+    number followed by letters (``7d``, ``5 minutes``)."""
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    return text.lower().startswith("now") or _UNIT_SUFFIX.fullmatch(text) is not None
+
+
+def canonical_relative_time(value: str) -> str:
+    """The relative time ``value`` as ``now`` or ``now-<n><unit>`` (unit s, m, h, d or w):
+    ``7d``, ``now - 7 days`` and ``now-7d`` all read ``now-7d``. Raises
+    :class:`UsageError` when ``value`` is not one."""
+    canonical = _canonical(value)
+    if canonical is None:
+        raise UsageError(
+            f"cannot read the relative time {value!r}",
+            hint=f"pass ISO 8601, epoch ms, or {_RELATIVE_TIME_FORMS}",
+        )
+    return canonical
+
+
+def _canonical(value: str) -> str | None:
+    match = _RELATIVE_TIME.fullmatch(value.strip())
+    if match is None:
+        return None
+    if match["now"] is not None and match["ago"] is None:
+        return "now"
+    amount = match["ago"] if match["ago"] is not None else match["bare"]
+    unit = _unit(match["unit"] if match["ago"] is not None else match["bare_unit"])
+    if unit is None:
+        return None
+    return f"now-{int(amount)}{unit}"
+
+
+def _unit(text: str) -> str | None:
+    if len(text) == 1:
+        return text if text in RELATIVE_TIME_UNITS_MS else None
+    return RELATIVE_TIME_UNIT_WORDS.get(text.lower())
 
 
 def resolve_time(value: TimeBound, now_ms: int) -> TimeBound:
     """``value`` as epoch milliseconds when it is a relative time, at ``now_ms``; else as is.
 
-    A relative time is ``now`` or ``now-<n><unit>`` (see :data:`RELATIVE_TIME_UNITS_MS`);
-    any other text starting with ``now`` raises :class:`UsageError` rather than being sent
-    to Datadog unresolved. ISO 8601 text and epoch milliseconds are returned unchanged.
+    A relative time is any form :func:`canonical_relative_time` reads; any other text that
+    looks like one (:func:`is_relative_time`) raises :class:`UsageError` rather than being
+    sent to Datadog unresolved. ISO 8601 text and epoch milliseconds are returned unchanged.
     """
     if not isinstance(value, str) or not is_relative_time(value):
         return value
@@ -108,14 +226,11 @@ def epoch_ms(clock: Clock) -> int:
 
 def _relative_offset_ms(value: str) -> int:
     """How far before now the relative time ``value`` is, in milliseconds."""
-    match = _RELATIVE_TIME.fullmatch(value.strip())
-    if match is None:
-        raise UsageError(
-            f"cannot read the relative time {value!r}",
-            hint=f"pass ISO 8601, epoch ms, or {_RELATIVE_TIME_FORMS}",
-        )
-    amount, unit = match.groups()
-    return int(amount) * RELATIVE_TIME_UNITS_MS[unit] if amount else 0
+    canonical = canonical_relative_time(value)
+    if canonical == "now":
+        return 0
+    amount, unit = canonical[len("now-") : -1], canonical[-1]
+    return int(amount) * RELATIVE_TIME_UNITS_MS[unit]
 
 
 def page_file_name(number: int) -> str:
@@ -272,9 +387,9 @@ def parse_span(item: object) -> LLMObsSpan | None:
 class SpanQuery:
     """Which spans to export, and how many.
 
-    ``from_`` and ``to`` take ISO 8601, a relative time such as ``now-7d`` (see
-    :func:`resolve_time`; another one starting with ``now`` raises :class:`UsageError`), or
-    epoch milliseconds.
+    ``from_`` and ``to`` take ISO 8601, a relative time such as ``now-7d`` or ``7d`` (see
+    :func:`resolve_time`; text that looks like one but is not raises :class:`UsageError`),
+    or epoch milliseconds.
     ``query`` is a search query string; ``tags`` must all match. ``max_spans`` caps how many
     export items :func:`iter_spans` reads, readable or not (``None``: all of them), so it
     yields at most that many spans and an export of unreadable items still stops.
@@ -714,7 +829,7 @@ def _read_cursor(cache_dir: Path, query_hash: str, account: Account) -> _Cursor:
             hint=f"delete {cache_dir} to export from the start",
         )
     if data.get("settings_hash") != query_hash:
-        raise StateError(
+        raise SettingsConflict(
             f"{cache_dir} holds spans exported for a different query",
             hint="use a new directory, or delete this one to export from the start",
         )
@@ -725,7 +840,7 @@ def _read_cursor(cache_dir: Path, query_hash: str, account: Account) -> _Cursor:
             and recorded.get("org") is None
             and not recorded.get("org_id")
         )
-        raise StateError(
+        raise SettingsConflict(
             f"{cache_dir} holds spans exported from {_describe_account(recorded)}, "
             f"but pup is logged in to {_describe_account(account)}",
             hint=(

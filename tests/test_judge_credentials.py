@@ -19,7 +19,6 @@ from pydantic import SecretStr
 from typer.testing import CliRunner
 
 from pup_finetune import credentials, judge_credentials, redaction
-from pup_finetune import doctor as doctor_registry
 from pup_finetune.cli import app
 from pup_finetune.cli import doctor as doctor_cli
 from pup_finetune.errors import ExternalError, UsageError
@@ -59,7 +58,10 @@ def status(provider: str) -> dict[str, object]:
     return entry
 
 
-def doctor_checks(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, object]]:
+def doctor_checks(monkeypatch: pytest.MonkeyPatch, home: Path) -> dict[str, dict[str, object]]:
+    for name in ("FIREWORKS_API_KEY", "BASETEN_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HOME", str(home))
     signed_in = {"authenticated": True, "site": "datadoghq.com", "expires_at": None}
     pup = FakePup().on("--version", raw=True, stdout="pup 1.10.7\n")
     pup.on("auth", "status", stdout=json.dumps(signed_in))
@@ -82,8 +84,9 @@ def test_the_specs() -> None:
     assert OPENAI.sdk_login is None
     for spec in (ANTHROPIC, OPENAI):
         assert credentials.get_spec(spec.provider) is spec
-        assert f"credentials:{spec.provider}" in doctor_registry._REGISTRY
         assert spec.validator is not None
+    assert ANTHROPIC.needed_for == "anthropic/... judges"
+    assert (OPENAI.needed_for, OPENAI.label) == ("openai/... judges", "OpenAI")
 
 
 def test_auth_status_lists_both_without_keys() -> None:
@@ -95,6 +98,7 @@ def test_auth_status_lists_both_without_keys() -> None:
         "env_var": "ANTHROPIC_API_KEY",
         "configured": False,
         "source": None,
+        "needed_for": "anthropic/... judges",
     }
     assert entries["openai"]["configured"] is False
 
@@ -108,28 +112,35 @@ def test_auth_status_reports_the_source_without_the_key(monkeypatch: pytest.Monk
     assert OPENAI_KEY not in json.dumps([status("openai"), status("anthropic")])
 
 
-def test_doctor_reports_missing_keys_without_failing(monkeypatch: pytest.MonkeyPatch) -> None:
-    checks = doctor_checks(monkeypatch)
+def test_doctor_reports_missing_keys_without_failing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    checks = doctor_checks(monkeypatch, tmp_path)
     for provider in ("anthropic", "openai"):
-        check = checks[f"credentials:{provider}"]
+        check = checks[f"{provider}:key"]
         assert check["required"] is False
-        assert check["ok"] is False
-        assert f"pup finetune auth login {provider}" in str(check["detail"])
+        assert check["status"] == "optional"
+        assert check["needed_for"] == f"{provider}/... judges"
+        assert f"pup finetune auth login {provider}" in str(check["fix"])
 
 
 # --- the Anthropic SDK's own login ------------------------------------------------------
 
 
-def test_an_auth_token_is_the_anthropic_sdk_source(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_an_auth_token_is_the_anthropic_sdk_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "synthetic-token")
     assert status("anthropic") == {
         "provider": "anthropic",
         "env_var": "ANTHROPIC_API_KEY",
         "configured": True,
         "source": "anthropic-sdk",
+        "needed_for": "anthropic/... judges",
     }
-    check = doctor_checks(monkeypatch)["credentials:anthropic"]
-    assert check["ok"] is True
+    check = doctor_checks(monkeypatch, tmp_path)["anthropic:key"]
+    assert check["status"] == "pass"
+    assert check["label"] == "Anthropic key (Anthropic SDK login)"
     assert "source: anthropic-sdk" in str(check["detail"])
     assert "synthetic-token" not in str(check["detail"])
 

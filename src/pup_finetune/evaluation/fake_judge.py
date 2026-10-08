@@ -17,8 +17,9 @@ reference and candidate actions back out of the prompt
 - a text reference passes a text candidate (no tool calls) that shares at least half of its
   words with the reference (Jaccard similarity over lowercase words).
 
-So the reference passes and every corruption :func:`~pup_finetune.evaluation.judge.corrupt`
-makes fails (a wrong tool, an altered argument, an unsupported claim, a refusal), and
+So the reference passes and every corruption :func:`~pup_finetune.evaluation.judge.corruptions`
+makes fails (a wrong tool, an altered argument, a refusal, an unsupported claim, an off-topic
+answer), and
 calibration succeeds. The evaluate command uses it for runs of the development-only ``fake``
 provider (or when ``--judge-model`` is :data:`FAKE_JUDGE_MODEL`), and only with
 ``PUP_FINETUNE_DEV=1``.
@@ -69,6 +70,7 @@ class FakeJudge:
         temperature: float | None = None,
         max_tokens: int | None = None,
         response_schema: Mapping[str, Any] | None = None,
+        reasoning_effort: str | None = None,
     ) -> ChatCompletion:
         with self._lock:
             self.calls += 1

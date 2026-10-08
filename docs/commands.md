@@ -2,48 +2,125 @@
 
 # Command reference
 
-Every `pup finetune` command, with its arguments and options. `pup finetune` builds a training dataset from your Datadog Agent Observability traces, fine-tunes a model on it, evaluates it and deploys it. Each command prints one JSON result on stdout and its progress on stderr, and exits `0` on success, `1` on an external or runtime failure and `2` on a usage or validation error or a preview that needs `--confirm`. Paid and remote-changing commands preview unless you pass `--confirm`. Run any command with `--help` for the same text in your terminal.
+Every `pup finetune` command, with its arguments and options. `pup finetune` builds a training dataset from your Datadog Agent Observability traces, fine-tunes a model on it, evaluates it and deploys it. Each command prints one JSON result on stdout and its progress on stderr; [Exit codes and errors](#exit-codes-and-errors) has the exit-code rule, the error codes and the few outputs that are not JSON. Paid and remote-changing commands preview unless you pass `--confirm`. A result's `next_command` is a command that runs exactly as written (after your yes, when it ends in `--confirm`), or `null`; it never holds a placeholder or `...`. Alternatives, and commands that need a value only you can supply, are in `next_steps`, a list of `{"command", "why"}` whose commands mark such a value as `<UPPER_CASE>`, for example `--name <NAME>`. Run `pup finetune help <command>` for the same text in your terminal (under a coding agent, Pup answers `--help` after `pup finetune` with its own help).
 
 Outside Pup, run the same commands as `pup-finetune <command>`.
 
+## Exit codes and errors
+
+- `0`: success.
+- `2`: you can fix it by changing the command or the directory: a usage or validation error, a preview that needs `--confirm`, a paid run or a remote write while `PUP_READ_ONLY` is set, a wrong, missing or non-empty directory, a directory that records other settings, or a run in the wrong phase (still training, not completed, already deployed).
+- `1`: something outside failed or local state is broken: pup, Datadog or a provider failed, a local file is unreadable or inconsistent, another process holds the directory's lock, or Ctrl-C or SIGTERM stopped the command.
+
+A failure leaves stdout empty and prints two lines on stderr: `Error [<code>]: <message>`, then `Hint: <what to do>` when there is a hint, for example `Error [run_dir_not_empty]: run1 already holds run ft-... (completed)`. The code is stable and listed below; the message is for people and may change. Usage errors that Click finds (an unknown command or option, a missing or malformed value) print the same way with the code `usage`, name every missing required option at once (`Error [usage]: train needs --dataset and --model`), keep Click's suggestions (`Did you mean ...`, `Possible options: ...`) and point to `pup finetune help <command>`. A preview is not a failure: it prints its JSON on stdout (`"status": "confirmation_required"`, with `next_command`), then on stderr a card of at most seven lines generated from it (`Preview only, nothing was run: ...`, then the data, settings, recipients, who bills it and the cost; a longer card drops the settings first, never the cost or a refusal), its warnings and `Next: <command>`, and exits `2`; its code is `confirmation_required`. A run records the error that stopped it, with the same `code`, under `error` in `state.json`.
+
+| Code | Exit | Meaning |
+| --- | --- | --- |
+| `usage` | `2` | a flag, argument or input is wrong; the message says which |
+| `confirmation_required` | `2` | a preview: nothing was run; stdout holds it, with the `--confirm` command |
+| `read_only` | `2` | a paid run or a remote write while PUP_READ_ONLY is set; changing that is the user's call |
+| `not_a_dataset_dir` | `2` | the directory is missing or is not a dataset directory |
+| `not_a_run_dir` | `2` | no such run directory or run id (`pup finetune runs` lists them) |
+| `run_dir_not_empty` | `2` | a new run needs a new directory: omit --run-dir/--run-id, or pass new ones |
+| `settings_conflict` | `2` | the directory records other settings (leave the flags out: the frozen values are used; or use a new directory or `--out-dir`) |
+| `wrong_phase` | `2` | the run is not in a phase the command acts on (`status` says which) |
+| `lock_busy` | `1` | another pup-finetune process is using the directory; wait for it |
+| `provider_auth` | `1` | the provider rejected the API key; log in again |
+| `provider_capacity` | `1` | the provider has no capacity or quota right now; retry later |
+| `transient` | `1` | a timeout or a dropped connection; retrying is safe |
+| `external` | `1` | pup, Datadog or a provider failed |
+| `state` | `1` | a local file is unreadable or inconsistent |
+| `interrupted` | `1` | Ctrl-C or SIGTERM stopped the command; rerun or resume it to continue |
+| `unexpected` | `1` | a bug; PUP_FINETUNE_DEBUG=1 prints the traceback |
+
+These print text on stdout instead of one JSON document: `help` (alone or with a command), `--help` or `-h` after any command, `--version`, `dataset triage --print-template`, and a group run without a command (`pup finetune`, `pup finetune dataset`, `pup finetune auth`, ...), which prints the group's help and exits `2`.
+
 ## Commands
 
-- [`pup finetune doctor`](#pup-finetune-doctor): Check that pup, its Datadog login and this install are ready.
+- [`pup finetune doctor`](#pup-finetune-doctor): Show which steps this setup can run, and what to fix.
 - [`pup finetune auth login`](#pup-finetune-auth-login): Store a provider API key in the OS keychain.
 - [`pup finetune auth status`](#pup-finetune-auth-status): Show where each provider's API key comes from.
 - [`pup finetune auth logout`](#pup-finetune-auth-logout): Delete a provider's API key from the OS keychain.
-- [`pup finetune models list`](#pup-finetune-models-list): List a provider's model profiles.
-- [`pup finetune dataset preview`](#pup-finetune-dataset-preview): Try a Datadog span filter without writing anything.
+- [`pup finetune models list`](#pup-finetune-models-list): List the model profiles each provider can fine-tune.
+- [`pup finetune skill show`](#pup-finetune-skill-show): Print the skill's path and content.
+- [`pup finetune skill install`](#pup-finetune-skill-install): Install the skill for your coding agents.
+- [`pup finetune help`](#pup-finetune-help): Show the help for a command, as --help does.
+- [`pup finetune dataset preview`](#pup-finetune-dataset-preview): Try a Datadog span filter; writes nothing.
 - [`pup finetune dataset pull`](#pup-finetune-dataset-pull): Pull training rows from Datadog into a dataset directory.
 - [`pup finetune dataset import`](#pup-finetune-dataset-import): Import canonical rows from a local JSONL file.
 - [`pup finetune dataset show`](#pup-finetune-dataset-show): Show a dataset's counts, exclusions, splits and settings.
 - [`pup finetune dataset sample`](#pup-finetune-dataset-sample): Show a small, readable sample of a dataset's rows.
-- [`pup finetune dataset label`](#pup-finetune-dataset-label): Apply keep/drop labels to a dataset's rows.
-- [`pup finetune dataset triage`](#pup-finetune-dataset-triage): Label rows with a council of judge models and a rubric (paid).
-- [`pup finetune dataset push`](#pup-finetune-dataset-push): Push a dataset's kept rows to an Agent Observability dataset.
-- [`pup finetune train`](#pup-finetune-train): Fine-tune a model with LoRA SFT (paid; previews without --confirm).
+- [`pup finetune dataset label`](#pup-finetune-dataset-label): Record keep/drop labels for a dataset's rows.
+- [`pup finetune dataset triage`](#pup-finetune-dataset-triage): Label rows with judge models (paid; previews without --confirm).
+- [`pup finetune dataset push`](#pup-finetune-dataset-push): Push kept rows to Datadog (previews without --confirm).
+- [`pup finetune train`](#pup-finetune-train): Fine-tune a model (paid; previews without --confirm).
 - [`pup finetune status`](#pup-finetune-status): Show a run's phase, progress, losses and worker.
-- [`pup finetune resume`](#pup-finetune-resume): Resume an interrupted, failed or cancelled run (paid).
-- [`pup finetune cancel`](#pup-finetune-cancel): Stop a training run gracefully.
-- [`pup finetune evaluate`](#pup-finetune-evaluate): Replay held-out conversations with the base and tuned model (paid).
-- [`pup finetune deploy`](#pup-finetune-deploy): Deploy a run's model on its provider and smoke-test it (paid).
-- [`pup finetune undeploy`](#pup-finetune-undeploy): Delete a run's deployment so it stops billing.
-- [`pup finetune skill show`](#pup-finetune-skill-show): Print the skill's path and content.
-- [`pup finetune skill install`](#pup-finetune-skill-install): Install the skill for your coding agents.
+- [`pup finetune runs`](#pup-finetune-runs): List the training runs under ./runs, newest first.
+- [`pup finetune resume`](#pup-finetune-resume): Resume a stopped run (paid; previews without --confirm).
+- [`pup finetune cancel`](#pup-finetune-cancel): Stop a training run gracefully (previews without --confirm).
+- [`pup finetune evaluate`](#pup-finetune-evaluate): Evaluate tuned vs base model (paid; previews without --confirm).
+- [`pup finetune deploy`](#pup-finetune-deploy): Deploy a run's model (paid; previews without --confirm).
+- [`pup finetune undeploy`](#pup-finetune-undeploy): Delete a run's deployment (previews without --confirm).
+
+## Safety
+
+What each command does without and with `--confirm`, where its data goes, and what `PUP_READ_ONLY` allows. `--confirm` is never implied by `PUP_AUTO_APPROVE` or agent mode. Every preview runs with `PUP_READ_ONLY` set; `--confirm` is refused where the table says so: training, evaluating and remote writes (`dataset triage` writes nothing remote, so its paid `--confirm` is allowed, and a training or evaluation that stays offline, on the fake provider and judge, is allowed too). Each command's help ends with the same facts in one line.
+
+| Command | Without `--confirm` | With `--confirm` | Data goes to | `PUP_READ_ONLY` |
+| --- | --- | --- | --- | --- |
+| `pup finetune doctor` | checks the setup | no `--confirm` | nowhere (--check: read-only calls to the provider) | allowed |
+| `pup finetune auth login` | stores the key | no `--confirm` | the OS keychain; the provider, to check the key (read-only) | allowed |
+| `pup finetune auth status` | reports where each key comes from | no `--confirm` | nowhere | allowed |
+| `pup finetune auth logout` | deletes the key | no `--confirm` | nowhere | allowed |
+| `pup finetune models list` | lists the profiles | no `--confirm` | nowhere (--check: read-only calls to the provider) | allowed |
+| `pup finetune skill show` | prints the skill | no `--confirm` | nowhere: local files | allowed |
+| `pup finetune skill install` | installs the skill | no `--confirm` | nowhere: npx gets no secrets | allowed |
+| `pup finetune help` | prints the help | no `--confirm` | nowhere | allowed |
+| `pup finetune dataset preview` | previews rows in memory | no `--confirm` | your terminal: samples of trace content are printed (and reach the agent's model when an agent runs it); reads Datadog through pup | allowed |
+| `pup finetune dataset pull` | pulls rows into DIR | no `--confirm` | DIR: reads Datadog through pup | allowed |
+| `pup finetune dataset import` | imports rows into DIR | no `--confirm` | nowhere: local files | allowed |
+| `pup finetune dataset show` | shows the dataset | no `--confirm` | nowhere: local files | allowed |
+| `pup finetune dataset sample` | shows rows | no `--confirm` | nowhere: local files | allowed |
+| `pup finetune dataset label` | records labels in DIR | no `--confirm` | nowhere: local files | allowed |
+| `pup finetune dataset triage` | previews the judge calls | runs the judges and labels rows (paid) | each judge's provider: Fireworks, Anthropic or OpenAI | allowed |
+| `pup finetune dataset push` | previews the records | pushes the kept rows (a remote write) | Datadog: an Agent Observability dataset | preview allowed; `--confirm` refused |
+| `pup finetune train` | previews the run | trains (paid) | the training provider; with --evaluate, also the judge's provider and Datadog (experiments, when the dataset was pushed) | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider and judge) |
+| `pup finetune status` | shows the run | no `--confirm` | nowhere: local files | allowed |
+| `pup finetune runs` | lists the runs | no `--confirm` | nowhere: local files | allowed |
+| `pup finetune resume` | previews where it resumes | resumes training (paid) | the training provider | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider and judge) |
+| `pup finetune cancel` | previews which process gets the signal | sends it SIGTERM | nowhere: a signal to a local process | allowed |
+| `pup finetune evaluate` | previews the calls | evaluates (paid) and publishes the experiments | the training provider, the judge's provider, Datadog (experiments) | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider and judge) |
+| `pup finetune deploy` | previews the deployment | creates it (billed while it runs) | the provider: a deployment of the model | preview allowed; `--confirm` refused |
+| `pup finetune undeploy` | previews the delete | deletes the deployment | the provider: the delete request | preview allowed; `--confirm` refused |
 
 ## `pup finetune doctor`
 
-Check that pup, its Datadog login and this install are ready.
+Check pup and its Datadog login, each provider's API key and packages, and the judge keys, and say which steps are ready. Only pup and the login are required, unless --provider makes a provider's checks required too; doctor exits 1 when a required check fails. A checklist follows the report on stderr.
 
-Prints the report, and exits 1 when a required check fails.
+The report has `status` (`ready` or `not_ready`), `provider`, `mode`, `versions` (`checkout` is what `git describe` names when it runs from a git checkout, `unknown` when git cannot say), `checks` (each with `status`, `detail`, `needed_for`, `fix` and `required`), `ready` (each step, and what blocks it: train and evaluate on a provider are blocked by a failed `--check` preflight too) and `next_command` and `next_steps`. Signing in (`auth login`) is only ever a step, which the user runs in their own terminal, never `next_command`. Compatibility: earlier versions reported top-level `pup` (path, version, min_version) and `datadog_auth` (authenticated, site, expires_at) sections, and `python` and `package`; read the `pup` and `datadog_auth` checks (the login's detail names when its token expires) and `versions` instead. `ok` stays for one release.
 
 ```
+pup finetune doctor [OPTIONS]
+```
+
+| Option | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--provider` | `NAME` |  | Require this provider's checks too: fireworks or baseten. |
+| `--check` |  |  | With --provider: also preflight its models live (read-only; needs its key). |
+
+Examples:
+
+```sh
 pup finetune doctor
+pup finetune doctor --provider fireworks
+pup finetune doctor --provider fireworks --check
 ```
+
+Safety: Free · asks pup for its login; --check makes read-only provider calls · PUP_READ_ONLY: allowed.
 
 ## `pup finetune auth login`
 
-Store a provider API key in the OS keychain. Prompts with hidden input, or reads piped input with --stdin, e.g. `<secret-manager> read ... | pup finetune auth login <provider> --stdin`. The key is never accepted as an option value, so it stays out of shell history and process listings. Writes only to the local OS keychain (login may make one read-only call to the provider to check the key), so it is allowed with PUP_READ_ONLY set. Datadog credentials are never involved: pup handles those.
+Store a provider API key in the OS keychain, from a hidden prompt or, with --stdin, from piped input. The key is never an option value, so it stays out of shell history and process listings.
 
 ```
 pup finetune auth login [OPTIONS] PROVIDER
@@ -51,15 +128,24 @@ pup finetune auth login [OPTIONS] PROVIDER
 
 | Argument | Description |
 | --- | --- |
-| `PROVIDER` | The provider: `fireworks`, `anthropic` or `openai`. |
+| `PROVIDER` | One of anthropic, baseten, fireworks, openai. |
 
 | Option | Value | Default | Description |
 | --- | --- | --- | --- |
 | `--stdin` |  |  | Read the key from stdin instead of prompting. |
 
+Examples:
+
+```sh
+pup finetune auth login fireworks
+pup finetune auth login anthropic --stdin < anthropic.key
+```
+
+Safety: Free · writes the OS keychain; may check the key with the provider · PUP_READ_ONLY: allowed.
+
 ## `pup finetune auth status`
 
-Report, per provider, whether an API key is configured and where it comes from (env, keychain or provider-config; anthropic-sdk when no Anthropic key is set but the Anthropic SDK can sign in on its own, e.g. after `ant auth login`). Never prints the key. Writes only to the local OS keychain (login may make one read-only call to the provider to check the key), so it is allowed with PUP_READ_ONLY set. Datadog credentials are never involved: pup handles those.
+Report, per provider, whether an API key is configured and where it comes from: env, keychain, provider-config, or anthropic-sdk when the Anthropic SDK can sign in on its own, and what the key is needed for. Never prints the key.
 
 ```
 pup finetune auth status [PROVIDER]
@@ -67,11 +153,20 @@ pup finetune auth status [PROVIDER]
 
 | Argument | Description |
 | --- | --- |
-| `PROVIDER` | Only this provider (default: all registered). Optional. |
+| `PROVIDER` | Only this provider (anthropic, baseten, fireworks, openai). Optional; default: all. |
+
+Examples:
+
+```sh
+pup finetune auth status
+pup finetune auth status fireworks
+```
+
+Safety: Free · reads the environment and the OS keychain · PUP_READ_ONLY: allowed.
 
 ## `pup finetune auth logout`
 
-Delete a provider's API key from the OS keychain. Writes only to the local OS keychain (login may make one read-only call to the provider to check the key), so it is allowed with PUP_READ_ONLY set. Datadog credentials are never involved: pup handles those.
+Delete a provider's API key from the OS keychain.
 
 ```
 pup finetune auth logout PROVIDER
@@ -79,11 +174,20 @@ pup finetune auth logout PROVIDER
 
 | Argument | Description |
 | --- | --- |
-| `PROVIDER` | The provider: `fireworks`, `anthropic` or `openai`. |
+| `PROVIDER` | One of anthropic, baseten, fireworks, openai. |
+
+Examples:
+
+```sh
+pup finetune auth logout fireworks
+pup finetune auth logout openai
+```
+
+Safety: Free · deletes from the OS keychain · PUP_READ_ONLY: allowed.
 
 ## `pup finetune models list`
 
-List a provider's model profiles: alias, provider model, renderer, pinned tokenizer, context length and default LoRA rank. Needs no API key. With --check, also asks the provider whether each model can be fine-tuned right now (a read-only call that needs the provider's API key) and exits 1 when any cannot.
+List the model profiles of every provider, or of --provider: alias, provider, provider model, context length, reasoning support, default LoRA rank and the provider's --provider-option keys; this needs no API key. With --check, also shows each profile's renderer and pinned tokenizer, asks the provider whether each model can be fine-tuned now, and exits 1 when any cannot.
 
 ```
 pup finetune models list [OPTIONS]
@@ -91,12 +195,87 @@ pup finetune models list [OPTIONS]
 
 | Option | Value | Default | Description |
 | --- | --- | --- | --- |
-| `--provider` | `TEXT` | required | The training provider. |
-| `--check` |  |  | Preflight each model with the provider (read-only). |
+| `--provider` | `NAME` | every provider | Only this provider: fireworks or baseten. |
+| `--check` |  |  | Preflight each model with its provider (needs its API key). |
+
+Examples:
+
+```sh
+pup finetune models list
+pup finetune models list --provider fireworks --check
+```
+
+Safety: Free · --check makes read-only provider calls · PUP_READ_ONLY: allowed.
+
+## `pup finetune skill show`
+
+Print where the bundled `datadog-finetune` skill is and its SKILL.md content, for an agent to read or a person to copy.
+
+```
+pup finetune skill show
+```
+
+Examples:
+
+```sh
+pup finetune skill show
+```
+
+Safety: Free · local files only · PUP_READ_ONLY: allowed.
+
+## `pup finetune skill install`
+
+Install the `datadog-finetune` skill: with npx on PATH and no --dir, through `npx skills add` for the agents you choose (it may prompt); otherwise by copying SKILL.md into the project directory (--dir) or, with --global, your home directory.
+
+The npx path runs `npx --yes skills add <bundled skills directory> --skill datadog-finetune`, passing on --agent, --global and --yes. The copy goes to .agents/skills/datadog-finetune/ and .claude/skills/datadog-finetune/; a different copy already there is replaced only with --yes. npx runs without your secrets in its environment.
+
+```
+pup finetune skill install [OPTIONS]
+```
+
+| Option | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--agent`, `-a` | `AGENT, repeatable` |  | An agent to install for (e.g. claude-code); repeatable. |
+| `--global`, `-g` |  |  | Install for your user instead of this project. |
+| `--yes`, `-y` |  |  | Skip the prompts; without npx, replace a different copy. |
+| `--dir` | `DIR` |  | Copy the skill into this project directory, without npx. |
+
+Examples:
+
+```sh
+pup finetune skill install
+pup finetune skill install -a claude-code -g -y
+pup finetune skill install --dir .
+```
+
+Safety: Free · writes skill files; npx fetches the skills CLI from npm · PUP_READ_ONLY: allowed.
+
+## `pup finetune help`
+
+Show the help for a command: the same text as `COMMAND --help`, or the top-level help with no command. Under a coding agent pup answers --help itself, so use this instead. Prints text, not JSON.
+
+```
+pup finetune help [COMMAND]...
+```
+
+| Argument | Description |
+| --- | --- |
+| `COMMAND` | A command, such as `train` or `dataset pull`. Optional. |
+
+Examples:
+
+```sh
+pup finetune help train
+pup finetune help dataset pull
+```
+
+Safety: Free · reads nothing · PUP_READ_ONLY: allowed.
 
 ## `pup finetune dataset preview`
 
-Export LLM spans from Datadog, check and convert them into training rows, and assign splits, all in memory: nothing is written. Shows the time range it read, how many spans matched, how many rows would be accepted, why the rest would be excluded, a few samples, and the `dataset pull` command with the same flags. Spans are LLM spans of --ml-app in the time range, narrowed by --span-name, --query and --tag. Each span becomes a conversation (input then output messages; a plain input or output value is the user or assistant message); per trace, a conversation another one contains is dropped, so sub-agents stay their own rows. Errored LLM calls are excluded as span_error unless --include-errors is passed. Reading stops once --target-count rows are accepted or --max-candidates spans are read, unreadable ones included. It only reads from Datadog (through pup), so it is allowed with PUP_READ_ONLY set.
+Read --ml-app's LLM spans from Datadog and convert them into training rows in memory, writing nothing. Shows the time range read, how many rows would be accepted and why the rest would not, a few samples, and the `dataset pull` command with the same flags.
+
+The samples are trace content, printed to your terminal, so when an agent runs the preview they reach the agent's model. The pull goes into a new directory under ./datasets named after --ml-app. Spans are LLM spans of --ml-app in the time range, narrowed by --span-name, --query and --tag. Each span becomes a conversation (input then output messages; a plain input or output value is the user or assistant message); per trace, a conversation another one contains is dropped, so sub-agents stay their own rows. Errored LLM calls are excluded as span_error unless --include-errors is passed. Reading stops once --target-count rows are accepted or --max-candidates spans are read, unreadable ones included. A relative time is a number and a unit (s, m, h, d or w, or spelled out, such as 5min or 2hours), with or without now- in front (7d is now-7d), or now; it is resolved once, when the command starts. A bare number is epoch milliseconds, not seconds: one below 10^11 (before March 1973) is refused.
 
 ```
 pup finetune dataset preview [OPTIONS]
@@ -104,23 +283,38 @@ pup finetune dataset preview [OPTIONS]
 
 | Option | Value | Default | Description |
 | --- | --- | --- | --- |
-| `--ml-app` | `TEXT` | required | The ml_app whose LLM spans to read (required). |
-| `--span-name` | `TEXT` |  | Only spans with this name. |
-| `--query` | `TEXT` |  | Only spans that also match this search query (event search syntax). |
-| `--tag` | `KEY:VALUE, repeatable` |  | Only spans with this tag; repeat for more (all must match). |
-| `--from` | `TEXT` | `now-7d` | Start of the time range: ISO 8601, epoch ms, or a relative time: now, or now-&lt;n&gt;&lt;unit&gt; with unit s, m, h, d or w, such as now-7d. A relative time is resolved once, when the command starts. |
-| `--to` | `TEXT` | `now` | End of the time range, in the same forms as --from. |
-| `--target-count` | `INTEGER (x>=1)` | `200` | Stop reading once this many rows are accepted. |
-| `--max-candidates` | `INTEGER (x>=1)` | `5000` | Read at most this many exported spans, counting ones that cannot be read. |
-| `--reasoning` | `omit\|preserve` | `omit` | Drop reasoning messages, or keep them as the assistant's reasoning_content. |
-| `--include-errors` |  |  | Keep errored LLM calls instead of excluding them as span_error. |
-| `--seed` | `INTEGER` | `42` | Seed for the split assignment. |
-| `--validation-fraction` | `FLOAT` | `0.1` | Share of traces assigned to validation. |
-| `--test-fraction` | `FLOAT` | `0.1` | Share of traces assigned to test. |
+| **Filter** | | | |
+| `--ml-app` | `NAME` | required | The ml_app whose LLM spans to read. |
+| `--span-name` | `NAME` |  | Only spans with this name. |
+| `--query` | `TEXT` |  | Only spans that match this search query. |
+| `--tag` | `KEY:VALUE, repeatable` |  | Only spans with this tag; repeatable. |
+| `--from` | `TIME` | `7d` | Start: ISO 8601, epoch ms, or relative: 7d, 24h, now-7d, now. |
+| `--to` | `TIME` | `now` | End, in the same forms as --from. |
+| **Limits** | | | |
+| `--target-count` | `N (x>=1)` | `200` | Stop once this many rows are accepted. |
+| `--max-candidates` | `N (x>=1)` | `5000` | Read at most this many spans. |
+| **Rows** | | | |
+| `--reasoning` | `omit\|preserve` | `omit` | omit or preserve reasoning messages. |
+| `--include-errors` |  |  | Keep errored LLM calls. |
+| **Splits** | | | |
+| `--seed` | `N` | `42` | Seed for the split assignment. |
+| `--validation-fraction` | `X` | `0.1` | Share of traces for validation. |
+| `--test-fraction` | `X` | `0.1` | Share of traces for test. |
+
+Examples:
+
+```sh
+pup finetune dataset preview --ml-app my-agent
+pup finetune dataset preview --ml-app my-agent --span-name chat --from 3d
+```
+
+Safety: Free · reads Datadog, prints sample rows · PUP_READ_ONLY: allowed.
 
 ## `pup finetune dataset pull`
 
-Export LLM spans from Datadog, check and convert them into training rows, and add them to DIR with their splits, creating it if needed. Excluded rows are recorded in excluded.jsonl with their reason. The filter, --reasoning, --include-errors and the split settings are frozen in DIR on the first pull; a pull with other values fails, so use a new directory. Raw pages are cached in DIR/raw/, so re-running an interrupted pull with the same flags resumes without fetching them again, and a higher --target-count or --max-candidates reads further (a stored row that turns out to be a prefix of a longer conversation of its trace is then excluded as contained_conversation). A relative --from or --to, such as the default now-7d, is resolved when the first pull starts and that window is frozen with the expressions; a re-run with the same expressions reads the same window. Spans are LLM spans of --ml-app in the time range, narrowed by --span-name, --query and --tag. Each span becomes a conversation (input then output messages; a plain input or output value is the user or assistant message); per trace, a conversation another one contains is dropped, so sub-agents stay their own rows. Errored LLM calls are excluded as span_error unless --include-errors is passed. Reading stops once --target-count rows are accepted or --max-candidates spans are read, unreadable ones included. It only reads from Datadog (through pup), so it is allowed with PUP_READ_ONLY set.
+Pull --ml-app's LLM spans from Datadog into DIR as training rows, with splits. The filter, the time range, --reasoning, --include-errors and the splits are frozen on the first pull, so a rerun needs no flag: `dataset pull DIR` resumes, and a higher --target-count reads further.
+
+Excluded rows are recorded in excluded.jsonl with their reason. On a rerun, a flag left out takes the frozen value and a flag with another value fails, so use a new directory for other settings. Raw pages are cached in DIR/raw/, so a rerun resumes without fetching them again, and a higher --target-count or --max-candidates (which are not frozen) reads further (a stored row that turns out to be a prefix of a longer conversation of its trace is then excluded as contained_conversation). A relative --from or --to, such as the default 7d, is resolved when the first pull starts and that window is frozen with the expressions: a rerun reads the same window, however much later it runs, and its result's window says so. Spans are LLM spans of --ml-app in the time range, narrowed by --span-name, --query and --tag. Each span becomes a conversation (input then output messages; a plain input or output value is the user or assistant message); per trace, a conversation another one contains is dropped, so sub-agents stay their own rows. Errored LLM calls are excluded as span_error unless --include-errors is passed. Reading stops once --target-count rows are accepted or --max-candidates spans are read, unreadable ones included. A relative time is a number and a unit (s, m, h, d or w, or spelled out, such as 5min or 2hours), with or without now- in front (7d is now-7d), or now; it is resolved once, when the command starts. A bare number is epoch milliseconds, not seconds: one below 10^11 (before March 1973) is refused.
 
 ```
 pup finetune dataset pull [OPTIONS] DIR
@@ -132,23 +326,38 @@ pup finetune dataset pull [OPTIONS] DIR
 
 | Option | Value | Default | Description |
 | --- | --- | --- | --- |
-| `--ml-app` | `TEXT` | required | The ml_app whose LLM spans to read (required). |
-| `--span-name` | `TEXT` |  | Only spans with this name. |
-| `--query` | `TEXT` |  | Only spans that also match this search query (event search syntax). |
-| `--tag` | `KEY:VALUE, repeatable` |  | Only spans with this tag; repeat for more (all must match). |
-| `--from` | `TEXT` | `now-7d` | Start of the time range: ISO 8601, epoch ms, or a relative time: now, or now-&lt;n&gt;&lt;unit&gt; with unit s, m, h, d or w, such as now-7d. A relative time is resolved once, when the command starts. |
-| `--to` | `TEXT` | `now` | End of the time range, in the same forms as --from. |
-| `--target-count` | `INTEGER (x>=1)` | `200` | Stop reading once this many rows are accepted. |
-| `--max-candidates` | `INTEGER (x>=1)` | `5000` | Read at most this many exported spans, counting ones that cannot be read. |
-| `--reasoning` | `omit\|preserve` | `omit` | Drop reasoning messages, or keep them as the assistant's reasoning_content. |
-| `--include-errors` |  |  | Keep errored LLM calls instead of excluding them as span_error. |
-| `--seed` | `INTEGER` | `42` | Seed for the split assignment. |
-| `--validation-fraction` | `FLOAT` | `0.1` | Share of traces assigned to validation. |
-| `--test-fraction` | `FLOAT` | `0.1` | Share of traces assigned to test. |
+| **Filter** | | | |
+| `--ml-app` | `NAME` |  | The ml_app whose LLM spans to read (a rerun takes the frozen one). |
+| `--span-name` | `NAME` |  | Only spans with this name. |
+| `--query` | `TEXT` |  | Only spans that match this search query. |
+| `--tag` | `KEY:VALUE, repeatable` |  | Only spans with this tag; repeatable. |
+| `--from` | `TIME` | `7d` | Start: ISO 8601, epoch ms, or relative: 7d, 24h, now-7d, now. |
+| `--to` | `TIME` | `now` | End, in the same forms as --from. |
+| **Limits** | | | |
+| `--target-count` | `N (x>=1)` | `200` | Stop once this many rows are accepted. |
+| `--max-candidates` | `N (x>=1)` | `5000` | Read at most this many spans. |
+| **Rows** | | | |
+| `--reasoning` | `omit\|preserve` | `omit` | omit or preserve reasoning messages. |
+| `--include-errors` |  |  | Keep errored LLM calls. |
+| **Splits** | | | |
+| `--seed` | `N` | `42` | Seed for the split assignment. |
+| `--validation-fraction` | `X` | `0.1` | Share of traces for validation. |
+| `--test-fraction` | `X` | `0.1` | Share of traces for test. |
+
+Examples:
+
+```sh
+pup finetune dataset pull datasets/my-agent --ml-app my-agent --from 7d --span-name chat
+pup finetune dataset pull datasets/my-agent --target-count 500
+```
+
+Safety: Free · reads Datadog, writes DIR · PUP_READ_ONLY: allowed.
 
 ## `pup finetune dataset import`
 
-Validate canonical training rows from a local JSONL file and add them to DIR, creating it if needed. Invalid rows are not fatal: each is recorded in excluded.jsonl with its reason code. A row repeating a conversation already in the dataset is excluded as duplicate_conversation. Importing again appends rows with new ids; a known id with different content is an error. The split settings are frozen when DIR is created, and later imports must pass the same ones. Reads and writes local files only, so it is allowed with PUP_READ_ONLY set.
+Validate canonical training rows from --file and add them to DIR, creating it if needed. An invalid row is not fatal: it is recorded in excluded.jsonl with its reason code. The split settings are frozen when DIR is created.
+
+A row repeating a conversation already in the dataset is excluded as duplicate_conversation. Importing again appends rows with new ids; a known id with different content is an error. Later imports must pass the same split settings.
 
 ```
 pup finetune dataset import [OPTIONS] DIR
@@ -161,13 +370,23 @@ pup finetune dataset import [OPTIONS] DIR
 | Option | Value | Default | Description |
 | --- | --- | --- | --- |
 | `--file` | `FILE` | required | Canonical rows, one JSON object per line. |
-| `--seed` | `INTEGER` | `42` | Seed for the split assignment. |
-| `--validation-fraction` | `FLOAT` | `0.1` | Share of traces assigned to validation. |
-| `--test-fraction` | `FLOAT` | `0.1` | Share of traces assigned to test. |
+| **Splits** | | | |
+| `--seed` | `N` | `42` | Seed for the split assignment. |
+| `--validation-fraction` | `X` | `0.1` | Share of traces for validation. |
+| `--test-fraction` | `X` | `0.1` | Share of traces for test. |
+
+Examples:
+
+```sh
+pup finetune dataset import datasets/my-agent --file rows.jsonl
+pup finetune dataset import datasets/my-agent --file rows.jsonl --seed 7 --test-fraction 0.2
+```
+
+Safety: Free · local files only · PUP_READ_ONLY: allowed.
 
 ## `pup finetune dataset show`
 
-Show a dataset directory: row counts, exclusion reasons, split sizes and warnings, the frozen settings, and a few row ids per split. Reads and writes local files only, so it is allowed with PUP_READ_ONLY set.
+Show a dataset directory: row counts, exclusion reasons, split sizes and warnings, the frozen settings, where it was pushed, a few row ids per split, and its pipeline: how many rows are kept, dropped and unlabeled, whether a triage is complete, and how many kept rows are not pushed yet, which choose the next steps.
 
 ```
 pup finetune dataset show DIR
@@ -177,9 +396,20 @@ pup finetune dataset show DIR
 | --- | --- |
 | `DIR` | The dataset directory. |
 
+Examples:
+
+```sh
+pup finetune dataset show datasets/my-agent
+pup finetune dataset show datasets/my-agent
+```
+
+Safety: Free · local files only · PUP_READ_ONLY: allowed.
+
 ## `pup finetune dataset sample`
 
-Show up to --n rows of DIR in brief, to review them before labeling: each row's id, split, label (keep, drop or none), assistant turns, tools used, and its first user and final assistant messages cut to 300 characters (a final message without text shows its tool calls as name(args)). The full rows stay in rows.jsonl. The same --seed picks the same rows. Rows labeled drop are left out unless --include-dropped is passed. Reads and writes local files only, so it is allowed with PUP_READ_ONLY set.
+Show up to --count rows of DIR in brief, to review them before labeling: id, split, label, turns, tools, and the first user and final assistant messages cut to 300 characters. The same --seed picks the same rows. Rows labeled drop are left out unless --include-dropped is passed.
+
+A final message without text shows its tool calls as name(args). The full rows stay in rows.jsonl.
 
 ```
 pup finetune dataset sample [OPTIONS] DIR
@@ -191,14 +421,25 @@ pup finetune dataset sample [OPTIONS] DIR
 
 | Option | Value | Default | Description |
 | --- | --- | --- | --- |
-| `--n` | `INTEGER (x>=1)` | `20` | How many rows to show. |
-| `--split` | `train\|validation\|test\|all` | `all` | The split to sample from. |
-| `--seed` | `INTEGER` | `0` | Seed that picks the rows. |
+| `-n`, `--count` | `N (x>=1)` | `20` | How many rows to show. |
+| `--split` | `train\|validation\|test\|all` | `all` | train, validation, test or all. |
+| `--seed` | `N` | `0` | Seed that picks the rows. |
 | `--include-dropped` |  |  | Also sample rows labeled drop. |
+
+Examples:
+
+```sh
+pup finetune dataset sample datasets/my-agent -n 20
+pup finetune dataset sample datasets/my-agent --split test --include-dropped
+```
+
+Safety: Free · local files only · PUP_READ_ONLY: allowed.
 
 ## `pup finetune dataset label`
 
-Record keep/drop decisions on accepted rows of DIR from a JSONL file of {"id", "keep", "reason"} objects; "by" and "at" may be given per line and default to --by and the current time. A reason is required to drop a row. Every id must be an accepted row, or nothing is written. Labels are appended to labels.jsonl and the last label of an id wins; rows.jsonl is never changed. A dropped row is left out of training and of the split files. Reads and writes local files only, so it is allowed with PUP_READ_ONLY set.
+Record keep/drop decisions on accepted rows of DIR from --file, one {"id", "keep", "reason"} object per line; a reason is required to drop. Every id must be an accepted row, or nothing is written. A dropped row is left out of training and of the split files.
+
+"at" may be given per line and defaults to the current time. Rows labeled here are never relabeled by `dataset triage`. Labels are appended to labels.jsonl and the last label of an id wins; rows.jsonl is never changed.
 
 ```
 pup finetune dataset label [OPTIONS] DIR
@@ -211,11 +452,21 @@ pup finetune dataset label [OPTIONS] DIR
 | Option | Value | Default | Description |
 | --- | --- | --- | --- |
 | `--file` | `FILE` | required | Labels, one JSON object per line. |
-| `--by` | `agent\|human` | `agent` | Who made the decisions, for lines that do not say. |
+
+Examples:
+
+```sh
+pup finetune dataset label datasets/my-agent --file labels.jsonl
+pup finetune dataset label datasets/my-agent --file review.jsonl
+```
+
+Safety: Free · local files only · PUP_READ_ONLY: allowed.
 
 ## `pup finetune dataset triage`
 
-Have each judge model review each whole row of DIR (every turn and its tools, since training imitates every assistant turn) against --rubric FILE and/or --rule TEXT, and vote keep or drop. A row is kept only on a strict majority of keep votes; a tie drops it; a row missing a vote (a failed call) stays undecided and unlabeled. Decisions are recorded as labels by judge; rows the agent or a person labeled are not reviewed. Votes are appended to DIR/judgments.jsonl as they arrive, so rerunning the same command resumes and retries only failed calls. The rubric and the judges are frozen in DIR/triage.json once votes exist: change them in a new directory or with --reset-triage. Row content is sent to each judge's provider: Fireworks serverless (the default judges), Anthropic or OpenAI, with that provider's API key; the preview names every one. Without --confirm, previews the calls. Paid, but no Datadog write: allowed with PUP_READ_ONLY set. Start with --max-rows 20 to calibrate the rubric. --print-template prints a rubric template.
+Have each judge model vote keep or drop on each whole row of DIR against --rubric and/or --rule; a strict majority of keep votes keeps a row. Without --confirm, previews the calls and where the rows go. Rerun the same command to resume; start with --max-rows 20 to calibrate the rubric.
+
+A judge reviews every turn of a row and its tools, since training imitates every assistant turn. A tie drops a row; a row missing a vote (a failed call) stays undecided and unlabeled. Decisions are recorded as labels by judge; rows the agent or a person labeled are not reviewed. Votes are appended to DIR/judgments.jsonl as they arrive, so a rerun retries only failed calls. The rubric and the judges are frozen in DIR/triage.json once votes exist: change them in a new directory or with --reset-triage. Row content is sent to each judge's provider: Fireworks serverless (the default judges), Anthropic or OpenAI, with that provider's API key; the preview names every one. --agreement measures the council against rows you labeled first; --print-template prints a rubric to start from.
 
 ```
 pup finetune dataset triage [OPTIONS] [DIR]
@@ -227,18 +478,36 @@ pup finetune dataset triage [OPTIONS] [DIR]
 
 | Option | Value | Default | Description |
 | --- | --- | --- | --- |
-| `--rubric` | `FILE` |  | A rubric file (Markdown; see --print-template). |
-| `--rule` | `TEXT, repeatable` |  | A rule to judge by; repeat for more. |
-| `--judges` | `M1,M2` |  | Comma-separated judge models, each anthropic/&lt;model&gt; (ANTHROPIC_API_KEY), openai/&lt;model&gt; (OPENAI_API_KEY), or otherwise a Fireworks model id such as accounts/fireworks/models/&lt;model&gt; (FIREWORKS_API_KEY); providers can be mixed (default: accounts/fireworks/models/deepseek-v4p1-flash,accounts/fireworks/models/glm-5p3-flash). |
-| `--concurrency` | `INTEGER (1<=x<=64)` | `4` | Judge calls made at once. |
-| `--max-rows` | `INTEGER (x>=1)` |  | Review at most this many rows (a fixed sample, e.g. 20 to calibrate the rubric first; a larger run later reuses its votes). |
-| `--reset-triage` |  |  | Discard every vote (even an unreadable judgments.jsonl) and the frozen rubric and judges first. |
-| `--print-template` |  |  | Print a rubric template (Task / Keep / Drop / Examples) and exit. |
+| **Rubric** | | | |
+| `--rubric` | `FILE` |  | A rubric file (see --print-template). |
+| `--rule` | `TEXT, repeatable` |  | A rule to judge by; repeatable. |
+| `--allow-template-rubric` |  |  | With --rubric: allow the template's Task text. |
+| `--print-template` |  |  | Print a rubric template and exit. |
+| **Judges** | | | |
+| `--judges` | `M1,M2` | deepseek-v4p1-flash, glm-5p3-flash | Aliases (glm-5p3-flash), anthropic/MODEL, openai/MODEL or Fireworks ids. |
+| `--concurrency` | `N (1<=x<=64)` | `4` | Judge calls at once (1-64). |
+| **Run** | | | |
+| `--max-rows` | `N (x>=1)` |  | Review a fixed sample of at most N rows. |
+| `--agreement` |  |  | Measure the council against your labels. |
+| `--reset-triage` |  |  | Discard the votes, rubric and judges first. |
 | `--confirm` |  |  | Run the judges (paid); without it, only preview. |
+
+Examples:
+
+```sh
+pup finetune dataset triage --print-template > rubric.md
+pup finetune dataset triage datasets/my-agent --rubric rubric.md --max-rows 20
+pup finetune dataset triage datasets/my-agent --rubric rubric.md --judges glm-5p3-flash
+pup finetune dataset triage datasets/my-agent --rubric rubric.md --agreement
+```
+
+Safety: Paid with --confirm · sends rows to each judge's provider · PUP_READ_ONLY: allowed.
 
 ## `pup finetune dataset push`
 
-Add one record per kept row of DIR to the Agent Observability dataset --name in project --project, creating either when missing; rows labeled drop are never sent. Each record's input is the conversation before the final assistant message, with its tools; its expected output is that message; its metadata holds the row id, split and source; it is tagged split:&lt;split&gt; and source:pup-finetune. Without --confirm it only previews what would be sent; when every kept row was pushed already it reports the receipt and sends nothing. The receipt, push.json in DIR, records the dataset and the record of every row pushed and is saved after every batch, so pushing again sends only rows not yet pushed, and an interrupted push resumes without adding a row twice. A directory pushes to one dataset: another --name or --project is an error. Rows labeled drop after they were pushed are reported as stale_records and are not deleted from the dataset; kept rows that changed after they were pushed are reported as changed_records and their records are not updated. A remote write: refused when PUP_READ_ONLY is set.
+Add one record per kept row of DIR to the Agent Observability dataset --name in --project, creating either when missing. Without --confirm, previews what would be sent. The receipt, push.json in DIR, makes a rerun send only rows not yet pushed, and names the dataset, so a rerun needs no --name or --project.
+
+Rows labeled drop are never sent. Each record's input is the conversation before the final assistant message, with its tools; its expected output is that message; its metadata holds the row id, split and source; it is tagged split:&lt;split&gt; and source:pup-finetune. When every kept row was pushed already, it reports the receipt and sends nothing. The receipt is saved after every batch, so an interrupted push resumes without adding a row twice. A directory pushes to one dataset: another --name or --project than the receipt's is an error. Rows labeled drop after they were pushed are reported as stale_records and are not deleted from the dataset; kept rows that changed after they were pushed are reported as changed_records and their records are not updated.
 
 ```
 pup finetune dataset push [OPTIONS] DIR
@@ -250,13 +519,25 @@ pup finetune dataset push [OPTIONS] DIR
 
 | Option | Value | Default | Description |
 | --- | --- | --- | --- |
-| `--name` | `TEXT` | required | The dataset to push to (required). |
-| `--project` | `TEXT` | `pup-finetune` | The project the dataset belongs to. |
-| `--confirm` |  |  | Push (a remote write); without it, only preview what is sent. |
+| `--name` | `NAME` |  | The dataset to push to (a rerun takes the one push.json names). |
+| `--project` | `NAME` |  | The project the dataset belongs to: pup-finetune, or the one push.json names. |
+| `--confirm` |  |  | Push (a remote write); without it, only preview. |
+
+Examples:
+
+```sh
+pup finetune dataset push datasets/my-agent --name my-agent-sft
+pup finetune dataset push datasets/my-agent --name my-agent-sft --project pup-finetune-dev
+pup finetune dataset push datasets/my-agent
+```
+
+Safety: Free · --confirm writes the kept rows to Datadog · PUP_READ_ONLY: preview only.
 
 ## `pup finetune train`
 
-Fine-tune a model with LoRA SFT on a dataset's train split, choosing the best epoch by validation loss and stopping early. Without --confirm, previews the run (rows and rendered tokens per split, rejected rows, tokens per epoch and in total, the settings, and where the data goes) and prints the exact command that starts it. With --confirm, trains in the foreground (Ctrl-C cancels gracefully: the best epoch is still promoted) or, with --detach, in a background worker. The preview is allowed with PUP_READ_ONLY set; training is not.
+Fine-tune --model with LoRA SFT on --dataset's train split, keeping the best epoch by validation loss. Without --confirm, previews the run and prints the command that starts it. With --confirm, trains (Ctrl-C cancels gracefully).
+
+The run goes in runs/RUN_ID unless --run-dir names another directory (a runs/ this creates gets a .gitignore, since runs hold trace-derived rows), and --provider is inferred from the --model alias when it is offered by one provider only; the preview says so (provider_source), and its next_command pins both. The preview lists rows and rendered tokens per split, the rejected rows, tokens per epoch and in total, the settings and where the data goes. --detach trains in a background worker; follow it with `status --watch`. Training stops early after --patience epochs without a validation-loss improvement; a Ctrl-C or `cancel` still promotes the best epoch. With --evaluate, the run is also evaluated on the test split in its training session once the best epoch is promoted (see `evaluate`): the judge is calibrated and --eval-out-dir checked before training starts, so a failed calibration trains nothing; --detach is refused with it; and the evaluation stops, partial, at --max-spend-usd. --max-seq-len caps the context (and so the cost): longer rows are left out, as the preview shows (exceeds_context).
 
 ```
 pup finetune train [OPTIONS]
@@ -264,58 +545,107 @@ pup finetune train [OPTIONS]
 
 | Option | Value | Default | Description |
 | --- | --- | --- | --- |
-| `--provider` | `TEXT` | required | The training provider. |
-| `--dataset` | `PATH` | required | The dataset directory to train on. |
-| `--model` | `TEXT` | required | The model profile to fine-tune. |
-| `--run-dir` | `PATH` | required | A new or empty run directory. |
-| `--run-id` | `TEXT` |  | The run id (default: ft-&lt;UTC timestamp&gt;-&lt;random hex&gt;); also the promoted model's id. |
-| `--max-epochs` | `INTEGER` |  | Most epochs to train (default: 5). |
-| `--patience` | `INTEGER` |  | Epochs without a validation-loss improvement before stopping early (default: 1). |
-| `--min-delta` | `FLOAT` |  | Smallest improvement that counts (default: 0.0). |
-| `--learning-rate` | `FLOAT` |  | Learning rate (default: 0.0001). |
-| `--batch-size` | `INTEGER` |  | Rows per optimizer step (default: 32). |
-| `--lora-rank` | `INTEGER` |  | LoRA rank (default: the model's). |
-| `--lora-alpha` | `INTEGER` |  | LoRA alpha (default: the provider's). |
-| `--seed` | `INTEGER` |  | Seed (default: 42). |
-| `--checkpoint-every-minutes` | `FLOAT` |  | Also save a resumable checkpoint this often, between epochs (default: 15.0). |
-| `--max-train-tokens` | `INTEGER` |  | Stop before training on more rendered tokens than this. |
-| `--max-spend-usd` | `FLOAT` |  | Stop before the elapsed time costs more; needs --hourly-rate-usd. With --evaluate, the evaluation in the training session stops at it too. |
-| `--hourly-rate-usd` | `FLOAT` |  | Your training price per hour (USD), for --max-spend-usd. |
-| `--spend-reserve-fraction` | `FLOAT` |  | The share of --max-spend-usd kept for the checkpoint and promotion at the stop; training stops that much short of the cap (default: 0.1). |
-| `--microbatch-token-budget` | `INTEGER` |  | Pack each step into microbatches of at most this many tokens. |
-| `--provider-option` | `KEY=VALUE, repeatable` |  | A provider-specific option; repeat for more. |
-| `--evaluate` |  |  | Also evaluate the run on the test split once it is trained, in its training session (paid; see `pup finetune evaluate`), within --max-spend-usd. |
-| `--eval-out-dir` | `PATH` |  | With --evaluate: where the evaluation goes (default: RUN_DIR/eval). |
-| `--eval-max-cases-per-trajectory` | `INTEGER (x>=1)` | `2` | With --evaluate: most assistant turns replayed per test conversation. |
-| `--eval-judge-model` | `TEXT` |  | With --evaluate: the judge model, anthropic/&lt;model&gt;, openai/&lt;model&gt; or a Fireworks model (default and keys: as `evaluate --judge-model`). |
-| `--eval-concurrency` | `INTEGER (1<=x<=64)` | `4` | With --evaluate: cases generated and judged at once. |
-| `--eval-max-tokens` | `INTEGER (x>=1)` | `1024` | With --evaluate: most tokens each generation may produce. |
-| `--eval-seed` | `INTEGER (x>=0)` | `0` | With --evaluate: seed for picking cases and the bootstrap. |
-| `--eval-skip-calibration` |  |  | With --evaluate: do not check the judge first. |
-| `--eval-no-publish` |  |  | With --evaluate: do not publish the evaluation to Datadog as experiments. |
-| `--detach` |  |  | Train in a background worker and return at once; follow it with `status --watch`. |
-| `--confirm` |  |  | Run it (paid); without it, only preview what runs. |
+| **Required** | | | |
+| `--dataset` | `DIR` | required | The dataset directory to train on. |
+| `--model` | `MODEL` | required | A model, e.g. qwen3p8-27b (fireworks); see models list. |
+| **Run** | | | |
+| `--provider` | `NAME` | from --model | Provider: fireworks or baseten. |
+| `--run-dir` | `DIR` | runs/RUN_ID | A new or empty run directory. |
+| `--run-id` | `ID` | generated | Run and model id. |
+| `--detach` |  |  | Train in a background worker; see status. |
+| `--confirm` |  |  | Train (paid); without it, preview. |
+| **Training** | | | |
+| `--max-epochs` | `N` | `5` | Most epochs to train. |
+| `--patience` | `N` | `1` | Epochs without improvement to stop. |
+| `--min-delta` | `X` | `0.0` | Least improvement that counts. |
+| `--learning-rate` | `X` | `0.0001` | Learning rate. |
+| `--batch-size` | `N` | `32` | Rows per optimizer step. |
+| `--lora-rank` | `N` | the model's | LoRA rank. |
+| `--lora-alpha` | `N` | the provider's | LoRA alpha. |
+| `--max-seq-len` | `N (x>=1)` | the model's | Context cap in tokens. |
+| `--seed` | `N` | `42` | Seed. |
+| **Budget** | | | |
+| `--max-train-tokens` | `N` |  | Stop before training more tokens. |
+| `--max-spend-usd` | `X` |  | Stop before spending more (USD). |
+| `--hourly-rate-usd` | `X` |  | Your price per hour, for --max-spend-usd. |
+| `--spend-reserve-fraction` | `X` | `0.1` | Share of --max-spend-usd kept. |
+| **Evaluate after training (with --evaluate)** | | | |
+| `--evaluate` |  |  | Evaluate the run after training (paid). |
+| `--eval-out-dir` | `DIR` | RUN_DIR/eval | Output directory. |
+| `--eval-max-cases` | `N (x>=1)` | `2` | Turns per conversation. |
+| `--eval-judge-model` | `MODEL` |  | The judge, as evaluate --judge-model. |
+| `--eval-concurrency` | `N (1<=x<=64)` | `4` | Cases at once (1-64). |
+| `--eval-max-tokens` | `N (x>=1)` | `1024` | Most tokens per generation. |
+| `--eval-seed` | `N (x>=0)` | `0` | Seed for cases and bootstrap. |
+| `--eval-skip-calibration` |  |  | Do not check the judge first. |
+| `--eval-no-publish` |  |  | Do not publish to Datadog. |
+| **Advanced** | | | |
+| `--checkpoint-every-minutes` | `X` | `15.0` | Checkpoint interval. |
+| `--microbatch-token-budget` | `N` |  | Most tokens per microbatch. |
+| `--provider-option` | `KEY=VALUE, repeatable` |  | Repeatable. Keys: max_seq_len (baseten, fireworks). |
+
+Examples:
+
+```sh
+pup finetune train --dataset ds --model qwen3p8-27b
+pup finetune train --provider fireworks --model qwen3p8-27b --dataset ds --run-dir run --max-seq-len 8192 --detach
+```
+
+Safety: Paid with --confirm · sends rows to the provider (and the judge) · PUP_READ_ONLY: preview only unless offline.
 
 ## `pup finetune status`
 
-Show a run's phase, epoch and step, losses, best epoch, promoted model and whether its training process is alive. With --watch, prints progress to stderr until training ends, then the final status.
+Show a run's phase, epoch and step, losses, best epoch, elapsed time and ETA, promoted model, and whether its process is alive; with no RUN_DIR, the newest run under ./runs. With --watch, prints progress to stderr until training ends, then the status; Ctrl-C or --timeout stops only the watch.
+
+RUN_DIR may also be a bare run id, read as runs/RUN_ID when no such path exists (here and in resume, cancel, evaluate, deploy and undeploy, which always need one). Training keeps going when the watch stops: the status then has watch_timed_out true, and the command exits 0. Under a coding agent (PUP_AGENT_MODE, AI_AGENT or CLAUDECODE set), a watch stops after 90s unless --timeout says otherwise, below the time agents' shell tools commonly allow a command.
 
 ```
-pup finetune status [OPTIONS] RUN_DIR
+pup finetune status [OPTIONS] [RUN_DIR]
 ```
 
 | Argument | Description |
 | --- | --- |
-| `RUN_DIR` | The run directory. |
+| `RUN_DIR` | The run: its directory or run id. Optional; default: the newest run in ./runs. |
 
 | Option | Value | Default | Description |
 | --- | --- | --- | --- |
-| `--watch` |  |  | Print progress to stderr until training ends, then print the final status. |
-| `--interval` | `FLOAT (x>=0.1)` | `10.0` | Seconds between checks with --watch. |
+| `--watch` |  |  | Print progress until training ends, then the status. |
+| `--interval` | `X (x>=0.1)` | 10 | With --watch: seconds between checks. |
+| `--timeout` | `DURATION` | 90s under a coding agent, else none | With --watch: stop watching after DURATION (90s, 10m, 2h). |
+
+Examples:
+
+```sh
+pup finetune status
+pup finetune status run --watch --timeout 10m
+```
+
+Safety: Free · local files only · PUP_READ_ONLY: allowed.
+
+## `pup finetune runs`
+
+List the training runs under ./runs (or --dir), newest first: run id, phase, model, provider, best epoch, promoted model, deployment state and directory. Every command that takes a RUN_DIR also takes one of these run ids.
+
+```
+pup finetune runs [OPTIONS]
+```
+
+| Option | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--dir` | `DIR` | ./runs | The directory holding the runs. |
+
+Examples:
+
+```sh
+pup finetune runs
+pup finetune runs --dir old-runs
+```
+
+Safety: Free · local files only · PUP_READ_ONLY: allowed.
 
 ## `pup finetune resume`
 
-Continue a run from its last training checkpoint, or only retry its promotion when training already ended. Without --confirm, previews where it resumes.
+Continue an interrupted, failed or cancelled run from its last training checkpoint, or only retry its promotion when training already ended. Without --confirm, previews where it resumes.
 
 ```
 pup finetune resume [OPTIONS] RUN_DIR
@@ -323,12 +653,21 @@ pup finetune resume [OPTIONS] RUN_DIR
 
 | Argument | Description |
 | --- | --- |
-| `RUN_DIR` | The run directory. |
+| `RUN_DIR` | The run: its directory or run id. |
 
 | Option | Value | Default | Description |
 | --- | --- | --- | --- |
-| `--detach` |  |  | Train in a background worker and return at once; follow it with `status --watch`. |
-| `--confirm` |  |  | Run it (paid); without it, only preview what runs. |
+| `--detach` |  |  | Train in a background worker; see status --watch. |
+| `--confirm` |  |  | Run it (paid); without it, only preview. |
+
+Examples:
+
+```sh
+pup finetune resume ft-20261007183443-a8b181
+pup finetune resume run --detach
+```
+
+Safety: Paid with --confirm · sends rows to the provider · PUP_READ_ONLY: preview only unless offline.
 
 ## `pup finetune cancel`
 
@@ -340,15 +679,26 @@ pup finetune cancel [OPTIONS] RUN_DIR
 
 | Argument | Description |
 | --- | --- |
-| `RUN_DIR` | The run directory. |
+| `RUN_DIR` | The run: its directory or run id. |
 
 | Option | Value | Default | Description |
 | --- | --- | --- | --- |
-| `--confirm` |  |  | Run it (paid); without it, only preview what runs. |
+| `--confirm` |  |  | Send the stop signal; without it, preview which process gets it. |
+
+Examples:
+
+```sh
+pup finetune cancel run
+pup finetune cancel ft-20261007183443-a8b181
+```
+
+Safety: Free · signals the local training process · PUP_READ_ONLY: allowed.
 
 ## `pup finetune evaluate`
 
-Replay every held-out test conversation of a completed or cancelled run, one recorded assistant turn at a time, with the base model and the run's best checkpoint; score each answer with deterministic tool-call metrics and an LLM judge; and compare the two (pass rates, wins and regressions, and the tuned-minus-base delta with a bootstrap confidence interval). Tools are not executed, so the scores measure agreement with the recorded behavior, not task success. Without --confirm, previews the calls it would make. With --confirm, calibrates the judge first, then evaluates; rerun the same command to continue an evaluation that stopped. A complete evaluation is published to Datadog as two Agent Observability experiments on the dataset `dataset push` created (--no-publish skips it). The preview is allowed with PUP_READ_ONLY set; evaluating is not.
+Replay each held-out test conversation of a run, one recorded assistant turn at a time, with the base model and the run's best checkpoint, and score both with tool-call metrics and an LLM judge. Without --confirm, previews the calls and where the data goes. A complete evaluation is published to Datadog as two experiments when the dataset was pushed (--no-publish skips it).
+
+The result compares the two: pass rates, wins and regressions, and the tuned-minus-base delta with a bootstrap confidence interval. Tools are not executed, so the scores measure agreement with the recorded behavior, not task success. With --confirm, the judge is calibrated first, then every case is replayed; rerun the same command to continue an evaluation that stopped. A changed --max-tokens, judge, seed or --max-cases needs a new --out-dir.
 
 ```
 pup finetune evaluate [OPTIONS] RUN_DIR
@@ -356,23 +706,38 @@ pup finetune evaluate [OPTIONS] RUN_DIR
 
 | Argument | Description |
 | --- | --- |
-| `RUN_DIR` | A completed or cancelled run directory. |
+| `RUN_DIR` | A completed or cancelled run: its directory or run id. |
 
 | Option | Value | Default | Description |
 | --- | --- | --- | --- |
-| `--out-dir` | `PATH` |  | Where the evaluation is written and resumed from (default: RUN_DIR/eval). |
-| `--max-cases-per-trajectory` | `INTEGER (x>=1)` | `2` | Most assistant turns replayed per test conversation. |
-| `--judge-model` | `TEXT` |  | The judge model: anthropic/&lt;model&gt; (ANTHROPIC_API_KEY, or the Anthropic SDK's own login), openai/&lt;model&gt; (OPENAI_API_KEY), or otherwise a Fireworks model id such as accounts/fireworks/models/&lt;model&gt; (FIREWORKS_API_KEY). Default: a Fireworks serverless model; the offline fake judge for a fake run. |
-| `--concurrency` | `INTEGER (1<=x<=64)` | `4` | Cases generated and judged at once. |
-| `--max-tokens` | `INTEGER (x>=1)` | `1024` | Most tokens each generation may produce. |
-| `--seed` | `INTEGER (x>=0)` | `0` | Seed for picking cases and the bootstrap. |
+| **Cases** | | | |
+| `--max-cases` | `N (x>=1)` | `2` | Turns replayed per conversation. |
+| `--max-tokens` | `N (x>=1)` | `1024` | Most tokens each generation may produce. |
+| `--seed` | `N (x>=0)` | `0` | Seed for picking cases and the bootstrap. |
+| **Judge** | | | |
+| `--judge-model` | `MODEL` | deepseek-v4p1-flash | An alias (glm-5p3-flash), anthropic/MODEL, openai/MODEL or a Fireworks id. |
 | `--skip-calibration` |  |  | Do not check the judge on known answers first. |
-| `--no-publish` |  |  | Do not publish the evaluation to Datadog as experiments (it is published when the dataset was pushed with `dataset push`). |
-| `--confirm` |  |  | Run it (paid); without it, only preview the calls. |
+| **Run** | | | |
+| `--out-dir` | `DIR` | RUN_DIR/eval | Output directory. |
+| `--concurrency` | `N (1<=x<=64)` | `4` | Cases at once (1-64). |
+| `--no-publish` |  |  | Do not publish the evaluation to Datadog. |
+| `--confirm` |  |  | Run it (paid); without it, only preview. |
+
+Examples:
+
+```sh
+pup finetune evaluate run
+pup finetune evaluate run --judge-model glm-5p3-flash
+pup finetune evaluate run --max-cases 4 --out-dir run/eval-4
+```
+
+Safety: Paid with --confirm · sends test rows to the provider and the judge, results to Datadog · PUP_READ_ONLY: preview only unless offline.
 
 ## `pup finetune deploy`
 
-Create an on-demand deployment of a completed run's promoted model on the run's provider (at most one replica, scaling to zero when idle), wait until it serves (--timeout-minutes), and send one chat completion as a smoke test. The receipt, deployment.json in RUN_DIR, is written as soon as the deployment exists, so a failed or timed-out wait still records it. Without --confirm, previews what would be created. The deployment bills per GPU-second while a replica runs (it scales to zero after a few idle minutes and starts again on the next request) until it is undeployed: run `pup finetune undeploy RUN_DIR --confirm`. A failed smoke test exits 1 and keeps the deployment. A remote write: refused when PUP_READ_ONLY is set. Fireworks' own CLI refuses to create deployments when run by an AI agent; this command uses the API and relies on --confirm, so an agent must pass --confirm only with the user's explicit authorization.
+Create an on-demand deployment of a completed run's model on its provider, wait until it serves, and smoke-test it with one chat completion. Without --confirm, previews what would be created; once created, it bills until `undeploy RUN_DIR --confirm`. An agent must pass --confirm only with the user's explicit authorization.
+
+The deployment has at most one replica and scales to zero when idle. The receipt, deployment.json in RUN_DIR, is written as soon as the deployment exists, so a failed or timed-out wait (--timeout-minutes) still records it. The result says how to call the model (usage: the base URL, the model to request and an example request that reads the key from its environment variable) and how to delete it (undeploy_command). The deployment bills per GPU-second while a replica runs (it scales to zero after a few idle minutes and starts again on the next request) until it is undeployed. A failed smoke test exits 1 and keeps the deployment. Fireworks' own CLI refuses to create deployments when run by an AI agent; this command uses the API and relies on --confirm, so an agent must pass --confirm only with the user's explicit authorization.
 
 ```
 pup finetune deploy [OPTIONS] RUN_DIR
@@ -380,18 +745,27 @@ pup finetune deploy [OPTIONS] RUN_DIR
 
 | Argument | Description |
 | --- | --- |
-| `RUN_DIR` | A completed run directory. |
+| `RUN_DIR` | A completed run: its directory or run id. |
 
 | Option | Value | Default | Description |
 | --- | --- | --- | --- |
-| `--deployment-id` | `TEXT` |  | The deployment's id (default: derived from the run id). |
-| `--shape` | `TEXT` |  | The deployment shape (default: the first validated shape the provider matches to the model). |
-| `--timeout-minutes` | `FLOAT (x>=1)` | `30.0` | How long to wait for the deployment to serve. |
+| `--deployment-id` | `ID` | from the run id | The deployment's id. |
+| `--shape` | `SHAPE` | the first validated one | The deployment shape. |
+| `--timeout-minutes` | `X (x>=1)` | `30.0` | Minutes to wait for it to serve. |
 | `--confirm` |  |  | Create it (paid); without it, only preview. |
+
+Examples:
+
+```sh
+pup finetune deploy run
+pup finetune deploy run --timeout-minutes 45
+```
+
+Safety: Paid with --confirm · creates a deployment that bills until undeploy · PUP_READ_ONLY: preview only.
 
 ## `pup finetune undeploy`
 
-Delete the deployment recorded in RUN_DIR/deployment.json and record when; the promoted model is kept and can be deployed again. Deleting a deployment that is already gone succeeds. Without --confirm, previews what would be deleted. A remote write: refused when PUP_READ_ONLY is set.
+Delete the deployment recorded in RUN_DIR/deployment.json, so it stops billing, and record when; the model is kept and can be deployed again. Deleting a deployment that is already gone succeeds. Without --confirm, previews what would be deleted.
 
 ```
 pup finetune undeploy [OPTIONS] RUN_DIR
@@ -399,31 +773,17 @@ pup finetune undeploy [OPTIONS] RUN_DIR
 
 | Argument | Description |
 | --- | --- |
-| `RUN_DIR` | A completed run directory. |
+| `RUN_DIR` | A completed run: its directory or run id. |
 
 | Option | Value | Default | Description |
 | --- | --- | --- | --- |
 | `--confirm` |  |  | Delete it; without it, only preview. |
 
-## `pup finetune skill show`
+Examples:
 
-Print where the bundled `datadog-finetune` skill is and its SKILL.md content, for an agent to read or a person to copy. Reads and writes local files only, so it is allowed with PUP_READ_ONLY set.
-
-```
-pup finetune skill show
-```
-
-## `pup finetune skill install`
-
-Install the `datadog-finetune` skill. When npx is on PATH and --dir is not given, runs `npx --yes skills add <bundled skills directory> --skill datadog-finetune`, passing on --agent, --global and --yes, so the skills CLI installs it for the agents you choose (it may prompt). Otherwise copies SKILL.md to .agents/skills/datadog-finetune/ and .claude/skills/datadog-finetune/ under the project directory (--dir, default: the current directory) or, with --global, your home directory; a different copy already there is replaced only with --yes. Makes no Datadog or provider call, so it is allowed with PUP_READ_ONLY set; the npx path downloads the skills CLI from npm and runs it, without your secrets in its environment.
-
-```
-pup finetune skill install [OPTIONS]
+```sh
+pup finetune undeploy run
+pup finetune undeploy ft-20261007183443-a8b181
 ```
 
-| Option | Value | Default | Description |
-| --- | --- | --- | --- |
-| `--agent`, `-a` | `TEXT, repeatable` |  | An agent to install for, as the skills CLI names it (e.g. claude-code); repeat for more. |
-| `--global`, `-g` |  |  | Install for your user instead of this project. |
-| `--yes`, `-y` |  |  | Skip the skills CLI's prompts; without npx, replace a different copy. |
-| `--dir` | `DIR` |  | Copy the skill into this project directory instead of running npx. |
+Safety: Free · --confirm deletes the deployment · PUP_READ_ONLY: preview only.

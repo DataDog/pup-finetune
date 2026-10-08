@@ -51,7 +51,7 @@ from pup_finetune.providers.base import (
     SmokeTest,
     TransientError,
 )
-from pup_finetune.providers.fireworks import PROVIDER_NAME
+from pup_finetune.providers.fireworks import ENV_VAR, PROVIDER_NAME
 from pup_finetune.providers.fireworks.client import (
     SOURCE,
     CreateRequest,
@@ -283,6 +283,7 @@ class FireworksDeployer:
             url=INFERENCE_URL,
             name=name,
             shape=record.shape or shape,
+            api_key_env=ENV_VAR,
         )
 
     def _wait_ready(

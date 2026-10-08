@@ -462,7 +462,7 @@ def test_the_max_seq_len_option_caps_the_session(fw: FakeFireworksTrainingClient
         backend.open_session(PROFILE, LORA, seed=1, max_seq_len=65),
     ):
         pass
-    assert caught.value.hint is not None and "--provider-option max_seq_len" in caught.value.hint
+    assert caught.value.hint is not None and "--max-seq-len" in caught.value.hint
     assert len(fw.sessions) == 1
 
 

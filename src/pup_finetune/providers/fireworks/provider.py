@@ -38,21 +38,22 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from pup_finetune import credentials
-from pup_finetune.doctor import error_detail
-from pup_finetune.errors import FinetuneError, UsageError
+from pup_finetune.errors import UsageError
 from pup_finetune.providers.base import (
-    Check,
     DeploymentRequest,
     DeployOptions,
     Endpoint,
     ModelProfile,
     ModelRef,
+    SamplingUsage,
     SmokeTest,
+    TrainingUsage,
+    sampling_usage_text,
+    training_usage_text,
 )
 from pup_finetune.providers.fireworks import PROVIDER_NAME
 from pup_finetune.providers.fireworks.models import PROFILES
 from pup_finetune.providers.options import parse_options
-from pup_finetune.redaction import redact
 from pup_finetune.rendering.families import get_family
 from pup_finetune.rendering.hf import INSTALL_HINT, ChatTokenizer, HFChatTemplateRenderer
 from pup_finetune.runtime import Runtime
@@ -181,9 +182,6 @@ class FireworksProvider:
     def name(self) -> str:
         return PROVIDER_NAME
 
-    def check(self) -> list[Check]:
-        return [self._key_check(), self._renderer_check()]
-
     def models(self) -> list[ModelProfile]:
         return list(PROFILES)
 
@@ -234,7 +232,8 @@ class FireworksProvider:
             ) from exc
         if self._tokenizer is None and not _transformers_installed():
             raise UsageError(
-                "rendering for Fireworks needs Hugging Face transformers, which is not installed",
+                "rendering for Fireworks needs the Hugging Face transformers package, which is "
+                "not installed",
                 hint=INSTALL_HINT,
             )
         return family.renderer(tokenizer=self._tokenizer)
@@ -252,9 +251,21 @@ class FireworksProvider:
             raise UsageError(
                 f"the max_seq_len provider option of {cap} is over the "
                 f"{profile.max_seq_len}-token context of {profile.alias}",
-                hint=f"pass --provider-option max_seq_len=N with N at most {profile.max_seq_len}",
+                hint=f"pass --max-seq-len N with N at most {profile.max_seq_len}",
             )
         return dataclasses.replace(profile, max_seq_len=cap)
+
+    def training_billing(self, usage: TrainingUsage) -> str:
+        return (
+            "Fireworks bills the serverless training session at its own rates, which "
+            f"pup-finetune does not know: it trains on {training_usage_text(usage)}"
+        )
+
+    def sampling_billing(self, usage: SamplingUsage) -> str:
+        return (
+            "Fireworks bills sampling in the training session at its own rates, which "
+            f"pup-finetune does not know: {sampling_usage_text(usage)}"
+        )
 
     def backend(self) -> FireworksBackend:
         """The training backend. Builds nothing remote: the client is made per session.
@@ -363,25 +374,6 @@ class FireworksProvider:
         from pup_finetune.providers.fireworks.client import FireworksTrainingClient
 
         return FireworksTrainingClient(self._key(), env=self._environ(), transport=self._transport)
-
-    def _key_check(self) -> Check:
-        name = "fireworks api key"
-        try:
-            found = credentials.lookup(PROVIDER_NAME, env=self._environ())
-        except FinetuneError as exc:
-            return Check(name, False, redact(error_detail(exc)))
-        except Exception as exc:
-            return Check(name, False, redact(f"could not look up the key ({type(exc).__name__})"))
-        if found is None:
-            hint = credentials.login_hint(credentials.get_spec(PROVIDER_NAME))
-            return Check(name, False, f"no Fireworks API key; {hint}")
-        return Check(name, True, f"Fireworks API key found (source: {found.source})")
-
-    def _renderer_check(self) -> Check:
-        name = "fireworks renderer"
-        if self._tokenizer is not None or _transformers_installed():
-            return Check(name, True, "Hugging Face transformers is installed")
-        return Check(name, False, f"Hugging Face transformers is not installed; {INSTALL_HINT}")
 
 
 def _transformers_installed() -> bool:

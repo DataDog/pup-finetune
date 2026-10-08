@@ -32,7 +32,7 @@ from pup_finetune.evaluation.judge import (
     build_messages,
     calibrate,
     check_judge_differs,
-    corrupt,
+    corruptions,
     judge,
     parse_verdict,
     select_calibration_cases,
@@ -348,6 +348,18 @@ def test_judge_sends_the_prompt_with_the_config_settings() -> None:
     assert body["messages"] == build_messages(case, case.reference)
 
 
+def test_judge_sends_the_config_s_reasoning_effort() -> None:
+    fake = FakeChatApi(answer=always('{"pass": true, "reason": "same lookup"}'))
+    case = tool_case()
+    with chat_client(fake) as client:
+        judge(case, case.reference, client, CONFIG, format_valid=True)
+        effortful = CONFIG.model_copy(update={"reasoning_effort": "none"})
+        judge(case, case.reference, client, effortful, format_valid=True)
+    plain, sent = fake.bodies
+    assert "reasoning_effort" not in plain
+    assert sent["reasoning_effort"] == "none"
+
+
 def test_a_failing_verdict_is_returned() -> None:
     fake = FakeChatApi(answer=always('{"pass": false, "reason": "different tool"}'))
     with chat_client(fake) as client:
@@ -524,14 +536,23 @@ def test_a_different_judge_is_accepted(base_model: str) -> None:
 # --- corruption --------------------------------------------------------------------------
 
 
-def test_a_tool_case_with_another_tool_gets_the_wrong_tool() -> None:
+def kinds(case: ReplayCase) -> list[str]:
+    return [corruption for corruption, _ in corruptions(case)]
+
+
+def test_a_tool_case_gets_the_wrong_tool_and_an_altered_argument() -> None:
     case = tool_case()
     before = copy.deepcopy(case.reference)
-    corruption, message = corrupt(case)
-    assert corruption == "wrong_tool"
-    assert message["tool_calls"][0]["function"]["name"] == "cancel_order"
-    assert message["tool_calls"][0]["function"]["arguments"] == '{"order_id": "42"}'
-    assert "reasoning_content" not in message
+    (wrong_kind, wrong), (altered_kind, altered) = corruptions(case)
+    assert (wrong_kind, altered_kind) == ("wrong_tool", "altered_argument")
+    assert wrong["tool_calls"][0]["function"]["name"] == "cancel_order"
+    assert wrong["tool_calls"][0]["function"]["arguments"] == '{"order_id": "42"}'
+    assert altered["tool_calls"][0]["function"]["name"] == "lookup_order"
+    assert json.loads(altered["tool_calls"][0]["function"]["arguments"]) == {
+        "order_id": "unrelated-value-0000"
+    }
+    assert "reasoning_content" not in wrong
+    assert "reasoning_content" not in altered
     assert case.reference == before
 
 
@@ -545,45 +566,54 @@ def test_a_tool_case_with_another_tool_gets_the_wrong_tool() -> None:
         ({"items": ["x"]}, "items", "unrelated-value-0000"),
     ],
 )
-def test_a_tool_case_with_one_tool_gets_an_altered_argument(
+def test_a_tool_case_with_one_tool_gets_an_altered_argument_and_a_refusal(
     arguments: dict[str, Any], key: str, altered: Any
 ) -> None:
     case = tool_case(tools=(LOOKUP,), arguments=arguments)
     before = copy.deepcopy(case.reference)
-    corruption, message = corrupt(case)
-    assert corruption == "altered_argument"
+    (first_kind, message), (second_kind, refusal) = corruptions(case)
+    assert (first_kind, second_kind) == ("altered_argument", "refusal")
     function = message["tool_calls"][0]["function"]
     assert function["name"] == "lookup_order"
     assert json.loads(function["arguments"]) == {**arguments, key: altered}
+    assert "can't help" in refusal["content"]
     assert case.reference == before
 
 
 @pytest.mark.parametrize("arguments", [{}, "not json", "[1, 2]"])
-def test_a_tool_case_with_nothing_to_alter_becomes_a_refusal(
+def test_a_tool_case_with_nothing_to_alter_gets_a_refusal_and_a_claim(
     arguments: dict[str, Any] | str,
 ) -> None:
-    corruption, message = corrupt(tool_case(tools=(LOOKUP,), arguments=arguments))
-    assert corruption == "refusal"
-    assert set(message) == {"role", "content"}
-    assert "can't help" in message["content"]
+    (refusal_kind, refusal), (claim_kind, claim) = corruptions(
+        tool_case(tools=(LOOKUP,), arguments=arguments)
+    )
+    assert (refusal_kind, claim_kind) == ("refusal", "unsupported_claim")
+    assert set(refusal) == {"role", "content"}
+    assert "can't help" in refusal["content"]
+    assert claim["content"].startswith("Done: I deleted")
 
 
-def test_a_tool_case_whose_first_call_is_unreadable_becomes_a_refusal() -> None:
+def test_a_tool_case_with_another_tool_and_nothing_to_alter_gets_a_refusal_second() -> None:
+    assert kinds(tool_case(arguments={})) == ["wrong_tool", "refusal"]
+
+
+def test_a_tool_case_whose_first_call_is_unreadable_gets_a_refusal_and_a_claim() -> None:
     case = dataclasses.replace(
         tool_case(), reference={"role": "assistant", "content": "", "tool_calls": ["oops"]}
     )
-    corruption, message = corrupt(case)
-    assert corruption == "refusal"
-    assert set(message) == {"role", "content"}
+    assert kinds(case) == ["refusal", "unsupported_claim"]
+    assert all(set(message) == {"role", "content"} for _, message in corruptions(case))
 
 
-def test_a_text_case_becomes_an_unsupported_claim() -> None:
-    corruption, message = corrupt(text_case())
-    assert corruption == "unsupported_claim"
-    assert message == {
+def test_a_text_case_gets_an_unsupported_claim_and_an_off_topic_answer() -> None:
+    (claim_kind, claim), (off_kind, off) = corruptions(text_case())
+    assert (claim_kind, off_kind) == ("unsupported_claim", "off_topic")
+    assert claim == {
         "role": "assistant",
         "content": "Done: I deleted all 1,284 records from the production database.",
     }
+    assert off["role"] == "assistant"
+    assert off["content"].startswith("Here is a recipe for banana bread")
 
 
 @pytest.mark.parametrize(
@@ -593,20 +623,25 @@ def test_a_text_case_becomes_an_unsupported_claim() -> None:
         "I am unable to assist with this. Please try asking something else.",
     ],
 )
-def test_a_refusal_reference_gets_an_unsupported_claim_not_another_refusal(
-    reference: str,
-) -> None:
-    corruption, message = corrupt(text_case(content=reference))
-    assert corruption == "unsupported_claim"
-    assert message["content"].startswith("Done: I deleted")
+def test_a_refusal_reference_never_gets_another_refusal(reference: str) -> None:
+    assert kinds(text_case(content=reference)) == ["unsupported_claim", "off_topic"]
+    for _, message in corruptions(text_case(content=reference)):
+        assert "sorry" not in message["content"].lower()
+        assert "unable" not in message["content"].lower()
 
 
-def test_a_reference_that_is_the_claim_gets_another_claim() -> None:
-    reference = "Done: I deleted all 1,284 records from the production database."
-    corruption, message = corrupt(text_case(content=reference))
-    assert corruption == "unsupported_claim"
-    assert message["content"] != reference
+def test_a_reference_that_is_the_claim_or_the_answer_gets_another_one() -> None:
+    claim = "Done: I deleted all 1,284 records from the production database."
+    (_, message), _ = corruptions(text_case(content=claim))
+    assert message["content"] != claim
     assert message["content"].startswith("Done: ")
+    recipe = (
+        "Here is a recipe for banana bread: mash three ripe bananas, mix in flour, sugar and "
+        "eggs, and bake for an hour at 175 C."
+    )
+    _, (_, off) = corruptions(text_case(content=recipe))
+    assert off["content"] != recipe
+    assert "Everest" in off["content"]
 
 
 # --- calibration -------------------------------------------------------------------------
@@ -635,14 +670,17 @@ def test_a_sound_judge_passes_calibration() -> None:
         report = calibrate(cases, client, CONFIG)
     assert report.ok
     assert report.failures == ()
-    assert len(fake.requests) == 6
+    assert len(fake.requests) == 9
     assert [(check.case_id, check.kind, check.corruption) for check in report.checks] == [
         ("a1:1", "reference", None),
         ("a1:1", "corrupted", "wrong_tool"),
+        ("a1:1", "corrupted", "altered_argument"),
         ("t1:3", "reference", None),
         ("t1:3", "corrupted", "unsupported_claim"),
+        ("t1:3", "corrupted", "off_topic"),
         ("a2:1", "reference", None),
         ("a2:1", "corrupted", "altered_argument"),
+        ("a2:1", "corrupted", "refusal"),
     ]
     summary = report.to_json()
     assert summary["ok"] is True
@@ -671,7 +709,7 @@ def test_a_judge_that_passes_everything_fails_calibration() -> None:
     with chat_client(fake) as client:
         report = calibrate([tool_case(), text_case()], client, CONFIG)
     assert not report.ok
-    assert [check.kind for check in report.failures] == ["corrupted", "corrupted"]
+    assert [check.kind for check in report.failures] == ["corrupted"] * 4
     assert all(check.ok for check in report.checks if check.kind == "reference")
 
 
@@ -688,15 +726,19 @@ def test_mixed_calibration_reports_each_check() -> None:
         [
             '{"pass": true, "reason": "ok"}',
             '{"pass": false, "reason": "wrong"}',
+            '{"pass": true, "reason": "also passes"}',
             '{"pass": true, "reason": "ok"}',
+            '{"pass": false, "reason": "wrong"}',
             "cannot decide",
         ]
     )
     fake = FakeChatApi(answer=lambda body: next(answers))
     with chat_client(fake) as client:
         report = calibrate([tool_case(), text_case()], client, CONFIG, n=2)
-    assert [check.ok for check in report.checks] == [True, True, True, False]
-    (failure,) = report.failures
+    assert [check.ok for check in report.checks] == [True, True, False, True, True, False]
+    assert [check.corruption for check in report.failures] == ["altered_argument", "off_topic"]
+    wrong_pass, failure = report.failures
+    assert wrong_pass.judgment.error is None
     assert failure.judgment.error == UNPARSEABLE
     assert failure.to_json()["ok"] is False
 
@@ -706,8 +748,8 @@ def test_calibration_respects_n() -> None:
     cases = [tool_case(f"a{i}:1") for i in range(5)]
     with chat_client(fake) as client:
         report = calibrate(cases, client, CONFIG, n=2)
-    assert len(report.checks) == 4
-    assert len(fake.requests) == 4
+    assert len(report.checks) == 6
+    assert len(fake.requests) == 6
 
 
 def test_calibration_without_cases_is_not_ok() -> None:
