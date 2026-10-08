@@ -78,35 +78,55 @@ def test_label_applies_labels_and_emits_the_report(dataset: Path, tmp_path: Path
     assert (data["accepted"], data["kept"], data["dropped"]) == (len(FIXTURE_IDS), 13, 1)
     assert data["drop_reasons"] == [{"reason": "wrong tool", "count": 1}]
     assert sum(data["splits"].values()) == 13
-    train = f"pup finetune train --dataset {shlex.quote(str(dataset))} ..."
-    assert data["next_command"] == train
-    assert data["next_commands"] == [
-        train,
-        f"pup finetune dataset push {shlex.quote(str(dataset))} --name ...",
+    # Training needs a model nobody chose yet (the provider follows from it, and the run
+    # directory defaults to runs/RUN_ID): steps only.
+    quoted = shlex.quote(str(dataset))
+    assert data["next_command"] is None
+    assert [step["command"] for step in data["next_steps"]] == [
+        "pup finetune models list",
+        f"pup finetune train --dataset {quoted} --model <MODEL>",
+        f"pup finetune dataset push {quoted} --name <NAME>",
     ]
     assert FIXTURE_IDS[0] not in {row.id for row in DatasetDir(dataset).kept_rows()}
     show = output_json(invoke("show", str(dataset)))
     assert show["summary"]["dropped"] == 1
 
 
-def test_label_fills_in_by_and_at(dataset: Path, tmp_path: Path) -> None:
+def test_labels_are_manual_and_at_is_filled_in(dataset: Path, tmp_path: Path) -> None:
     file = label_file(
         tmp_path,
         {"id": FIXTURE_IDS[0], "keep": True},
-        {"id": FIXTURE_IDS[1], "keep": True, "by": "judge", "at": "2026-01-02T03:04:05+01:00"},
+        {"id": FIXTURE_IDS[1], "keep": True, "at": "2026-01-02T03:04:05+01:00"},
     )
-    output_json(label(dataset, file, "--by", "human"))
+    output_json(label(dataset, file))
     records = [json.loads(line) for line in (dataset / "labels.jsonl").read_text().splitlines()]
-    assert records[0]["by"] == "human"
+    assert [record["by"] for record in records] == ["manual", "manual"]
     assert records[0]["at"].endswith("Z")
-    assert (records[1]["by"], records[1]["at"]) == ("judge", "2026-01-02T02:04:05Z")
+    assert records[1]["at"] == "2026-01-02T02:04:05Z"
 
 
-def test_label_defaults_to_by_agent(dataset: Path, tmp_path: Path) -> None:
-    file = label_file(tmp_path, {"id": FIXTURE_IDS[0], "keep": True})
+@pytest.mark.parametrize("old", ["agent", "human"])
+def test_a_label_file_from_before_says_agent_or_human_and_reads_as_manual(
+    dataset: Path, tmp_path: Path, old: str
+) -> None:
+    file = label_file(tmp_path, {"id": FIXTURE_IDS[0], "keep": True, "by": old})
     output_json(label(dataset, file))
     [record] = [json.loads(line) for line in (dataset / "labels.jsonl").read_text().splitlines()]
-    assert record["by"] == "agent"
+    assert record["by"] == "manual"
+
+
+def test_a_label_file_cannot_claim_the_judge_council(dataset: Path, tmp_path: Path) -> None:
+    file = label_file(tmp_path, {"id": FIXTURE_IDS[0], "keep": True, "by": "judge"})
+    result = label(dataset, file)
+    assert result.exit_code == 2
+    assert "judge" in result.stderr
+    assert not (dataset / "labels.jsonl").exists()
+
+
+def test_label_has_no_by_option(dataset: Path, tmp_path: Path) -> None:
+    file = label_file(tmp_path, {"id": FIXTURE_IDS[0], "keep": True})
+    result = label(dataset, file, "--by", "human")
+    assert result.exit_code == 2
 
 
 def test_label_last_label_wins_across_runs(dataset: Path, tmp_path: Path) -> None:
@@ -123,7 +143,7 @@ def test_label_rejects_unknown_ids(dataset: Path, tmp_path: Path) -> None:
     file = label_file(tmp_path, {"id": FIXTURE_IDS[0], "keep": True}, {"id": "nope", "keep": True})
     result = label(dataset, file)
     assert result.exit_code == 2
-    assert "1 labeled ids are not accepted rows of the dataset: 'nope'" in result.stderr
+    assert "1 labeled id is not an accepted row of the dataset: 'nope'" in result.stderr
     assert result.stdout == ""
     assert not (dataset / "labels.jsonl").exists()
 
@@ -181,13 +201,6 @@ def test_label_rejects_an_empty_file(dataset: Path, tmp_path: Path) -> None:
     assert "has no labels" in result.stderr
 
 
-def test_label_by_accepts_only_agent_or_human(dataset: Path, tmp_path: Path) -> None:
-    file = label_file(tmp_path, {"id": FIXTURE_IDS[0], "keep": True})
-    result = label(dataset, file, "--by", "judge")
-    assert result.exit_code == 2
-    assert "--by" in _ANSI.sub("", result.stderr)
-
-
 def test_label_needs_a_dataset_directory(tmp_path: Path) -> None:
     file = label_file(tmp_path, {"id": "a", "keep": True})
     result = label(tmp_path / "missing", file)
@@ -203,7 +216,7 @@ def sample(directory: Path, *extra: str) -> dict[str, Any]:
 
 
 def test_sample_shows_rows_in_brief(dataset: Path) -> None:
-    data = sample(dataset, "--n", "3")
+    data = sample(dataset, "--count", "3")
     assert data["dataset_dir"] == str(dataset.resolve())
     assert (data["split"], data["seed"], data["eligible"]) == ("all", 0, len(FIXTURE_IDS))
     assert len(data["rows"]) == 3
@@ -219,22 +232,25 @@ def test_sample_shows_rows_in_brief(dataset: Path) -> None:
         }
         assert row["label"] == "none"
     assert data["rows_file"] == str((dataset / "rows.jsonl").resolve())
-    expected = f"pup finetune dataset label {shlex.quote(str(dataset))} --file labels.jsonl"
-    assert data["next_command"] == expected
+    # Labels come from a file the reader writes, so labeling is a step, not next_command.
+    assert data["next_command"] is None
+    assert data["next_steps"][0]["command"] == (
+        f"pup finetune dataset label {shlex.quote(str(dataset))} --file <LABELS_FILE>"
+    )
 
 
 def test_sample_is_deterministic_for_a_seed(dataset: Path) -> None:
-    first = sample(dataset, "--n", "4", "--seed", "11")
-    assert sample(dataset, "--n", "4", "--seed", "11") == first
+    first = sample(dataset, "--count", "4", "--seed", "11")
+    assert sample(dataset, "--count", "4", "--seed", "11") == first
     assert (
-        sample(dataset, "--n", "100")["rows"]
-        == sample(dataset, "--n", "100", "--seed", "5")["rows"]
+        sample(dataset, "--count", "100")["rows"]
+        == sample(dataset, "--count", "100", "--seed", "5")["rows"]
     )
 
 
 def test_sample_of_one_split(dataset: Path) -> None:
     train = {row.id for row in DatasetDir(dataset).rows_for_split("train")}
-    data = sample(dataset, "--split", "train", "--n", "100")
+    data = sample(dataset, "--split", "train", "--count", "100")
     assert {row["id"] for row in data["rows"]} == train
     assert {row["split"] for row in data["rows"]} == {"train"}
 
@@ -242,9 +258,9 @@ def test_sample_of_one_split(dataset: Path) -> None:
 def test_sample_hides_dropped_rows_unless_asked(dataset: Path, tmp_path: Path) -> None:
     dropped = FIXTURE_IDS[0]
     output_json(label(dataset, label_file(tmp_path, {"id": dropped, "keep": False, "reason": "x"})))
-    shown = {row["id"] for row in sample(dataset, "--n", "100")["rows"]}
+    shown = {row["id"] for row in sample(dataset, "--count", "100")["rows"]}
     assert dropped not in shown
-    everything = sample(dataset, "--n", "100", "--include-dropped")["rows"]
+    everything = sample(dataset, "--count", "100", "--include-dropped")["rows"]
     assert {row["id"]: row["label"] for row in everything}[dropped] == "drop"
 
 
@@ -294,3 +310,40 @@ def test_label_and_sample_are_allowed_read_only(
     file = label_file(tmp_path, {"id": FIXTURE_IDS[0], "keep": False, "reason": "noise"})
     assert output_json(label(dataset, file))["dropped"] == 1
     assert sample(dataset, "--include-dropped")["eligible"] == len(FIXTURE_IDS)
+
+
+# --- closing summaries ------------------------------------------------------------------
+
+
+def test_label_and_sample_end_with_one_summary_line_of_their_result(
+    dataset: Path, tmp_path: Path
+) -> None:
+    from pup_finetune.cli._summary import summarize
+
+    file = label_file(
+        tmp_path,
+        {"id": FIXTURE_IDS[0], "keep": False, "reason": "synthetic drop"},
+        {"id": FIXTURE_IDS[1], "keep": True},
+    )
+    labeled = label(dataset, file)
+    data = output_json(labeled)
+    found = summarize("dataset label", data)
+    assert found is not None
+    assert labeled.stderr.splitlines()[-1] == found.line
+    assert found.line == (
+        f"recorded 2 labels from {file} (1 keep, 1 drop, 0 unchanged); the dataset keeps "
+        f"{len(FIXTURE_IDS) - 1} of {len(FIXTURE_IDS)} rows, 1 dropped"
+    )
+
+    sampled = invoke("sample", str(dataset), "--count", "3", "--split", "train")
+    data = output_json(sampled)
+    found = summarize("dataset sample", data)
+    assert found is not None
+    assert sampled.stderr.splitlines()[-1] == found.line
+    assert found.line.startswith(
+        f"sampled 3 of {data['eligible']} rows from the train split of {data['dataset_dir']} (seed "
+    )
+    assert "rows labeled drop left out" in found.line
+    # Never the rows' content: only counts and where the full rows are.
+    assert all(row["id"] not in found.line for row in data["rows"])
+    assert len(found.lines) <= 8 and "\n" not in found.line

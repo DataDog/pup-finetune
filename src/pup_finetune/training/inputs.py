@@ -26,7 +26,7 @@ from pathlib import Path
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.schema import TrainingRow
 from pup_finetune.data.split import SPLITS, SplitName
-from pup_finetune.errors import StateError, UsageError
+from pup_finetune.errors import SettingsConflict, UsageError
 from pup_finetune.providers import get_provider
 from pup_finetune.providers.base import ModelProfile, Provider
 from pup_finetune.rendering.base import Renderer
@@ -148,14 +148,14 @@ def load_run_inputs(
         )
     by_split = dataset.rows_by_split()  # read once: what is checked is what is rendered
     if rows_content_hash(by_split) != manifest.get("dataset_sha256"):
-        raise StateError(
+        raise SettingsConflict(
             f"the dataset in {dataset.path} changed since the run in {run_dir.path} was "
             "created, so it cannot continue on the same rows",
             hint=hint,
         )
     renderer = provider.renderer(profile)
     if renderer.identity() != manifest.get("rendering"):
-        raise StateError(
+        raise SettingsConflict(
             f"the {profile.alias} renderer changed since the run in {run_dir.path} was created",
             hint=hint,
         )

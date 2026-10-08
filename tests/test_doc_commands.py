@@ -6,11 +6,14 @@
 # Copyright 2026-present Datadog, Inc.
 """Every `pup finetune` command and flag the skill and the README mention exists in the CLI.
 
+So does every `--provider` and `--model` they pass, and both name each real provider.
+
 Also: the README names the Pup version `doctor` requires.
 """
 
 from __future__ import annotations
 
+import itertools
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -22,6 +25,8 @@ import typer.main
 
 from pup_finetune.cli import app
 from pup_finetune.datadog.pup import MIN_PUP_VERSION
+from pup_finetune.providers import get_provider, known_models
+from pup_finetune.runtime import Runtime
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCS = [REPO_ROOT / "skills" / "datadog-finetune" / "SKILL.md", REPO_ROOT / "README.md"]
@@ -31,7 +36,7 @@ SHELL_STOP = {">", ">>", "|", "&&", "||", ";", "#", "\\"}
 
 # Flags of other tools the docs use: `pup llm-obs spans search` and `get-content` (as
 # `pup --no-agent llm-obs spans search --help` lists them in pup 1.10.7), `pup extension
-# install` and `uv sync`.
+# install`, pup's own global flags and `uv sync`.
 OTHER_TOOL_FLAGS = {
     "--ml-app",
     "--span-kind",
@@ -47,7 +52,13 @@ OTHER_TOOL_FLAGS = {
     "--field",
     "--local",
     "--link",
+    "--description",
+    "--jq",
+    "--output",
+    "--read-only",
+    "--no-agent",
     "--all-extras",
+    "--extra",
 }
 
 _FENCE = re.compile(r"^```[^\n]*\n(.*?)^```", re.MULTILINE | re.DOTALL)
@@ -117,6 +128,14 @@ def every_option_name() -> set[str]:
     return names | option_names(command)
 
 
+def help_problems(snippet: str, words: list[str]) -> list[str]:
+    """What is wrong with ``pup finetune help <words>``: it must name a command, nothing more."""
+    _, path, rest = resolve(words)
+    if not path or rest:
+        return [f"{snippet!r}: pup finetune help names no command {words}"]
+    return []
+
+
 @pytest.mark.parametrize("doc", DOCS, ids=lambda path: path.name)
 def test_every_command_and_its_flags_exist(doc: Path) -> None:
     problems: list[str] = []
@@ -133,6 +152,9 @@ def test_every_command_and_its_flags_exist(doc: Path) -> None:
                 problems.append(f"{snippet!r}: {name} has no subcommand {rest[:1]}")
                 continue
             seen += 1
+            if path == ["help"] and rest and not rest[0].startswith("<"):
+                problems += help_problems(snippet, rest)
+                continue
             known = option_names(command)
             for word in rest:
                 flag = word.split("=", 1)[0]
@@ -150,6 +172,28 @@ def test_every_flag_mentioned_belongs_to_a_command(doc: Path) -> None:
     assert not unknown, f"{doc.name} mentions flags no command has: {unknown}"
 
 
+@pytest.mark.parametrize("doc", DOCS, ids=lambda path: path.name)
+def test_every_provider_and_model_passed_exists(doc: Path) -> None:
+    # A --model without --provider names its provider, as train infers it.
+    offered_by = {
+        alias: name for name, aliases in known_models(Runtime()).items() for alias in aliases
+    }
+    providers: set[str] = set()
+    for snippet in code_snippets(doc.read_text(encoding="utf-8")):
+        for words in invocations(snippet):
+            values = dict(itertools.pairwise(words))
+            name, model = values.get("--provider"), values.get("--model")
+            if model is not None and not model.startswith("<"):
+                name = name or offered_by.get(model)
+                assert name is not None, f"{doc.name}: no provider offers --model {model}"
+                get_provider(name, Runtime()).resolve_model(model)
+                providers.add(name)
+            elif name is not None:
+                get_provider(name, Runtime())
+                providers.add(name)
+    assert {"fireworks", "baseten"} <= providers, f"{doc.name} names only {providers}"
+
+
 def test_the_checker_catches_a_wrong_command_and_flag() -> None:
     command, path, rest = resolve(["dataset", "pull", "DIR", "--ml-app", "x"])
     assert rest == ["DIR", "--ml-app", "x"]
@@ -162,6 +206,9 @@ def test_the_checker_catches_a_wrong_command_and_flag() -> None:
     assert list(invocations("pup finetune dataset triage --print-template > rubric.md")) == [
         ["dataset", "triage", "--print-template"]
     ]
+    assert help_problems("s", ["dataset", "pull"]) == []
+    assert help_problems("s", ["dataset", "nope"]) != []
+    assert help_problems("s", ["nope"]) != []
 
 
 def test_the_readme_names_the_minimum_pup_version() -> None:

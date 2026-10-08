@@ -17,8 +17,9 @@ provider follows. ``tests/providers/contract`` holds the suites it passes.
   an id derived from the word itself. Assistant completions carry weight 1.
 - :class:`FakeBackend` and :class:`FakeSession` report losses from configurable per-epoch
   curves, enforce the 17-character checkpoint-name limit and the session-expiry rules of a
-  real provider, record what was saved, promoted and sampled, and can simulate a crash or a
-  failed promotion. Both optional capabilities (resume and promotion) are on by default and
+  real provider, record what was saved, promoted and sampled (and the weights each model id
+  holds, refusing other weights under a taken id), and can simulate a crash or a failed
+  promotion. Both optional capabilities (resume and promotion) are on by default and
   can be turned off, to exercise the paths of providers without them.
 - :class:`FakeSampler` answers a fixed generic reply from the base model. A tuned checkpoint
   answers the reference when an optional teacher table has the prompt, else what the session
@@ -35,6 +36,7 @@ listed on :class:`FakeOptions`; string values are decoded as JSON.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import re
@@ -45,16 +47,17 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, NoReturn
+from pathlib import Path
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Final, Literal, NoReturn
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt
 
-from pup_finetune.errors import FinetuneError, UsageError
+from pup_finetune.errors import FinetuneError, StateError, UsageError
 from pup_finetune.providers.base import (
     MODEL_ID_PATTERN,
+    OFFLINE_BILLING,
     AdamConfig,
-    Check,
     CheckpointRef,
     DeploymentRequest,
     DeployOptions,
@@ -63,8 +66,12 @@ from pup_finetune.providers.base import (
     LoraConfig,
     ModelProfile,
     ModelRef,
+    SamplingUsage,
     SmokeTest,
     StepMetrics,
+    TrainingUsage,
+    sampling_usage_text,
+    training_usage_text,
 )
 from pup_finetune.providers.options import parse_options
 from pup_finetune.rendering.base import (
@@ -91,6 +98,7 @@ if TYPE_CHECKING:
 __all__ = [
     "BASE_ANSWER",
     "FAKE_PROFILE",
+    "INFERENCE_URL",
     "MAX_CHECKPOINT_NAME_LEN",
     "PROVIDER_NAME",
     "TUNED_FALLBACK_ANSWER",
@@ -106,6 +114,9 @@ __all__ = [
 
 PROVIDER_NAME: Final = "fake"
 MAX_CHECKPOINT_NAME_LEN: Final = 17
+INFERENCE_URL: Final = "http://fake-inference.invalid/v1"
+"""The base URL a fake deployment reports: a reserved name that never resolves, since the
+fake serves nothing over the network (its smoke test answers in memory)."""
 BASE_ANSWER: Final = "I can help with that."
 """What the base model (a sampler without a checkpoint) answers to every prompt."""
 TUNED_FALLBACK_ANSWER: Final = "Here is the answer you need."
@@ -444,7 +455,10 @@ class FakeOptions(BaseModel):
     ``fail_at_step`` makes the ``forward_backward`` of that global step (1-based) fail with
     :class:`FakeCrash` once per lineage: only a fresh session crashes, so a session resumed
     from a checkpoint (with the same options) trains on past that step; ``prefix_stable``
-    configures the renderer.
+    configures the renderer; ``max_seq_len`` caps the profile's context, as the real
+    providers' option does (``train --max-seq-len``); ``hold_file`` holds every pending
+    result while that file exists, so a test can keep a run training for as long as it
+    needs and then let it finish (by removing the file).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
@@ -458,6 +472,13 @@ class FakeOptions(BaseModel):
     step_delay_s: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     fail_at_step: PositiveInt | None = None
     prefix_stable: bool = True
+    max_seq_len: PositiveInt | None = None
+    hold_file: str | None = None
+
+    @property
+    def hold(self) -> Path | None:
+        """The file whose existence holds every pending result, if any."""
+        return None if self.hold_file is None else Path(self.hold_file)
 
     @classmethod
     def parse(cls, options: Mapping[str, Any]) -> FakeOptions:
@@ -471,17 +492,33 @@ class FakeOptions(BaseModel):
 
 
 class FakeCrash(FinetuneError):
-    """The simulated crash ``fail_at_step`` asks for."""
+    """The simulated crash ``fail_at_step`` asks for: a provider failure, as the error line
+    reports it."""
+
+    error_code: ClassVar[str] = "external"
+
+
+HOLD_POLL_S = 0.02
+"""How often a held result (``hold_file``) checks whether its file is gone."""
 
 
 class _Pending[T]:
-    """A result computed at call time and released ``delay_s`` seconds later."""
+    """A result computed at call time and released ``delay_s`` seconds later, and not
+    before ``hold`` (a file) is gone."""
 
-    def __init__(self, outcome: Callable[[], T], delay_s: float) -> None:
+    def __init__(self, outcome: Callable[[], T], delay_s: float, hold: Path | None = None) -> None:
         self._outcome = outcome
         self._ready_at = time.monotonic() + delay_s
+        self._hold = hold
 
     def result(self, timeout: float | None = None) -> T:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while self._hold is not None and self._hold.exists():
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("the fake result is held (hold_file exists)")
+            time.sleep(HOLD_POLL_S)
+        if deadline is not None:
+            timeout = max(deadline - time.monotonic(), 0.0)
         remaining = self._ready_at - time.monotonic()
         if remaining > 0:
             if timeout is not None and timeout < remaining:
@@ -598,6 +635,7 @@ class FakeBackend:
         self.closed: list[str] = []
         self.saved: list[CheckpointRef] = []
         self.promoted: list[ModelRef] = []
+        self.models: dict[str, int | None] = {}
         self.sampled: list[CheckpointRef | None] = []
         self._live: set[str] = set()
         self._prefix = uuid.uuid4().hex[:8]
@@ -724,7 +762,7 @@ class FakeSession:
         if step == self._options.fail_at_step and not self._resumed:
             self._crashed = True
             crash = FakeCrash(f"simulated crash at step {step} (fail_at_step)")
-            return _Pending(_raises(crash), self._options.step_delay_s)
+            return _Pending(_raises(crash), self._options.step_delay_s, self._options.hold)
         for example in batch:
             for key in self._observations(example):
                 state.policy[key] = state.policy.get(key, 0) + 1
@@ -739,7 +777,7 @@ class FakeSession:
         self._require_open()
         self._state.step += 1
         self._state.trained = self._state.epoch
-        return _Pending(lambda: None, self._options.step_delay_s)
+        return _Pending(lambda: None, self._options.step_delay_s, self._options.hold)
 
     def save_training_checkpoint(self, name: str, *, epoch: int, step: int) -> CheckpointRef:
         self._require_open()
@@ -766,12 +804,13 @@ class FakeSession:
     def promote(
         self, ckpt: CheckpointRef, model_id: str, *, adopt_since: datetime | None = None
     ) -> ModelRef:
-        # The fake never refuses a model id it promoted before, so it has nothing to adopt.
+        # The fake promotes the same weights to a model id again as the model it promoted them
+        # to before, so it has nothing to adopt; other weights under a taken id are refused.
         del adopt_since
         self._require_open()
         if not self._backend.supports_promotion:
             raise UsageError("this fake backend is configured without promotion")
-        self._require_live_sampler(ckpt, "promote")
+        weights = self._require_live_sampler(ckpt, "promote").trained
         if not MODEL_ID_PATTERN.fullmatch(model_id):
             raise UsageError(
                 f"invalid model id {model_id!r}",
@@ -782,6 +821,12 @@ class FakeSession:
             self._backend.fail_promotions -= 1
             error = self._backend.promotion_error
             raise error or FakeCrash(f"simulated failure promoting {ckpt.name!r} (fail_promotions)")
+        held = self._backend.models.setdefault(model_id, weights)
+        if held != weights:
+            raise StateError(
+                f"the fake model {model_id!r} already holds other weights, so "
+                f"{ckpt.name!r} cannot be promoted to it"
+            )
         model = ModelRef(provider=PROVIDER_NAME, model_id=model_id, uri=f"fake://models/{model_id}")
         self._backend.promoted.append(model)
         return model
@@ -839,7 +884,7 @@ class FakeSession:
         weight = sum(sum(example.weights) for example in batch)
         tokens = sum(example.num_tokens for example in batch)
         metrics = StepMetrics(loss_sum=mean * weight, weight=weight, tokens=tokens)
-        return _Pending(lambda: metrics, self._options.step_delay_s)
+        return _Pending(lambda: metrics, self._options.step_delay_s, self._options.hold)
 
     def _save(
         self, kind: Literal["training", "sampler"], name: str, *, epoch: int, step: int
@@ -1054,9 +1099,6 @@ class FakeProvider:
     def name(self) -> str:
         return PROVIDER_NAME
 
-    def check(self) -> list[Check]:
-        return [Check("fake provider", True, "offline; needs no credentials or network")]
-
     def models(self) -> list[ModelProfile]:
         return [FAKE_PROFILE]
 
@@ -1076,7 +1118,24 @@ class FakeProvider:
         return FakeRenderer(profile, prefix_stable=self.options.prefix_stable)
 
     def training_profile(self, profile: ModelProfile) -> ModelProfile:
-        return profile  # no fake option narrows a profile
+        """``profile`` with its context cut to the ``max_seq_len`` option, if one is set."""
+        self._own(profile)
+        cap = self.options.max_seq_len
+        if cap is None or cap == profile.max_seq_len:
+            return profile
+        if cap > profile.max_seq_len:
+            raise UsageError(
+                f"the max_seq_len provider option of {cap} is over the "
+                f"{profile.max_seq_len}-token context of {profile.alias}",
+                hint=f"pass --max-seq-len N with N at most {profile.max_seq_len}",
+            )
+        return dataclasses.replace(profile, max_seq_len=cap)
+
+    def training_billing(self, usage: TrainingUsage) -> str:
+        return f"{OFFLINE_BILLING}: it would train on {training_usage_text(usage)}"
+
+    def sampling_billing(self, usage: SamplingUsage) -> str:
+        return f"{OFFLINE_BILLING}: {sampling_usage_text(usage)}"
 
     def backend(self) -> FakeBackend:
         return self._backend
@@ -1114,6 +1173,7 @@ class FakeProvider:
             deployment_id=options.deployment_id,
             model_id=model.model_id,
             inference_model=model.model_id,
+            url=INFERENCE_URL,
             name=request.name,
             shape=request.shape,
         )

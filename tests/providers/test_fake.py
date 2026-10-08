@@ -578,7 +578,6 @@ def test_the_profile() -> None:
     assert FAKE_PROFILE.tokenizer_model == "fake/tokenizer"
     assert FAKE_PROFILE.tokenizer_revision == "0" * 40
     assert (FAKE_PROFILE.renderer, FAKE_PROFILE.max_seq_len) == ("fake", 4096)
-    assert all(check.ok for check in provider.check())
     # A derived fake profile is still the fake's; another provider's is refused.
     derived = dataclasses.replace(FAKE_PROFILE, max_seq_len=64)
     provider.preflight(derived)

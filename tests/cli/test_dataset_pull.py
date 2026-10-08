@@ -23,6 +23,7 @@ from pup_finetune.cli import app
 from pup_finetune.cli import dataset as dataset_cli
 from pup_finetune.datadog.pup import Pup
 from pup_finetune.datadog.spans import EXPORT_PATH
+from pup_finetune.display import display_path
 from tests.fakes.llmobs import FakeExportApi, fixture_pages, page, span_item
 from tests.fakes.pup import FakePup
 
@@ -56,6 +57,12 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
     fake = FakeClock(NOW_MS)
     monkeypatch.setattr(dataset_cli, "clock", fake)
     return fake
+
+
+@pytest.fixture(autouse=True)
+def _in_tmp_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run in an empty directory: the preview's pull command names a new one under it."""
+    monkeypatch.chdir(tmp_path)
 
 
 @pytest.fixture
@@ -180,9 +187,11 @@ def test_preview_reports_counts_samples_and_the_pull_command(api: FakeExportApi)
     assert errored["span_id"] == "synthetic-span-0201"
     assert data["stats"]["stopped"] == "exhausted"
     assert data["stats"]["pages_fetched"] == 2
+    # A new directory under ./datasets, and only the flags given (now-7d and now are the
+    # defaults).
     assert data["next_command"] == (
-        "pup finetune dataset pull <DIR> --ml-app synthetic-trip-planner --span-name chat "
-        "--tag env:synthetic --from now-7d --to now"
+        "pup finetune dataset pull ./datasets/synthetic-trip-planner --ml-app "
+        "synthetic-trip-planner --span-name chat --tag env:synthetic"
     )
     assert api.requests[0]["data"]["attributes"]["options"] == {"include_attachments": True}
 
@@ -269,10 +278,8 @@ def test_preview_passes_every_non_default_flag_to_the_pull_command(api: FakeExpo
     data = output_json(preview(*flags))
     assert data["query"]["filter"]["from"] == 1767225600000
     assert data["query"]["filter"]["to"] == NOW_MS - DAY_MS
-    command = data["next_command"]
-    assert command.startswith("pup finetune dataset pull <DIR> ")
-    words = shlex.split(command.replace("<DIR>", "DIR"))
-    assert words[:5] == ["pup", "finetune", "dataset", "pull", "DIR"]
+    words = shlex.split(data["next_command"])
+    assert words[:5] == ["pup", "finetune", "dataset", "pull", "./datasets/synthetic-trip-planner"]
     reparsed = dict(zip(words[5::2], words[6::2], strict=True))
     assert reparsed == {
         "--ml-app": "synthetic-trip-planner",
@@ -285,6 +292,25 @@ def test_preview_passes_every_non_default_flag_to_the_pull_command(api: FakeExpo
         "--validation-fraction": "0.2",
         "--test-fraction": "0.0",
     }
+
+
+def test_preview_names_a_new_directory_for_the_ml_app(api: FakeExportApi, tmp_path: Path) -> None:
+    (tmp_path / "datasets" / "synthetic-trip-planner").mkdir(parents=True)
+    (tmp_path / "datasets" / "synthetic-trip-planner-2").mkdir()
+    data = output_json(preview())
+    assert shlex.split(data["next_command"])[4] == "./datasets/synthetic-trip-planner-3"
+    result = invoke("preview", "--ml-app", " Trip Planner/EU ")
+    assert shlex.split(output_json(result)["next_command"])[4] == "./datasets/trip-planner-eu"
+
+
+def test_preview_s_pull_command_runs_as_written(api: FakeExportApi) -> None:
+    data = output_json(preview("--tag", "env:synthetic", "--target-count", "3"))
+    words = shlex.split(data["next_command"])
+    pulled = invoke(*words[3:])
+    assert pulled.exit_code == 0, pulled.stderr
+    # Relative to the current directory, which holds it.
+    assert output_json(pulled)["dataset_dir"] == str(Path(words[4]))
+    assert output_json(pulled)["accepted"] == 3
 
 
 def test_max_candidates_equal_to_every_span_is_not_a_short_read(api: FakeExportApi) -> None:
@@ -302,6 +328,49 @@ def test_preview_warns_when_no_span_matched(use_pup: UsePup) -> None:
         "no LLM spans matched; check --ml-app, --span-name, --query, --tag and the time "
         "range (--from, --to)"
     )
+
+
+def test_a_preview_that_accepts_no_row_steps_to_widen_it_instead_of_a_pull(
+    use_pup: UsePup,
+) -> None:
+    serve(use_pup, [page([])])
+    result = preview("--span-name", "chat")
+    assert result.exit_code == 0, result.stderr
+    data = output_json(result)
+    assert data["accepted"] == 0
+    assert data["next_command"] is None
+    assert [step["command"] for step in data["next_steps"]] == [
+        "pup finetune dataset preview --ml-app synthetic-trip-planner --span-name chat --from 30d",
+        "pup finetune dataset preview --ml-app <ML_APP>",
+    ]
+    assert "no LLM span matched" in data["next_steps"][0]["why"]
+    assert "--span-name, --query and --tag" in data["next_steps"][1]["why"]
+    # Only why nothing was accepted; empty splits follow from that alone.
+    assert data["warnings"] == [
+        "no LLM spans matched; check --ml-app, --span-name, --query, --tag and the time "
+        "range (--from, --to)"
+    ]
+    assert "split is empty" not in result.stderr
+    # The widened preview runs as written.
+    widened = invoke(*shlex.split(data["next_steps"][0]["command"])[3:])
+    assert widened.exit_code == 0, widened.stderr
+
+
+def test_a_preview_whose_spans_all_errored_steps_to_include_errors(use_pup: UsePup) -> None:
+    errored = conversation("synthetic-span-1", "synthetic-trace-1", "Q?", "A.", status="error")
+    serve(use_pup, [page([errored])])
+    data = output_json(preview("--from", "60d"))
+    assert (data["accepted"], data["next_command"]) == (0, None)
+    commands = [step["command"] for step in data["next_steps"]]
+    assert commands[0] == (
+        "pup finetune dataset preview --ml-app synthetic-trip-planner --from 60d --include-errors"
+    )
+    # 60 days is past the 30 a widened preview suggests, so the earlier --from is the user's.
+    assert (
+        commands[1] == "pup finetune dataset preview --ml-app synthetic-trip-planner --from <FROM>"
+    )
+    assert "every span read was excluded" in data["next_steps"][1]["why"]
+    assert not any("split" in warning for warning in data["warnings"])
 
 
 def test_preview_warns_about_unreadable_spans_and_excludes_them(use_pup: UsePup) -> None:
@@ -428,7 +497,7 @@ def test_pull_end_to_end(api: FakeExportApi, tmp_path: Path) -> None:
     result = pull(target, "--tag", "env:synthetic")
     assert result.exit_code == 0, result.stderr
     data = output_json(result)
-    assert data["dataset_dir"] == str(target.resolve())
+    assert data["dataset_dir"] == display_path(target)
     assert (data["accepted"], data["excluded"]) == (FIXTURE_ROWS, FIXTURE_EXCLUSIONS)
     assert data["excluded_by_code"] == {
         "no_assistant_message": 1,
@@ -440,7 +509,11 @@ def test_pull_end_to_end(api: FakeExportApi, tmp_path: Path) -> None:
     assert data["pull"]["matched_spans"] == 10
     assert data["pull"]["added"] == FIXTURE_ROWS
     assert data["pull"]["pages_fetched"] == 2
-    assert data["next_command"] == f"pup finetune dataset show {shlex.quote(str(target))}"
+    assert (
+        data["next_command"]
+        == f"pup finetune dataset sample {shlex.quote(display_path(target))} --count 20"
+    )
+    assert data["next_steps"][0]["command"].endswith(" --file <LABELS_FILE>")
     assert "review" in data["hint"]
 
     settings = json.loads((target / "settings.json").read_text())
@@ -482,11 +555,12 @@ def test_an_interrupted_pull_resumes_without_refetching(api: FakeExportApi, tmp_
     assert failed.exit_code == 1
     assert "502 Bad Gateway" in failed.stderr
     assert f"pages read so far are cached in {target / 'raw'}" in failed.stderr
-    assert "re-run the same command to resume" in failed.stderr
+    # The hint's command takes no flag: the directory's frozen settings fill them in.
+    assert "`pup finetune dataset pull ds` resumes" in failed.stderr
     assert api.cursors == [None, PAGE_2_CURSOR]
     assert (target / "raw" / "page-0001.json").is_file()
 
-    result = pull(target)
+    result = invoke("pull", "ds")
     assert result.exit_code == 0, result.stderr
     # Page 1 came from the cache; only page 2 was fetched again.
     assert api.cursors == [None, PAGE_2_CURSOR, PAGE_2_CURSOR]
@@ -583,8 +657,9 @@ def test_pulling_with_other_settings_is_rejected(
     assert pull(target).exit_code == 0
     requests = len(api.requests)
     result = pull(target, *changed)
-    assert result.exit_code == 1
-    assert "settings changed" in result.stderr
+    assert result.exit_code == 2
+    # The error names the flag and the value the directory froze.
+    assert result.stderr.startswith(f"Error [settings_conflict]: ds froze {changed[0]} ")
     # Rejected before anything was fetched.
     assert len(api.requests) == requests
 
@@ -604,15 +679,38 @@ def test_pull_into_an_imported_dataset_is_rejected(api: FakeExportApi, tmp_path:
     target = tmp_path / "ds"
     assert invoke("import", str(target), "--file", str(rows)).exit_code == 0
     result = pull(target)
-    assert result.exit_code == 1
-    assert "settings changed" in result.stderr
+    assert result.exit_code == 2
+    # The cause is in the message, not only in the hint.
+    assert result.stderr.startswith(
+        "Error [settings_conflict]: ds was built by `dataset import`; pull into a new DIR\n"
+    )
     assert api.requests == []
 
 
-def test_a_non_ascii_digit_time_is_passed_through_as_text(api: FakeExportApi) -> None:
-    result = preview("--from", "²")
-    assert result.exit_code == 0, result.stderr
-    assert output_json(result)["query"]["filter"]["from"] == "²"
+@pytest.mark.parametrize("bad", ["yesterday", "²", "2026-13-01", "last week"])
+def test_a_time_that_is_no_accepted_form_is_a_usage_error_before_anything_is_frozen(
+    api: FakeExportApi, tmp_path: Path, bad: str
+) -> None:
+    for result in (preview("--from", bad), pull(tmp_path / "ds", "--from", bad)):
+        assert result.exit_code == 2
+        assert result.stderr.startswith(f"Error [usage]: cannot read --from {bad!r}\n")
+        assert "ISO 8601" in result.stderr and "7d, 24h" in result.stderr
+        assert "resume" not in result.stderr
+    assert api.requests == []
+    assert not (tmp_path / "ds").exists()  # nothing frozen to poison the directory
+
+
+@pytest.mark.parametrize("bare", ["1728000000", "20261001", "7"])
+def test_a_bare_number_too_small_for_epoch_ms_is_refused_before_anything_is_frozen(
+    api: FakeExportApi, tmp_path: Path, bare: str
+) -> None:
+    for result in (preview("--from", bare), pull(tmp_path / "ds", "--to", bare)):
+        assert result.exit_code == 2
+        assert "Error [usage]: --" in result.stderr
+        assert "too small for epoch milliseconds" in result.stderr
+        assert "Hint: " in result.stderr
+    assert api.requests == []
+    assert not (tmp_path / "ds").exists()
 
 
 # --- the time range -------------------------------------------------------------------------
@@ -682,12 +780,146 @@ def test_absolute_times_are_sent_unchanged(api: FakeExportApi, tmp_path: Path) -
     assert (time_range["from_utc"], time_range["to_utc"]) == (None, "2025-12-31T23:58:20.000Z")
 
 
-@pytest.mark.parametrize("bad", ["now-7", "now-7y", "now-d", "now+1h", "now - 7d", "NOW"])
+@pytest.mark.parametrize(
+    "bad", ["now-7", "now-7y", "now-d", "now+1h", "now-1M", "7y", "3 fortnights"]
+)
 def test_an_unreadable_relative_time_is_a_usage_error(
     api: FakeExportApi, tmp_path: Path, bad: str
 ) -> None:
     for result in (preview("--from", bad), pull(tmp_path / "ds", "--to", bad)):
         assert result.exit_code == 2
-        assert "cannot read the relative time" in result.stderr
+        assert "Error [usage]: cannot read --" in result.stderr
     assert api.requests == []
     assert not (tmp_path / "ds").exists()
+
+
+# --- flagless reruns ------------------------------------------------------------------------
+
+
+def test_a_rerun_needs_no_flag_and_reads_the_window_the_first_pull_froze(
+    api: FakeExportApi, tmp_path: Path, clock: FakeClock
+) -> None:
+    first = pull(tmp_path / "ds", "--from", "2d", "--span-name", "chat", "--include-errors")
+    assert first.exit_code == 0, first.stderr
+    window = (NOW_MS - 2 * DAY_MS, NOW_MS)
+    assert output_json(first)["window"] == {
+        "from": "2025-12-30T00:00:00.000Z",
+        "to": "2026-01-01T00:00:00.000Z",
+        "frozen": False,
+    }
+    # pup's `2d` is frozen as the expression `now-2d`.
+    source = json.loads((tmp_path / "ds" / "settings.json").read_text())["source"]
+    assert source["from_expr"] == "now-2d"
+
+    clock.now_ms += 3 * DAY_MS
+    rerun = invoke("pull", "ds")  # run from tmp_path: the directory as typed
+    assert rerun.exit_code == 0, rerun.stderr
+    data = output_json(rerun)
+    assert data["window"] == {**output_json(first)["window"], "frozen": True}
+    assert "reading the window the first pull froze: 2025-12-30T00:00:00.000Z to " in rerun.stderr
+    assert "ds has frozen settings: using its --ml-app, --span-name, --from, --include-errors" in (
+        rerun.stderr
+    )
+    filters = [body["data"]["attributes"]["filter"] for body in api.requests]
+    assert {f["span_name"] for f in filters} == {"chat"}
+    assert sent_windows(api)[-1] == window
+    assert data["pipeline"]["rows"]["accepted"] == data["accepted"]
+    # `now-2d` and `2d` are the same expression, so the window is the frozen one too.
+    same = pull(tmp_path / "ds", "--from", "now-2d", "--span-name", "chat", "--include-errors")
+    assert same.exit_code == 0, same.stderr
+    assert output_json(same)["window"]["frozen"] is True
+
+
+def test_a_rerun_with_another_value_than_the_frozen_one_still_fails(
+    api: FakeExportApi, tmp_path: Path
+) -> None:
+    assert pull(tmp_path / "ds", "--span-name", "chat").exit_code == 0
+    requests = len(api.requests)
+    result = invoke("pull", "ds", "--span-name", "other", "--from", "now-1d")
+    assert result.exit_code == 2
+    assert result.stderr == (
+        "Error [settings_conflict]: ds froze --span-name chat, --from 7d on its first "
+        "pull\nHint: leave those flags out to use the frozen values, or pull into a new "
+        "directory for other settings\n"
+    )
+    assert len(api.requests) == requests
+    # The frozen value given again, in another form, is no conflict.
+    assert invoke("pull", "ds", "--span-name", "chat", "--from", "7d").exit_code == 0
+
+
+def test_a_flagless_pull_into_an_imported_dataset_is_a_settings_conflict(
+    api: FakeExportApi, tmp_path: Path
+) -> None:
+    rows = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
+    assert invoke("import", "ds", "--file", str(rows)).exit_code == 0
+    result = invoke("pull", "ds")
+    assert result.exit_code == 2
+    assert result.stderr.startswith(
+        "Error [settings_conflict]: ds was built by `dataset import`; pull into a new DIR\n"
+    )
+    assert api.requests == []
+
+
+def test_tags_given_in_another_order_are_the_frozen_ones(
+    api: FakeExportApi, tmp_path: Path
+) -> None:
+    first = pull(tmp_path / "ds", "--tag", "env:synthetic", "--tag", "team:trips")
+    assert first.exit_code == 0, first.stderr
+    again = invoke("pull", "ds", "--tag", "team:trips", "--tag", "env:synthetic")
+    assert again.exit_code == 0, again.stderr
+    assert output_json(again)["window"]["frozen"] is True
+
+
+def test_the_default_from_frozen_then_given_as_7d_later_reads_the_same_window(
+    api: FakeExportApi, tmp_path: Path, clock: FakeClock
+) -> None:
+    first = pull(tmp_path / "ds")  # the default --from, 7d, frozen as now-7d
+    assert first.exit_code == 0, first.stderr
+    source = json.loads((tmp_path / "ds" / "settings.json").read_text())["source"]
+    assert source["from_expr"] == "now-7d"
+    clock.now_ms += 2 * DAY_MS
+    rerun = invoke("pull", "ds", "--from", "7d")
+    assert rerun.exit_code == 0, rerun.stderr
+    data = output_json(rerun)
+    assert data["window"] == {**output_json(first)["window"], "frozen": True}
+    assert sent_windows(api)[-1] == (WEEK_AGO_MS, NOW_MS)
+    assert "using its --ml-app\n" in rerun.stderr  # not --from: 7d is the frozen now-7d
+
+
+def test_the_first_pull_into_a_directory_needs_ml_app(api: FakeExportApi, tmp_path: Path) -> None:
+    result = invoke("pull", "ds")
+    assert result.exit_code == 2
+    assert result.stderr.startswith(
+        "Error [usage]: dataset pull needs --ml-app (ds has no settings yet)\n"
+    )
+    assert api.requests == []
+    assert not (tmp_path / "ds").exists()
+
+
+def test_a_pull_stopped_by_max_candidates_steps_to_a_flagless_one_reading_further(
+    api: FakeExportApi, tmp_path: Path
+) -> None:
+    result = pull(tmp_path / "ds", "--max-candidates", "3")
+    assert result.exit_code == 0, result.stderr
+    step = output_json(result)["next_steps"][0]
+    assert step["command"] == "pup finetune dataset pull ds --max-candidates 6"
+    further = invoke(*shlex.split(step["command"])[3:])
+    assert further.exit_code == 0, further.stderr
+
+
+def test_preview_samples_show_the_first_user_and_final_assistant_messages(
+    use_pup: UsePup,
+) -> None:
+    long_question = "Synthetic question " + "x" * 400
+    serve(use_pup, [page([conversation("s1", "t1", long_question, "Synthetic answer.")])])
+    (sample,) = output_json(preview())["sample_accepted"]
+    assert set(sample) == {
+        "id",
+        "turns",
+        "tools_used",
+        "first_user_message",
+        "final_assistant_message",
+    }
+    assert sample["first_user_message"].startswith("Synthetic question x")
+    assert len(sample["first_user_message"]) == 300
+    assert sample["final_assistant_message"] == "Synthetic answer."

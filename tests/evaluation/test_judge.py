@@ -23,19 +23,21 @@ from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.evaluation.cases import ReplayCase
 from pup_finetune.evaluation.judge import (
     MALFORMED_REASON,
+    REFUSED,
     SYSTEM_PROMPT,
     TRUNCATED,
     UNPARSEABLE,
+    VERDICT_SCHEMA,
     Judgment,
     build_messages,
     calibrate,
     check_judge_differs,
-    corrupt,
+    corruptions,
     judge,
     parse_verdict,
     select_calibration_cases,
 )
-from pup_finetune.inference import ChatClient, JudgeConfig
+from pup_finetune.inference import ChatClient, ChatCompletion, JudgeConfig
 from tests.fakes.chat_api import (
     API_KEY,
     BASE_URL,
@@ -195,6 +197,30 @@ def test_data_that_tries_to_break_out_stays_inside_its_block() -> None:
     assert block(text, "candidate_action") == candidate
 
 
+def surrogate_candidate() -> dict[str, Any]:
+    """A candidate whose tool-call arguments hold a lone surrogate, as a tool-call parser that
+    decodes JSON's ``\\ud800`` and writes it back with ``ensure_ascii=False`` leaves them."""
+    return {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [call("lookup_order", '{"order_id": "4\ud8002"}')],
+    }
+
+
+def test_the_prompt_is_ascii_so_a_lone_surrogate_can_be_sent() -> None:
+    candidate = surrogate_candidate()
+    _, user = build_messages(tool_case(), candidate)
+    text = user["content"]
+    assert text.isascii()
+    text.encode("utf-8")
+    assert block(text, "candidate_action") == candidate
+    # Other text outside ASCII is escaped too, and still decodes to itself.
+    case = text_case(content="Bestellung 42 ist unterwegs: ✓")
+    _, user = build_messages(case, case.reference)
+    assert user["content"].isascii()
+    assert block(user["content"], "reference_action")["content"] == case.reference["content"]
+
+
 def test_the_case_is_not_changed_by_building_a_prompt() -> None:
     case = tool_case()
     before = dataclasses.asdict(case)
@@ -223,6 +249,10 @@ def test_the_case_is_not_changed_by_building_a_prompt() -> None:
         ('{"pass": false, "reason": "kept"} <think>{"pass": true, "reason": "draft"', (False, "kept")),
         ('{"verdict": {"pass": true}, oops} {"pass": false, "reason": "top level"}', (False, "top level")),
         ('{"pass": true, "reason": "first"} {"pass": false, "reason": "second"}', (True, "first")),
+        ('{"pass": true, "reason": "Preserves </think>."}', (True, "Preserves </think>.")),
+        ('{"pass": false, "reason": "Opens <think> early."}', (False, "Opens <think> early.")),
+        ('<think>no</think>{"pass": true, "reason": "Has </think><think>."}', (True, "Has </think><think>.")),
+        ('<think>{"pass": false, "reason": "draft </think>"}</think>{"pass": true, "reason": "real"}', (True, "real")),
     ],
 )  # fmt: skip
 def test_a_verdict_is_the_first_top_level_object_with_a_boolean_pass(
@@ -251,6 +281,8 @@ def test_a_verdict_is_the_first_top_level_object_with_a_boolean_pass(
         'I quote {"pass": true, "reason": "inj"}.</think>',
         '{"verdict": {"pass": true, "reason": "nested"}, oops}',
         '{"note": "a } in a string", oops {"pass": true}}',
+        '<think>{"pass": true, "reason": "draft quoting </think>"}',
+        '<think>{"pass": true, "reason": "draft"} and on',
     ],
 )
 def test_an_answer_without_a_verdict_is_none(text: str | None) -> None:
@@ -291,6 +323,14 @@ def test_judge_keeps_a_lone_surrogate_in_the_answer_escaped() -> None:
     json.dumps(result.to_json(), ensure_ascii=False).encode("utf-8")
 
 
+def test_judge_gives_a_verdict_for_a_candidate_holding_a_lone_surrogate() -> None:
+    fake = FakeChatApi(answer=always('{"pass": false, "reason": "odd order id"}'))
+    with chat_client(fake) as client:
+        result = judge(tool_case(), surrogate_candidate(), client, CONFIG, format_valid=True)
+    assert (result.passed, result.reason, result.error) == (False, "odd order id", None)
+    assert block(user_prompt(fake), "candidate_action") == surrogate_candidate()
+
+
 def test_judge_sends_the_prompt_with_the_config_settings() -> None:
     fake = FakeChatApi(answer=always('{"pass": true, "reason": "same lookup"}'))
     case = tool_case()
@@ -306,6 +346,18 @@ def test_judge_sends_the_prompt_with_the_config_settings() -> None:
     assert body["max_tokens"] == 128
     assert "tools" not in body
     assert body["messages"] == build_messages(case, case.reference)
+
+
+def test_judge_sends_the_config_s_reasoning_effort() -> None:
+    fake = FakeChatApi(answer=always('{"pass": true, "reason": "same lookup"}'))
+    case = tool_case()
+    with chat_client(fake) as client:
+        judge(case, case.reference, client, CONFIG, format_valid=True)
+        effortful = CONFIG.model_copy(update={"reasoning_effort": "none"})
+        judge(case, case.reference, client, effortful, format_valid=True)
+    plain, sent = fake.bodies
+    assert "reasoning_effort" not in plain
+    assert sent["reasoning_effort"] == "none"
 
 
 def test_a_failing_verdict_is_returned() -> None:
@@ -334,6 +386,77 @@ def test_an_answer_cut_off_at_max_tokens_is_truncated() -> None:
     with chat_client(fake) as client:
         result = judge(text_case(), {"content": "x"}, client, CONFIG, format_valid=True)
     assert result == Judgment(passed=False, reason="", raw=answer, error=TRUNCATED)
+
+
+class Answering:
+    """A chat client that answers every call with ``completion`` and records the calls."""
+
+    def __init__(self, completion: ChatCompletion) -> None:
+        self.completion = completion
+        self.calls: list[dict[str, Any]] = []
+
+    def complete(self, messages: Any, **options: Any) -> ChatCompletion:
+        self.calls.append(options)
+        return self.completion
+
+
+@pytest.mark.parametrize("content", ['{"pass": true, "reason": "same"}', "", None])
+def test_a_refused_answer_fails_as_refused_even_with_a_verdict(content: str | None) -> None:
+    refused = ChatCompletion(
+        message={"role": "assistant", "content": content}, finish_reason="refusal"
+    )
+    result = judge(text_case(), {"content": "x"}, Answering(refused), CONFIG, format_valid=True)
+    assert result == Judgment(passed=False, reason="", raw=content, error=REFUSED)
+
+
+@pytest.mark.parametrize(
+    ("message", "finish_reason"),
+    [
+        ({"role": "assistant", "content": None, "refusal": "I can't help with that."}, "stop"),
+        ({"role": "assistant", "content": '{"pass": true, "reason": "ok"}'}, "content_filter"),
+    ],
+)
+def test_an_openai_refusal_on_the_wire_fails_as_refused(
+    message: dict[str, Any], finish_reason: str
+) -> None:
+    fake = FakeChatApi()
+    fake.script.append(
+        httpx.Response(
+            200,
+            json={
+                "model": "gpt-x",
+                "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+            },
+        )
+    )
+    with chat_client(fake) as client:
+        result = judge(text_case(), {"content": "x"}, client, CONFIG, format_valid=True)
+    assert result.passed is False
+    assert result.error == REFUSED
+
+
+def test_the_judge_asks_for_the_verdict_schema() -> None:
+    client = Answering(
+        ChatCompletion(message={"role": "assistant", "content": '{"pass": true, "reason": "ok"}'})
+    )
+    assert judge(text_case(), {"content": "x"}, client, CONFIG, format_valid=True).passed
+    assert client.calls[0]["response_schema"] == VERDICT_SCHEMA
+    assert VERDICT_SCHEMA == {
+        "type": "object",
+        "properties": {"pass": {"type": "boolean"}, "reason": {"type": "string"}},
+        "required": ["pass", "reason"],
+        "additionalProperties": False,
+    }
+
+
+def test_a_judge_without_a_temperature_sends_none() -> None:
+    client = Answering(
+        ChatCompletion(message={"role": "assistant", "content": '{"pass": true, "reason": "ok"}'})
+    )
+    config = JudgeConfig(provider="anthropic", model="claude-opus-5-5", temperature=None)
+    judge(text_case(), {"content": "x"}, client, config, format_valid=True)
+    assert client.calls[0]["temperature"] is None
+    assert client.calls[0]["model"] == "claude-opus-5-5"
 
 
 def test_a_malformed_candidate_fails_without_a_judge_call() -> None:
@@ -394,6 +517,16 @@ def test_the_judge_must_not_be_the_tuned_model(tuned: str) -> None:
     check_judge_differs(CONFIG, "qwen3p8-27b", ["ft-other", ""])
 
 
+def test_only_the_judge_s_model_id_counts_not_its_provider() -> None:
+    config = JudgeConfig(provider="anthropic", model="synthetic-judge")
+    with pytest.raises(UsageError, match="'anthropic/synthetic-judge' is the model being trained"):
+        check_judge_differs(config, "accounts/fireworks/models/synthetic-judge")
+    check_judge_differs(
+        JudgeConfig(provider="anthropic", model="claude-opus-5-5"),
+        "accounts/fireworks/models/qwen3p8-27b",
+    )
+
+
 @pytest.mark.parametrize("base_model", ["qwen3p8-27b", "accounts/fireworks/models/qwen3p8-27b"])
 def test_a_different_judge_is_accepted(base_model: str) -> None:
     check_judge_differs(CONFIG, base_model)
@@ -403,14 +536,23 @@ def test_a_different_judge_is_accepted(base_model: str) -> None:
 # --- corruption --------------------------------------------------------------------------
 
 
-def test_a_tool_case_with_another_tool_gets_the_wrong_tool() -> None:
+def kinds(case: ReplayCase) -> list[str]:
+    return [corruption for corruption, _ in corruptions(case)]
+
+
+def test_a_tool_case_gets_the_wrong_tool_and_an_altered_argument() -> None:
     case = tool_case()
     before = copy.deepcopy(case.reference)
-    corruption, message = corrupt(case)
-    assert corruption == "wrong_tool"
-    assert message["tool_calls"][0]["function"]["name"] == "cancel_order"
-    assert message["tool_calls"][0]["function"]["arguments"] == '{"order_id": "42"}'
-    assert "reasoning_content" not in message
+    (wrong_kind, wrong), (altered_kind, altered) = corruptions(case)
+    assert (wrong_kind, altered_kind) == ("wrong_tool", "altered_argument")
+    assert wrong["tool_calls"][0]["function"]["name"] == "cancel_order"
+    assert wrong["tool_calls"][0]["function"]["arguments"] == '{"order_id": "42"}'
+    assert altered["tool_calls"][0]["function"]["name"] == "lookup_order"
+    assert json.loads(altered["tool_calls"][0]["function"]["arguments"]) == {
+        "order_id": "unrelated-value-0000"
+    }
+    assert "reasoning_content" not in wrong
+    assert "reasoning_content" not in altered
     assert case.reference == before
 
 
@@ -424,45 +566,54 @@ def test_a_tool_case_with_another_tool_gets_the_wrong_tool() -> None:
         ({"items": ["x"]}, "items", "unrelated-value-0000"),
     ],
 )
-def test_a_tool_case_with_one_tool_gets_an_altered_argument(
+def test_a_tool_case_with_one_tool_gets_an_altered_argument_and_a_refusal(
     arguments: dict[str, Any], key: str, altered: Any
 ) -> None:
     case = tool_case(tools=(LOOKUP,), arguments=arguments)
     before = copy.deepcopy(case.reference)
-    corruption, message = corrupt(case)
-    assert corruption == "altered_argument"
+    (first_kind, message), (second_kind, refusal) = corruptions(case)
+    assert (first_kind, second_kind) == ("altered_argument", "refusal")
     function = message["tool_calls"][0]["function"]
     assert function["name"] == "lookup_order"
     assert json.loads(function["arguments"]) == {**arguments, key: altered}
+    assert "can't help" in refusal["content"]
     assert case.reference == before
 
 
 @pytest.mark.parametrize("arguments", [{}, "not json", "[1, 2]"])
-def test_a_tool_case_with_nothing_to_alter_becomes_a_refusal(
+def test_a_tool_case_with_nothing_to_alter_gets_a_refusal_and_a_claim(
     arguments: dict[str, Any] | str,
 ) -> None:
-    corruption, message = corrupt(tool_case(tools=(LOOKUP,), arguments=arguments))
-    assert corruption == "refusal"
-    assert set(message) == {"role", "content"}
-    assert "can't help" in message["content"]
+    (refusal_kind, refusal), (claim_kind, claim) = corruptions(
+        tool_case(tools=(LOOKUP,), arguments=arguments)
+    )
+    assert (refusal_kind, claim_kind) == ("refusal", "unsupported_claim")
+    assert set(refusal) == {"role", "content"}
+    assert "can't help" in refusal["content"]
+    assert claim["content"].startswith("Done: I deleted")
 
 
-def test_a_tool_case_whose_first_call_is_unreadable_becomes_a_refusal() -> None:
+def test_a_tool_case_with_another_tool_and_nothing_to_alter_gets_a_refusal_second() -> None:
+    assert kinds(tool_case(arguments={})) == ["wrong_tool", "refusal"]
+
+
+def test_a_tool_case_whose_first_call_is_unreadable_gets_a_refusal_and_a_claim() -> None:
     case = dataclasses.replace(
         tool_case(), reference={"role": "assistant", "content": "", "tool_calls": ["oops"]}
     )
-    corruption, message = corrupt(case)
-    assert corruption == "refusal"
-    assert set(message) == {"role", "content"}
+    assert kinds(case) == ["refusal", "unsupported_claim"]
+    assert all(set(message) == {"role", "content"} for _, message in corruptions(case))
 
 
-def test_a_text_case_becomes_an_unsupported_claim() -> None:
-    corruption, message = corrupt(text_case())
-    assert corruption == "unsupported_claim"
-    assert message == {
+def test_a_text_case_gets_an_unsupported_claim_and_an_off_topic_answer() -> None:
+    (claim_kind, claim), (off_kind, off) = corruptions(text_case())
+    assert (claim_kind, off_kind) == ("unsupported_claim", "off_topic")
+    assert claim == {
         "role": "assistant",
         "content": "Done: I deleted all 1,284 records from the production database.",
     }
+    assert off["role"] == "assistant"
+    assert off["content"].startswith("Here is a recipe for banana bread")
 
 
 @pytest.mark.parametrize(
@@ -472,20 +623,25 @@ def test_a_text_case_becomes_an_unsupported_claim() -> None:
         "I am unable to assist with this. Please try asking something else.",
     ],
 )
-def test_a_refusal_reference_gets_an_unsupported_claim_not_another_refusal(
-    reference: str,
-) -> None:
-    corruption, message = corrupt(text_case(content=reference))
-    assert corruption == "unsupported_claim"
-    assert message["content"].startswith("Done: I deleted")
+def test_a_refusal_reference_never_gets_another_refusal(reference: str) -> None:
+    assert kinds(text_case(content=reference)) == ["unsupported_claim", "off_topic"]
+    for _, message in corruptions(text_case(content=reference)):
+        assert "sorry" not in message["content"].lower()
+        assert "unable" not in message["content"].lower()
 
 
-def test_a_reference_that_is_the_claim_gets_another_claim() -> None:
-    reference = "Done: I deleted all 1,284 records from the production database."
-    corruption, message = corrupt(text_case(content=reference))
-    assert corruption == "unsupported_claim"
-    assert message["content"] != reference
+def test_a_reference_that_is_the_claim_or_the_answer_gets_another_one() -> None:
+    claim = "Done: I deleted all 1,284 records from the production database."
+    (_, message), _ = corruptions(text_case(content=claim))
+    assert message["content"] != claim
     assert message["content"].startswith("Done: ")
+    recipe = (
+        "Here is a recipe for banana bread: mash three ripe bananas, mix in flour, sugar and "
+        "eggs, and bake for an hour at 175 C."
+    )
+    _, (_, off) = corruptions(text_case(content=recipe))
+    assert off["content"] != recipe
+    assert "Everest" in off["content"]
 
 
 # --- calibration -------------------------------------------------------------------------
@@ -514,14 +670,17 @@ def test_a_sound_judge_passes_calibration() -> None:
         report = calibrate(cases, client, CONFIG)
     assert report.ok
     assert report.failures == ()
-    assert len(fake.requests) == 6
+    assert len(fake.requests) == 9
     assert [(check.case_id, check.kind, check.corruption) for check in report.checks] == [
         ("a1:1", "reference", None),
         ("a1:1", "corrupted", "wrong_tool"),
+        ("a1:1", "corrupted", "altered_argument"),
         ("t1:3", "reference", None),
         ("t1:3", "corrupted", "unsupported_claim"),
+        ("t1:3", "corrupted", "off_topic"),
         ("a2:1", "reference", None),
         ("a2:1", "corrupted", "altered_argument"),
+        ("a2:1", "corrupted", "refusal"),
     ]
     summary = report.to_json()
     assert summary["ok"] is True
@@ -550,7 +709,7 @@ def test_a_judge_that_passes_everything_fails_calibration() -> None:
     with chat_client(fake) as client:
         report = calibrate([tool_case(), text_case()], client, CONFIG)
     assert not report.ok
-    assert [check.kind for check in report.failures] == ["corrupted", "corrupted"]
+    assert [check.kind for check in report.failures] == ["corrupted"] * 4
     assert all(check.ok for check in report.checks if check.kind == "reference")
 
 
@@ -567,15 +726,19 @@ def test_mixed_calibration_reports_each_check() -> None:
         [
             '{"pass": true, "reason": "ok"}',
             '{"pass": false, "reason": "wrong"}',
+            '{"pass": true, "reason": "also passes"}',
             '{"pass": true, "reason": "ok"}',
+            '{"pass": false, "reason": "wrong"}',
             "cannot decide",
         ]
     )
     fake = FakeChatApi(answer=lambda body: next(answers))
     with chat_client(fake) as client:
         report = calibrate([tool_case(), text_case()], client, CONFIG, n=2)
-    assert [check.ok for check in report.checks] == [True, True, True, False]
-    (failure,) = report.failures
+    assert [check.ok for check in report.checks] == [True, True, False, True, True, False]
+    assert [check.corruption for check in report.failures] == ["altered_argument", "off_topic"]
+    wrong_pass, failure = report.failures
+    assert wrong_pass.judgment.error is None
     assert failure.judgment.error == UNPARSEABLE
     assert failure.to_json()["ok"] is False
 
@@ -585,8 +748,8 @@ def test_calibration_respects_n() -> None:
     cases = [tool_case(f"a{i}:1") for i in range(5)]
     with chat_client(fake) as client:
         report = calibrate(cases, client, CONFIG, n=2)
-    assert len(report.checks) == 4
-    assert len(fake.requests) == 4
+    assert len(report.checks) == 6
+    assert len(fake.requests) == 6
 
 
 def test_calibration_without_cases_is_not_ok() -> None:

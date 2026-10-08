@@ -9,10 +9,9 @@
 :class:`BasetenProvider` serves :data:`PROFILES`, checks with Baseten, read only, that the
 workspace can train a model before anything is paid (:meth:`~BasetenProvider.preflight`),
 renders each profile with its model family's Hugging Face chat template, and trains through
-:class:`~.backend.BasetenBackend`. Deployment on Baseten lands in a later release; until then
-:meth:`~BasetenProvider.deploy`, :meth:`~BasetenProvider.owns_deployment`,
-:meth:`~BasetenProvider.smoke_test` and :meth:`~BasetenProvider.undeploy` refuse with a
-:class:`UsageError`, before anything is sent.
+:class:`~.backend.BasetenBackend`. It deploys a run's sampler checkpoint as a dedicated Baseten
+model, smoke-tests it and deletes it (:mod:`.deploy`: :meth:`~BasetenProvider.deploy`,
+:meth:`~BasetenProvider.smoke_test`, :meth:`~BasetenProvider.undeploy`).
 
 Building the provider is cheap: the Loops SDK is imported by preflight and when a session
 opens, ``transformers`` when a renderer first loads its tokenizer. The API key
@@ -30,34 +29,35 @@ import dataclasses
 import os
 import time
 from collections.abc import Callable, Mapping
-from importlib import metadata
-from typing import TYPE_CHECKING, Any, Final, NoReturn, TypeGuard
+from typing import TYPE_CHECKING, Any, Final, TypeGuard
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from pup_finetune import credentials
-from pup_finetune.doctor import error_detail
-from pup_finetune.errors import ExternalError, FinetuneError, UsageError
+from pup_finetune.errors import ExternalError, UsageError
+from pup_finetune.inference import ChatClient
 from pup_finetune.providers.base import (
-    Check,
     DeploymentRequest,
     DeployOptions,
     Endpoint,
     ModelProfile,
     ModelRef,
+    SamplingUsage,
     SmokeTest,
+    TrainingUsage,
+    sampling_usage_text,
+    training_usage_text,
 )
-from pup_finetune.providers.baseten import CREDENTIALS, PROVIDER_NAME
+from pup_finetune.providers.baseten import PROVIDER_NAME
+from pup_finetune.providers.baseten import deploy as serving
 from pup_finetune.providers.baseten.backend import MIN_SEQ_LEN, BasetenBackend, Sleep
 from pup_finetune.providers.baseten.client import (
-    INSTALL_HINT,
     SOURCE,
     BasetenHTTP,
     LoopsModule,
     loops_sdk,
 )
 from pup_finetune.providers.options import parse_options
-from pup_finetune.redaction import redact
 from pup_finetune.rendering.families import GLM5_3, QWEN3_5, ModelFamily, get_family
 from pup_finetune.rendering.hf import ChatTokenizer, HFChatTemplateRenderer
 from pup_finetune.runtime import Runtime
@@ -197,9 +197,10 @@ class BasetenProvider:
     """The ``baseten`` provider. See the module docstring.
 
     ``env`` is where the API key is looked up first (default: the process environment).
-    ``transport`` replaces the network for Baseten's HTTP routes, ``loops`` the Loops SDK,
-    ``tokenizer`` the Hugging Face tokenizer and ``sleep`` the wait between deactivation
-    polls and sampling retries, so tests run against the fakes in ``tests/fakes/baseten.py``.
+    ``transport`` replaces the network for Baseten's HTTP routes (a deployment's chat route
+    included), ``loops`` the Loops SDK, ``tokenizer`` the Hugging Face tokenizer, ``sleep``
+    the wait between polls and retries and ``clock`` the monotonic clock a deploy's waits run
+    on, so tests run against the fakes in ``tests/fakes/baseten.py``.
     :meth:`validate_options` also makes the validated options this provider's configuration,
     which :meth:`training_profile` and :meth:`backend` use.
     """
@@ -213,6 +214,7 @@ class BasetenProvider:
         loops: LoopsModule | None = None,
         tokenizer: ChatTokenizer | None = None,
         sleep: Sleep = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.runtime = runtime
         self.options = BasetenOptions()
@@ -221,30 +223,12 @@ class BasetenProvider:
         self._loops = loops
         self._tokenizer = tokenizer
         self._sleep = sleep
+        self._clock = clock
         self._api_key: SecretStr | None = None
 
     @property
     def name(self) -> str:
         return PROVIDER_NAME
-
-    def check(self) -> list[Check]:
-        """The SDK, the API key and, with a key, whether Baseten answers; never raises."""
-        checks = [_sdk_check()]
-        name = "baseten api key"
-        try:
-            found = credentials.lookup(PROVIDER_NAME, env=self._environ())
-        except Exception as exc:
-            return [*checks, Check(name, False, redact(_detail(exc, "could not look it up")))]
-        if found is None:
-            hint = credentials.login_hint(CREDENTIALS)
-            return [*checks, Check(name, False, f"no Baseten API key; {hint}")]
-        checks.append(Check(name, True, f"Baseten API key found (source: {found.source})"))
-        try:
-            with BasetenHTTP(found.value, transport=self._transport) as http:
-                http.capabilities()
-        except Exception as exc:
-            return [*checks, Check("baseten api", False, redact(_detail(exc, "unexpected error")))]
-        return [*checks, Check("baseten api", True, "Baseten Loops answers with this key")]
 
     def models(self) -> list[ModelProfile]:
         return list(PROFILES)
@@ -275,7 +259,7 @@ class BasetenProvider:
             raise UsageError(
                 f"Baseten trains {profile.base_model} on at most {limit} tokens in this "
                 f"workspace, shorter than the {max_seq_len} to train at",
-                hint=f"pass --provider-option max_seq_len=N with N at most {limit}",
+                hint=f"pass --max-seq-len N with N at most {limit}",
             )
 
     def renderer(self, profile: ModelProfile) -> HFChatTemplateRenderer:
@@ -302,9 +286,21 @@ class BasetenProvider:
             raise UsageError(
                 f"the max_seq_len provider option of {cap} is over the "
                 f"{profile.max_seq_len}-token context of {profile.alias}",
-                hint=f"pass --provider-option max_seq_len=N with N at most {profile.max_seq_len}",
+                hint=f"pass --max-seq-len N with N at most {profile.max_seq_len}",
             )
         return dataclasses.replace(profile, max_seq_len=cap)
+
+    def training_billing(self, usage: TrainingUsage) -> str:
+        return (
+            "Baseten bills the training job's GPUs for the time they run, at its own rates, "
+            f"which pup-finetune does not know: it trains on {training_usage_text(usage)}"
+        )
+
+    def sampling_billing(self, usage: SamplingUsage) -> str:
+        return (
+            "Baseten bills each sampler's GPU for the time it runs, at its own rates, which "
+            f"pup-finetune does not know: {sampling_usage_text(usage)}"
+        )
 
     def backend(self) -> BasetenBackend:
         """The training backend. Builds nothing remote; the key is resolved per session.
@@ -334,20 +330,42 @@ class BasetenProvider:
         on_creating: Callable[[DeploymentRequest], None] | None = None,
         on_created: Callable[[Endpoint, str], None] | None = None,
     ) -> Endpoint:
-        _later("deploying on Baseten")
+        """Deploy ``model``'s sampler checkpoint as the dedicated Baseten model
+        ``options.deployment_id`` and wait until it serves; see :mod:`.deploy`. Needs the API
+        key. It bills per GPU-second while a replica runs, until :meth:`undeploy`.
+        """
+        with self._http() as http:
+            return serving.deploy(
+                http,
+                model,
+                options,
+                served={profile.base_model for profile in PROFILES},
+                on_creating=on_creating,
+                on_created=on_created,
+                clock=self._clock,
+                sleep=self._sleep,
+            )
 
     def deployment_name(self, deployment_id: str) -> str | None:
         """``None``: Baseten names a deployment by ids it assigns when it creates one."""
         return None
 
     def owns_deployment(self, request: DeploymentRequest) -> bool | None:
-        _later("reading back a Baseten deployment")
+        """Whether the Baseten model named ``request.deployment_id`` is the one ``request``
+        creates."""
+        with self._http() as http:
+            return serving.owns_deployment(http, request)
 
     def smoke_test(self, endpoint: Endpoint) -> SmokeTest:
-        _later("smoke-testing a Baseten deployment")
+        """One chat completion to the deployment, retried while it scales up from zero."""
+        self._own_endpoint(endpoint)
+        return serving.smoke_test(endpoint, chat=self._chat, clock=self._clock, sleep=self._sleep)
 
     def undeploy(self, endpoint: Endpoint) -> bool:
-        _later("removing a Baseten deployment")
+        """Delete the deployment's Baseten model (idempotent); the checkpoint is kept."""
+        self._own_endpoint(endpoint)
+        with self._http() as http:
+            return serving.undeploy(http, endpoint)
 
     # Internals.
 
@@ -356,6 +374,10 @@ class BasetenProvider:
             raise UsageError(
                 f"the baseten provider does not serve {profile.provider}/{profile.alias}"
             )
+
+    def _own_endpoint(self, endpoint: Endpoint) -> None:
+        if endpoint.provider != PROVIDER_NAME:
+            raise UsageError(f"the baseten provider does not serve a {endpoint.provider} endpoint")
 
     def _environ(self) -> Mapping[str, str]:
         return self._env if self._env is not None else os.environ
@@ -368,31 +390,15 @@ class BasetenProvider:
     def _http(self) -> BasetenHTTP:
         return BasetenHTTP(self._key(), transport=self._transport)
 
-
-def _sdk_check() -> Check:
-    name = "baseten loops sdk"
-    try:
-        version = metadata.version("baseten-loops")
-    except metadata.PackageNotFoundError:
-        return Check(name, False, f"the Baseten Loops SDK is not installed; {INSTALL_HINT}")
-    if version != LOOPS_VERSION:
-        return Check(
-            name,
-            True,
-            f"baseten-loops {version} is installed, but pup-finetune is tested with "
-            f"{LOOPS_VERSION}; {INSTALL_HINT}",
+    def _chat(self, base_url: str) -> ChatClient:
+        # One attempt per call: the smoke test retries on its own clock while it scales up.
+        return ChatClient(
+            base_url,
+            self._key(),
+            credential=PROVIDER_NAME,
+            max_attempts=1,
+            transport=self._transport,
         )
-    return Check(name, True, f"baseten-loops {version} is installed")
-
-
-def _detail(exc: Exception, unexpected: str) -> str:
-    if isinstance(exc, FinetuneError):
-        return error_detail(exc)
-    return f"{unexpected} ({type(exc).__name__})"
-
-
-def _later(action: str) -> NoReturn:
-    raise UsageError(f"{action} is not available in this version of pup-finetune")
 
 
 if TYPE_CHECKING:

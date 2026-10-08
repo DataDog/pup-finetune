@@ -17,7 +17,11 @@ from pathlib import Path
 import pytest
 
 from pup_finetune import skill
-from pup_finetune.errors import StateError, UsageError
+from pup_finetune.errors import ERROR_CODES, StateError, UsageError
+from pup_finetune.providers.baseten import client as baseten_client
+from pup_finetune.providers.baseten.backend import MIN_SEQ_LEN
+from pup_finetune.providers.baseten.deploy import DEFAULT_SHAPE
+from pup_finetune.providers.baseten.provider import PROFILES as BASETEN_PROFILES
 
 REPO_SKILL = Path(__file__).resolve().parents[1] / "skills" / "datadog-finetune" / "SKILL.md"
 
@@ -68,8 +72,53 @@ def test_the_body_has_the_rules_steps_and_debugging_table() -> None:
             assert "\nCheck:\n" in section, f"no Check: list in {section.splitlines()[0]!r}"
     assert "## End state" in text
     assert "| Symptom | Cause | Fix |" in text
-    assert "pup finetune auth login fireworks" in text
+    assert "pup finetune auth login <PROVIDER>" in text
     assert "untrusted data" in text
+
+
+def _section(text: str, heading: str) -> str:
+    """The body of the ``## heading`` section of ``text``."""
+    return text.split(f"\n## {heading}\n", 1)[1].split("\n## ", 1)[0]
+
+
+def test_the_body_opens_with_the_flow_and_where_to_start() -> None:
+    text = skill.skill_text()
+    assert text.index("## The flow") < text.index("## Rules for every step")
+    assert "| The user has | Start at |" in _section(text, "The flow")
+
+
+def test_there_are_about_eight_short_rules() -> None:
+    rules = re.findall(
+        r"^\d+\. (.*?)(?=^\d+\. |\Z)",
+        _section(skill.skill_text(), "Rules for every step"),
+        re.MULTILINE | re.DOTALL,
+    )
+    assert 6 <= len(rules) <= 9, rules
+    for rule in rules:
+        rule = rule.split("\n\n", 1)[0]
+        assert len(rule.split()) <= 30, rule
+
+
+def test_the_preview_and_status_templates_are_there() -> None:
+    text = skill.skill_text()
+    preview = _section(text, "Presenting a preview")
+    for line in ("Runs:", "Sends to:", "Cost:", "Command:", "Run it?"):
+        assert line in preview, line
+    status = _section(text, "Status -> do this")
+    for key in ("`phase`", "`worker.state`", "`publication.status`", "complete_with_errors"):
+        assert key in status, key
+
+
+def test_commands_use_runnable_examples_not_shell_variables_or_lowercase_placeholders() -> None:
+    # An agent copies these; its shell state does not persist between calls, and a lowercase
+    # `<run_dir>` reads like a real argument. `<UPPER>` marks a value to fill in.
+    text = skill.skill_text()
+    for line in text.splitlines():
+        if "pup finetune" not in line and "pup llm-obs" not in line:
+            continue
+        assert not re.search(r"\$[A-Za-z_{]", line), line
+        for command in re.findall(r"pup (?:finetune|llm-obs)[^`|]*", line):
+            assert not re.search(r"<[a-z][a-z_ ]*>", command), command
 
 
 @pytest.mark.parametrize(
@@ -82,7 +131,7 @@ def test_the_body_has_the_rules_steps_and_debugging_table() -> None:
         "Never ask for API keys in chat",
         "Sending traces to a model provider needs consent",
         "Respect read-only mode",
-        "Do not unset `PUP_READ_ONLY` yourself",
+        "Do not change `PUP_READ_ONLY` yourself",
         "Deploying needs the user's explicit authorization",
         "per GPU-second",
     ],
@@ -92,23 +141,91 @@ def test_the_body_keeps_each_safety_rule(phrase: str) -> None:
 
 
 def test_the_debugging_table_covers_each_failure() -> None:
+    # Keyed on the error codes the error line shows, never on class names that no output has.
     table = skill.skill_text().split("## Debugging", 1)[1]
     rows = [line for line in table.splitlines() if line.startswith("| ") and "---" not in line]
     for term in (
         "datadog_auth",  # Datadog auth
-        "fireworks",  # provider auth
+        "provider key",  # provider auth
+        "Baseten",  # Baseten cleanup and deploy failures
         "matches no spans",  # empty pulls
         "excluded_by_code",  # exclusions
-        "ReadOnlyError",  # read-only mode
-        "ProviderCapacityError",  # capacity
-        "worker.stale",  # stale worker
-        "`resume` is refused",  # resume
-        "identity mismatch",  # evaluation identity
+        "Error [read_only]",  # read-only mode
+        "Error [provider_capacity]",  # capacity
+        "Error [provider_auth]",  # a rejected key
+        "worker.state",  # a stale or exited worker
+        "Error [wrong_phase]",  # resume, evaluate or deploy in the wrong phase
+        "Error [settings_conflict]",  # frozen settings, evaluation identity
+        "[not_a_run_dir]",  # the wrong directory
         "calibration",  # judge calibration
         "push.json",  # publishing without a push receipt
         "times out",  # deployment timeouts
     ):
         assert any(term in row for row in rows), f"no debugging row mentions {term!r}"
+
+
+def test_the_skill_lists_every_error_code_itself() -> None:
+    # The installed skill ships alone, without docs/commands.md: its own table is the list.
+    table = skill.skill_text().split("## Debugging", 1)[1]
+    assert "docs/commands.md" not in skill.skill_text()
+    for code, (exit_code, meaning) in ERROR_CODES.items():
+        assert f"| `{code}` | `{exit_code}` | {meaning} |" in table, code
+
+
+def test_the_skill_never_types_a_confirm_for_a_previewed_command() -> None:
+    # The agent runs the preview's next_command, which pins what was previewed, rather than
+    # typing --confirm itself.
+    text = skill.skill_text()
+    for command in ("train", "resume", "dataset triage", "dataset push"):
+        typed = re.findall(rf"pup finetune {command} [^`\n]*--confirm", text)
+        assert typed == [], typed
+
+
+MAX_SKILL_LINES = 355
+"""The most lines SKILL.md may have: an agent loads all of it into its context."""
+
+
+def test_the_skill_stays_short() -> None:
+    lines = len(skill.skill_text().splitlines())
+    assert lines <= MAX_SKILL_LINES, f"SKILL.md has {lines} lines, over {MAX_SKILL_LINES}"
+
+
+def test_the_skill_never_types_a_confirm_for_undeploy_or_deploy() -> None:
+    # Deleting or creating a deployment is the user's to approve from the preview.
+    text = skill.skill_text()
+    for command in ("deploy", "undeploy"):
+        assert re.findall(rf"pup finetune {command} [^`\n]*--confirm", text) == [], command
+
+
+def test_the_skill_keeps_data_out_of_the_checkout() -> None:
+    text = skill.skill_text()
+    assert "./ds" not in text
+    assert "datasets/my-agent" in text
+
+
+def test_the_provider_notes_cover_baseten() -> None:
+    text = skill.skill_text()
+    assert "pup finetune auth login baseten" in text
+    assert text.index("## Step 7") < text.index("## Provider notes") < text.index("## End state")
+    notes = text.split("## Provider notes", 1)[1].split("## End state", 1)[0]
+    assert "### Baseten" in notes
+    rows = set(re.findall(r"^\| `([^`]+)` \| `([^`]+)` \|", notes, re.MULTILINE))
+    assert rows == {(profile.alias, profile.base_model) for profile in BASETEN_PROFILES}
+    for phrase in (
+        "deployable_checkpoint",
+        "it may still",
+        "kill -9",
+        "BDN volumes",
+        baseten_client.HF_SECRET_NAME,
+        f"`{DEFAULT_SHAPE}`",
+        f"at least {MIN_SEQ_LEN}",
+        "--lora-alpha",
+        "--max-seq-len",
+        "LOOPS_BASE_URL",
+        *baseten_client._REJECTED_ENV,
+    ):
+        assert phrase in notes, phrase
+    assert f"LOOPS_BASE_URL must be unset or {baseten_client.API_BASE}" in text
 
 
 def _fake_files(root: Path) -> Callable[[str], Path]:
@@ -151,7 +268,11 @@ def test_npx_env_drops_datadog_secrets_and_provider_keys() -> None:
         "DD_APP_KEY": "synthetic",
         "DD_APPLICATION_KEY": "synthetic",
         "FIREWORKS_API_KEY": "synthetic",
+        "ANTHROPIC_API_KEY": "synthetic",
+        "ANTHROPIC_AUTH_TOKEN": "synthetic",
+        "ANTHROPIC_IDENTITY_TOKEN": "synthetic",
         "BASETEN_API_KEY": "synthetic",
+        "OPENAI_API_KEY": "synthetic",
     }
     assert skill.npx_env(environ) == {"PATH": "/usr/bin", "HOME": "/home/someone"}
     assert "DD_API_KEY" in environ  # the parent's mapping is left alone

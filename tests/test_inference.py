@@ -23,10 +23,15 @@ from pup_finetune.http_common import CLIENT_SOURCE
 from pup_finetune.inference import (
     DEFAULT_JUDGE_BASE_URL,
     DEFAULT_JUDGE_MODEL,
+    DEFAULT_TIMEOUT_S,
     MAX_WAIT_S,
+    OPENAI_POLICY,
+    OPENAI_TIMEOUT_S,
     ChatClient,
     ChatCompletion,
+    ContextLimitError,
     JudgeConfig,
+    is_context_limit,
 )
 from pup_finetune.providers.base import ProviderAuthError, ProviderCapacityError, TransientError
 from tests.fakes.chat_api import API_KEY, BASE_URL, MODEL, FakeChatApi, always
@@ -460,13 +465,17 @@ def test_the_judge_config_identity_is_json_and_tracks_every_setting() -> None:
     identity = JudgeConfig().identity()
     assert json.loads(json.dumps(identity)) == identity
     assert identity == {
+        "provider": "fireworks",
         "model": DEFAULT_JUDGE_MODEL,
         "base_url": DEFAULT_JUDGE_BASE_URL,
         "credential": "fireworks",
         "temperature": 0.0,
         "max_tokens": 512,
+        "reasoning_effort": None,
     }
     assert JudgeConfig(model="other").identity() != identity
+    assert JudgeConfig(reasoning_effort="low").identity() != identity
+    assert JudgeConfig(provider="openai").identity() != identity
     assert JudgeConfig(max_tokens=64).identity() != identity
 
 
@@ -496,6 +505,153 @@ def test_a_judge_client_without_a_key_is_a_usage_error() -> None:
         ChatClient.for_judge(JudgeConfig(), env={})
 
 
+# --- request policies --------------------------------------------------------------------
+
+SCHEMA = {"type": "object", "properties": {"pass": {"type": "boolean"}}}
+
+
+def test_the_default_policy_sends_max_tokens_and_the_temperature_but_no_format(
+    fake: FakeChatApi, sleeps: list[float]
+) -> None:
+    with client(fake, sleeps) as chat:
+        chat.complete(MESSAGES, model=MODEL, temperature=0, max_tokens=64, response_schema=SCHEMA)
+    (body,) = fake.bodies
+    assert body["max_tokens"] == 64
+    assert body["temperature"] == 0
+    assert "max_completion_tokens" not in body
+    assert "response_format" not in body
+
+
+def test_the_openai_policy_sends_max_completion_tokens_json_mode_and_no_temperature(
+    fake: FakeChatApi, sleeps: list[float]
+) -> None:
+    with client(fake, sleeps, policy=OPENAI_POLICY) as chat:
+        chat.complete(MESSAGES, model="gpt-x", temperature=0, max_tokens=64, response_schema=SCHEMA)
+        chat.complete(MESSAGES, model="gpt-x", max_tokens=32)
+    first, second = fake.bodies
+    assert first["max_completion_tokens"] == 64
+    assert "max_tokens" not in first
+    assert "temperature" not in first
+    assert first["response_format"] == {"type": "json_object"}
+    # JSON mode only when the caller asks for a JSON answer.
+    assert second["max_completion_tokens"] == 32
+    assert "response_format" not in second
+
+
+def test_an_openai_judge_client_waits_longer_than_a_fireworks_one(fake: FakeChatApi) -> None:
+    env = {"OPENAI_API_KEY": API_KEY, "FIREWORKS_API_KEY": API_KEY}
+    openai = JudgeConfig(provider="openai", model="gpt-x", base_url=BASE_URL, credential="openai")
+    configs = [(openai, None), (JudgeConfig(base_url=BASE_URL), None), (openai, 5.0)]
+    for config, timeout_s in configs:
+        with ChatClient.for_judge(
+            config, env=env, transport=fake.transport, timeout_s=timeout_s
+        ) as chat:
+            chat.complete(MESSAGES, model=config.model)
+    waits = [request.extensions["timeout"]["read"] for request in fake.requests]
+    assert waits == [OPENAI_TIMEOUT_S, DEFAULT_TIMEOUT_S, 5.0]
+    assert OPENAI_TIMEOUT_S > DEFAULT_TIMEOUT_S
+
+
+def test_an_openai_judge_client_uses_the_openai_policy_and_key(fake: FakeChatApi) -> None:
+    config = JudgeConfig(provider="openai", model="gpt-x", base_url=BASE_URL, credential="openai")
+    env = {"OPENAI_API_KEY": API_KEY, "FIREWORKS_API_KEY": "fw-other-key-0000"}
+    with ChatClient.for_judge(config, env=env, transport=fake.transport) as chat:
+        chat.complete(MESSAGES, model=config.model, temperature=0.0, max_tokens=16)
+    assert fake.requests[0].headers["authorization"] == f"Bearer {API_KEY}"
+    assert "temperature" not in fake.bodies[0]
+    assert fake.bodies[0]["max_completion_tokens"] == 16
+
+
+def test_an_anthropic_judge_is_not_served_by_the_openai_compatible_client() -> None:
+    config = JudgeConfig(provider="anthropic", model="claude-opus-5-5", credential="anthropic")
+    with pytest.raises(ValueError, match="not served by an OpenAI-compatible API"):
+        ChatClient.for_judge(config, env={"ANTHROPIC_API_KEY": API_KEY})
+
+
+def test_the_judge_spec_names_the_provider() -> None:
+    assert JudgeConfig().spec == DEFAULT_JUDGE_MODEL
+    assert JudgeConfig(model="judge-x").spec == "judge-x"
+    assert JudgeConfig(provider="openai", model="gpt-x").spec == "openai/gpt-x"
+    assert JudgeConfig(provider="fake", model="fake-judge").spec == "fake-judge"
+
+
 def test_the_key_is_registered_for_redaction(fake: FakeChatApi, sleeps: list[float]) -> None:
     client(fake, sleeps).close()
     assert redaction.redact(f"x {API_KEY} y") == "x *** y"
+
+
+# --- the context window and the reasoning effort -------------------------------------------
+
+# How each provider answered a request longer than the model's context window (October 2026).
+OPENAI_TOO_LONG = {
+    "error": {
+        "message": "Input tokens exceed the configured limit of 922000 tokens. Your messages "
+        "resulted in 2200007 tokens. Please reduce the length of the messages.",
+        "type": "invalid_request_error",
+        "param": "messages",
+        "code": "context_length_exceeded",
+    }
+}
+FIREWORKS_TOO_LONG = {
+    "error": {
+        "object": "error",
+        "type": "invalid_request_error",
+        "code": "invalid_request_error",
+        "message": "The prompt is too long: 2200031, model maximum context length: 1048571",
+    }
+}
+ANTHROPIC_TOO_LONG = "prompt is too long: 2200057 tokens > 1000000 maximum"
+
+
+@pytest.mark.parametrize("body", [OPENAI_TOO_LONG, FIREWORKS_TOO_LONG])
+def test_a_request_longer_than_the_context_window_is_a_context_limit_error(
+    fake: FakeChatApi, sleeps: list[float], body: dict[str, Any]
+) -> None:
+    fake.script.append(httpx.Response(400, json=body))
+    with client(fake, sleeps) as chat, pytest.raises(ContextLimitError) as info:
+        chat.complete(MESSAGES, model=MODEL)
+    assert "context window" in info.value.message
+    assert "larger context window" in (info.value.hint or "")
+    assert len(fake.requests) == 1  # never retried
+    assert sleeps == []
+
+
+def test_another_bad_request_is_not_a_context_limit_error(
+    fake: FakeChatApi, sleeps: list[float]
+) -> None:
+    body = {
+        "error": {"message": "Unsupported value: 'reasoning_effort'", "code": "unsupported_value"}
+    }
+    fake.script.append(httpx.Response(400, json=body))
+    with client(fake, sleeps) as chat, pytest.raises(ExternalError) as info:
+        chat.complete(MESSAGES, model=MODEL)
+    assert type(info.value) is ExternalError
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "message", "expected"),
+    [
+        (400, "context_length_exceeded", "", True),
+        (400, None, FIREWORKS_TOO_LONG["error"]["message"], True),
+        (400, None, ANTHROPIC_TOO_LONG, True),
+        (413, None, "Prompt is too long", True),
+        (422, None, "the input exceeds the model's maximum context length", True),
+        (400, "rate_limit_exceeded", "Rate limit reached for tokens per minute", False),
+        (400, None, "max_tokens is too large for this model", False),
+        (429, "context_length_exceeded", "prompt is too long", False),
+        (500, None, "prompt is too long", False),
+    ],
+)
+def test_context_limits_are_told_from_other_errors(
+    status: int, code: str | None, message: str, expected: bool
+) -> None:
+    assert is_context_limit(status, code, message) is expected
+
+
+def test_the_reasoning_effort_is_sent_only_when_set(fake: FakeChatApi, sleeps: list[float]) -> None:
+    with client(fake, sleeps) as chat:
+        chat.complete(MESSAGES, model=MODEL, reasoning_effort="none")
+        chat.complete(MESSAGES, model=MODEL)
+    first, second = (json.loads(request.content) for request in fake.requests)
+    assert first["reasoning_effort"] == "none"
+    assert "reasoning_effort" not in second

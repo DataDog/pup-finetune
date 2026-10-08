@@ -59,8 +59,16 @@ ticks every box:
 - [ ] **Registration.** Register the provider lazily in `providers/__init__.py` with
       `register_provider("<name>", "pup_finetune.providers.<name>.provider:<Name>Provider")`,
       so listing providers imports no provider implementation; keep the implementation in
-      `provider.py` and the package `__init__.py` light.
-- [ ] **Credentials.** Add a `CredentialSpec` for the provider's API key to the registry in
+      `provider.py` and the package `__init__.py` light. Name its `--provider-option` keys
+      with `options=(...)` (`train --help` lists them, and a test holds them to the
+      provider's options model), and its profiles' aliases with `models=(...)` (`train`
+      infers `--provider` from them, and a test holds them to the provider's profiles).
+      Say what it needs: `label=`, `credential=` (its `CredentialSpec`), `packages=`
+      (`Package`s: the SDK and the renderer, by step), `refuses=` (`RefusedFlag`s for flags
+      it cannot honor) and `deploys=False` if it cannot deploy yet. `doctor` and the
+      previews read these, so nothing fails only after `--confirm`.
+- [ ] **Credentials.** Add a `CredentialSpec` for the provider's API key (with
+      `needed_for`, what `doctor` and `auth status` say it is for) to the registry in
       `credentials.py`, from the package's `__init__.py` (keep it free of heavy imports), and
       import the package at the bottom of `providers/__init__.py` with
       `from pup_finetune.providers import <name> as _<name>  # noqa: E402, F401`, so
@@ -83,7 +91,9 @@ from the `seed` and `max_seq_len` it is opened with, and reports the provider's
 checkpoint-name limit as `max_checkpoint_name_len` and its capabilities as
 `supports_resume` and `supports_promotion`. The models Baseten serves use
 the same renderers as on any other provider, and `preflight` asks Baseten, read only, whether
-the workspace can train the model. `BASETEN_API_KEY` gets a `CredentialSpec` from the
+the workspace can train the model. Without promotion, `deploy` serves the run's deployable
+checkpoint, and reads a model back by name before it adopts or deletes one, since Baseten
+assigns the ids. `BASETEN_API_KEY` gets a `CredentialSpec` from the
 package's `__init__.py` (falling back, read only, to the key in `~/.trussrc`), the SDK goes in
 a `baseten` extra, and the three contract suites run against a fake Loops client in the
 default suite and against Baseten itself under `PUP_FINETUNE_LIVE=1`.

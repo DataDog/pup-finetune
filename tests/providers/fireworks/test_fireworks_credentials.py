@@ -13,19 +13,19 @@ import subprocess
 import sys
 import textwrap
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from pydantic import SecretStr
 from typer.testing import CliRunner
 
 from pup_finetune import credentials, redaction
-from pup_finetune import doctor as doctor_registry
 from pup_finetune.cli import app
 from pup_finetune.cli import doctor as doctor_cli
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.providers.fireworks import CREDENTIALS, validate_key
 from tests.fakes.fireworks_api import API_KEY, FakeFireworksApi
-from tests.fakes.pup import FakePup
+from tests.fakes.setup import healthy_pup, no_provider_keys
 
 runner = CliRunner()
 
@@ -47,23 +47,25 @@ def test_the_spec() -> None:
     assert CREDENTIALS.validator is validate_key
 
 
-def test_it_is_registered_with_its_doctor_check() -> None:
+def test_it_is_registered_with_what_it_is_needed_for() -> None:
     assert credentials.get_spec("fireworks") is CREDENTIALS
-    assert "credentials:fireworks" in doctor_registry._REGISTRY
+    assert CREDENTIALS.needed_for == (
+        "training, evaluation and deployment on fireworks, and the default judges"
+    )
 
 
-def test_doctor_reports_a_missing_key_without_failing(monkeypatch: pytest.MonkeyPatch) -> None:
-    signed_in = {"authenticated": True, "site": "datadoghq.com", "expires_at": None}
-    pup = FakePup().on("--version", raw=True, stdout="pup 1.10.7\n")
-    pup.on("auth", "status", stdout=json.dumps(signed_in))
-    monkeypatch.setattr(doctor_cli, "Pup", pup.client)
+def test_doctor_reports_a_missing_key_without_failing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    no_provider_keys(monkeypatch, tmp_path)
+    monkeypatch.setattr(doctor_cli, "Pup", healthy_pup().client)
     result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0, result.stdout + result.stderr
     checks = {check["name"]: check for check in json.loads(result.stdout)["checks"]}
-    fireworks = checks["credentials:fireworks"]
+    fireworks = checks["fireworks:key"]
     assert fireworks["required"] is False
-    assert fireworks["ok"] is False
-    assert "pup finetune auth login fireworks" in fireworks["detail"]
+    assert fireworks["status"] == "optional"
+    assert "pup finetune auth login fireworks" in fireworks["fix"]
 
 
 def test_auth_status_reports_the_source_without_the_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -77,6 +79,7 @@ def test_auth_status_reports_the_source_without_the_key(monkeypatch: pytest.Monk
                 "env_var": "FIREWORKS_API_KEY",
                 "configured": True,
                 "source": "env",
+                "needed_for": CREDENTIALS.needed_for,
             }
         ]
     }
@@ -97,7 +100,7 @@ def test_the_cli_registers_the_key_without_heavy_imports() -> None:
         from pup_finetune import credentials
         import pup_finetune.cli.auth
 
-        heavy = {"transformers", "fireworks", "tinker", "httpx", "baseten"}
+        heavy = {"transformers", "fireworks", "tinker", "httpx", "httpx2", "anthropic", "baseten"}
         print(json.dumps({
             "providers": [spec.provider for spec in credentials.all_specs()],
             "heavy": sorted({name.partition(".")[0] for name in sys.modules} & heavy),
@@ -107,7 +110,10 @@ def test_the_cli_registers_the_key_without_heavy_imports() -> None:
     completed = subprocess.run(  # noqa: S603 - this interpreter, a fixed script
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
     )
-    assert json.loads(completed.stdout) == {"providers": ["baseten", "fireworks"], "heavy": []}
+    assert json.loads(completed.stdout) == {
+        "providers": ["anthropic", "baseten", "fireworks", "openai"],
+        "heavy": [],
+    }
 
 
 # --- the validator -----------------------------------------------------------------------

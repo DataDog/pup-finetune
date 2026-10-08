@@ -25,6 +25,7 @@ from pup_finetune.datadog.spans import (
     iter_spans,
     page_file_name,
     parse_span,
+    parse_time_bound,
     resolve_time,
 )
 from pup_finetune.errors import ExternalError, StateError, UsageError
@@ -178,6 +179,15 @@ NOW_MS = 1767225600000
         ("now-7d", 7 * 24 * 60 * 60 * 1000),
         ("now-1w", 7 * 24 * 60 * 60 * 1000),
         (" now-1d ", 24 * 60 * 60 * 1000),
+        ("Now", 0),
+        ("now - 7d", 7 * 24 * 60 * 60 * 1000),
+        ("7d", 7 * 24 * 60 * 60 * 1000),
+        ("24h", 24 * 60 * 60 * 1000),
+        ("5min", 5 * 60 * 1000),
+        ("2hours", 2 * 60 * 60 * 1000),
+        ("5 minutes", 5 * 60 * 1000),
+        ("1 Week", 7 * 24 * 60 * 60 * 1000),
+        ("now-3days", 3 * 24 * 60 * 60 * 1000),
     ],
 )
 def test_a_relative_time_resolves_to_epoch_ms(value: str, offset_ms: int) -> None:
@@ -194,7 +204,8 @@ def test_an_absolute_time_is_returned_unchanged(value: str | int | None) -> None
 
 
 @pytest.mark.parametrize(
-    "value", ["now-", "now-7", "now-d", "now-7y", "now-1M", "now+1h", "now - 7d", "Now", "nowish"]
+    "value",
+    ["now-", "now-7", "now-d", "now-7y", "now-1M", "now+1h", "nowish", "7y", "1M", "3 fortnights"],
 )
 def test_an_unreadable_relative_time_is_a_usage_error(value: str) -> None:
     assert is_relative_time(value)
@@ -204,6 +215,57 @@ def test_an_unreadable_relative_time_is_a_usage_error(value: str) -> None:
         SpanQuery(from_=value)
     with pytest.raises(UsageError, match="cannot read the relative time"):
         SpanQuery(to=value)
+
+
+@pytest.mark.parametrize(
+    ("text", "bound"),
+    [
+        ("7d", "now-7d"),
+        ("24h", "now-24h"),
+        ("now-7d", "now-7d"),
+        ("NOW", "now"),
+        ("now - 7 days", "now-7d"),
+        ("5 minutes", "now-5m"),
+        ("90sec", "now-90s"),
+        ("007d", "now-7d"),
+        ("1767225600000", 1767225600000),
+        ("2025-12-01", "2025-12-01"),
+        ("20251201T000000", "20251201T000000"),
+    ],
+)
+def test_a_time_bound_is_read_into_one_form(text: str, bound: str | int) -> None:
+    """``7d`` and ``now-7d`` freeze as the same expression; a bare number is epoch ms."""
+    assert parse_time_bound(text, "--from") == bound
+
+
+@pytest.mark.parametrize(
+    ("text", "hint"),
+    [
+        ("20261001", "epoch seconds? append 000 (20261001000); a date? write 2026-10-01"),
+        ("1728000000", "epoch seconds? append 000 (1728000000000); a date? write it as "),
+        ("7", "7 days? write 7d; a date? write it as 2026-10-01"),
+        ("0", "0 days? write 0d"),
+        ("99999999999", "epoch seconds? append 000"),
+    ],
+)
+def test_a_bare_number_too_small_for_epoch_ms_is_refused_with_what_it_may_mean(
+    text: str, hint: str
+) -> None:
+    with pytest.raises(UsageError, match="too small for epoch milliseconds") as caught:
+        parse_time_bound(text, "--from")
+    assert caught.value.hint is not None and caught.value.hint.startswith(hint)
+
+
+def test_the_smallest_epoch_ms_a_bare_number_reads() -> None:
+    assert parse_time_bound("100000000000", "--to") == 100000000000
+
+
+@pytest.mark.parametrize("text", ["7y", "1M", "yesterday", "last week", "now+1h", ""])
+def test_a_time_bound_in_no_accepted_form_names_the_forms(text: str) -> None:
+    with pytest.raises(UsageError) as caught:
+        parse_time_bound(text, "--from")
+    assert caught.value.hint is not None
+    assert "7d, 24h" in caught.value.hint and "epoch milliseconds" in caught.value.hint
 
 
 def test_a_relative_time_before_the_epoch_is_a_usage_error() -> None:

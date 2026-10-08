@@ -306,10 +306,15 @@ def test_get_checkpoint_sends_the_path_and_returns_the_one_record() -> None:
     assert transport.requests[0].url.params["checkpoint_path"] == path
 
 
-@pytest.mark.parametrize("records", [[], [{"id": "a"}, {"id": "b"}], None])
-def test_get_checkpoint_needs_exactly_one_record(records: Any) -> None:
+def test_get_checkpoint_is_none_without_a_record() -> None:
+    http, _ = make_http({"GET /v1/loops/checkpoints": (200, {"checkpoints": []})})
+    assert http.get_checkpoint("bt://loops:run1/sampler_weights/ckpt") is None
+
+
+@pytest.mark.parametrize("records", [[{"id": "a"}, {"id": "b"}], None])
+def test_get_checkpoint_needs_at_most_one_record(records: Any) -> None:
     http, _ = make_http({"GET /v1/loops/checkpoints": (200, {"checkpoints": records})})
-    with pytest.raises(ExternalError, match="exactly one checkpoint"):
+    with pytest.raises(ExternalError, match="at most one checkpoint"):
         http.get_checkpoint("bt://loops:run1/sampler_weights/ckpt")
 
 
@@ -428,6 +433,42 @@ def test_deployment_routes() -> None:
     assert http.get_deployment("m1", "gone") is None
     http.deactivate_deployment("m1", "d1")
     assert transport.calls[2:] == [f"POST {base}/deactivate"]
+
+
+def test_model_and_deployment_reads_and_the_autoscaling_update() -> None:
+    base = "/v1/models/m1/deployments/d1"
+    config = {"training_checkpoints": {"loops_checkpoint_ids": ["ck1"]}}
+    http, transport = make_http(
+        {
+            "GET /v1/models/m1": (200, {"id": "m1", "name": "pft-run"}),
+            "GET /v1/models/gone": (404, {}),
+            "GET /v1/models/m1/deployments": (200, {"deployments": [{"id": "d1"}]}),
+            "GET /v1/models/gone/deployments": (404, {}),
+            f"GET {base}/config": (200, {"config": config, "raw_config": None}),
+            "GET /v1/models/m1/deployments/d2/config": (200, {"config": None}),
+            f"PATCH {base}/autoscaling_settings": (200, {"status": "ACCEPTED", "message": ""}),
+        }
+    )
+    assert http.get_model("m1") == {"id": "m1", "name": "pft-run"}
+    assert http.get_model("gone") is None
+    assert http.list_deployments("m1") == [{"id": "d1"}]
+    assert http.list_deployments("gone") == []
+    assert http.deployment_config("m1", "d1") == config
+    assert http.deployment_config("m1", "d2") == {}
+    http.set_autoscaling("m1", "d1", min_replica=0, max_replica=1)
+    config_request = transport.requests[4]
+    assert config_request.url.params["output_format"] == "parsed"
+    assert transport.bodies(f"PATCH {base}/autoscaling_settings") == [
+        {"min_replica": 0, "max_replica": 1}
+    ]
+
+
+@pytest.mark.parametrize("status", [500, 503])
+def test_the_autoscaling_update_is_safe_to_repeat(status: int) -> None:
+    route = "PATCH /v1/models/m1/deployments/d1/autoscaling_settings"
+    http, _ = make_http({route: (status, {})})
+    with pytest.raises(TransientError):
+        http.set_autoscaling("m1", "d1", min_replica=0, max_replica=1)
 
 
 @pytest.mark.parametrize("bad_id", ["../runs", "a/b", "", "a b"])

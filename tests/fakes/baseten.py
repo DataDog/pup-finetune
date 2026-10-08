@@ -42,9 +42,26 @@ What it mimics:
   it answers ``completion`` (token ids; by default the code points of ``Hello.``), cut after
   the first stop token id of ``SamplingParams.stop`` or at ``max_tokens``, and refuses to
   sample once closed, once its deployment is inactive or when its checkpoint expired.
+- Serving: ``GET /v1/loops/checkpoints`` describes a saved checkpoint (``ckpt1``...; none for
+  an unknown or expired one), and :meth:`FakeLoops.sampler_checkpoint` leaves one as a
+  finished run does. ``GET /v1/instance_types`` lists :attr:`FakeLoops.instance_types`.
+  ``POST /v1/loops/checkpoints/deploy`` creates a model under the requested name
+  (``dmodel1``...) with one deployment (``ddep1``...) of the sampler checkpoints, or adds one to
+  the model of that name, as Baseten does; it refuses (HTTP 400 or 404) an unknown instance
+  type or checkpoint, and every create without BDN volumes (``bdn=False``). A deployment reads
+  :attr:`FakeLoops.statuses` in turn (the last one stays), reports its autoscaling settings
+  (:attr:`FakeLoops.replicas`, changed by ``PATCH .../autoscaling_settings``) once it is
+  ``ACTIVE`` or scaled to zero, and its config's ``training_checkpoints``. ``GET /v1/models``
+  (by ``name``), ``GET /v1/models/<m>``, its deployments and ``DELETE /v1/models/<m>`` serve
+  :attr:`FakeLoops.models`. A deployment's chat route
+  (``model-<m>.api.baseten.co/deployment/<d>/sync/v1/chat/completions``) answers the
+  checkpoint's name with ``OK`` once it is ready, after :attr:`FakeLoops.chat_script`, and
+  any other model with HTTP 404.
 
 Failures are injected with :meth:`FakeLoops.fail_on`, at the call or in its future. Every SDK
-call is recorded in ``loops.calls`` with its keyword arguments.
+call is recorded in ``loops.calls`` with its keyword arguments. :attr:`FakeLoops.fail` and
+:attr:`FakeLoops.lost` inject an answer or an exception into a serving route (``deploy``,
+``status``, ``delete``, ``autoscaling``), once, before it takes effect or after.
 
 ``BasetenTransport`` answers by ``"METHOD /path"`` and records every request::
 
@@ -75,6 +92,7 @@ from typing import Any, Literal
 import httpx
 
 from pup_finetune.providers.baseten.client import MAX_CHECKPOINT_NAME_LEN
+from tests.fakes.chat_api import completion
 
 Answer = tuple[int, Any] | httpx.Response | Callable[[httpx.Request], httpx.Response]
 
@@ -83,6 +101,13 @@ _RUN_ROUTE = re.compile(r"/v1/loops/runs/([A-Za-z0-9_-]+)(/deactivate)?")
 _DEPLOYMENT_ROUTE = re.compile(
     r"/v1/models/([A-Za-z0-9_-]+)/deployments/([A-Za-z0-9_-]+)(/deactivate)?"
 )
+_MODEL_ROUTE = re.compile(
+    r"/v1/models/([A-Za-z0-9_-]+)"
+    r"(?:/deployments(?:/([A-Za-z0-9_-]+)(/config|/autoscaling_settings)?)?)?"
+)
+_CHAT_ROUTE = re.compile(r"/deployment/([A-Za-z0-9_-]+)/sync/v1/chat/completions")
+_CHAT_HOST = re.compile(r"model-([A-Za-z0-9_-]+)\.api\.baseten\.co")
+_SERVING: frozenset[str] = frozenset({"ACTIVE", "SCALED_TO_ZERO"})
 
 COMPLETION: tuple[int, ...] = tuple(ord(char) for char in "Hello.")
 """What a fake sampler answers by default: token ids a character-level tokenizer reads as text."""
@@ -278,6 +303,75 @@ class FakeSampler:
         }
 
 
+def instance_type(gpu_type: str, gpu_count: int, *, cpus: int = 22) -> dict[str, Any]:
+    """An instance type as ``GET /v1/instance_types`` lists it."""
+    return {
+        "id": f"{gpu_type}x{cpus}x{120 * gpu_count}",
+        "name": f"{gpu_type} {gpu_count}x{cpus}",
+        "memory_limit_mib": 122_880 * gpu_count,
+        "millicpu_limit": cpus * 1000,
+        "gpu_count": gpu_count,
+        "gpu_type": gpu_type,
+        "gpu_memory_limit_mib": 81_920,
+    }
+
+
+@dataclass
+class FakeDeployment:
+    """A dedicated deployment of sampler checkpoints, made by the checkpoint deploy route."""
+
+    model_id: str
+    deployment_id: str
+    checkpoint_ids: list[str] | None
+    """What its config's ``training_checkpoints`` names; ``None`` leaves them out."""
+    instance_type: dict[str, Any]
+    statuses: list[str]
+    replicas: dict[str, int]
+    status: str = "BUILDING"
+
+    def record(self, *, read: bool = False) -> dict[str, Any]:
+        """The deployment as ``GET /v1/models/<m>/deployments/<d>`` describes it; ``read``
+        moves it to its next status."""
+        if read and self.statuses:
+            self.status = self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
+        serving = self.status in _SERVING
+        return {
+            "id": self.deployment_id,
+            "model_id": self.model_id,
+            "name": self.deployment_id,
+            "created_at": "2026-10-07T12:00:00Z",
+            "is_production": True,
+            "is_development": False,
+            "status": self.status,
+            "active_replica_count": 1 if self.status == "ACTIVE" else 0,
+            "autoscaling_settings": dict(self.replicas) if serving else None,
+            "instance_type_name": self.instance_type["name"],
+            "environment": "production",
+        }
+
+
+@dataclass
+class FakeModel:
+    """A Baseten model and its deployments."""
+
+    model_id: str
+    name: str
+    deployments: list[FakeDeployment] = field(default_factory=list)
+
+    def record(self) -> dict[str, Any]:
+        first = self.deployments[0] if self.deployments else None
+        return {
+            "id": self.model_id,
+            "name": self.name,
+            "created_at": "2026-10-07T12:00:00Z",
+            "deployments_count": len(self.deployments),
+            "production_deployment_id": first.deployment_id if first else None,
+            "development_deployment_id": None,
+            "instance_type_name": first.instance_type["name"] if first else "",
+            "team_name": "Default Team",
+        }
+
+
 def _done(value: Any) -> Future[Any]:
     future: Future[Any] = Future()
     future.set_result(value)
@@ -453,7 +547,8 @@ class FakeServiceClient:
 class FakeLoops:
     """A fake ``baseten.loops`` module; see the module docstring.
 
-    ``logprobs=False`` leaves ``loss_fn_outputs`` empty, so only the loss is reported.
+    ``logprobs=False`` leaves ``loss_fn_outputs`` empty, so only the loss is reported;
+    ``bdn=False`` refuses every checkpoint deployment, as a workspace without BDN volumes.
     """
 
     Datum = FakeDatum
@@ -466,8 +561,11 @@ class FakeLoops:
     RemoteOpError = FakeRemoteOpError
     SamplerTerminatedError = FakeSamplerTerminatedError
 
-    def __init__(self, *, logprobs: bool = True, completion: Sequence[int] = COMPLETION) -> None:
+    def __init__(
+        self, *, logprobs: bool = True, completion: Sequence[int] = COMPLETION, bdn: bool = True
+    ) -> None:
         self.logprobs = logprobs
+        self.bdn = bdn
         self.completion = list(completion)
         self.calls: list[LoopsCall] = []
         self.sessions: list[str] = []
@@ -477,6 +575,27 @@ class FakeLoops:
         self.samplers: dict[str, FakeSampler] = {}
         self.sampling_clients: list[FakeSamplingClient] = []
         self._failures: dict[tuple[str, int], tuple[BaseException, bool]] = {}
+        self.instance_types = [
+            instance_type("H100", 1),
+            instance_type("H100", 2),
+            instance_type("A100", 1),
+        ]
+        self.models: dict[str, FakeModel] = {}
+        self.deleted: list[str] = []
+        """The ids of the models deleted, in order."""
+        self._deployed = 0
+        self.statuses = ["DEPLOYING", "ACTIVE"]
+        """What successive reads of a new deployment report; the last one stays."""
+        self.replicas = {"min_replica": 1, "max_replica": 1}
+        """A new deployment's autoscaling replicas."""
+        self.chat_script: list[httpx.Response | Exception] = []
+        """What a deployment's chat route answers (or raises) first, in order."""
+        self.fail: dict[str, httpx.Response | BaseException] = {}
+        """What a serving route answers or raises once, before it takes effect."""
+        self.lost: dict[str, httpx.Response | BaseException] = {}
+        """What a serving route answers or raises once, after it took effect."""
+        self.after_deploy: Callable[[FakeDeployment], None] | None = None
+        """Called once with the next deployment a create makes, before it answers."""
 
     def ServiceClient(self, **kwargs: Any) -> FakeServiceClient:
         self._raise_on_failure("ServiceClient", kwargs)
@@ -510,6 +629,37 @@ class FakeLoops:
     def expire(self, path: str) -> None:
         """Expire the checkpoint at ``path``, as Baseten does after its time to live."""
         self.checkpoints[path].expired = True
+
+    def sampler_checkpoint(self, name: str = "best", *, base_model: str = "Qwen/Qwen3.5-9B") -> str:
+        """The ``bt://loops:`` path of a sampler checkpoint a finished, deactivated run left."""
+        session_id = f"session{len(self.sessions) + 1}"
+        self.sessions.append(session_id)
+        run = FakeRun(f"run{len(self.runs) + 1}", session_id, {"base_model": base_model})
+        run.active = False
+        self.runs[run.run_id] = run
+        path = f"bt://loops:{run.run_id}/sampler_weights/{name}"
+        self.checkpoints[path] = FakeCheckpoint(path, run.run_id, "sampler_weights", 0)
+        return path
+
+    def checkpoint_id(self, path: str) -> str:
+        """Baseten's id of the checkpoint at ``path``."""
+        return f"ckpt{list(self.checkpoints).index(path) + 1}"
+
+    def deploy_checkpoint(self, path: str, name: str) -> FakeModel:
+        """Deploy the checkpoint at ``path`` as the model ``name``, as another client would."""
+        body = {
+            "checkpoint_ids": [self.checkpoint_id(path)],
+            "model_name": name,
+            "instance_type_id": self.instance_types[0]["id"],
+            "hf_secret_name": "hf_access_token",
+        }
+        made = self._create_deployment(body)
+        assert isinstance(made, FakeDeployment)
+        return self.models[made.model_id]
+
+    def model_named(self, name: str) -> FakeModel:
+        (model,) = [model for model in self.models.values() if model.name == name]
+        return model
 
     def deactivate(self, run_id: str) -> bool:
         """Deactivate ``run_id``; whether Baseten knows the run."""
@@ -586,12 +736,169 @@ class FakeLoops:
             )
         raise AssertionError(f"no fake Baseten route for {request.method} {request.url.path}")
 
+    def _injected(self, key: str, injected: dict[str, httpx.Response | BaseException]) -> Any:
+        found = injected.pop(key, None)
+        if isinstance(found, BaseException):
+            raise found
+        return found
+
+    def _checkpoint_record(self, path: str) -> dict[str, Any]:
+        checkpoint = self.checkpoints[path]
+        return {
+            "id": self.checkpoint_id(path),
+            "run_id": checkpoint.run_id,
+            "checkpoint_id": path.rsplit("/", 1)[1],
+            "checkpoint_type": "lora",
+            "base_model": self.runs[checkpoint.run_id].settings["base_model"],
+            "target": "sampler" if checkpoint.kind == "sampler_weights" else "trainer",
+            "sync_status": "COMPLETE",
+        }
+
+    def _find_checkpoints(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.params.get("checkpoint_path", "")
+        found = self.checkpoints.get(path)
+        records = [] if found is None or found.expired else [self._checkpoint_record(path)]
+        return httpx.Response(200, json={"checkpoints": records})
+
+    def _deploy(self, request: httpx.Request) -> httpx.Response:
+        refused = self._injected("deploy", self.fail)
+        if refused is not None:
+            return refused
+        made = self._create_deployment(jsonlib.loads(request.content))
+        if isinstance(made, httpx.Response):
+            return made
+        hook, self.after_deploy = self.after_deploy, None
+        if hook is not None:
+            hook(made)
+        lost = self._injected("deploy", self.lost)
+        if lost is not None:
+            return lost
+        ids = {"model_id": made.model_id, "deployment_id": made.deployment_id}
+        return httpx.Response(200, json=ids)
+
+    def _create_deployment(self, body: dict[str, Any]) -> FakeDeployment | httpx.Response:
+        """The deployment a checkpoint deploy of ``body`` makes, else Baseten's refusal."""
+        types = [item for item in self.instance_types if item["id"] == body["instance_type_id"]]
+        paths = {self.checkpoint_id(path): path for path in self.checkpoints}
+        sent = [paths.get(checkpoint_id) for checkpoint_id in body["checkpoint_ids"]]
+        if not self.bdn:
+            return httpx.Response(
+                400, json={"detail": "BDN volumes are not enabled for this organization"}
+            )
+        if not types or not body.get("hf_secret_name"):
+            return httpx.Response(400, json={"detail": "invalid instance type or secret"})
+        if not sent or not all(path is not None and self._serves(path) for path in sent):
+            return httpx.Response(404, json={"detail": "checkpoint not found"})
+        self._deployed += 1
+        number = self._deployed
+        named = [model for model in self.models.values() if model.name == body["model_name"]]
+        model = named[0] if named else FakeModel(f"dmodel{number}", body["model_name"])
+        self.models[model.model_id] = model
+        deployment = FakeDeployment(
+            model_id=model.model_id,
+            deployment_id=f"ddep{number}",
+            checkpoint_ids=list(body["checkpoint_ids"]),
+            instance_type=types[0],
+            statuses=list(self.statuses),
+            replicas=dict(self.replicas),
+        )
+        model.deployments.append(deployment)
+        return deployment
+
+    def _dedicated(self, model_id: str, deployment_id: str) -> FakeDeployment | None:
+        model = self.models.get(model_id)
+        found = [d for d in model.deployments if d.deployment_id == deployment_id] if model else []
+        return found[0] if found else None
+
+    def _handle_model(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        model_id, deployment_id, sub = match.groups()
+        route = (request.method, "deployments" in request.url.path, deployment_id, sub)
+        model = self.models.get(model_id)
+        if route == ("DELETE", False, None, None):
+            failed = self._injected("delete", self.fail)
+            if failed is not None:
+                return failed
+            if model is None:
+                return httpx.Response(404, json={"detail": "not found"})
+            del self.models[model_id]
+            self.deleted.append(model_id)
+            return self._injected("delete", self.lost) or httpx.Response(
+                200, json={"id": model_id, "deleted": True}
+            )
+        if model is None:
+            return httpx.Response(404, json={"detail": "not found"})
+        if route == ("GET", False, None, None):
+            return httpx.Response(200, json=model.record())
+        if route == ("GET", True, None, None):
+            records = [deployment.record() for deployment in model.deployments]
+            return httpx.Response(200, json={"deployments": records})
+        deployment = self._dedicated(model_id, str(deployment_id))
+        if deployment is None:
+            return httpx.Response(404, json={"detail": "not found"})
+        if route[0] == "GET" and sub is None:
+            failed = self._injected("status", self.fail)
+            return failed or httpx.Response(200, json=deployment.record(read=True))
+        if route[0] == "GET" and sub == "/config":
+            checkpoints: dict[str, Any] = {"download_folder": "/tmp/training_checkpoints"}  # noqa: S108
+            if deployment.checkpoint_ids is not None:
+                checkpoints["loops_checkpoint_ids"] = deployment.checkpoint_ids
+            config = {
+                "model_name": model.name,
+                "resources": {"instance_type": deployment.instance_type["id"]},
+                "training_checkpoints": checkpoints,
+            }
+            return httpx.Response(200, json={"config": config, "raw_config": None})
+        if route[0] == "PATCH" and sub == "/autoscaling_settings":
+            failed = self._injected("autoscaling", self.fail)
+            if failed is not None:
+                return failed
+            body = jsonlib.loads(request.content)
+            deployment.replicas.update(
+                {key: body[key] for key in body if key in deployment.replicas}
+            )
+            return httpx.Response(200, json={"status": "ACCEPTED", "message": "updated"})
+        raise AssertionError(f"no fake Baseten route for {request.method} {request.url.path}")
+
+    def _chat(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        host = _CHAT_HOST.fullmatch(request.url.host)
+        deployment = self._dedicated(host[1], match[1]) if host else None
+        if deployment is None or deployment.status not in _SERVING:
+            return httpx.Response(404, json={"detail": "not found"})
+        if self.chat_script:
+            answer = self.chat_script.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        paths = {self.checkpoint_id(path): path for path in self.checkpoints}
+        served = [paths[i].rsplit("/", 1)[1] for i in deployment.checkpoint_ids or [] if i in paths]
+        model = jsonlib.loads(request.content).get("model")
+        if model not in served:
+            return httpx.Response(404, json={"message": f"The model `{model}` does not exist."})
+        return completion("OK", model=str(model))
+
     def _handle(self, request: httpx.Request) -> httpx.Response:
-        if (request.method, request.url.path) == ("POST", "/v1/loops/samplers"):
+        route = (request.method, request.url.path)
+        if route == ("POST", "/v1/loops/samplers"):
             return self._create_sampler(request)
+        if route == ("GET", "/v1/loops/checkpoints"):
+            return self._find_checkpoints(request)
+        if route == ("POST", "/v1/loops/checkpoints/deploy"):
+            return self._deploy(request)
+        if route == ("GET", "/v1/instance_types"):
+            return httpx.Response(200, json={"instance_types": self.instance_types})
+        if route == ("GET", "/v1/models"):
+            name = request.url.params.get("name")
+            models = [m.record() for m in self.models.values() if name in (None, m.name)]
+            return httpx.Response(200, json={"models": models})
+        chat = _CHAT_ROUTE.fullmatch(request.url.path)
+        if chat is not None and request.method == "POST":
+            return self._chat(request, chat)
         deployment = _DEPLOYMENT_ROUTE.fullmatch(request.url.path)
-        if deployment is not None:
+        if deployment is not None and deployment[1] not in self.models:
             return self._handle_deployment(request, deployment)
+        model = _MODEL_ROUTE.fullmatch(request.url.path)
+        if model is not None:
+            return self._handle_model(request, model)
         match = _RUN_ROUTE.fullmatch(request.url.path)
         if match is None:
             raise AssertionError(f"no fake Baseten route for {request.method} {request.url.path}")
