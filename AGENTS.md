@@ -176,8 +176,14 @@ keychain after `pup finetune auth login baseten`, or the default remote's key in
 `~/.trussrc`, read only). Its preview asks Baseten, read only, whether the workspace can train
 the model; `--confirm` starts a billed dedicated trainer, deactivated when the session ends.
 Baseten has no promotion, so `result.json` records the best sampler checkpoint as
-`deployable_checkpoint`; deploying it on Baseten arrives later. `--provider-option
-max_seq_len=<n>` (at least 1024) cuts the profile's context as on Fireworks.
+`deployable_checkpoint`, and `deploy` serves it as a dedicated Baseten model named after the
+deployment id (the run id made safe, or `--deployment-id`), on an instance type with exactly
+the GPUs of `--shape TYPE:COUNT` (default `H100:1`), scaling 0 to 1 replicas. The workspace
+needs BDN volumes and an `hf_access_token` secret (the deployment downloads the base weights
+from Hugging Face). A name Baseten already has is refused before anything is created.
+`undeploy` deletes that Baseten model with its deployment; the checkpoint is kept, so the run
+can be deployed again. `--provider-option max_seq_len=<n>` (at least 1024) cuts the
+profile's context as on Fireworks.
 
 Add `--detach` to train in a background worker (output in `/tmp/run/worker.log`) and follow it
 with `status /tmp/run --watch`. `--provider-option step_delay_s=0.5 --batch-size 1` makes the
@@ -211,7 +217,9 @@ and `scripts/check_headers.py` checks only code.
 
 Opt-in test suites: `PUP_FINETUNE_LIVE=1` runs `live` tests (real external services);
 `PUP_FINETUNE_TOKENIZER_TESTS=1` runs `tokenizer` tests (downloads real tokenizers, needs the
-`hf` extra): `PUP_FINETUNE_TOKENIZER_TESTS=1 uv run pytest -m tokenizer`.
+`hf` extra): `PUP_FINETUNE_TOKENIZER_TESTS=1 uv run pytest -m tokenizer`. The live Baseten
+deploy test also needs `PUP_FINETUNE_BASETEN_CHECKPOINT`, a `bt://loops:` sampler checkpoint
+of `qwen3p5-9b`: it deploys it on a billed H100 and always undeploys it.
 
 ## Layout
 
@@ -502,8 +510,19 @@ Source lives under `src/pup_finetune/`.
   their families), a read-only `preflight` (the SDK loads, and Loops' capabilities offer and
   enable the model with a limit of at least the `max_seq_len` option, else the profile's
   context), `check`, the family's HF renderer and the `max_seq_len` option (at least 1024; it
-  cuts the training profile, so it also sizes the samplers and an evaluation's trainer);
-  deployment arrives later. See `docs/architecture.md`.
+  cuts the training profile, so it also sizes the samplers and an evaluation's trainer).
+  `baseten/deploy.py` has what its `deploy`, `smoke_test`, `owns_deployment` and `undeploy`
+  run: lookups first (the checkpoint record, synced and of a served model; the instance type
+  with exactly the shape's GPUs; no model already named the deployment id), then
+  `POST /v1/loops/checkpoints/deploy` sent once, as a model named the deployment id (a 4xx is
+  `DeploymentRejected`; after any other failure the model is read back by name and adopted
+  only when its one deployment serves the checkpoint on the instance type, else refused as
+  taken, else `TransientError`), polling every 15 s until `ACTIVE` (`DeploymentNotReady` for
+  a failed status or the timeout), the replicas set to 0 to 1, a smoke test of one chat
+  completion naming the checkpoint on the deployment's `/sync/v1` route, retried while it
+  scales up, and an idempotent `undeploy` that deletes the model. `deployment_name` is
+  `None` (Baseten assigns the ids), and the `Endpoint`'s `name` is
+  `models/<model id>/deployments/<deployment id>`. See `docs/architecture.md`.
 
 Tests live under `tests/` and mirror `src/`. Shared fakes live in `tests/fakes/` (import them
 as `tests.fakes...`); `tests/fakes/pup.py` has `FakePup`, a fake pup runner that answers by
@@ -537,7 +556,10 @@ failures), `FakeClock`, and `fake_deployer`, the provider's `deployer` factory o
 deterministic losses and logprobs, `bt://loops:` checkpoints with the name limit, expiry,
 closed clients and deactivated runs, samplers that answer a fixed completion, injectable
 failures), and `BasetenTransport`, Baseten's HTTP routes by `"METHOD /path"`
-(`FakeLoops.transport()` also serves its runs, samplers and their deployments);
+(`FakeLoops.transport()` also serves its runs, samplers and their deployments, checkpoint
+records, instance types, checkpoint deployments as models with scripted statuses,
+autoscaling and config, model deletion and each deployment's chat route, with `fail`, `lost`
+and `after_deploy` to inject failures before or after a create took effect);
 `capabilities()` builds a Loops capabilities answer.
 `tests/fakes/keyring.py` has in-memory, failing and locked keyring backends; every test starts
 on the failing one, so none touches the real keychain.

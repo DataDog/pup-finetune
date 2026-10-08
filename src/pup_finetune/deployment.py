@@ -202,7 +202,7 @@ def deploy_preview(target: DeployTarget, options: DeployOptions) -> dict[str, An
         "model": target.model.uri,
         "model_source": target.source,
         "deployment_id": options.deployment_id,
-        "shape": options.shape or "the first validated shape the provider matches to the model",
+        "shape": options.shape or "the provider's default shape for the model",
         "replicas": {"min": options.min_replicas, "max": options.max_replicas},
         "action": (
             f"create an on-demand deployment of {target.model.uri} on {target.provider}, wait "

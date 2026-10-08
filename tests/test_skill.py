@@ -18,6 +18,10 @@ import pytest
 
 from pup_finetune import skill
 from pup_finetune.errors import StateError, UsageError
+from pup_finetune.providers.baseten import client as baseten_client
+from pup_finetune.providers.baseten.backend import MIN_SEQ_LEN
+from pup_finetune.providers.baseten.deploy import DEFAULT_SHAPE
+from pup_finetune.providers.baseten.provider import PROFILES as BASETEN_PROFILES
 
 REPO_SKILL = Path(__file__).resolve().parents[1] / "skills" / "datadog-finetune" / "SKILL.md"
 
@@ -97,6 +101,7 @@ def test_the_debugging_table_covers_each_failure() -> None:
     for term in (
         "datadog_auth",  # Datadog auth
         "fireworks",  # provider auth
+        "baseten",  # Baseten auth and failures
         "matches no spans",  # empty pulls
         "excluded_by_code",  # exclusions
         "ReadOnlyError",  # read-only mode
@@ -109,6 +114,31 @@ def test_the_debugging_table_covers_each_failure() -> None:
         "times out",  # deployment timeouts
     ):
         assert any(term in row for row in rows), f"no debugging row mentions {term!r}"
+
+
+def test_the_provider_notes_cover_baseten() -> None:
+    text = skill.skill_text()
+    assert "pup finetune auth login baseten" in text
+    assert text.index("## Step 7") < text.index("## Provider notes") < text.index("## End state")
+    notes = text.split("## Provider notes", 1)[1].split("## End state", 1)[0]
+    assert "### Baseten" in notes
+    rows = set(re.findall(r"^\| `([^`]+)` \| `([^`]+)` \|", notes, re.MULTILINE))
+    assert rows == {(profile.alias, profile.base_model) for profile in BASETEN_PROFILES}
+    for phrase in (
+        "deployable_checkpoint",
+        "it may still",
+        "kill -9",
+        "BDN volumes",
+        baseten_client.HF_SECRET_NAME,
+        f"`{DEFAULT_SHAPE}`",
+        f"at least {MIN_SEQ_LEN}",
+        "--lora-alpha",
+        "max_seq_len",
+        "LOOPS_BASE_URL",
+        *baseten_client._REJECTED_ENV,
+    ):
+        assert phrase in notes, phrase
+    assert f"LOOPS_BASE_URL must be unset or {baseten_client.API_BASE}" in text
 
 
 def _fake_files(root: Path) -> Callable[[str], Path]:

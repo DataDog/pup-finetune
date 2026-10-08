@@ -71,8 +71,7 @@ def deploy(
         str | None,
         typer.Option(
             "--shape",
-            help="The deployment shape (default: the first validated shape the provider "
-            "matches to the model).",
+            help="The deployment shape (default: the provider's default shape for the model).",
             show_default=False,
         ),
     ] = None,
