@@ -101,6 +101,7 @@ def test_labels_reject_unknown_fields_and_loose_values() -> None:
         Label.model_validate({"id": "a", "keep": "false", "reason": "x"})
     with pytest.raises(ValidationError):
         Label.model_validate({"id": "a", "keep": True, "by": "robot"})
+    assert Label.model_validate({"id": "a", "keep": True, "by": "human"}).by == "manual"
     with pytest.raises(ValidationError):
         Label.model_validate({"id": "", "keep": True})
 
@@ -204,10 +205,10 @@ def test_applying_a_file_that_changes_its_mind_again_changes_nothing(tmp_path: P
 def test_a_new_source_or_reason_for_the_same_decision_is_recorded(tmp_path: Path) -> None:
     dataset = make_dataset(tmp_path / "ds", ["a", "b"])
     apply_labels(dataset, [drop("a")])
-    confirmed = Label(id="a", keep=False, reason="off topic", by="human", at=AT)
+    confirmed = Label(id="a", keep=False, reason="off topic", by="judge", at=AT)
     report = apply_labels(dataset, [confirmed])
     assert (report.applied, report.unchanged) == (1, 0)
-    assert dataset.labels()["a"].by == "human"
+    assert dataset.labels()["a"].by == "judge"
     report = apply_labels(dataset, [drop("a", "wrong tool")])
     assert report.applied == 1
     assert report.summary["drop_reasons"] == [{"reason": "wrong tool", "count": 1}]

@@ -20,7 +20,7 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Final, Literal, Protocol, Self, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, Protocol, Self, runtime_checkable
 
 from pydantic import (
     BaseModel,
@@ -125,6 +125,15 @@ class AdamConfig:
             raise ValueError("weight_decay and grad_clip_norm must not be negative")
 
 
+MODEL_DEFAULT: Final = "model default"
+"""The source :meth:`TrainSpec.resolved_settings` names for a value the model profile gave."""
+
+MAX_SEQ_LEN_FLAG: Final = "--max-seq-len"
+"""The source of a context cut with ``--max-seq-len``; one cut with ``--provider-option
+max_seq_len`` is :data:`MAX_SEQ_LEN_OPTION_FLAG`."""
+
+MAX_SEQ_LEN_OPTION_FLAG: Final = "--provider-option max_seq_len"
+
 DEFAULT_SPEND_RESERVE_FRACTION = 0.1
 """The share of ``max_spend_usd`` kept back for the checkpoint saved when training stops."""
 
@@ -200,6 +209,152 @@ class TrainSpec(BaseModel):
         """The optimizer parameters for every step: a constant learning rate."""
         return AdamConfig(learning_rate=self.learning_rate)
 
+    def resolved_settings(
+        self, profile: ModelProfile, *, max_seq_len_flag: str = MAX_SEQ_LEN_FLAG
+    ) -> dict[str, Any]:
+        """The values a run on ``profile`` (its training profile) trains with, as a preview
+        shows them and ``run.json`` records them: the LoRA rank and the context resolved,
+        each with where it comes from (a cut context with ``max_seq_len_flag``, the flag
+        that set it), and an alpha left to the provider said so rather than guessed. The
+        optimizer's fixed parameters are not here (see :meth:`recorded_settings`)."""
+        lora = self.lora_config(profile)
+        return {
+            "max_epochs": self.max_epochs,
+            "patience": self.patience,
+            "min_delta": self.min_delta,
+            "learning_rate": self.learning_rate,
+            "batch_size": self.batch_size,
+            "lora": {
+                "rank": lora.rank,
+                "rank_source": "--lora-rank" if self.lora_rank is not None else MODEL_DEFAULT,
+                "alpha": lora.alpha,
+                "alpha_source": "--lora-alpha"
+                if self.lora_alpha is not None
+                else "chosen by the provider",
+            },
+            "max_seq_len": profile.max_seq_len,
+            "max_seq_len_source": max_seq_len_flag
+            if "max_seq_len" in self.provider_options
+            else MODEL_DEFAULT,
+            "seed": self.seed,
+            "checkpoint_every_minutes": self.checkpoint_every_minutes,
+            "max_train_tokens": self.max_train_tokens,
+            "microbatch_token_budget": self.microbatch_token_budget,
+            "max_spend_usd": self.max_spend_usd,
+            "hourly_rate_usd": self.hourly_rate_usd,
+            "spend_reserve_fraction": self.spend_reserve_fraction,
+            "provider_options": dict(self.provider_options),
+        }
+
+    def recorded_settings(
+        self, profile: ModelProfile, *, max_seq_len_flag: str = MAX_SEQ_LEN_FLAG
+    ) -> dict[str, Any]:
+        """What ``run.json`` records under ``settings``: :meth:`resolved_settings`, plus what
+        no flag changes (the pipeline depth and the optimizer's fixed parameters), which
+        ``status`` shows and a preview leaves out."""
+        adam = self.adam_config()
+        return {
+            **self.resolved_settings(profile, max_seq_len_flag=max_seq_len_flag),
+            "pipeline_depth": self.pipeline_depth,
+            "optimizer": {
+                "name": "adam",
+                "beta1": adam.beta1,
+                "beta2": adam.beta2,
+                "eps": adam.eps,
+                "weight_decay": adam.weight_decay,
+                "grad_clip_norm": adam.grad_clip_norm,
+            },
+        }
+
+
+# --- What a preview says is billed -------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TrainingUsage:
+    """What a training run would use, for :meth:`Provider.training_billing`.
+
+    ``epochs`` is how many epochs are left to train (all of them for a new run).
+    ``validation_tokens_per_epoch`` counts the tokens forwarded each epoch to compute the
+    validation loss, which trains nothing. ``max_spend_usd`` and ``hourly_rate_usd`` are the
+    run's wall-clock spend guard, if any (see :class:`TrainSpec`).
+    """
+
+    tokens_per_epoch: int
+    epochs: int
+    validation_tokens_per_epoch: int = 0
+    max_train_tokens: int | None = None
+    max_spend_usd: float | None = None
+    hourly_rate_usd: float | None = None
+    resumed: bool = False
+    """Whether this is what resuming a run would use, whose spend cap was set when it
+    started."""
+
+    @property
+    def max_tokens(self) -> int:
+        """The most tokens it trains on: every epoch left, or ``max_train_tokens`` if less."""
+        total = self.tokens_per_epoch * self.epochs
+        return total if self.max_train_tokens is None else min(total, self.max_train_tokens)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SamplingUsage:
+    """What an evaluation's generations would use, for :meth:`Provider.sampling_billing`."""
+
+    calls: int
+    max_tokens_per_call: int
+
+
+OFFLINE_BILLING: Final = "the fake provider is offline and bills nothing"
+"""How the offline fake provider's billing sentences start, before ``: `` and what it would
+use."""
+
+
+def spend_cap_text(
+    max_spend_usd: float | None, hourly_rate_usd: float | None, *, resumed: bool = False
+) -> str:
+    """The run's spend guard in words: a cap at a rate the user gave, or that there is none.
+
+    ``resumed`` says it of a run being resumed, whose cap was set when it started (``resume``
+    has no flag to change it)."""
+    if max_spend_usd is None or hourly_rate_usd is None:
+        if resumed:
+            return "no spend cap (a run's cap is set when it starts; this one started without)"
+        return "no spend cap (add --max-spend-usd with --hourly-rate-usd)"
+    rate = (
+        f"the ${hourly_rate_usd:g} per hour set when the run started"
+        if resumed
+        else (f"your ${hourly_rate_usd:g} per hour")
+    )
+    return (
+        f"stops at about ${max_spend_usd:g} of wall-clock time at {rate} "
+        "(an estimate, not the provider's bill)"
+    )
+
+
+def training_usage_text(usage: TrainingUsage) -> str:
+    """``usage`` in words, for a provider's billing sentence: the tokens trained per epoch
+    and at most, the validation tokens forwarded, and the spend guard."""
+    epochs = f"{usage.epochs} epoch{'' if usage.epochs == 1 else 's'}"
+    text = f"{usage.tokens_per_epoch:,} tokens per epoch, at most {usage.max_tokens:,}"
+    capped = usage.max_tokens < usage.tokens_per_epoch * usage.epochs
+    text += " (--max-train-tokens)" if capped else f" over {epochs}"
+    if usage.validation_tokens_per_epoch:
+        text += (
+            f", plus {usage.validation_tokens_per_epoch:,} validation tokens forwarded per epoch"
+        )
+    cap = spend_cap_text(usage.max_spend_usd, usage.hourly_rate_usd, resumed=usage.resumed)
+    return f"{text}; {cap}"
+
+
+def sampling_usage_text(usage: SamplingUsage) -> str:
+    """``usage`` in words, for a provider's billing sentence."""
+    total = usage.calls * usage.max_tokens_per_call
+    return (
+        f"{usage.calls:,} generations of at most {usage.max_tokens_per_call:,} tokens each "
+        f"(at most {total:,} generated tokens), each sent its conversation so far"
+    )
+
 
 class TransientError(ExternalError):
     """A provider call that failed in a way worth retrying: a timeout, a dropped connection.
@@ -208,6 +363,8 @@ class TransientError(ExternalError):
     that change nothing when repeated. The loop retries such failures for ``forward`` alone,
     never for ``forward_backward``, where a retry would accumulate the gradients twice.
     """
+
+    error_code: ClassVar[str] = "transient"
 
 
 def is_transient(exc: BaseException) -> bool:
@@ -224,9 +381,13 @@ class ProviderCapacityError(ExternalError):
     retry it, the user does, later.
     """
 
+    error_code: ClassVar[str] = "provider_capacity"
+
 
 class ProviderAuthError(ExternalError):
     """The provider rejected the API key (HTTP 401) or refused it the request (HTTP 403)."""
+
+    error_code: ClassVar[str] = "provider_auth"
 
 
 # --- Results the seam returns ------------------------------------------------------------
@@ -276,9 +437,11 @@ class ModelRef:
 class Endpoint:
     """A deployment serving a model. ``inference_model`` is what chat requests name.
 
-    ``url`` is the base URL of the OpenAI-compatible API that serves it, when it has one;
-    ``name`` is the provider's full resource name for the deployment and ``shape`` the
-    hardware configuration it runs on, when the provider has those.
+    ``url`` is the base URL of the OpenAI-compatible API that serves it, when it has one,
+    and ``api_key_env`` the environment variable a client conventionally reads the key it
+    sends as its bearer token from (never the key itself), when it needs one; ``name`` is
+    the provider's full resource name for the deployment and ``shape`` the hardware
+    configuration it runs on, when the provider has those.
     """
 
     provider: str
@@ -288,6 +451,7 @@ class Endpoint:
     url: str | None = None
     name: str | None = None
     shape: str | None = None
+    api_key_env: str | None = None
 
 
 DEFAULT_DEPLOY_TIMEOUT_S: Final = 30 * 60.0
@@ -437,22 +601,6 @@ class StepMetrics:
     def mean_loss(self) -> float:
         """The per-token mean loss; NaN when no token carried weight."""
         return self.loss_sum / self.weight if self.weight > 0 else math.nan
-
-
-@dataclass(frozen=True, slots=True)
-class Check:
-    """One provider readiness check, reported by ``doctor``. Never holds secret values.
-
-    It carries the same fields as :class:`pup_finetune.doctor.CheckResult`, but ``required``
-    defaults to ``False`` here and to ``True`` there, so copy it across explicitly
-    (``CheckResult(c.name, c.ok, c.detail, required=c.required)``) rather than relying on
-    either default.
-    """
-
-    name: str
-    ok: bool
-    detail: str
-    required: bool = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -615,8 +763,10 @@ class TrainingBackend(Protocol):
 class Provider(Protocol):
     """Everything a training provider offers beyond the loop. Constructing one is cheap.
 
-    :meth:`check` reports readiness without raising. :meth:`resolve_model` and
-    :meth:`preflight` raise :class:`UsageError` for an unknown or unusable model;
+    Readiness is not the provider's to report: ``doctor`` checks what the registry says it
+    needs (:class:`~pup_finetune.providers.ProviderInfo`, :mod:`pup_finetune.readiness`),
+    offline, and calls only :meth:`models` and :meth:`preflight` for ``--check``.
+    :meth:`resolve_model` and :meth:`preflight` raise :class:`UsageError` for an unknown or unusable model;
     :meth:`validate_options` returns the normalized ``provider_options`` or raises
     :class:`UsageError`. :meth:`deploy` and :meth:`undeploy` are remote writes: callers gate
     them behind ``--confirm`` and ``PUP_READ_ONLY``; :meth:`smoke_test` is a paid call.
@@ -625,10 +775,6 @@ class Provider(Protocol):
     @property
     def name(self) -> str:
         """The provider's registry name, e.g. ``fireworks``."""
-        ...
-
-    def check(self) -> list[Check]:
-        """Readiness checks (credentials, SDK, reachability), for ``doctor``."""
         ...
 
     def models(self) -> list[ModelProfile]:
@@ -654,6 +800,17 @@ class Provider(Protocol):
         :meth:`validate_options`: rows are rendered against, and a run records, the profile
         it returns. Raises :class:`UsageError` when an option does not fit ``profile``.
         """
+        ...
+
+    def training_billing(self, usage: TrainingUsage) -> str:
+        """One sentence for a training preview: what this provider bills a run for, and
+        ``usage`` (:func:`training_usage_text`). Never a price it cannot know."""
+        ...
+
+    def sampling_billing(self, usage: SamplingUsage) -> str:
+        """One sentence for an evaluation preview: what this provider bills the base and
+        tuned models' generations for, and ``usage`` (:func:`sampling_usage_text`). Never a
+        price it cannot know."""
         ...
 
     def backend(self) -> TrainingBackend:

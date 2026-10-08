@@ -31,11 +31,13 @@ from pup_finetune.curation.triage import (
     Vote,
     build_messages,
     decide,
+    has_template_task,
     measure_agreement,
     parse_judges,
     parse_vote,
     plan_triage,
     read_votes,
+    rubric_sections,
     rubric_template,
     run_triage,
 )
@@ -139,9 +141,12 @@ def test_criteria_need_a_rubric_or_rules() -> None:
 
 def test_judges_parse_in_order_without_repeats() -> None:
     assert parse_judges(None) == DEFAULT_JUDGES
-    assert parse_judges(" judge-a, openai/b ,judge-a,") == ("judge-a", "openai/b")
+    assert parse_judges(" fireworks/a, openai/b ,fireworks/a,") == ("fireworks/a", "openai/b")
+    assert parse_judges("glm-5p3-flash") == ("accounts/fireworks/models/glm-5p3-flash",)
     with pytest.raises(UsageError):
         parse_judges(" , ")
+    with pytest.raises(UsageError, match="unknown judge 'fake-judge'"):
+        parse_judges("fake-judge")  # the offline fake judge is evaluate's only
 
 
 def test_judges_are_written_one_way() -> None:
@@ -163,6 +168,31 @@ def test_the_template_ships_with_the_package() -> None:
     text = rubric_template()
     for heading in ("## Task", "## Keep", "## Drop", "## Examples"):
         assert heading in text
+
+
+def _with_task(task: str) -> str:
+    template = rubric_template()
+    start = template.index("## Task") + len("## Task")
+    return template[:start] + f"\n\n{task}\n\n" + template[template.index("## Keep") :]
+
+
+def test_the_template_s_task_is_detected() -> None:
+    assert has_template_task(rubric_template())
+    # Rewrapped or with a note added, the placeholder is still there.
+    placeholder = rubric_sections(rubric_template())["task"]
+    assert has_template_task(_with_task(placeholder.replace(", ", ",\n")))
+    assert has_template_task(_with_task("A synthetic order agent. " + placeholder))
+
+
+def test_a_rubric_with_its_own_task_is_edited_even_with_the_template_s_lists() -> None:
+    assert not has_template_task(_with_task("A synthetic order agent that tracks parcels."))
+    assert not has_template_task("Keep rows that call the order tool.")
+    assert not has_template_task("## Task\n\n## Keep\n- anything")
+
+
+def test_rubric_sections_are_keyed_by_heading() -> None:
+    sections = rubric_sections("# Title\nintro\n## Task\n  one\n two\n### Keep ##\nthree\n")
+    assert sections == {"task": "one two", "keep": "three"}
 
 
 # --- the prompt ----------------------------------------------------------------------------
@@ -275,12 +305,12 @@ def test_the_plan_counts_calls_and_writes_nothing(tmp_path: Path) -> None:
     before = sorted(p.name for p in dataset.path.iterdir())
     plan = plan_triage(dataset, RUBRIC, (J1, J2))
     preview = plan.preview()
-    assert preview["rows_to_review"] == 4
+    assert preview["rows"]["to_review"] == 4
     assert preview["judge_calls"] == 8
     assert preview["judge_calls_pending"] == 8
     assert preview["votes_reused"] == 0
-    assert preview["judges"] == [J1, J2]
-    assert preview["rubric_sha256"] == RUBRIC.sha256
+    assert [judge["model"] for judge in preview["judges"]] == [J1, J2]
+    assert preview["rubric_hash"] == RUBRIC.sha256[:12]
     assert "api.fireworks.ai" in preview["data_destination"]
     assert sorted(p.name for p in dataset.path.iterdir()) == before
 
@@ -300,8 +330,8 @@ def test_rows_labeled_by_the_agent_or_a_person_are_not_reviewed(tmp_path: Path) 
     apply_labels(
         dataset,
         [
-            Label(id="row-0", keep=False, reason="off topic", by="human", at=AT),
-            Label(id="row-1", keep=True, by="agent", at=AT),
+            Label(id="row-0", keep=False, reason="off topic", by="manual", at=AT),
+            Label(id="row-1", keep=True, by="manual", at=AT),
             Label(id="row-2", keep=True, by="judge", at=AT),
         ],
     )
@@ -431,13 +461,13 @@ def test_a_label_written_after_planning_is_kept_and_its_row_skipped(tmp_path: Pa
     plan = plan_triage(dataset, RUBRIC, (J1,))
     assert plan.skipped_labeled == 0
     # The agent drops a row after the plan was made, before the judges label it.
-    apply_labels(dataset, [Label(id="row-1", keep=False, reason="off topic", by="agent", at=AT)])
+    apply_labels(dataset, [Label(id="row-1", keep=False, reason="off topic", by="manual", at=AT)])
     report = run_triage(plan, FakeCouncil(keep_all))
     assert report.skipped_labeled == 1
     assert "row-1" not in {decision.row_id for decision in report.decisions}
     assert report.complete
     labels = dataset.labels()
-    assert (labels["row-1"].keep, labels["row-1"].by) == (False, "agent")
+    assert (labels["row-1"].keep, labels["row-1"].by) == (False, "manual")
     assert {labels[row_id].by for row_id in ("row-0", "row-2")} == {"judge"}
 
 
@@ -810,26 +840,42 @@ def test_the_preview_names_every_provider_the_rows_are_sent_to(tmp_path: Path) -
     destination = preview["data_destination"]
     for place in ("Fireworks (api.fireworks.ai)", "Anthropic (api.anthropic.com)", "OpenAI"):
         assert place in destination
-    assert preview["judge_endpoints"] == [
+    assert preview["data_recipients"] == [
+        "full rows -> Fireworks api.fireworks.ai (judge), Anthropic api.anthropic.com (judge), "
+        "OpenAI api.openai.com (judge)"
+    ]
+    # Each judge once, with its provider, endpoint and credential.
+    assert preview["judges"] == [
         {
+            "model": J1,
             "provider": "fireworks",
             "endpoint": "https://api.fireworks.ai/inference/v1",
             "credential": "fireworks",
-            "judges": [J1, J2],
         },
         {
+            "model": CLAUDE,
             "provider": "anthropic",
             "endpoint": "https://api.anthropic.com",
             "credential": "anthropic",
-            "judges": [CLAUDE],
         },
         {
+            "model": GPT,
             "provider": "openai",
             "endpoint": "https://api.openai.com/v1",
             "credential": "openai",
-            "judges": [GPT],
+        },
+        {
+            "model": J2,
+            "provider": "fireworks",
+            "endpoint": "https://api.fireworks.ai/inference/v1",
+            "credential": "fireworks",
         },
     ]
+    # One billing sentence per provider, never a price.
+    billing = preview["billing"]
+    assert [billing.count(name) for name in ("Fireworks", "Anthropic", "OpenAI")] == [1, 1, 1]
+    assert "$" not in billing
+    assert "approximate" in billing
 
 
 def test_the_frozen_settings_hold_the_provider_qualified_judges(tmp_path: Path) -> None:
@@ -975,7 +1021,7 @@ def test_a_too_long_vote_drops_the_row_even_while_other_votes_are_missing() -> N
 # --- agreement with the user's labels ------------------------------------------------------
 
 
-def label_rows(dataset: DatasetDir, labels: Mapping[str, bool], by: LabelSource = "human") -> None:
+def label_rows(dataset: DatasetDir, labels: Mapping[str, bool], by: LabelSource = "manual") -> None:
     apply_labels(
         dataset,
         [
@@ -993,8 +1039,7 @@ def test_agreement_needs_rows_the_user_or_the_agent_labeled(tmp_path: Path) -> N
 
 def test_agreement_reviews_only_labeled_rows_and_labels_nothing(tmp_path: Path) -> None:
     dataset = make_dataset(tmp_path, n=6)
-    label_rows(dataset, {"row-0": True, "row-1": False, "row-2": True}, by="human")
-    label_rows(dataset, {"row-3": False}, by="agent")
+    label_rows(dataset, {"row-0": True, "row-1": False, "row-2": True, "row-3": False})
     labels_before = (dataset.path / "labels.jsonl").read_text()
 
     # Every judge keeps row-0 and row-1 and drops row-2 and row-3; J3 alone also keeps row-3.
@@ -1016,10 +1061,7 @@ def test_agreement_reviews_only_labeled_rows_and_labels_nothing(tmp_path: Path) 
     assert (agreement.compared, agreement.agreed, agreement.rate) == (4, 2, 0.5)
     assert agreement.confusion == {"keep_keep": 1, "keep_drop": 1, "drop_keep": 1, "drop_drop": 1}
     assert agreement.kappa == 0.0
-    assert agreement.by == {
-        "agent": {"rows_compared": 1, "rate": 1.0},
-        "human": {"rows_compared": 3, "rate": 0.3333},
-    }
+    assert "by" not in agreement.to_json()
     assert agreement.judges[J1] == {"rows_compared": 4, "rows_agreed": 2, "rate": 0.5, "kappa": 0.0}
     assert agreement.judges[J3]["rows_agreed"] == 1
     assert sorted(d["row_id"] for d in agreement.disagreements) == ["row-1", "row-2"]
@@ -1027,7 +1069,6 @@ def test_agreement_reviews_only_labeled_rows_and_labels_nothing(tmp_path: Path) 
     assert row_1 == {
         "row_id": "row-1",
         "label": "drop",
-        "label_by": "human",
         "label_reason": "off topic",
         "council": "keep",
         "council_reason": "fine",
@@ -1097,7 +1138,7 @@ def test_kappa_rewards_agreement_beyond_chance() -> None:
         )
 
     labels = {
-        f"r{i}": Label(id=f"r{i}", keep=i < 5, reason="" if i < 5 else "no", by="human", at=AT)
+        f"r{i}": Label(id=f"r{i}", keep=i < 5, reason="" if i < 5 else "no", by="manual", at=AT)
         for i in range(10)
     }
     perfect = [decision(f"r{i}", i < 5) for i in range(10)]

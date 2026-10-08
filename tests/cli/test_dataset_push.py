@@ -83,7 +83,7 @@ def test_push_without_confirm_previews_and_sends_nothing(
 ) -> None:
     result = push(dataset)
     assert result.exit_code == 2, result.stderr
-    assert "Confirmation required" in result.stderr
+    assert result.stderr.startswith("Preview only, nothing was run: push")
     data = output_json(result)
     assert data["status"] == "confirmation_required"
     preview = data["preview"]
@@ -91,8 +91,10 @@ def test_push_without_confirm_previews_and_sends_nothing(
     assert preview["dataset_name"] == NAME
     assert preview["dataset_id"] is None
     assert preview["records_to_push"] == len(ROW_IDS)
-    assert sum(preview["records_to_push_by_split"].values()) == len(ROW_IDS)
-    assert set(preview["records_to_push_by_split"]) == set(SPLITS)
+    assert sum(preview["rows"].values()) == len(ROW_IDS)
+    assert set(preview["rows"]) == set(SPLITS)
+    # Each count once: the records to push by split are the preview's rows.
+    assert not {"records_to_push_by_split", "kept_by_split"} & set(preview)
     assert preview["already_pushed"] == 0
     assert preview["stale_records"] == {}
     sample = preview["sample_record"]
@@ -116,6 +118,32 @@ def test_push_without_confirm_previews_and_sends_nothing(
     assert not (dataset / PUSH_FILE).exists()
 
 
+def test_a_warnings_key_inside_trace_data_is_never_echoed_as_a_warning(
+    tmp_path: Path, api: FakeDatasetsApi, fake: FakePup
+) -> None:
+    # Trace content is untrusted: a `warnings` list in a row's tool schema reaches the
+    # preview's sample_record, but stderr must not print it as one of our warnings.
+    injected = "INJECTED TEXT from a trace"
+    rows = []
+    for line in TOOL_USE.read_text().splitlines():
+        row = json.loads(line)
+        if not row.get("tools"):
+            continue
+        for tool in row["tools"]:
+            tool["function"]["parameters"]["warnings"] = [injected]
+        rows.append(json.dumps(row))
+    file = tmp_path / "rows.jsonl"
+    file.write_text("\n".join(rows) + "\n")
+    target = tmp_path / "ds"
+    assert invoke("import", str(target), "--file", str(file)).exit_code == 0
+
+    result = push(target)
+    assert result.exit_code == 2, result.stderr
+    assert injected in result.stdout  # the data is still in the JSON, as data
+    assert injected not in result.stderr
+    assert "warning:" not in result.stderr
+
+
 def test_push_with_confirm_pushes_and_emits_the_receipt(
     dataset: Path, api: FakeDatasetsApi
 ) -> None:
@@ -131,18 +159,30 @@ def test_push_with_confirm_pushes_and_emits_the_receipt(
     assert sum(data["records_by_split"].values()) == len(ROW_IDS)
     assert data["stale_records"] == {}
     assert data["receipt_file"] == str((dataset / PUSH_FILE).resolve())
-    assert data["next_command"] == f"pup finetune train --dataset {dataset} ..."
+    assert data["next_command"] == f"pup finetune dataset sample {dataset} --count 20"
     assert "dataset_url" not in data
     assert len(remote.records) == len(ROW_IDS)
 
 
-def test_push_is_refused_read_only_even_as_a_preview(
+def test_push_previews_read_only_but_refuses_confirm(
     dataset: Path, api: FakeDatasetsApi, fake: FakePup
 ) -> None:
-    for extra in ((), ("--confirm",)):
-        result = push(dataset, *extra, env={"PUP_READ_ONLY": "true"})
-        assert result.exit_code == 2
-        assert "PUP_READ_ONLY" in result.stderr
+    refused = push(dataset, "--confirm", env={"PUP_READ_ONLY": "true"})
+    assert refused.exit_code == 2
+    assert refused.stdout == ""
+    assert "PUP_READ_ONLY" in refused.stderr
+    assert "pup --read-only" in refused.stderr
+    # The preview reads local files only, so it runs, but offers no --confirm.
+    preview = push(dataset, env={"PUP_READ_ONLY": "yes"})
+    assert preview.exit_code == 2, preview.stderr
+    data = output_json(preview)
+    assert data["status"] == "confirmation_required"
+    assert data["next_command"] is None
+    assert data["preview"]["read_only"] == "--confirm is refused while PUP_READ_ONLY is set"
+    assert data["preview"]["records_to_push"] > 0
+    assert data["preview"]["data_recipients"] == [
+        f"kept rows -> Datadog (dataset {NAME!r} in project {PROJECT!r})"
+    ]
     assert fake.calls == []
     assert not (dataset / PUSH_FILE).exists()
 
@@ -178,7 +218,9 @@ def test_nothing_left_to_push_reports_the_receipt_without_confirm(
     assert (data["pushed"], data["already_pushed"]) == (0, len(ROW_IDS) - 1)
     assert data["stale_records"] == {ROW_IDS[0]: record_id_of(remote, ROW_IDS[0])}
     assert "not deleted" in data["warnings"][0]
-    assert data["next_command"].startswith("pup finetune train")
+    # Labeled and pushed: training is the step left (no push step any more).
+    assert data["next_command"] is None
+    assert [step["command"].split()[2] for step in data["next_steps"]] == ["models", "train"]
     assert len(fake.calls) == calls  # nothing reached Datadog
     assert output_json(push(dataset, "--confirm")) == data
 
@@ -284,10 +326,69 @@ def test_the_default_project(dataset: Path, api: FakeDatasetsApi) -> None:
     assert output_json(result)["preview"]["project"] == "pup-finetune"
 
 
-def test_name_is_required(dataset: Path) -> None:
+def test_name_is_required_until_the_first_push(dataset: Path) -> None:
     result = invoke("push", str(dataset))
     assert result.exit_code == 2
-    assert "--name" in _ANSI.sub("", result.stderr)
+    assert "Error [usage]: dataset push needs --name (" in _ANSI.sub("", result.stderr)
+    assert "was never pushed)" in result.stderr
+
+
+def test_project_without_name_is_refused(
+    dataset: Path, api: FakeDatasetsApi, fake: FakePup
+) -> None:
+    """Before a first push, --project alone names no dataset; after one, another project
+    than the receipt's is refused too."""
+    never = invoke("push", str(dataset), "--project", "other")
+    assert never.exit_code == 2
+    assert "Error [usage]: dataset push needs --name (" in _ANSI.sub("", never.stderr)
+    assert fake.calls == []
+    assert push(dataset, "--confirm").exit_code == 0
+    calls = len(fake.calls)
+    other = invoke("push", str(dataset), "--project", "other")
+    assert other.exit_code == 2
+    assert f"was pushed to dataset {NAME!r} in project {PROJECT!r}" in other.stderr
+    assert len(fake.calls) == calls
+
+
+def test_a_rerun_takes_the_dataset_from_the_receipt(tmp_path: Path, api: FakeDatasetsApi) -> None:
+    """Once pushed, `dataset push DIR` needs no flag; another --name names the receipt's."""
+    rows = TOOL_USE.read_text().splitlines()
+    first, rest = tmp_path / "first.jsonl", tmp_path / "rest.jsonl"
+    first.write_text("\n".join(rows[:6]) + "\n")
+    rest.write_text("\n".join(rows[6:]) + "\n")
+    directory = tmp_path / "ds"
+    assert invoke("import", str(directory), "--file", str(first)).exit_code == 0
+    pushed = push(directory, "--confirm")
+    assert pushed.exit_code == 0, pushed.stderr
+    assert output_json(pushed)["pipeline"]["push"] == {"status": "pushed", "pending": 0}
+
+    imported = output_json(invoke("import", str(directory), "--file", str(rest)))
+    new_rows = len(rows) - 6
+    assert imported["pipeline"]["push"] == {"status": "pushed_with_new_rows", "pending": new_rows}
+    flagless = f"pup finetune dataset push {directory}"
+    assert flagless in [step["command"] for step in imported["next_steps"]]
+
+    result = invoke("push", str(directory))
+    assert result.exit_code == 2, result.stderr
+    data = output_json(result)
+    # The receipt's project, not the default one.
+    assert (data["preview"]["project"], data["preview"]["dataset_name"]) == (PROJECT, NAME)
+    assert data["preview"]["defaults_used"] == []
+    assert data["preview"]["records_to_push"] == new_rows
+    words = shlex.split(data["next_command"])
+    assert words[:4] == ["pup", "finetune", "dataset", "push"]
+    assert "--name" not in words and "--project" not in words
+    confirmed = invoke(*words[3:])
+    assert confirmed.exit_code == 0, confirmed.stderr
+    receipt = output_json(confirmed)
+    assert (receipt["pushed"], receipt["records"]) == (new_rows, len(rows))
+    assert receipt["pipeline"]["push"] == {"status": "pushed", "pending": 0}
+    assert len(api.dataset_named(NAME).records) == len(rows)
+
+    other = invoke("push", str(directory), "--name", "other")
+    assert other.exit_code == 2
+    assert f"was pushed to dataset {NAME!r} in project {PROJECT!r}, not 'other'" in other.stderr
+    assert "leave --name and --project out" in other.stderr
 
 
 def test_show_reports_the_push(dataset: Path, api: FakeDatasetsApi) -> None:

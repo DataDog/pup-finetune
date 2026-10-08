@@ -65,7 +65,13 @@ from pup_finetune.datadog.datasets import (
     RecordsListTruncated,
 )
 from pup_finetune.datadog.pup import Pup
-from pup_finetune.errors import ExternalError, FinetuneError, StateError, UsageError
+from pup_finetune.errors import (
+    ExternalError,
+    Interrupted,
+    SettingsConflict,
+    StateError,
+    UsageError,
+)
 from pup_finetune.storage import (
     DirectoryLock,
     atomic_write_json,
@@ -427,7 +433,7 @@ def plan_push(dataset: DatasetDir, *, project: str, name: str) -> PushPlan:
     )
 
 
-class PushTerminated(FinetuneError):
+class PushTerminated(Interrupted):
     """The push stopped because the process received SIGTERM; rerun it to resume."""
 
 
@@ -707,17 +713,18 @@ def _check_state(
 ) -> None:
     path = push_path(dataset)
     if state.settings_hash != digest:
-        raise StateError(
+        raise SettingsConflict(
             f"{path} was written for a dataset directory with other settings",
             hint=f"move {path} aside to push this directory as a new dataset",
         )
     if state.project != project or state.dataset_name != name:
-        raise UsageError(
+        raise SettingsConflict(
             f"{dataset.path} was pushed to dataset {state.dataset_name!r} in project "
             f"{state.project!r}, not {name!r} in {project!r}",
             hint=(
-                f"pass --name {shlex.quote(state.dataset_name)} --project "
-                f"{shlex.quote(state.project)} to add to that dataset; a directory pushes to "
+                "leave --name and --project out (or pass --name "
+                f"{shlex.quote(state.dataset_name)} --project {shlex.quote(state.project)}) "
+                f"to add to that dataset; a directory pushes to "
                 f"a new dataset only without a {PUSH_FILE}, so move {path} aside first to "
                 "push to another one"
             ),

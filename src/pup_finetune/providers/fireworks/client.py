@@ -40,6 +40,7 @@ deletes on-demand deployments, returning plain :class:`ShapeVersion` and
 from __future__ import annotations
 
 import importlib
+import logging
 import os
 import re
 import sys
@@ -52,7 +53,13 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 from pydantic import SecretStr
 
 from pup_finetune.credentials import login_hint
-from pup_finetune.errors import ExternalError, FinetuneError, UsageError
+from pup_finetune.errors import (
+    ExternalError,
+    FinetuneError,
+    UsageError,
+    install_hint,
+    reinstall_hint,
+)
 from pup_finetune.output import info
 from pup_finetune.providers.base import (
     MODEL_ID_PATTERN,
@@ -115,10 +122,7 @@ ACCOUNT_ENV_VAR: Final = "FIREWORKS_ACCOUNT_ID"
 """Overrides the account lookup: the id recorded for the client and used to name a session
 when the SDK does not report its resource name. It does not choose where training runs: the
 SDK trains in the key's own account, and refuses a key that sees several accounts."""
-INSTALL_HINT: Final = (
-    "install the fireworks extra: uv sync --extra fireworks, "
-    "or pip install 'pup-finetune[fireworks]'"
-)
+INSTALL_HINT: Final = install_hint("fireworks")
 
 MAX_CHECKPOINT_NAME_LEN: Final = 17
 """The longest checkpoint name Fireworks can promote. It is checked only when promoting, long
@@ -557,13 +561,42 @@ def _is_sdk_module(name: str) -> bool:
 def _broken_sdk(exc: ImportError) -> UsageError:
     return UsageError(
         f"the Fireworks Training SDK is installed but failed to load: {redact(str(exc))}",
-        hint="reinstall the fireworks extra: uv sync --extra fireworks --reinstall, "
-        "or pip install --force-reinstall 'pup-finetune[fireworks]'",
+        hint=reinstall_hint("fireworks"),
     )
 
 
+_EXPECTED_SDK_NOTICES: Final = (
+    # Sampling the base model passes base_model only to select base-only routing, and this
+    # client always names the session's own base, which the warning is about.
+    "base_model is ignored for serverless base-only sampling",
+    # Serverless sessions never report the queue metric; the SDK says so once per sampler.
+    "prefill_queue_duration is unavailable",
+)
+"""Warnings the SDK logs on every serverless evaluation, about choices this client makes on
+purpose. They are dropped; every other SDK warning is still shown."""
+
+
+class _ExpectedSdkNotices(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not any(message.startswith(notice) for notice in _EXPECTED_SDK_NOTICES)
+
+
+_SDK_LOGGERS: Final = ("fireworks.training.sdk.client", "fireworks.training.sdk.concurrency")
+
+
+def _quiet_expected_sdk_notices() -> None:
+    """Install :class:`_ExpectedSdkNotices` on the SDK's loggers, once."""
+    for name in _SDK_LOGGERS:
+        logger = logging.getLogger(name)
+        if not any(isinstance(f, _ExpectedSdkNotices) for f in logger.filters):
+            logger.addFilter(_ExpectedSdkNotices())
+
+
 def _sdk() -> Any:
-    return _import("fireworks.training.sdk")
+    sdk = _import("fireworks.training.sdk")
+    _quiet_expected_sdk_notices()
+    return sdk
 
 
 def _tinker() -> Any:

@@ -30,6 +30,7 @@ from pup_finetune.cli import deploy as deploy_module
 from pup_finetune.cli import train as train_module
 from pup_finetune.providers.base import Provider
 from pup_finetune.providers.baseten import client
+from pup_finetune.runs import RunDir
 from pup_finetune.runtime import Runtime
 from pup_finetune.training import inputs as inputs_module
 from tests.fakes.baseten import FakeLoops
@@ -105,7 +106,8 @@ def test_the_preview_asks_baseten_nothing_paid(
     data = output(result)
     preview = data["preview"]
     assert (preview["provider"], preview["model"]) == ("baseten", "qwen3p5-9b")
-    assert preview["profile"]["renderer"] == "qwen3_5"
+    # The preview shows what identifies the model; run.json records the whole profile.
+    assert set(preview["profile"]) == {"alias", "base_model", "max_seq_len"}
     assert preview["examples"]["train"] > 0
     assert preview["data_destination"] == "training data is sent to baseten"
     assert shlex.split(data["next_command"])[-1] == "--confirm"
@@ -120,9 +122,10 @@ def test_a_confirmed_run_trains_leaves_nothing_running_and_cannot_deploy_yet(
     result = train(dataset, run_dir, "--confirm")
     assert result.exit_code == 0, result.stderr
     data = output(result)
-    assert data["phase"] == "completed"
+    assert data["status"] == "completed"
     assert data["promoted_model"] is None
-    checkpoint = data["deployable_checkpoint"]
+    checkpoint = (RunDir(run_dir).read_result() or {})["deployable_checkpoint"]
+    assert data["deployable_checkpoint"] == checkpoint["name"]
     assert checkpoint["kind"] == "sampler"
     assert checkpoint["uri"].startswith("bt://loops:run1/sampler_weights/")
     assert loops.runs
@@ -132,3 +135,48 @@ def test_a_confirmed_run_trains_leaves_nothing_running_and_cannot_deploy_yet(
     assert deployed.exit_code == 2, deployed.stderr
     assert "deploying on Baseten is not available" in deployed.stderr
     assert not (run_dir / "deployment.json").exists()
+
+
+def test_the_lora_alpha_is_refused_in_the_preview(
+    dataset: Path, tmp_path: Path, loops: FakeLoops
+) -> None:
+    run_dir = tmp_path / "run"
+    result = train(dataset, run_dir, "--lora-alpha", "16")
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert (
+        "Error [usage]: --lora-alpha is not supported on baseten: Baseten sets the LoRA alpha "
+        "itself"
+    ) in result.stderr
+    assert "Hint: drop --lora-alpha" in result.stderr
+    assert not run_dir.exists()
+    assert loops.calls == []
+
+
+def test_resuming_a_run_recorded_with_a_lora_alpha_says_to_start_a_new_run(
+    dataset: Path, tmp_path: Path, loops: FakeLoops
+) -> None:
+    run_dir = tmp_path / "run"
+    assert train(dataset, run_dir, "--confirm").exit_code == 0
+    manifest = json.loads((run_dir / "run.json").read_text())
+    manifest["spec"]["lora_alpha"] = 16
+    (run_dir / "run.json").write_text(json.dumps(manifest))
+    state = json.loads((run_dir / "state.json").read_text())
+    (run_dir / "state.json").write_text(json.dumps({**state, "phase": "interrupted"}))
+    result = invoke("resume", str(run_dir))
+    assert result.exit_code == 2
+    assert "--lora-alpha is not supported on baseten" in result.stderr
+    assert "Hint: the run was recorded with --lora-alpha" in result.stderr
+    assert "start a new run without --lora-alpha" in result.stderr
+    assert "drop --lora-alpha" not in result.stderr
+
+
+def test_the_deploy_preview_is_refused_before_any_confirm(
+    dataset: Path, tmp_path: Path, loops: FakeLoops
+) -> None:
+    run_dir = tmp_path / "run"
+    assert train(dataset, run_dir, "--confirm").exit_code == 0
+    preview = invoke("deploy", str(run_dir))
+    assert preview.exit_code == 2
+    assert preview.stdout == ""
+    assert "deploying on Baseten is not available in this version" in preview.stderr

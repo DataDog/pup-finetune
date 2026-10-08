@@ -47,7 +47,7 @@ import httpx
 from pydantic import SecretStr
 
 from pup_finetune.credentials import login_hint
-from pup_finetune.errors import ExternalError, UsageError
+from pup_finetune.errors import ExternalError, UsageError, install_hint, reinstall_hint
 from pup_finetune.http_common import (
     CLIENT_SOURCE,
     DETAIL_LIMIT,
@@ -86,9 +86,7 @@ __all__ = [
 
 SOURCE: Final = "baseten"
 API_BASE: Final = "https://api.baseten.co"
-INSTALL_HINT: Final = (
-    "install the baseten extra: uv sync --extra baseten, or pip install 'pup-finetune[baseten]'"
-)
+INSTALL_HINT: Final = install_hint("baseten")
 MAX_CHECKPOINT_NAME_LEN: Final = 54
 """The longest checkpoint name pup-finetune saves on Loops."""
 IGNORE_INDEX: Final = -100
@@ -653,8 +651,7 @@ def loops_sdk(loops: LoopsModule | None = None) -> LoopsModule:
 def _broken_sdk(exc: ImportError) -> UsageError:
     return UsageError(
         f"the Baseten Loops SDK is installed but failed to load: {redact(str(exc))}",
-        hint="reinstall the baseten extra: uv sync --extra baseten --reinstall, "
-        "or pip install --force-reinstall 'pup-finetune[baseten]'",
+        hint=reinstall_hint("baseten"),
     )
 
 

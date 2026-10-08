@@ -21,7 +21,6 @@ import pytest
 from pydantic import SecretStr
 
 from pup_finetune import credentials, redaction
-from pup_finetune import doctor as doctor_registry
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.providers.base import ProviderCapacityError, TransientError
 from pup_finetune.providers.baseten import CREDENTIALS, read_trussrc_key, validate_key
@@ -46,7 +45,7 @@ def trussrc(home: Path, text: str) -> Path:
     return path
 
 
-def test_the_spec_is_registered_with_its_doctor_check() -> None:
+def test_the_spec_is_registered() -> None:
     assert credentials.get_spec("baseten") is CREDENTIALS
     assert CREDENTIALS.env_var == "BASETEN_API_KEY"
     assert CREDENTIALS.keychain_service == "pup-finetune"
@@ -54,7 +53,7 @@ def test_the_spec_is_registered_with_its_doctor_check() -> None:
     assert CREDENTIALS.description
     assert CREDENTIALS.config_reader is read_trussrc_key
     assert CREDENTIALS.validator is validate_key
-    assert "credentials:baseten" in doctor_registry._REGISTRY
+    assert CREDENTIALS.needed_for == "training and evaluation on baseten"
 
 
 def test_the_cli_registers_the_key_without_heavy_imports() -> None:

@@ -829,8 +829,7 @@ class FireworksBackend:
             raise UsageError(
                 f"a session with max_seq_len {max_seq_len} was requested, over the max_seq_len "
                 f"provider option of {self._max_seq_len}",
-                hint="train a new run with a larger --provider-option max_seq_len, or on "
-                "shorter rows",
+                hint="train a new run with a larger --max-seq-len, or on shorter rows",
             )
         if seed < 0:
             raise UsageError(f"the seed must not be negative, got {seed}")

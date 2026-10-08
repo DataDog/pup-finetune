@@ -77,10 +77,19 @@ def dataset(tmp_path: Path) -> Path:
     return path
 
 
+def edited_rubric() -> str:
+    """The rubric template with its Task section filled in, as a user would."""
+    template = rubric_template()
+    start = template.index("## Task") + len("## Task")
+    end = template.index("## Keep")
+    task = "\n\nA synthetic support agent that answers order questions with the order tool.\n\n"
+    return template[:start] + task + template[end:]
+
+
 @pytest.fixture
 def rubric(tmp_path: Path) -> Path:
     path = tmp_path / "rubric.md"
-    path.write_text(rubric_template(), encoding="utf-8")
+    path.write_text(edited_rubric(), encoding="utf-8")
     return path
 
 
@@ -108,15 +117,63 @@ def test_the_preview_counts_the_calls_and_calls_nothing(
     data = output(result)
     rows = accepted(dataset)
     preview = data["preview"]
-    assert preview["rows_to_review"] == rows
+    assert preview["rows"]["to_review"] == rows
     assert preview["judge_calls"] == rows * len(DEFAULT_JUDGES)
-    assert preview["judges"] == list(DEFAULT_JUDGES)
-    assert len(preview["rubric_sha256"]) == 64
+    assert [judge["model"] for judge in preview["judges"]] == list(DEFAULT_JUDGES)
+    assert len(preview["rubric_hash"]) == 12
+    assert not {"rows_to_review", "rows_skipped_labeled"} & set(preview)  # under rows
+    assert preview["approx_input_tokens"] > 0
     assert data["next_command"] == shlex.join(
         ["pup", "finetune", "dataset", "triage", str(dataset), "--rubric", str(rubric), "--confirm"]
     )
     assert chat.requests == []
     assert not (dataset / JUDGMENTS_FILE).exists()
+
+
+def test_an_unedited_template_rubric_warns_and_offers_no_confirm(
+    dataset: Path, tmp_path: Path, chat: FakeChatApi
+) -> None:
+    template = tmp_path / "rubric.md"
+    template.write_text(rubric_template(), encoding="utf-8")
+    args = ["dataset", "triage", str(dataset), "--rubric", str(template), "--max-rows", "2"]
+    result = invoke(*args)
+    assert result.exit_code == 2, result.stderr
+    data = output(result)
+    warning = f"{template} still has the template's Task text; describe what the agent is for first"
+    assert warning in data["preview"]["warnings"]
+    assert data["next_command"] is None
+    assert "--allow-template-rubric" in result.stderr
+    # Why --confirm is refused, and what to change, are in the result too.
+    assert data["preview"]["refused"] == (
+        "--confirm is refused while the rubric's Task section is the template's"
+    )
+    assert "--allow-template-rubric" in data["preview"]["refused_hint"]
+
+    refused = invoke(*args, "--confirm")
+    assert refused.exit_code == 2
+    assert refused.stdout == ""
+    assert warning in refused.stderr
+    assert chat.requests == []
+    assert not (dataset / JUDGMENTS_FILE).exists()
+
+    allowed = invoke(*args, "--allow-template-rubric")
+    assert allowed.exit_code == 2, allowed.stderr
+    assert warning in output(allowed)["preview"]["warnings"]
+    assert "refused" not in output(allowed)["preview"]
+    next_command = output(allowed)["next_command"]
+    assert "--allow-template-rubric" in shlex.split(next_command)
+    assert shlex.split(next_command)[-1] == "--confirm"
+    judged = invoke(*shlex.split(next_command)[2:])
+    assert judged.exit_code == 0, judged.stderr
+    assert chat.requests
+
+
+def test_an_edited_rubric_has_no_template_warning(
+    dataset: Path, rubric: Path, chat: FakeChatApi
+) -> None:
+    result = invoke("dataset", "triage", str(dataset), "--rubric", str(rubric))
+    assert result.exit_code == 2, result.stderr
+    assert "warnings" not in output(result)["preview"]
 
 
 def test_auto_approve_does_not_confirm(
@@ -133,7 +190,7 @@ def test_triage_labels_rows_and_is_allowed_read_only(
 ) -> None:
     monkeypatch.setenv("PUP_READ_ONLY", "true")
     args = ["dataset", "triage", str(dataset), "--rule", "stay on topic"]
-    args += ["--judges", "judge-a,judge-b,judge-c", "--confirm"]
+    args += ["--judges", "fireworks/judge-a,fireworks/judge-b,fireworks/judge-c", "--confirm"]
     result = invoke(*args)
     assert result.exit_code == 0, result.stderr
     data = output(result)
@@ -144,15 +201,32 @@ def test_triage_labels_rows_and_is_allowed_read_only(
     assert data["dropped"] > 0
     assert data["top_drop_reasons"] == [{"reason": "off topic", "count": data["dropped"]}]
     assert data["calls_made"] == rows * 3
-    assert data["next_command"] == f"pup finetune dataset sample {dataset}"
-    assert data["next_commands"] == [
-        f"pup finetune dataset sample {dataset}",
-        f"pup finetune dataset push {dataset} --name ...",
-        f"pup finetune train --dataset {dataset} ...",
+    # Every row is labeled now: training (and a push) are the steps; no command is guessed.
+    assert data["next_command"] is None
+    assert [step["command"] for step in data["next_steps"]] == [
+        "pup finetune models list",
+        f"pup finetune train --dataset {dataset} --model <MODEL>",
+        f"pup finetune dataset push {dataset} --name <NAME>",
     ]
     assert data["stale_judge_labels"] == 0
     assert data["dataset"]["dropped"] == data["dropped"]
-    assert {body["model"] for body in chat.bodies} == {"judge-a", "judge-b", "judge-c"}
+    assert data["pipeline"] == {
+        "rows": {
+            "accepted": rows,
+            "kept": data["kept"],
+            "dropped": data["dropped"],
+            "unlabeled": 0,
+        },
+        "triage": "complete",
+        "push": {"status": "not_pushed", "pending": data["kept"]},
+    }
+    # The rubric is named as the preview names it.
+    assert len(data["rubric_hash"]) == 12 and "rubric_sha256" not in data
+    assert {body["model"] for body in chat.bodies} == {
+        "fireworks/judge-a",
+        "fireworks/judge-b",
+        "fireworks/judge-c",
+    }
     labels = DatasetDir(dataset).labels()
     assert len(labels) == rows
     assert {label.by for label in labels.values()} == {"judge"}
@@ -177,18 +251,29 @@ def test_failed_calls_leave_rows_undecided_and_exit_1(dataset: Path, chat: FakeC
     # One call at a time, in review order: both judges of the first row failed.
     assert data["undecided"] == 1
     assert data["stale_judge_labels"] == 0
+    assert data["pipeline"]["triage"] == "incomplete"
+    assert data["pipeline"]["rows"]["unlabeled"] == 1
     assert data["next_command"] == shlex.join(["pup", "finetune", *args])
     retried = invoke(*args)
     assert retried.exit_code == 0, retried.stderr
     assert output(retried)["status"] == "complete"
+    assert output(retried)["pipeline"]["triage"] == "complete"
     assert output(retried)["calls_made"] == 2
 
 
 def test_a_changed_rubric_needs_a_reset(dataset: Path, chat: FakeChatApi) -> None:
     base = ["dataset", "triage", str(dataset), "--max-rows", "2", "--judges", "fireworks/j1"]
-    assert invoke(*base, "--rule", "first", "--confirm").exit_code == 0
+    first = invoke(*base, "--rule", "first", "--confirm")
+    assert first.exit_code == 0
+    # The run is complete, but the dataset's triage is not: --max-rows left rows unjudged.
+    assert output(first)["status"] == "complete"
+    assert output(first)["pipeline"]["triage"] == "incomplete"
+    assert f"pup finetune dataset triage {dataset} --rubric <RUBRIC_FILE>" in [
+        step["command"] for step in output(first)["next_steps"]
+    ]
     changed = invoke(*base, "--rule", "second", "--confirm")
-    assert changed.exit_code == 1
+    assert changed.exit_code == 2
+    assert "Error [settings_conflict]: " in changed.stderr
     assert "--reset-triage" in changed.stderr
     preview = invoke(*base, "--rule", "second", "--reset-triage")
     assert preview.exit_code == 2
@@ -215,6 +300,8 @@ def test_a_reset_sample_leaves_stale_judge_labels_and_asks_for_every_row(
     data = output(reset)
     assert data["status"] == "incomplete"
     assert data["stale_judge_labels"] == rows - 1
+    assert data["pipeline"]["triage"] == "incomplete"  # every row labeled, most labels stale
+    assert data["pipeline"]["rows"]["unlabeled"] == 0
     assert "judge label" in data["hint"]
     assert data["next_command"] == shlex.join(
         ["pup", "finetune", "dataset", "triage", str(dataset), "--rule", "second", *JUDGE_J1]
@@ -223,6 +310,7 @@ def test_a_reset_sample_leaves_stale_judge_labels_and_asks_for_every_row(
     assert final.exit_code == 0, final.stderr
     assert output(final)["status"] == "complete"
     assert output(final)["stale_judge_labels"] == 0
+    assert output(final)["pipeline"]["triage"] == "complete"
 
 
 def test_a_mixed_council_previews_every_provider_and_routes_each_judge(
@@ -247,11 +335,15 @@ def test_a_mixed_council_previews_every_provider_and_routes_each_judge(
     assert preview.exit_code == 2, preview.stderr
     data = output(preview)
     council = ["accounts/fireworks/models/judge-a", "anthropic/claude-opus-5-5"]
-    assert data["preview"]["judges"] == council
+    # Each judge once, with its provider.
+    assert [(e["model"], e["provider"]) for e in data["preview"]["judges"]] == [
+        (council[0], "fireworks"),
+        (council[1], "anthropic"),
+    ]
     assert "Fireworks (api.fireworks.ai)" in data["preview"]["data_destination"]
     assert "Anthropic (api.anthropic.com)" in data["preview"]["data_destination"]
-    assert [e["provider"] for e in data["preview"]["judge_endpoints"]] == ["fireworks", "anthropic"]
-    assert shlex.split(data["next_command"])[-2] == ",".join(council)
+    words = shlex.split(data["next_command"])
+    assert words[words.index("--judges") + 1] == ",".join(council)
     assert opened == []
 
     result = invoke(*base, "--confirm")
@@ -299,7 +391,7 @@ def test_a_row_too_long_for_its_judge_is_dropped_and_counted(
     }
     chat.script.append(httpx.Response(400, json=too_long))
     args = ["dataset", "triage", str(dataset), "--rule", "stay on topic"]
-    args += ["--judges", "judge-a", "--concurrency", "1", "--confirm"]
+    args += ["--judges", "fireworks/judge-a", "--concurrency", "1", "--confirm"]
     result = invoke(*args)
     assert result.exit_code == 0, result.stderr
     data = output(result)
@@ -328,21 +420,29 @@ def test_agreement_compares_the_council_with_the_user_s_labels(
             for row_id, (keep, reason) in rows.items()
         )
     )
-    assert invoke("dataset", "label", str(dataset), "--file", str(labels)).exit_code == 0
+    labeled = invoke("dataset", "label", str(dataset), "--file", str(labels))
+    assert labeled.exit_code == 0
     labels_before = (dataset / "labels.jsonl").read_text()
     args = ["dataset", "triage", str(dataset), "--rule", "stay on topic"]
-    args += ["--judges", "judge-a,judge-b", "--agreement"]
+    args += ["--judges", "fireworks/judge-a,fireworks/judge-b", "--agreement"]
 
     preview = invoke(*args)
     assert preview.exit_code == 2, preview.stderr
     assert output(preview)["preview"]["mode"] == "agreement"
-    assert output(preview)["preview"]["rows_to_review"] == 4
+    assert output(preview)["preview"]["rows"]["to_review"] == 4
+    noisy = (
+        "the agreement is measured on 4 rows you or the agent labeled; on fewer than 20 it is "
+        "noisy (one row moves it by 25 points)"
+    )
+    assert any(w.startswith(noisy) for w in output(preview)["preview"]["warnings"])
 
     result = invoke(*args, "--confirm")
     assert result.exit_code == 0, result.stderr
     data = output(result)
     assert data["mode"] == "agreement"
     assert data["status"] == "complete"
+    assert any(w.startswith(noisy) for w in data["warnings"])
+    assert f"warning: {noisy}" in result.stderr
     agreement = data["agreement"]
     assert (agreement["rows_compared"], agreement["rows_agreed"], agreement["rate"]) == (4, 2, 0.5)
     assert agreement["confusion"] == {
@@ -351,8 +451,8 @@ def test_agreement_compares_the_council_with_the_user_s_labels(
         "drop_keep": 1,
         "drop_drop": 1,
     }
-    assert agreement["by"] == {"agent": {"rows_compared": 4, "rate": 0.5}}
-    assert set(agreement["judges"]) == {"judge-a", "judge-b"}
+    assert "by" not in agreement
+    assert set(agreement["judges"]) == {"fireworks/judge-a", "fireworks/judge-b"}
     assert sorted(item["row_id"] for item in agreement["disagreements_shown"]) == [
         "row-calendar-002",
         "row-weather-001",
@@ -361,7 +461,12 @@ def test_agreement_compares_the_council_with_the_user_s_labels(
     assert (dataset / "labels.jsonl").read_text() == labels_before  # nothing labeled
     without = [word for word in args if word != "--agreement"]
     assert data["next_command"] == shlex.join(["pup", "finetune", *without, "--confirm"])
-    assert "--reset-triage" in data["next_commands"][1]
+    assert data["next_steps"] == [
+        {
+            "command": shlex.join(["pup", "finetune", *args, "--reset-triage"]),
+            "why": data["next_steps"][0]["why"],
+        }
+    ]
 
     # Labeling the rest afterwards reviews only the unlabeled rows.
     labeled = invoke(*without, "--confirm")
@@ -375,3 +480,41 @@ def test_agreement_without_labels_is_a_usage_error(dataset: Path, chat: FakeChat
     assert result.exit_code == 2
     assert "label" in result.stderr
     assert chat.requests == []
+
+
+def test_a_judge_alias_is_previewed_and_frozen_as_its_full_id(
+    dataset: Path, chat: FakeChatApi
+) -> None:
+    full = "accounts/fireworks/models/glm-5p3-flash"
+    args = ["dataset", "triage", str(dataset), "--rule", "stay on topic"]
+    preview = invoke(*args, "--judges", "glm-5p3-flash")
+    assert preview.exit_code == 2, preview.stderr
+    data = output(preview)
+    assert [judge["model"] for judge in data["preview"]["judges"]] == [full]
+    assert f"--judges {full}" in data["next_command"]
+    result = invoke(*args, "--judges", "glm-5p3-flash", "--confirm")
+    assert result.exit_code == 0, result.stderr
+    frozen = json.loads((dataset / "triage.json").read_text(encoding="utf-8"))
+    assert frozen["judges"] == [full]
+    assert {body["model"] for body in chat.bodies} == {full}
+    # The full id is the same judge: the rerun resumes and makes no call.
+    before = len(chat.requests)
+    again = invoke(*args, "--judges", full, "--confirm")
+    assert again.exit_code == 0, again.stderr
+    assert len(chat.requests) == before
+
+
+def test_the_card_names_the_rubric_file_the_rules_and_the_hash(
+    dataset: Path, rubric: Path, chat: FakeChatApi
+) -> None:
+    args = ["dataset", "triage", str(dataset), "--rubric", str(rubric)]
+    result = invoke(*args, "--rule", "stay on topic", "--rule", "no secrets")
+    assert result.exit_code == 2, result.stderr
+    preview = output(result)["preview"]
+    assert (preview["rubric_file"], preview["rule_count"]) == (str(rubric), 2)
+    rubric_line = f"  rubric    rubric {rubric} + 2 rules (hash {preview['rubric_hash']})"
+    assert rubric_line in result.stderr.splitlines()
+
+    rules_only = invoke("dataset", "triage", str(dataset), "--rule", "stay on topic")
+    hash_shown = output(rules_only)["preview"]["rubric_hash"]
+    assert f"  rubric    1 rule (hash {hash_shown})" in rules_only.stderr.splitlines()

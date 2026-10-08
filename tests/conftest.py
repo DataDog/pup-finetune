@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 from collections.abc import Iterator
+from datetime import datetime
+from typing import Any
 
 import keyring.core
 import pytest
 
-from pup_finetune import credentials, judge_credentials
+from pup_finetune import credentials, judge_credentials, next_steps, output
 from tests.fakes.keyring import OS_KEYCHAIN_FAKES, FailKeyring
 
 pytest_plugins = ["pytester"]
@@ -27,9 +30,14 @@ _RUNTIME_ENV: tuple[str, ...] = (
     "PUP_READ_ONLY",
     "PUP_AUTO_APPROVE",
     "PUP_AGENT_MODE",
+    # What a coding agent sets for its commands (the tests may run under one).
+    "AI_AGENT",
+    "CLAUDECODE",
     "DD_SITE",
     "PUP_FINETUNE_DEV",
     "PUP_FINETUNE_DEBUG",
+    "PUP_FINETUNE_QUIET",
+    "PUP_FINETUNE_PROGRESS",
     "PUP_FINETUNE_PUP",
     "PUP_FINETUNE_KEEP_DD_TOKEN",
     # Terminal and color overrides that change how rich renders stderr.
@@ -55,6 +63,19 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         for item in items:
             if marker in item.keywords:
                 item.add_marker(skip)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _ctrl_c_raises() -> Iterator[None]:
+    """Make SIGINT raise :class:`KeyboardInterrupt` for the whole session, as in an
+    interactive Python, even when pytest started with SIGINT ignored (``trap '' INT``, a
+    background job, some agents' shells): the tests that signal a process expect the
+    default. The handler pytest started with comes back after the session."""
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
 
 
 @pytest.fixture(autouse=True)
@@ -86,6 +107,16 @@ def _no_anthropic_sdk_login(
     monkeypatch.setattr(judge_credentials, "_sdk_config_dir", lambda env: empty)
 
 
+PROGRESS_TIME = datetime(2026, 10, 7, 18, 3, 16)
+"""The time of day every test's progress lines are stamped with (``18:03:16``)."""
+
+
+@pytest.fixture(autouse=True)
+def _fixed_progress_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stamp progress lines with :data:`PROGRESS_TIME`, so tests can assert them exactly."""
+    monkeypatch.setattr(output, "_now", lambda: PROGRESS_TIME)
+
+
 @pytest.fixture(autouse=True)
 def _no_real_keychain(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default every test to a keyring with no backend, so none can touch the real keychain."""
@@ -115,3 +146,26 @@ def _restore_logging() -> Iterator[None]:
     logging.lastResort = last_resort
     if last_resort is not None:
         last_resort.filters[:] = last_resort_filters
+
+
+@pytest.fixture(autouse=True)
+def _next_steps_rule(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """Fail any test whose emitted result breaks the next_command rule
+    (:func:`pup_finetune.next_steps.problems`): a next_command runs as written or is null,
+    and next_steps use only <UPPER_CASE> placeholders. Tests marked ``any_next_command``
+    emit such results on purpose."""
+    if request.node.get_closest_marker("any_next_command") is not None:
+        yield
+        return
+    found: list[str] = []
+    to_json = output.to_json
+
+    def checked(result: Any) -> str:
+        found.extend(next_steps.problems(result))
+        return to_json(result)
+
+    monkeypatch.setattr(output, "to_json", checked)
+    yield
+    assert not found, "results break the next_command rule:\n" + "\n".join(found)

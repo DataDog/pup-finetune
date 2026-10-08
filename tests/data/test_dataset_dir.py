@@ -220,12 +220,12 @@ def test_changed_settings_are_rejected(tmp_path: Path, fixture_rows: list[Traini
     dataset = DatasetDir(tmp_path / "ds")
     dataset.add(fixture_rows[:3], settings=IMPORT)
     before = snapshot(dataset.path)
-    for settings in (
-        DatasetSettings("import", SplitParams(43, 0.1, 0.1)),
-        DatasetSettings("import", SplitParams(42, 0.2, 0.1)),
-        DatasetSettings("datadog", SplitParams(42, 0.1, 0.1)),
+    for settings, message in (
+        (DatasetSettings("import", SplitParams(43, 0.1, 0.1)), "settings changed"),
+        (DatasetSettings("import", SplitParams(42, 0.2, 0.1)), "settings changed"),
+        (DatasetSettings("datadog", SplitParams(42, 0.1, 0.1)), "built by `dataset import`"),
     ):
-        with pytest.raises(StateError, match="settings changed"):
+        with pytest.raises(StateError, match=message):
             dataset.add(fixture_rows, settings=settings)
     assert snapshot(dataset.path) == before
 

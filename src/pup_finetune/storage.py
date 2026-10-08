@@ -25,7 +25,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, NoReturn, Self, overload
 
-from pup_finetune.errors import LockBusy, StateError
+from pup_finetune.errors import DirectoryUsageError, LockBusy, SettingsConflict, StateError
 
 LOCK_FILE_NAME = ".pup-finetune.lock"
 
@@ -54,13 +54,13 @@ def ensure_private_dir(path: Path) -> Path:
         missing.append(current)
         current = current.parent
     if not current.is_dir():
-        raise StateError(f"{current} exists and is not a directory")
+        raise DirectoryUsageError(f"{current} exists and is not a directory")
     for directory in reversed(missing):
         with contextlib.suppress(FileExistsError):
             directory.mkdir(mode=_PRIVATE_DIR)
             directory.chmod(_PRIVATE_DIR)
     if not path.is_dir():
-        raise StateError(f"{path} exists and is not a directory")
+        raise DirectoryUsageError(f"{path} exists and is not a directory")
     return path
 
 
@@ -348,8 +348,9 @@ class FrozenSettings:
     def check_or_write(directory: Path, name: str, settings: Mapping[str, Any]) -> str:
         """Write ``<directory>/<name>.json`` once; later calls must pass identical settings.
 
-        Returns the settings hash. Raises :class:`StateError` when the stored settings differ
-        or are corrupt. Callers should hold a :class:`DirectoryLock` on ``directory``.
+        Returns the settings hash. Raises :class:`SettingsConflict` when the stored settings
+        differ, :class:`StateError` when they are corrupt. Callers should hold a
+        :class:`DirectoryLock` on ``directory``.
         """
         if not name or Path(name).name != name or name.startswith("."):
             raise ValueError(f"invalid settings name: {name!r}")
@@ -367,7 +368,7 @@ class FrozenSettings:
                 for key in set(stored) | set(settings)
                 if canonical_json(stored.get(key)) != canonical_json(settings.get(key))
             )
-            raise StateError(
+            raise SettingsConflict(
                 f"settings changed; use a new directory ({path} records different settings)",
                 hint=f"changed: {', '.join(changed)}" if changed else None,
             )

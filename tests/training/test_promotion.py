@@ -285,3 +285,22 @@ def test_a_failed_promotion_keeps_the_result() -> None:
     assert info.value.result.promoted_model is None
     assert isinstance(info.value.__cause__, FinetuneError)
     assert backend.closed == backend.opened  # the session still ended
+
+
+def test_a_promotion_reports_the_epoch_it_promotes_and_the_model() -> None:
+    events: list[dict[str, Any]] = []
+    backend = FakeBackend(FakeOptions(val_curve=[2.0, 1.5, 1.0]))
+    result = train(
+        backend, spec(), finalize=dataclasses.replace(promotion(), on_event=events.append)
+    )
+    assert result.best_epoch == 3
+    assert events == [
+        {
+            "type": "promoting",
+            "epoch": 3,
+            "val_loss": 1.0,
+            "train_loss": result.epochs[2].train_loss,
+            "model_id": "ft-run-1",
+        },
+        {"type": "promoted", "model_id": "ft-run-1", "epoch": 3},
+    ]

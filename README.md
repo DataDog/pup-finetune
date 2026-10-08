@@ -1,211 +1,262 @@
 # pup-finetune
 
-Fine-tune an open-weight model on how your agent already works. `pup-finetune` reads the LLM
-spans your application sends to Datadog Agent Observability and helps you:
-
-- **Curate** a supervised fine-tuning dataset from them, review it, and push it to an Agent
-  Observability dataset.
-- **Train** a LoRA on Fireworks, keeping the epoch with the best validation loss and stopping
-  early.
-- **Evaluate** the tuned model against the base model on held-out conversations, and publish
-  the results as Agent Observability experiments.
-- **Deploy** the tuned model, and undeploy it when you're done.
-
-It runs as a Pup extension, so you use it as `pup finetune <command>`. Every Datadog read and
-write goes through Pup and its OAuth login.
+Fine-tune an open-weight model on how your agent already behaves. `pup-finetune` turns the LLM
+spans your application sends to Datadog Agent Observability into a reviewed training dataset,
+trains a LoRA on it (on Fireworks, or Baseten), compares the tuned model with the base model on
+held-out conversations, and deploys it. It is a Pup extension, so you run it as
+`pup finetune <command>`, and every Datadog read and write goes through Pup's OAuth login.
 
 > **Status: early development.** Commands and file formats may change without notice.
 
-## Requirements
-
-- Python 3.12 or later and [uv](https://docs.astral.sh/uv/).
-- Pup 1.10.7 or later, signed in to your Datadog organization with `pup auth login`.
-- A Fireworks account with access to Serverless Training, for training, triage, evaluation
-  and deployment.
-
-## Install for development
-
-```sh
-git clone https://github.com/DataDog/pup-finetune.git
-cd pup-finetune
-uv sync --all-extras
-pup extension install --local bin/pup-finetune --link
-pup finetune --help
-```
-
-`bin/pup-finetune` runs the checkout through uv from any directory, so your changes take effect
-without reinstalling.
-
-## Credentials
-
-Datadog authentication is Pup's: `pup-finetune` never asks for Datadog API or application
-keys. For Fireworks, set `FIREWORKS_API_KEY` in your environment, or store the key in your OS
-keychain:
-
-```sh
-pup finetune auth login fireworks    # prompts for the key with hidden input
-pup finetune auth status             # shows where the key comes from, never the key itself
-pup finetune auth logout fireworks   # removes it from the keychain
-```
-
-The key is never accepted as a command-line flag, never printed, and never written to a file.
-Without an OS keychain, `auth login` refuses to store the key and you use the environment
-variable instead.
-
-LLM judges (for `evaluate`, `train --evaluate` and `dataset triage`) run on Fireworks by
-default, with the same key. To judge on Anthropic or OpenAI instead, name the judge with its
-provider's prefix, `anthropic/<model>` or `openai/<model>` (a bare
-`accounts/<account>/models/<model>` stays Fireworks), and configure that provider's key the
-same way:
-
-```sh
-pup finetune auth login anthropic    # or set ANTHROPIC_API_KEY
-pup finetune auth login openai       # or set OPENAI_API_KEY
-pup finetune evaluate ./run --judge-model anthropic/claude-opus-5-5
-pup finetune dataset triage ./ds --rubric rubric.md \
-  --judges accounts/fireworks/models/deepseek-v4p1-flash,openai/gpt-6-astra
-```
-
-Anthropic judges use the official Anthropic SDK, an optional extra: install it with
-`uv sync --extra anthropic` in a checkout, or `pip install 'pup-finetune[anthropic]'`. Without
-an `ANTHROPIC_API_KEY` or a stored key, they sign in the way the Anthropic SDK does on its own
-(`ANTHROPIC_AUTH_TOKEN`, or a profile from `ant auth login`), which `auth status` and `doctor`
-report as the source `anthropic-sdk`. Every preview names each provider the rows or
-conversations are sent to.
-
 ## Quickstart
 
-Check your setup:
+You need Python 3.12 or later, [uv](https://docs.astral.sh/uv/), and Pup 1.10.7 or later,
+signed in to your Datadog organization with `pup auth login`. Training needs a Fireworks
+account with access to Serverless Training, or a Baseten account.
 
 ```sh
-pup finetune doctor
-pup finetune models list --provider fireworks --check
+git clone https://github.com/DataDog/pup-finetune.git && cd pup-finetune
+uv sync --all-extras
+pup extension install --local bin/pup-finetune --link \
+  --description "Fine-tune a model on your Agent Observability traces"
+pup finetune auth login fireworks    # hidden prompt; or set FIREWORKS_API_KEY
+pup finetune doctor                  # what you can run now, and what to fix
 ```
 
-Build a dataset from the LLM spans of one `ml_app`. `dataset preview` writes nothing, so you
-can tune the filter (`--span-name`, `--tag`, `--query`, `--from`) before you pull:
+**With a coding agent:** run `pup finetune skill install`, then ask:
+
+> Use the datadog-finetune skill to fine-tune a model on the LLM spans of ml_app `<my-agent>`.
+
+The agent shows you every paid or remote step before it runs, and waits for your yes.
+
+**By hand:** `dataset preview` → `dataset pull` → review (`dataset sample` and `dataset
+label`, or `dataset triage`) → `train` → `status` → `evaluate` → `deploy` → `undeploy`.
 
 ```sh
-pup finetune dataset preview --ml-app my-agent --from now-7d
-pup finetune dataset pull ./ds --ml-app my-agent --from now-7d
-pup finetune dataset show ./ds
+pup finetune dataset preview --ml-app my-agent --from 7d
+pup finetune dataset pull datasets/my-agent --ml-app my-agent --from 7d
+pup finetune dataset sample datasets/my-agent --count 20
+pup finetune dataset label datasets/my-agent --file labels.jsonl
+pup finetune train --dataset datasets/my-agent --model qwen3p8-27b --detach
+pup finetune status --watch
+pup finetune evaluate ft-20261007183443-a8b181
+pup finetune deploy ft-20261007183443-a8b181
+pup finetune undeploy ft-20261007183443-a8b181
 ```
 
-Review a sample and record which rows to keep. `labels.jsonl` holds one
-`{"id": "<row id>", "keep": true, "reason": "..."}` per line, and a reason is required to drop
-a row:
+Run the quickstart from a working directory of your own, or keep the paths above: a
+`datasets/` or `runs/` that `pup-finetune` creates gets a `.gitignore`, since both hold trace
+content.
+
+Paid and remote commands only preview: they print what would run, where the data goes and
+what bills, then exit `2`. The preview's `next_command` runs it, with `--confirm`. The
+[safety table](docs/commands.md#safety) says what each command costs and where its data goes.
+
+### Start here
+
+| You have | Start at |
+| --- | --- |
+| An `ml_app` that sends LLM spans to Agent Observability | [Build a dataset](#build-a-dataset) |
+| Conversations as JSONL rows ([format](docs/data-format.md)) | `pup finetune dataset import datasets/my-agent --file rows.jsonl`, then [Train](#train) |
+| A dataset directory | [Train](#train) |
+| A finished run | [Evaluate](#evaluate) or [Deploy](#deploy) |
+
+### What each step needs
+
+`doctor` checks all of this and says which steps are ready. A key comes from its environment
+variable or from the OS keychain (`pup finetune auth login <provider>`). `uv sync --all-extras`
+installs every extra. `evaluate` also uses the Datadog login to publish its experiments.
+
+<!-- BEGIN GENERATED: what each step needs (scripts/gen_command_docs.py) -->
+| Step | Datadog login | API key | Extra |
+| --- | --- | --- | --- |
+| `dataset preview`, `dataset pull` | yes | - | - |
+| `dataset import`, `show`, `sample`, `label`; `status`, `runs` | - | - | - |
+| `dataset triage` | - | `FIREWORKS_API_KEY` | - |
+| `dataset push` | yes | - | - |
+| `train`, `evaluate` on Fireworks | - | `FIREWORKS_API_KEY` | `fireworks`, `hf` |
+| `deploy`, `undeploy` on Fireworks | - | `FIREWORKS_API_KEY` | `fireworks` |
+| `train` on Baseten | - | `BASETEN_API_KEY` | `baseten`, `hf` |
+| `evaluate` on Baseten | - | `BASETEN_API_KEY`, `FIREWORKS_API_KEY` | `baseten`, `hf` |
+| `anthropic/<model>` judges | - | `ANTHROPIC_API_KEY` | `anthropic` |
+| `openai/<model>` judges | - | `OPENAI_API_KEY` | - |
+<!-- END GENERATED: what each step needs -->
+
+### Reading results
+
+Each command prints one JSON result on stdout, and progress, warnings and a summary on
+stderr. Under a coding agent, Pup wraps it in an envelope whose `data` is the result. Pup's
+flags go before `finetune`: `pup --output yaml finetune status`, `pup --jq .phase finetune
+status`. Exit `0` is done, `2` a command to fix or a preview, `1` an outside failure. The files
+under `files` hold the full record. `pup finetune help <command>` prints a command's help.
+
+## Build a dataset
+
+`dataset preview` converts the spans in memory and writes nothing. Tune the filter with it,
+then pull:
 
 ```sh
-pup finetune dataset sample ./ds --n 20
-pup finetune dataset label ./ds --file labels.jsonl
+pup finetune dataset preview --ml-app my-agent --from 7d --span-name chat --tag env:prod
+pup finetune dataset pull datasets/my-agent --ml-app my-agent --from 7d --span-name chat --tag env:prod
+pup finetune dataset show datasets/my-agent
 ```
 
-For larger datasets, `dataset triage` has a council of judge models label the rows against a
-rubric (`pup finetune dataset triage --print-template` prints one). With `--agreement`, it
-first reports how often the council agrees with the rows you labeled yourself, and labels
-nothing.
+The preview shows sample rows (the first user message and the final answer), how many rows it
+would accept, and why it leaves the rest out. `--tag` repeats, and every tag must match.
+`--query` takes a search query, and `--include-errors` keeps errored LLM calls. `--from` and
+`--to` take ISO 8601, epoch milliseconds (a bare number is milliseconds), or a relative time:
+`7d`, `24h`, `now-7d`, `now`.
 
-Push the kept rows to an Agent Observability dataset. Like every remote or paid command, it
-previews first, and runs only when you add `--confirm`:
+The first pull freezes the filter and the time window, so `pup finetune dataset pull datasets/my-agent`
+with no flags resumes it over the same window. Every dataset command reports a `pipeline`
+block (rows kept, dropped and unlabeled, triage, push), and its `next_command` follows from it.
+
+### Review the rows
+
+Read a sample and record which rows to keep. `labels.jsonl` holds one
+`{"id": "<row id>", "keep": true, "reason": "..."}` per line; dropping a row needs a reason:
 
 ```sh
-pup finetune dataset push ./ds --name my-agent-sft
-pup finetune dataset push ./ds --name my-agent-sft --confirm
+pup finetune dataset sample datasets/my-agent --count 20
+pup finetune dataset label datasets/my-agent --file labels.jsonl
 ```
 
-Train in a background worker, and follow it:
+For a larger dataset, `dataset triage` has a council of judge models label the rows against
+your rubric. It is paid, so it previews first:
 
 ```sh
-pup finetune train --provider fireworks --model qwen3p8-27b --dataset ./ds --run-dir ./run
-pup finetune train --provider fireworks --model qwen3p8-27b --dataset ./ds --run-dir ./run --detach --confirm
-pup finetune status ./run --watch
+pup finetune dataset triage --print-template > rubric.md    # then describe your agent's task
+pup finetune dataset triage datasets/my-agent --rubric rubric.md --agreement
+pup finetune dataset triage datasets/my-agent --rubric rubric.md
 ```
 
-If the run is interrupted, `pup finetune resume ./run --confirm` continues it from its last
-checkpoint, and `pup finetune cancel ./run --confirm` stops it while keeping the best epoch.
+`--agreement` measures how often the council agrees with the rows you labeled, and labels
+nothing. With the two default judges, a row is kept only when both vote keep; add a third
+judge with `--judges` for a true majority.
 
-Compare the tuned model with the base model on the test split:
+### Push the dataset
+
+Pushing creates an Agent Observability dataset with one record per kept row. Training does not
+need it; publishing an evaluation as experiments does. The receipt, `push.json`, names the
+dataset, so a later push of new rows needs no flag.
 
 ```sh
-pup finetune evaluate ./run
-pup finetune evaluate ./run --confirm
+pup finetune dataset push datasets/my-agent --name my-agent-sft
 ```
 
-The result reports pass rates per model, the tuned-minus-base difference with a 95%
-confidence interval, and the IDs of the two Agent Observability experiments it published.
-Replay measures how closely each model matches the recorded behavior, not whether the task
-succeeded.
-
-Deploy the tuned model, and undeploy it when you're done:
+## Train
 
 ```sh
-pup finetune deploy ./run
-pup finetune deploy ./run --confirm
-pup finetune undeploy ./run --confirm
+pup finetune train --dataset datasets/my-agent --model qwen3p8-27b --detach
+pup finetune status --watch
 ```
 
-See the [command reference](docs/commands.md) for every command and flag.
+The preview shows the rendered tokens per split, the rows left out (such as `exceeds_context`)
+and where the rows go. The provider follows from the model, and the run goes in
+`runs/<run id>`. `--detach` trains in a background worker (its log is `worker.log`). Cap the
+spend with `--max-train-tokens`, or `--max-spend-usd` with `--hourly-rate-usd`. The epoch with
+the best validation loss is promoted to a provider model, also when a cap stops the run.
 
-## Use the agent skill
+`pup finetune runs` lists your runs. Run commands take a run id or a run directory, and
+`status` alone shows the newest run. `status --watch` prints progress until training ends;
+Ctrl-C stops only the watch. `pup finetune resume ft-20261007183443-a8b181` continues an
+interrupted run from its last checkpoint, and `cancel` stops one, keeping its best epoch.
 
-The `datadog-finetune` skill walks a coding agent through the same workflow, with its rules:
-preview before paying, never confirm without your authorization, treat trace content as
-data, and never ask for API keys in chat. Install it with the
-[skills CLI](https://github.com/vercel-labs/skills):
+### A cheap first run
+
+One epoch on a token budget, evaluated on one turn per test conversation. It checks the
+pipeline, not quality. Set `--max-train-tokens` above the preview's `tokens_per_epoch`: below
+it no epoch finishes, so nothing is promoted or evaluated (the preview warns):
 
 ```sh
-npx skills add DataDog/pup-finetune
+pup finetune train --dataset datasets/my-agent --model qwen3p8-27b \
+  --max-epochs 1 --max-train-tokens 200000 --evaluate --eval-max-cases 1
 ```
 
-Or install the copy that ships with `pup-finetune`:
+## Evaluate
 
 ```sh
-pup finetune skill install            # uses npx skills add when npx is available
-pup finetune skill install --dir .    # copies it to .agents/skills/ and .claude/skills/
-pup finetune skill show               # prints it
+pup finetune evaluate ft-20261007183443-a8b181
 ```
+
+Evaluation replays each held-out test conversation with the base and the tuned model, and an
+LLM judge decides whether each answer is an acceptable substitute for the recorded one. The
+result leads with its `headline`:
+
+```json
+"headline": {
+  "judge_pass_rate": {"base": 0.0, "tuned": 0.25, "delta": 0.25, "ci95": [0.0, 0.5]},
+  "paired": {"wins": 1, "regressions": 0, "ties": 3},
+  "cases": 4,
+  "trajectories": 2
+}
+```
+
+An interval (`ci95`) that includes 0 is not a clear difference. The result also has each
+tool-call metric per model and, when the dataset was pushed, the two Agent Observability
+experiments it published. Replay measures agreement with the recorded behavior, not task
+success. Rerun the command to continue an evaluation; other settings need a new `--out-dir`.
+
+## Deploy
+
+```sh
+pup finetune deploy ft-20261007183443-a8b181
+pup finetune undeploy ft-20261007183443-a8b181
+```
+
+Both preview first; the preview's `next_command` adds `--confirm`. `deploy --confirm` creates
+an on-demand deployment on Fireworks, waits until it serves and sends one chat completion as a
+smoke test. It bills per GPU-second while a replica runs (it
+scales to zero when idle) until you undeploy it. The result's `usage` gives the base URL, the
+model to request and an example request. Undeploying keeps the model.
+
+## Credentials and judges
+
+`pup-finetune` never asks for Datadog API or application keys: Datadog access is Pup's. A
+provider key comes from its environment variable or the OS keychain:
+
+```sh
+pup finetune auth login fireworks    # hidden prompt; also baseten, anthropic, openai
+pup finetune auth status             # where each key comes from, never the key
+pup finetune auth logout fireworks
+```
+
+A key is never a flag value, never printed and never written to a file. Without an OS
+keychain, use the environment variable.
+
+LLM judges grade `evaluate` and `dataset triage`. They run on Fireworks by default, with the
+same key. Name a judge `anthropic/<model>` or `openai/<model>` to judge on Anthropic or
+OpenAI with that provider's key, and a triage council can mix them:
+
+```sh
+pup finetune evaluate ft-20261007183443-a8b181 --judge-model anthropic/claude-opus-5-5
+pup finetune dataset triage datasets/my-agent --rubric rubric.md --judges deepseek-v4p1-flash,openai/gpt-6-astra
+```
+
+Anthropic judges need the `anthropic` extra. Without an API key, they sign in the way the
+Anthropic SDK does on its own (`ANTHROPIC_AUTH_TOKEN`, or `ant auth login`), which
+`auth status` reports as `anthropic-sdk`.
 
 ## Data handling
 
 Dataset and run directories hold trace content: conversations, tool calls and tool results.
-`pup-finetune` creates them with `0700` permissions and their files with `0600`, and a pull
-caches the raw Export API pages in the dataset's `raw/` directory. Keep these directories out
-of version control.
+`pup-finetune` creates them with `0700` permissions and their files with `0600`. When it
+creates `runs/` or `datasets/` in the working directory, it adds a `.gitignore` there so they
+stay out of version control.
 
-Training, `dataset triage` and `evaluate` send conversation content to the model provider
-you choose (Fireworks). `dataset preview`, `dataset pull` and every local command read from
-Datadog or your disk only.
-
-Set `PUP_READ_ONLY=true` to refuse remote writes: `train`, `resume` and `evaluate` with
-`--confirm`, and `dataset push`, `deploy` and `undeploy` (also their previews). Read-only mode
-does not stop data from leaving: `dataset triage` writes nothing to Datadog, so it is still
-allowed and still sends rows to the provider.
-
-[docs/data-format.md](docs/data-format.md) describes the row format, the exclusion codes and
-the files in a dataset directory.
-
-## Cost
-
-- Previews show what a paid command would do: rendered token counts for training, and case,
-  generation and judge call counts for evaluation and triage.
-- `--confirm` gates every paid or remote-changing action. `PUP_AUTO_APPROVE` and agent mode
-  never imply it.
-- `train` can stop at a token budget (`--max-train-tokens`) or a spend cap (`--max-spend-usd`
-  with `--hourly-rate-usd`), and still keeps the best epoch.
-- A deployment bills per GPU-second while a replica runs, until you undeploy it.
+Training, `evaluate` and `dataset triage` send conversation content to the providers you
+choose, and every preview lists each recipient in `data_recipients`. `PUP_READ_ONLY=true` (or
+`pup --read-only`) refuses `--confirm` on `train`, `resume`, `evaluate`, `dataset push`,
+`deploy` and `undeploy`; previews still run. `dataset triage` writes nothing to Datadog, so it
+stays allowed, and it still sends rows to the judges. [docs/data-format.md](docs/data-format.md)
+describes the rows, the exclusion codes and the files in a dataset directory.
 
 ## Develop
 
-[AGENTS.md](AGENTS.md) covers the layout, the conventions, and an offline development loop
-that trains end to end on a fake provider, with no network or credentials.
-[docs/architecture.md](docs/architecture.md) explains the training seam and how a new
-provider plugs in.
+[AGENTS.md](AGENTS.md) covers the layout, the conventions and an offline loop that trains on
+a fake provider, with no network or credentials. [docs/architecture.md](docs/architecture.md)
+explains how a provider plugs in, and [docs/commands.md](docs/commands.md) documents every
+command and flag. See [CONTRIBUTING.md](CONTRIBUTING.md) to contribute and
+[SECURITY.md](SECURITY.md) to report a vulnerability.
 
-## Contributing and security
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) to contribute, and [SECURITY.md](SECURITY.md) to report a
-vulnerability.
-
-## License
-
-Apache License 2.0. See [LICENSE](LICENSE).
+Licensed under the Apache License 2.0. See [LICENSE](LICENSE).

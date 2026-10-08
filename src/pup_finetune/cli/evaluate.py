@@ -31,73 +31,207 @@ from typing import Annotated, Any
 
 import typer
 
-from pup_finetune.cli._common import CommandResult, get_runtime, run_command
-from pup_finetune.errors import require_confirm, require_writable
+from pup_finetune.cli._common import CommandResult, current_context, get_runtime, run_command
+from pup_finetune.cli._dirs import RUN_DIR_BY_ID, resolve_run_ref
+from pup_finetune.cli._flags import given, renamed
+from pup_finetune.cli._presentation import (
+    EVALUATE_AND_SHIP,
+    CommandDoc,
+    Safety,
+    default_note,
+    describe,
+)
+from pup_finetune.cli._views import evaluation_view
+from pup_finetune.errors import PAID_RUN, require_confirm, require_writable
 from pup_finetune.evaluation import runner
+from pup_finetune.judge_models import DEFAULT_JUDGE_MODEL, alias_of
 
 RunDirArgument = Annotated[
     Path,
     typer.Argument(
-        metavar="RUN_DIR", help="A completed or cancelled run directory.", show_default=False
+        metavar="RUN_DIR",
+        help="A completed or cancelled run: its directory or run id.",
+        show_default=False,
     ),
 ]
+
+SETTING_PARAMS: dict[str, tuple[str, ...]] = {
+    "judge_model": ("judge_model",),
+    "max_cases": ("max_cases", "old_max_cases"),
+    "max_tokens": ("max_tokens",),
+    "concurrency": ("concurrency",),
+    "seed": ("seed",),
+    "calibration": ("skip_calibration",),
+    "publish": ("no_publish",),
+}
+"""Each setting of an evaluation preview, and the parameters that set it."""
+
+
+def _with_defaults_used(preview: dict[str, Any], ctx: Any) -> dict[str, Any]:
+    """``preview`` with ``defaults_used`` (the settings no flag set) after its ``settings``."""
+    used = [
+        name
+        for name, params in SETTING_PARAMS.items()
+        if not (ctx is not None and any(given(ctx, param) for param in params))
+    ]
+    shown: dict[str, Any] = {}
+    for key, value in preview.items():
+        shown[key] = value
+        if key == "settings":
+            shown["defaults_used"] = used
+    return shown
+
+
+def _with_source(result: dict[str, Any], source: str) -> dict[str, Any]:
+    """``result`` with ``run_dir_source`` when the run was named by a bare run id: after its
+    ``run_dir`` (a preview), else after its ``run_id``."""
+    if source != RUN_DIR_BY_ID:
+        return result
+    after = "run_dir" if "run_dir" in result else "run_id"
+    shown: dict[str, Any] = {}
+    for key, value in result.items():
+        shown[key] = value
+        if key == after:
+            shown["run_dir_source"] = source
+    return shown
+
+
+CASES = "Cases"
+JUDGE = "Judge"
+RUN = "Run"
+"""``evaluate``'s option panels."""
+
+DOC = CommandDoc(
+    path="evaluate",
+    short="Evaluate tuned vs base model (paid; previews without --confirm).",
+    description=describe(
+        "Replay each held-out test conversation of a run, one recorded assistant turn at a "
+        "time, with the base model and the run's best checkpoint, and score both with "
+        "tool-call metrics and an LLM judge. Without --confirm, previews the calls and where "
+        "the data goes. A complete evaluation is published to Datadog as two experiments "
+        "when the dataset was pushed (--no-publish skips it).",
+        "The result compares the two: pass rates, wins and regressions, and the "
+        "tuned-minus-base delta with a bootstrap confidence interval. Tools are not "
+        "executed, so the scores measure agreement with the recorded behavior, not task "
+        "success. With --confirm, the judge is calibrated first, then every case is "
+        "replayed; rerun the same command to continue an evaluation that stopped. A changed "
+        "--max-tokens, judge, seed or --max-cases needs a new --out-dir.",
+    ),
+    examples=(
+        "pup finetune evaluate run",
+        "pup finetune evaluate run --judge-model glm-5p3-flash",
+        "pup finetune evaluate run --max-cases 4 --out-dir run/eval-4",
+    ),
+    safety=Safety(
+        data="sends test rows to the provider and the judge, results to Datadog",
+        recipients="the training provider, the judge's provider, Datadog (experiments)",
+        without="previews the calls",
+        confirm="evaluates (paid) and publishes the experiments",
+        paid=True,
+        read_only="confirm_refused",
+        offline_allowed=True,
+    ),
+    panel=EVALUATE_AND_SHIP,
+)
 
 
 @run_command
 def evaluate(
     run_dir: RunDirArgument,
-    out_dir: Annotated[
-        Path | None,
-        typer.Option(
-            "--out-dir",
-            help="Where the evaluation is written and resumed from (default: RUN_DIR/eval).",
-            show_default=False,
-        ),
-    ] = None,
-    max_cases_per_trajectory: Annotated[
+    max_cases: Annotated[
         int,
-        typer.Option(min=1, help="Most assistant turns replayed per test conversation."),
+        typer.Option(
+            "--max-cases",
+            min=1,
+            metavar="N",
+            help="Turns replayed per conversation.",
+            rich_help_panel=CASES,
+        ),
     ] = runner.DEFAULT_MAX_CASES_PER_TRAJECTORY,
+    max_tokens: Annotated[
+        int,
+        typer.Option(
+            min=1,
+            metavar="N",
+            help="Most tokens each generation may produce.",
+            rich_help_panel=CASES,
+        ),
+    ] = runner.DEFAULT_MAX_TOKENS,
+    seed: Annotated[
+        int,
+        typer.Option(
+            min=0,
+            metavar="N",
+            help="Seed for picking cases and the bootstrap.",
+            rich_help_panel=CASES,
+        ),
+    ] = runner.DEFAULT_SEED,
     judge_model: Annotated[
         str | None,
         typer.Option(
             "--judge-model",
-            help="The judge model: anthropic/<model> (ANTHROPIC_API_KEY, or the Anthropic "
-            "SDK's own login), openai/<model> (OPENAI_API_KEY), or otherwise a Fireworks model "
-            "id such as accounts/fireworks/models/<model> (FIREWORKS_API_KEY). "
-            "Default: a Fireworks serverless model; the offline fake judge for a fake run.",
+            metavar="MODEL",
+            help="An alias (glm-5p3-flash), anthropic/MODEL, openai/MODEL or a Fireworks id. "
+            f"{default_note(alias_of(DEFAULT_JUDGE_MODEL))}",
             show_default=False,
+            rich_help_panel=JUDGE,
+        ),
+    ] = None,
+    skip_calibration: Annotated[
+        bool,
+        typer.Option(
+            "--skip-calibration",
+            help="Do not check the judge on known answers first.",
+            rich_help_panel=JUDGE,
+        ),
+    ] = False,
+    out_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--out-dir",
+            metavar="DIR",
+            help=f"Output directory. {default_note('RUN_DIR/eval')}",
+            show_default=False,
+            rich_help_panel=RUN,
         ),
     ] = None,
     concurrency: Annotated[
-        int, typer.Option(min=1, max=64, help="Cases generated and judged at once.")
+        int,
+        typer.Option(
+            min=1,
+            max=64,
+            metavar="N",
+            help="Cases at once (1-64).",
+            rich_help_panel=RUN,
+        ),
     ] = runner.DEFAULT_CONCURRENCY,
-    max_tokens: Annotated[
-        int, typer.Option(min=1, help="Most tokens each generation may produce.")
-    ] = runner.DEFAULT_MAX_TOKENS,
-    seed: Annotated[
-        int, typer.Option(min=0, help="Seed for picking cases and the bootstrap.")
-    ] = runner.DEFAULT_SEED,
-    skip_calibration: Annotated[
-        bool,
-        typer.Option("--skip-calibration", help="Do not check the judge on known answers first."),
-    ] = False,
     no_publish: Annotated[
         bool,
         typer.Option(
             "--no-publish",
-            help="Do not publish the evaluation to Datadog as experiments (it is published "
-            "when the dataset was pushed with `dataset push`).",
+            help="Do not publish the evaluation to Datadog.",
+            rich_help_panel=RUN,
         ),
     ] = False,
     confirm: Annotated[
-        bool, typer.Option("--confirm", help="Run it (paid); without it, only preview the calls.")
+        bool,
+        typer.Option(
+            "--confirm", help="Run it (paid); without it, only preview.", rich_help_panel=RUN
+        ),
     ] = False,
+    old_max_cases: Annotated[
+        int | None,
+        typer.Option(
+            "--max-cases-per-trajectory", min=1, hidden=True, help="The old name of --max-cases."
+        ),
+    ] = None,
 ) -> dict[str, Any] | CommandResult:
+    max_cases = renamed("max_cases", "old_max_cases")
     runtime = get_runtime()
+    run_dir, source = resolve_run_ref(run_dir, "evaluate")
     settings = runner.EvalSettings(
         out_dir=out_dir if out_dir is not None else run_dir / runner.DEFAULT_OUT_DIR_NAME,
-        max_cases_per_trajectory=max_cases_per_trajectory,
+        max_cases_per_trajectory=max_cases,
         judge_model=judge_model,
         concurrency=concurrency,
         max_tokens=max_tokens,
@@ -106,32 +240,22 @@ def evaluate(
         publish=not no_publish,
     )
     evaluation = runner.plan_standalone(runtime, run_dir, settings)
-    if confirm:
-        require_writable(runtime, f"evaluating on {evaluation.provider.name}")
+    # PUP_READ_ONLY refuses paid and remote runs, not one that never leaves the machine.
+    offline = evaluation.plan.offline
+    if confirm and not offline:
+        require_writable(runtime, f"evaluating on {evaluation.provider.name}", what=PAID_RUN)
     rerun = [*evaluation.plan.evaluate_command(), "--confirm"]
-    require_confirm(confirm, evaluation.preview(), shlex.join(rerun))
-    data = evaluation.execute()
-    code = runner.evaluation_exit_code(data)
+    preview = _with_source(_with_defaults_used(evaluation.preview(), current_context()), source)
+    require_confirm(
+        confirm, preview, shlex.join(rerun), read_only=runtime.read_only and not offline
+    )
+    outcome = evaluation.execute()
+    code = runner.evaluation_exit_code(outcome)
+    # What it prints is the decision; summary.json in the evaluation directory has the rest.
+    data = _with_source(evaluation_view(outcome), source)
     return CommandResult(data, exit_code=code) if code else data
 
 
 def register(app: typer.Typer) -> None:
     """Add `evaluate` to ``app``."""
-    app.command(
-        "evaluate",
-        short_help="Replay held-out conversations with the base and tuned model (paid).",
-        help=(
-            "Replay every held-out test conversation of a completed or cancelled run, one "
-            "recorded assistant turn at a time, with the base model and the run's best "
-            "checkpoint; score each answer with deterministic tool-call metrics and an LLM "
-            "judge; and compare the two (pass rates, wins and regressions, and the "
-            "tuned-minus-base delta with a bootstrap confidence interval). Tools are not "
-            "executed, so the scores measure agreement with the recorded behavior, not task "
-            "success. Without --confirm, previews the calls it would make. With --confirm, "
-            "calibrates the judge first, then evaluates; rerun the same command to continue "
-            "an evaluation that stopped. A complete evaluation is published to Datadog as "
-            "two Agent Observability experiments on the dataset `dataset push` created "
-            "(--no-publish skips it). The preview is allowed with PUP_READ_ONLY set; "
-            "evaluating is not."
-        ),
-    )(evaluate)
+    app.command(**DOC.typer())(evaluate)

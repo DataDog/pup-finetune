@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner, Result
 
+from pup_finetune import providers
 from pup_finetune.cli import app
 from pup_finetune.cli import train as train_module
 from pup_finetune.providers.base import Provider
@@ -129,14 +130,14 @@ def test_train_on_fireworks_runs_end_to_end(
     result = train(dataset, run_dir, "--confirm")
     assert result.exit_code == 0, result.stderr
     data = output(result)
-    assert data["phase"] == "completed"
+    assert data["status"] == "completed"
     model_id = model_id_for_run(RUN_ID)
     expected = {
         "provider": "fireworks",
         "model_id": model_id,
         "uri": f"accounts/{ACCOUNT}/models/{model_id}",
     }
-    assert data["promoted_model"] == expected
+    assert data["promoted_model"] == {key: expected[key] for key in ("model_id", "uri")}
     on_disk = RunDir(run_dir).read_result() or {}
     assert on_disk["promoted_model"] == expected
     assert on_disk["deployable_checkpoint"]["kind"] == "sampler"
@@ -145,6 +146,53 @@ def test_train_on_fireworks_runs_end_to_end(
     assert model_id in fw.promoted
     assert _no_session_left(fw)
     assert API_KEY not in result.stdout + result.stderr
+
+
+def test_read_only_allows_the_preview_but_not_training(
+    dataset: Path, tmp_path: Path, fw: CrashingFireworks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PUP_READ_ONLY", "true")
+    run_dir = tmp_path / "run"
+    preview = train(dataset, run_dir)
+    assert preview.exit_code == 2
+    assert output(preview)["next_command"] is None
+    assert "refused   --confirm is refused while PUP_READ_ONLY is set" in preview.stderr
+    # A paid provider's card says who bills it and what caps the spend.
+    assert (
+        "  bills     Fireworks bills the serverless training session at its own rates "
+        "(pup-finetune does not know the rates)\n"
+    ) in preview.stderr
+    assert "  cost      no spend cap (add --max-spend-usd with --hourly-rate-usd)\n" in (
+        preview.stderr
+    )
+
+    confirmed = train(dataset, run_dir, "--confirm")
+    assert confirmed.exit_code == 2
+    assert confirmed.stderr.startswith(
+        "Error [read_only]: training on fireworks is a paid or remote run and PUP_READ_ONLY is set"
+    )
+    assert confirmed.stdout == ""
+    assert not run_dir.exists()
+    assert fw.calls == []
+
+
+def test_read_only_refuses_resuming_a_fireworks_run(
+    dataset: Path, tmp_path: Path, fw: CrashingFireworks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    fw.crash_at = 6
+    assert train(dataset, run_dir, "--confirm").exit_code == 1
+    monkeypatch.setenv("PUP_READ_ONLY", "true")
+    preview = invoke("resume", str(run_dir))
+    assert output(preview)["next_command"] is None
+    # resume has no spend flag: the cap is the run's, set when it started.
+    assert (
+        "  cost      no spend cap (a run's cap is set when it starts; this one started without)\n"
+    ) in preview.stderr
+    assert "--hourly-rate-usd" not in output(preview)["preview"]["billing"]
+    result = invoke("resume", str(run_dir), "--confirm")
+    assert result.exit_code == 2
+    assert "Error [read_only]: training on fireworks is a paid or remote run" in result.stderr
 
 
 def test_resume_after_a_crash_finishes_and_promotes(
@@ -164,7 +212,7 @@ def test_resume_after_a_crash_finishes_and_promotes(
     resumed = invoke("resume", str(run_dir), "--confirm")
     assert resumed.exit_code == 0, resumed.stderr
     data = output(resumed)
-    assert data["phase"] == "completed"
+    assert data["status"] == "completed"
     assert data["promoted_model"]["model_id"] == model_id_for_run(RUN_ID)
     resumed_from = [
         call[1]
@@ -211,7 +259,66 @@ def test_the_max_seq_len_option_leaves_longer_rows_out_and_survives_a_resume(
 
     resumed = invoke("resume", str(run_dir), "--confirm")
     assert resumed.exit_code == 0, resumed.stderr
-    assert output(resumed)["phase"] == "completed"
+    assert output(resumed)["status"] == "completed"
     calls = [call[0] for call in fw.calls]
     assert calls.count("create_training_client_from_state_with_optimizer") >= 1
     assert _no_session_left(fw)
+
+
+# --- what the preview can know fails in the preview ----------------------------------------
+
+
+def _without(monkeypatch: pytest.MonkeyPatch, module: str) -> None:
+    """Make the package checks miss ``module``, as if its extra were not installed."""
+    monkeypatch.setattr(providers, "installed", lambda name: name != module)
+
+
+def test_a_missing_training_sdk_fails_the_preview_before_anything_is_created(
+    dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _without(monkeypatch, "tinker")
+    run_dir = tmp_path / "run"
+    for args in ((), ("--detach", "--confirm")):
+        result = train(dataset, run_dir, *args)
+        assert result.exit_code == 2, result.stderr
+        assert result.stdout == ""
+        assert (
+            "Error [usage]: training on Fireworks needs the Fireworks Training SDK, which is not "
+            "installed"
+        ) in result.stderr
+        assert "uv sync --all-extras" in result.stderr
+        assert not run_dir.exists()
+
+
+def test_a_missing_renderer_fails_the_preview(
+    dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _without(monkeypatch, "transformers")
+    result = train(dataset, tmp_path / "run")
+    assert result.exit_code == 2
+    assert "needs the Hugging Face transformers package, which is not installed" in result.stderr
+
+
+def test_a_missing_training_sdk_fails_the_resume_preview(
+    dataset: Path, tmp_path: Path, fw: CrashingFireworks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    fw.crash_at = 6
+    assert train(dataset, run_dir, "--confirm").exit_code == 1
+    _without(monkeypatch, "fireworks")
+    result = invoke("resume", str(run_dir))
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "training on Fireworks needs the Fireworks Training SDK" in result.stderr
+
+
+def test_a_missing_training_sdk_fails_the_evaluate_preview(
+    dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    assert train(dataset, run_dir, "--confirm").exit_code == 0
+    _without(monkeypatch, "tinker")
+    result = invoke("evaluate", str(run_dir))
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "evaluating on Fireworks needs the Fireworks Training SDK" in result.stderr

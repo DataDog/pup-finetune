@@ -37,8 +37,12 @@ from pup_finetune.data.schema import lone_surrogate
 from pup_finetune.errors import FinetuneError, StateError
 from pup_finetune.storage import parse_jsonl_line
 
-LabelSource = Literal["agent", "human", "judge"]
-"""Who decided: the coding agent, a person, or a judge model."""
+LabelSource = Literal["manual", "judge"]
+"""How the decision was made: ``manual`` when recorded with ``dataset label`` (by the user or
+their coding agent), ``judge`` when the judge council of ``dataset triage`` decided. Labels
+written before these two existed say ``agent`` or ``human``, and are read as ``manual``."""
+
+_LEGACY_SOURCES = frozenset({"agent", "human"})
 
 TOP_DROP_REASONS = 10
 """How many of the most frequent drop reasons the dataset summary lists."""
@@ -53,7 +57,7 @@ class Label(BaseModel):
     """The row id, as in ``rows.jsonl``."""
     keep: StrictBool
     reason: str = ""
-    by: LabelSource = "agent"
+    by: LabelSource = "manual"
     at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
     """When the decision was made; stored in UTC."""
 
@@ -65,6 +69,11 @@ class Label(BaseModel):
         if (surrogate := lone_surrogate(value)) is not None:
             raise ValueError(f"has a lone surrogate ({surrogate}); UTF-8 cannot encode it")
         return value
+
+    @field_validator("by", mode="before")
+    @classmethod
+    def _legacy_source_is_manual(cls, value: object) -> object:
+        return "manual" if value in _LEGACY_SOURCES else value
 
     @field_validator("at")
     @classmethod
