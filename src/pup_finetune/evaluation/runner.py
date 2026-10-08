@@ -420,20 +420,6 @@ class EvalPlan:
             max_cases_per_trajectory=self.settings.max_cases_per_trajectory,
         )
 
-    def approval_value(self) -> dict[str, Any]:
-        """What approving this evaluation pins (see :mod:`pup_finetune.approval`): the
-        judge, the cases and the settings that change what is called."""
-        settings = self.settings
-        return {
-            "judge": self.judge.identity(),
-            "cases": [case.id for case in self.cases],
-            "max_tokens": settings.max_tokens,
-            "seed": settings.seed,
-            "max_cases_per_trajectory": settings.max_cases_per_trajectory,
-            "skip_calibration": settings.skip_calibration,
-            "publish": self.publishing.status()["status"],
-        }
-
     def calibration_calls(self) -> int:
         if self.settings.skip_calibration:
             return 0

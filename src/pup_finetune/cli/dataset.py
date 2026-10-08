@@ -20,10 +20,9 @@ from typing import Annotated, Any
 
 import typer
 
-from pup_finetune.approval import inputs_digest, require_expected, with_digest
 from pup_finetune.cli._common import current_context, get_runtime, run_command
 from pup_finetune.cli._dirs import require_dataset_dir
-from pup_finetune.cli._flags import flag_name, given, renamed, require_enablers
+from pup_finetune.cli._flags import flag_name, given, renamed
 from pup_finetune.cli._presentation import (
     BUILD_A_DATASET,
     CommandDoc,
@@ -303,9 +302,6 @@ SHOW_DOC = CommandDoc(
     ),
     safety=local("shows the dataset"),
 )
-
-PUSH_NEEDS: dict[str, str] = {"expect": "confirm"}
-"""``dataset push``'s options that need ``--confirm``."""
 
 PUSH_DOC = CommandDoc(
     path="dataset push",
@@ -666,17 +662,7 @@ def push(
         bool,
         typer.Option("--confirm", help="Push (a remote write); without it, only preview."),
     ] = False,
-    expect: Annotated[
-        str | None,
-        typer.Option(
-            "--expect",
-            metavar="DIGEST",
-            hidden=True,
-            help="With --confirm: the preview's inputs_digest; refused when the records changed.",
-        ),
-    ] = None,
 ) -> dict[str, Any]:
-    require_enablers(PUSH_NEEDS)
     runtime = get_runtime()
     require_dataset_dir(directory)
     dataset = DatasetDir(directory)
@@ -703,29 +689,18 @@ def push(
     plan = plan_push(dataset, project=project, name=name)
     plan.require_rows()
     if plan.needs_remote:
-        parts = plan.approval_parts()
-        preview = with_digest(_push_preview(plan, defaults_used), inputs_digest(parts))
+        preview = _push_preview(plan, defaults_used)
         if confirm:
             require_writable(runtime, "dataset push")
         # The preview reads local files only, so it is allowed under PUP_READ_ONLY.
         require_confirm(
             confirm,
             preview,
-            command(*rerun, "--expect", preview["inputs_digest"], "--confirm"),
+            command(*rerun, "--confirm"),
             read_only=runtime.read_only,
         )
-
-        def approve(locked: PushPlan) -> None:
-            # Against the plan made under the directory lock, which is what is sent.
-            require_expected(expect, locked.approval_parts(), preview=command(*rerun))
-
         receipt = push_dataset(
-            dataset,
-            project=plan.project,
-            name=plan.dataset_name,
-            pup=Pup(),
-            progress=info,
-            approve=approve,
+            dataset, project=plan.project, name=plan.dataset_name, pup=Pup(), progress=info
         )
     else:
         info("nothing to push: every kept row was pushed already")

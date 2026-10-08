@@ -5,8 +5,8 @@
 # This product includes software developed at Datadog (https://www.datadoghq.com/).
 # Copyright 2026-present Datadog, Inc.
 """Previews as the approval: one shape (action, billing, rows, resolved settings, the
-defaults used, an inputs digest), ``--expect`` refusing drift between the preview and the
-confirm, and the card on stderr. Offline: the fake provider, judge, chat API and pup."""
+defaults used), a ``next_command`` that is the previewed command plus ``--confirm``, and the
+card on stderr. Offline: the fake provider, judge, chat API and pup."""
 
 from __future__ import annotations
 
@@ -27,7 +27,6 @@ from pup_finetune.cli import app
 from pup_finetune.cli import dataset as dataset_cli
 from pup_finetune.cli import triage as triage_cli
 from pup_finetune.cli._summary import CARD_LINES
-from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.inference import ChatClient, ChatCompleter
 from pup_finetune.runs import RunDir
 from tests.fakes.chat_api import API_KEY, BASE_URL, FakeChatApi
@@ -85,15 +84,6 @@ def train_args(dataset: Path, run_dir: Path, *extra: str) -> list[str]:
     ]
 
 
-def drop_a_validation_row(dataset: Path) -> str:
-    row = DatasetDir(dataset).rows_by_split()["validation"][0]
-    labels = dataset.parent / "labels.jsonl"
-    labels.write_text(json.dumps({"id": row.id, "keep": False, "reason": "drift test"}) + "\n")
-    result = invoke("dataset", "label", str(dataset), "--file", str(labels))
-    assert result.exit_code == 0, result.stderr
-    return row.id
-
-
 # --- train --------------------------------------------------------------------------------
 
 
@@ -128,7 +118,6 @@ def test_the_train_preview_shows_what_will_be_used(dataset: Path, tmp_path: Path
     assert f"{preview['tokens_per_epoch']:,} tokens per epoch" in billing
     assert f"{preview['validation_tokens']:,} validation tokens" in billing
     assert "no spend cap" in billing and "$" not in billing
-    assert len(preview["inputs_digest"]) == 24
 
 
 def test_values_the_user_typed_read_back_exactly(dataset: Path, tmp_path: Path) -> None:
@@ -151,47 +140,20 @@ def test_values_the_user_typed_read_back_exactly(dataset: Path, tmp_path: Path) 
     assert status["settings"]["max_spend_usd"] == 1234.5
 
 
-def test_the_digest_is_stable_and_an_unchanged_confirm_trains(
+def test_the_next_command_is_the_preview_plus_confirm_and_trains(
     dataset: Path, tmp_path: Path
 ) -> None:
     run_dir = tmp_path / "run"
     first = output(invoke(*train_args(dataset, run_dir, "--run-id", "ft-stable")))
-    again = output(invoke(*train_args(dataset, run_dir, "--run-id", "ft-stable")))
-    assert first["preview"]["inputs_digest"] == again["preview"]["inputs_digest"]
     words = shlex.split(first["next_command"])
-    assert words[-3:] == ["--expect", first["preview"]["inputs_digest"], "--confirm"]
+    assert words[-1] == "--confirm"
+    assert "--confirm" not in words[:-1]
     confirmed = follow(first["next_command"])
     assert confirmed.exit_code == 0, confirmed.stderr
     manifest = RunDir(run_dir).manifest()
     assert manifest["settings"]["lora"]["rank"] == 8
     assert manifest["settings"]["optimizer"]["beta2"] == 0.95
     assert manifest["defaults_used"] == first["preview"]["defaults_used"]
-
-
-def test_a_dataset_changed_after_the_preview_is_refused(dataset: Path, tmp_path: Path) -> None:
-    run_dir = tmp_path / "run"
-    data = output(invoke(*train_args(dataset, run_dir)))
-    rows = data["preview"]["rows"]
-    drop_a_validation_row(dataset)
-    refused = follow(data["next_command"])
-    assert refused.exit_code == 2
-    assert refused.stdout == ""
-    first = refused.stderr.splitlines()[0]
-    assert first == (
-        "Error [settings_conflict]: the dataset changed since the preview (now "
-        f"{rows['train']} train / {rows['validation'] - 1} validation rows); preview again"
-    )
-    assert not run_dir.exists()  # nothing was trained
-    # Without --expect, --confirm works as before.
-    words = shlex.split(data["next_command"])
-    index = words.index("--expect")
-    assert follow(shlex.join(words[:index] + words[index + 2 :])).exit_code == 0
-
-
-def test_expect_needs_confirm(dataset: Path, tmp_path: Path) -> None:
-    result = invoke(*train_args(dataset, tmp_path / "run", "--expect", "0" * 24))
-    assert result.exit_code == 2
-    assert "--expect needs --confirm" in result.stderr
 
 
 def test_the_train_card_is_short_and_generated_from_the_preview(
@@ -338,7 +300,7 @@ def test_the_resume_preview_has_the_shape_and_pins_the_run(crashed: Path) -> Non
     assert all(key in preview for key in SHAPE)
     assert preview["settings"]["batch_size"] == 2
     assert "optimizer" not in preview["settings"]
-    assert data["next_command"].endswith(f"--expect {preview['inputs_digest']} --confirm")
+    assert data["next_command"] == f"pup finetune resume {crashed} --confirm"
     resumed = follow(data["next_command"])
     assert resumed.exit_code == 0, resumed.stderr
 
@@ -408,17 +370,10 @@ def test_the_triage_preview_lists_each_judge_once_and_estimates_tokens(dataset: 
     assert len(lines) <= CARD_LINES
 
 
-def test_triage_refuses_rows_changed_after_the_preview(dataset: Path, chat: FakeChatApi) -> None:
+def test_the_triage_next_command_runs_as_written(dataset: Path, chat: FakeChatApi) -> None:
     data = output(triage(dataset))
-    drop_a_validation_row(dataset)  # a labeled row is not reviewed: one row fewer
-    refused = follow(data["next_command"])
-    assert refused.exit_code == 2
-    assert "Error [settings_conflict]: the rows to review changed since the preview" in (
-        refused.stderr
-    )
-    assert chat.requests == []
-    again = output(triage(dataset))
-    confirmed = follow(again["next_command"])
+    assert shlex.split(data["next_command"])[-1] == "--confirm"
+    confirmed = follow(data["next_command"])
     assert confirmed.exit_code == 0, confirmed.stderr
 
 
@@ -449,17 +404,10 @@ def test_the_push_preview_has_the_shape(dataset: Path, fake: FakePup) -> None:
     )
 
 
-def test_push_refuses_records_changed_after_the_preview(dataset: Path, fake: FakePup) -> None:
+def test_the_push_next_command_runs_as_written(dataset: Path, fake: FakePup) -> None:
     data = output(push(dataset))
-    drop_a_validation_row(dataset)
-    refused = follow(data["next_command"])
-    assert refused.exit_code == 2
-    assert (
-        "Error [settings_conflict]: the records to push changed since the preview (now "
-        f"{data['preview']['records_to_push'] - 1} records)"
-    ) in refused.stderr
-    assert fake.calls == []
-    pushed = follow(output(push(dataset))["next_command"])
+    assert shlex.split(data["next_command"])[-1] == "--confirm"
+    pushed = follow(data["next_command"])
     assert pushed.exit_code == 0, pushed.stderr
 
 

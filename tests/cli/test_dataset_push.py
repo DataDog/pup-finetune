@@ -19,9 +19,6 @@ from typer.testing import CliRunner, Result
 
 from pup_finetune.cli import app
 from pup_finetune.cli import dataset as dataset_cli
-from pup_finetune.curation.labels import apply_labels
-from pup_finetune.data.dataset_dir import DatasetDir
-from pup_finetune.data.labels import Label
 from pup_finetune.data.push import PUSH_FILE, SOURCE_TAG
 from pup_finetune.data.split import SPLITS
 from tests.fakes.datasets import FakeDataset, FakeDatasetsApi
@@ -81,28 +78,6 @@ def output_json(result: Result) -> dict[str, Any]:
     return data
 
 
-def test_expect_is_checked_on_the_plan_made_under_the_lock(
-    dataset: Path, api: FakeDatasetsApi, fake: FakePup, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A row relabeled after the command planned, but before it took the lock, is caught."""
-    preview = output_json(push(dataset))
-    real = dataset_cli.push_dataset
-
-    def relabel_then_push(directory: DatasetDir, **kwargs: Any) -> Any:
-        apply_labels(directory, [Label(id=ROW_IDS[0], keep=False, reason="changed my mind")])
-        return real(directory, **kwargs)
-
-    monkeypatch.setattr(dataset_cli, "push_dataset", relabel_then_push)
-    words = shlex.split(preview["next_command"])
-    result = invoke(*words[3:])
-    assert result.exit_code == 2, result.stderr
-    assert "Error [settings_conflict]: the records to push changed since the preview" in (
-        result.stderr
-    )
-    assert fake.calls == []  # nothing was sent
-    assert not (dataset / PUSH_FILE).exists()
-
-
 def test_push_without_confirm_previews_and_sends_nothing(
     dataset: Path, api: FakeDatasetsApi, fake: FakePup
 ) -> None:
@@ -137,8 +112,6 @@ def test_push_without_confirm_previews_and_sends_nothing(
         NAME,
         "--project",
         PROJECT,
-        "--expect",
-        preview["inputs_digest"],
         "--confirm",
     ]
     assert fake.calls == []

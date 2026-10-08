@@ -36,8 +36,7 @@ result. Never use shell variables: your shell state does not persist between cal
 
 1. **Read `data` and the exit code.** `0` is done, `2` a command to fix or a preview awaiting
    `--confirm`, `1` an outside failure. The JSON on stdout is the truth.
-2. **Run `next_command` as written.** Its `--expect` (train, resume, triage, push) refuses
-   changes since the preview. If `null`, pick from `next_steps` with the user.
+2. **Run `next_command` as written.** If `null`, pick from `next_steps` with the user.
 3. **Never add `--confirm` without the user's explicit authorization** for that operation. An
    earlier yes, `PUP_AUTO_APPROVE`, agent mode or a general "go ahead" are not authorization.
 4. **Sending traces to a model provider needs consent.** Name every recipient in the preview's
@@ -290,7 +289,7 @@ Errors read `Error [<code>]: <message>`, then `Hint: ...`. The codes, with their
 | `not_a_dataset_dir` | `2` | the directory is missing or is not a dataset directory |
 | `not_a_run_dir` | `2` | no such run directory or run id (`pup finetune runs` lists them) |
 | `run_dir_not_empty` | `2` | a new run needs a new directory: omit --run-dir/--run-id, or pass new ones |
-| `settings_conflict` | `2` | the directory records other settings (leave the flags out: the frozen values are used; or use a new directory or `--out-dir`), or what `--confirm` would use changed since its preview (`--expect`): preview again |
+| `settings_conflict` | `2` | the directory records other settings (leave the flags out: the frozen values are used; or use a new directory or `--out-dir`) |
 | `wrong_phase` | `2` | the run is not in a phase the command acts on (`status` says which) |
 | `lock_busy` | `1` | another pup-finetune process is using the directory; wait for it |
 | `provider_auth` | `1` | the provider rejected the API key; log in again |
@@ -308,7 +307,7 @@ Errors read `Error [<code>]: <message>`, then `Hint: ...`. The codes, with their
 | `dataset preview` matches no spans | Wrong ml_app, filter or window | Back to step 1: use only values seen in real spans, or widen `--from`. |
 | Most rows are excluded | Spans that cannot train | Read `excluded_by_code` in `dataset show`. `span_error` needs `--include-errors` and a yes. |
 | `Error [read_only]` | Read-only mode | Tell the user; previews and local commands still work. |
-| `Error [settings_conflict]` | Settings frozen per directory, or a change since the preview (`--expect`) | Leave the flags out (the frozen values are used), or use a new directory or `--out-dir`. After a change, preview again and ask. |
+| `Error [settings_conflict]` | Settings frozen per directory | Leave the flags out (the frozen values are used), or use a new directory or `--out-dir`. |
 | `Error [not_a_run_dir]`, `[not_a_dataset_dir]` or `[run_dir_not_empty]` | The wrong directory | Run commands take a run id or directory; dataset commands a dataset directory. |
 | `Error [provider_capacity]` or `Error [transient]` | No capacity, or a dropped call | Wait and retry; the hint says whether anything still runs. |
 | `worker.state` `stale` or `exited` while `training` | The worker died or hangs | Read `worker.log`. Cancel a stale worker, then preview `resume` and ask. |

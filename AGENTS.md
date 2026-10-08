@@ -378,10 +378,6 @@ Source lives under `src/pup_finetune/`.
   variable, never the key), from which `deployment_usage` builds the deploy result's `usage`
   (with an example request); the result's `next_command` is `null` and `undeploy_command`
   says how to delete it.
-- `approval.py` - what a preview pins: `Part`s (rows, settings, ...) hashed into a 24-character
-  `inputs_digest`, one segment per part; `require_expected` refuses an `--expect` that no
-  longer matches with `SettingsConflict`, naming the part that changed and how it is now (one
-  that is not a digest at all with `UsageError`).
 - `runtime.py` - non-secret settings from the environment (`PUP_OUTPUT`, `PUP_READ_ONLY`, ...),
   and `under_agent`, whether a coding agent drives the process (`PUP_AGENT_MODE`, `AI_AGENT`
   or `CLAUDECODE`), for defaults that suit an agent's bounded tool calls (`status --watch`'s
@@ -820,14 +816,13 @@ Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds can
   `next_steps`, a list of `{"command", "why"}` whose commands mark such values in one style,
   `<UPPER_CASE>`; never copy a step into `next_command`. A preview's `next_command` repeats
   the flags that were typed plus the identity it must pin (`--run-id` for `train`, the judge
-  for `evaluate`), not every resolved default, and for `train`, `resume`, `dataset triage`
-  and `dataset push`, `--expect <inputs_digest>` (see `approval.py`). Build them with
-  `next_steps.py`; the test conftest checks every emitted result against the rule.
+  for `evaluate`), not every resolved default. Build them with `next_steps.py`; the test
+  conftest checks every emitted result against the rule.
 - A preview is the approval: `action` (one sentence of what `--confirm` does), `billing`
   (the provider's sentence: what it bills for and the usage counted, never a dollar figure
   we cannot compute), `data_recipients`, `rows`, `settings` (the resolved values that will
   be used, each value a default resolved to with its source, e.g. `rank_source`),
-  `defaults_used`, `warnings`, and on the four commands above `inputs_digest`.
+  `defaults_used` and `warnings`.
 - Honor `PUP_READ_ONLY`: reject every remote write and paid run when it is set. Previews still
   run (they make no remote write) and say so: `"read_only"` in the preview and `next_command`
   null. A run that never leaves the machine (the offline fake provider and judge) is allowed.

@@ -115,4 +115,3 @@ def test_suggestions_never_name_a_hidden_option() -> None:
     first = result.stderr.splitlines()[0]
     assert "--eval-max-cases," in first
     assert "--eval-max-cases-per-trajectory" not in first
-    assert "--expect" not in first

@@ -847,8 +847,7 @@ def test_resume_after_a_crash_completes(dataset: Path, tmp_path: Path) -> None:
     assert data["preview"]["remaining_epochs"] == 1
     assert data["preview"]["action"].startswith("continue training with epoch 2")
     assert data["preview"]["data_recipients"] == ["training rows -> fake"]
-    digest = data["preview"]["inputs_digest"]
-    assert data["next_command"] == f"pup finetune resume {run_dir} --expect {digest} --confirm"
+    assert data["next_command"] == f"pup finetune resume {run_dir} --confirm"
 
     resumed = rerun(data["next_command"])
     assert resumed.exit_code == 0, resumed.stderr

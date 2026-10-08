@@ -25,8 +25,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 
-from pup_finetune.approval import inputs_digest, require_expected, with_digest, with_settings
-from pup_finetune.cli._common import CommandResult, current_context, run_command
+from pup_finetune.cli._common import CommandResult, current_context, run_command, with_settings
 from pup_finetune.cli._dirs import require_dataset_dir
 from pup_finetune.cli._flags import given, require_alone, require_enablers
 from pup_finetune.cli._presentation import CommandDoc, Safety, default_note, describe
@@ -65,7 +64,7 @@ def _check_available(judges: Sequence[str]) -> None:
         check_available(triage.judge_config(spec))
 
 
-TRIAGE_NEEDS: dict[str, str] = {"allow_template_rubric": "rubric", "expect": "confirm"}
+TRIAGE_NEEDS: dict[str, str] = {"allow_template_rubric": "rubric"}
 """``dataset triage``'s options that need another one (see :mod:`pup_finetune.cli._flags`)."""
 
 RUBRIC = "Rubric"
@@ -205,15 +204,6 @@ def triage_rows(
             rich_help_panel=RUN,
         ),
     ] = False,
-    expect: Annotated[
-        str | None,
-        typer.Option(
-            "--expect",
-            metavar="DIGEST",
-            hidden=True,
-            help="With --confirm: the preview's inputs_digest; refused when the rows changed.",
-        ),
-    ] = None,
 ) -> dict[str, Any] | CommandResult | None:
     require_alone("print_template")
     require_enablers(TRIAGE_NEEDS)
@@ -270,10 +260,9 @@ def triage_rows(
         )
         if not (ctx is not None and given(ctx, param))
     ]
-    parts = plan.approval_parts()
     planned = plan.preview()
     planned["rubric_file"] = str(rubric) if rubric is not None else None
-    preview = with_digest(with_settings(planned, settings, defaults_used), inputs_digest(parts))
+    preview = with_settings(planned, settings, defaults_used)
     refused = None
     if template_task is not None:
         preview["warnings"] = [*preview.get("warnings", []), template_task]
@@ -282,12 +271,10 @@ def triage_rows(
             # In the result too, not only on stderr: an agent reads why and what to change.
             preview["refused"] = refused
             preview["refused_hint"] = template_hint
-    if confirm:
-        require_expected(expect, parts, preview=shlex.join(rerun))
     require_confirm(
         confirm,
         preview,
-        shlex.join([*rerun, "--expect", preview["inputs_digest"], "--confirm"]),
+        shlex.join([*rerun, "--confirm"]),
         refused=refused,
         hint=template_hint if refused is not None else None,
     )

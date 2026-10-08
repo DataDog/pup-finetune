@@ -249,13 +249,8 @@ def render_errors() -> list[str]:
         "of at most seven lines generated from it (`Preview only, nothing was run: ...`, then "
         "the data, settings, recipients, who bills it and the cost; a longer card drops the "
         "settings first, never the cost or a refusal), its warnings and `Next: <command>`, and "
-        "exits `2`; its code is `confirmation_required`. The previews of `train`, `resume`, "
-        "`dataset triage` and `dataset push` carry an `inputs_digest`, and their "
-        "`next_command` passes it back as `--expect <digest>`: with `--confirm`, the command "
-        "refuses with `settings_conflict` when what it would use changed since the preview "
-        "(for example a row labeled in between); without `--expect`, `--confirm` runs as "
-        "the inputs are now. A run records the error that stopped it, with the same `code`, "
-        "under `error` in `state.json`.",
+        "exits `2`; its code is `confirmation_required`. A run records the error that "
+        "stopped it, with the same `code`, under `error` in `state.json`.",
         "",
         "| Code | Exit | Meaning |",
         "| --- | --- | --- |",

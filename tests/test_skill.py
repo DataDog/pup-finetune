@@ -167,9 +167,9 @@ def test_the_skill_lists_every_error_code_itself() -> None:
         assert f"| `{code}` | `{exit_code}` | {meaning} |" in table, code
 
 
-def test_the_skill_never_types_a_confirm_that_skips_expect() -> None:
-    # train, resume, triage and push pin their preview with --expect: the agent runs the
-    # preview's next_command rather than typing --confirm itself.
+def test_the_skill_never_types_a_confirm_for_a_previewed_command() -> None:
+    # The agent runs the preview's next_command, which pins what was previewed, rather than
+    # typing --confirm itself.
     text = skill.skill_text()
     for command in ("train", "resume", "dataset triage", "dataset push"):
         typed = re.findall(rf"pup finetune {command} [^`\n]*--confirm", text)

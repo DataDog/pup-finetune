@@ -75,7 +75,6 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
-from pup_finetune.approval import Part
 from pup_finetune.concurrency import DaemonPool
 from pup_finetune.curation.labels import Label, LabelReport, apply_labels
 from pup_finetune.data.dataset_dir import DatasetDir
@@ -527,34 +526,6 @@ class TriagePlan:
                 )
             chars[judge] = chars.get(judge, 0) + sizes[row.id]
         return {judge: -(-count // CHARS_PER_TOKEN) for judge, count in chars.items()}
-
-    def approval_parts(self) -> list[Part]:
-        """What approving this triage pins (see :mod:`pup_finetune.approval`): the rows to
-        review with the calls left (and, measuring agreement, each row's reference label,
-        ``[row_id, keep]``, which the council is measured against), and the criteria,
-        judges and mode."""
-        rows: dict[str, Any] = {
-            "rows": [[row.id, row_digest(row)] for row in self.rows],
-            "pending": [[row.id, judge] for row, judge in self.pending],
-        }
-        if self.references is not None:
-            rows["references"] = [
-                [row_id, label.keep] for row_id, label in sorted(self.references.items())
-            ]
-        criteria = {
-            "rubric_sha256": self.criteria.sha256,
-            "judges": list(self.judges),
-            "mode": self.mode,
-            "reset": self.reset,
-        }
-        return [
-            Part(
-                "the rows to review",
-                rows,
-                now=f"{len(self.rows)} rows, {len(self.pending)} judge calls",
-            ),
-            Part("the rubric and judges", criteria),
-        ]
 
     def preview(self) -> dict[str, Any]:
         """What :func:`run_triage` would do, and every provider the rows are sent to."""

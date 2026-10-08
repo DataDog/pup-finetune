@@ -182,8 +182,7 @@ ERROR_CODES: Final[dict[str, tuple[int, str]]] = {
     "settings_conflict": (
         2,
         "the directory records other settings (leave the flags out: the frozen values are "
-        "used; or use a new directory or `--out-dir`), or what `--confirm` would use changed "
-        "since its preview (`--expect`): preview again",
+        "used; or use a new directory or `--out-dir`)",
     ),
     "wrong_phase": (2, "the run is not in a phase the command acts on (`status` says which)"),
     "lock_busy": (1, "another pup-finetune process is using the directory; wait for it"),

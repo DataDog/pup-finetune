@@ -28,8 +28,13 @@ from typing import Annotated, Any
 
 import typer
 
-from pup_finetune.approval import with_settings
-from pup_finetune.cli._common import CommandResult, current_context, get_runtime, run_command
+from pup_finetune.cli._common import (
+    CommandResult,
+    current_context,
+    get_runtime,
+    run_command,
+    with_settings,
+)
 from pup_finetune.cli._dirs import RUN_DIR_BY_ID, resolve_run_ref
 from pup_finetune.cli._flags import given
 from pup_finetune.cli._presentation import (

@@ -98,7 +98,7 @@ def test_train_needs_only_a_dataset_and_a_model(dataset: Path) -> None:
     assert not Path("runs").exists()
 
 
-def test_the_digest_does_not_depend_on_the_run_directory_or_id(dataset: Path) -> None:
+def test_pinning_the_run_directory_and_id_changes_only_where_it_runs(dataset: Path) -> None:
     first = output(invoke("train", "--dataset", str(dataset), "--model", "fake-model"))
     pinned = output(
         invoke(
@@ -115,7 +115,8 @@ def test_the_digest_does_not_depend_on_the_run_directory_or_id(dataset: Path) ->
             "other-id",
         )
     )
-    assert first["preview"]["inputs_digest"] == pinned["preview"]["inputs_digest"]
+    for key in ("rows", "settings", "action"):
+        assert first["preview"][key] == pinned["preview"][key], key
     assert pinned["preview"]["provider_source"] == "--provider"
     assert pinned["preview"]["run_dir"] == "elsewhere"
 

@@ -58,6 +58,20 @@ class CommandResult:
     exit_code: int = 0
 
 
+def with_settings(
+    preview: Mapping[str, Any], settings: Mapping[str, Any], defaults_used: Sequence[str]
+) -> dict[str, Any]:
+    """``preview`` with ``settings`` (the values that will be used) and ``defaults_used``
+    (the ones no flag set) just before its ``data_destination`` (else at the end)."""
+    fields = {"settings": dict(settings), "defaults_used": list(defaults_used)}
+    shown: dict[str, Any] = {}
+    for key, value in preview.items():
+        if key == "data_destination":
+            shown.update(fields)
+        shown[key] = value
+    return {**shown, **fields} if "settings" not in shown else shown
+
+
 def get_runtime() -> Runtime:
     """The runtime for the current command, read from the environment."""
     return Runtime.from_env()
@@ -125,7 +139,7 @@ def report_click_error(exc: Any) -> int:
 
 
 def _drop_hidden_possibilities(exc: Any, ctx: Any) -> None:
-    """Leave the hidden options (old names kept for compatibility, ``--expect``) out of a
+    """Leave the hidden options (old names kept for compatibility) out of a
     ``No such option`` error's suggestions, so it never suggests a name ``--help`` hides."""
     possibilities = getattr(exc, "possibilities", None)
     command = getattr(ctx, "command", None)

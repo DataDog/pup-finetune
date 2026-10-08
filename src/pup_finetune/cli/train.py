@@ -27,7 +27,6 @@ the cap is reached already and stops, partial, once it is.
 from __future__ import annotations
 
 import contextlib
-import dataclasses
 import json
 import math
 import os
@@ -43,7 +42,6 @@ from typing import Annotated, Any, Final
 import typer
 from pydantic import ValidationError
 
-from pup_finetune.approval import Part, inputs_digest, require_expected, with_digest
 from pup_finetune.cli._common import (
     CommandResult,
     current_context,
@@ -161,7 +159,6 @@ _FLAGS: dict[str, str] = {
 }
 
 TRAIN_NEEDS: dict[str, str] = {
-    "expect": "confirm",
     "spend_reserve_fraction": "max_spend_usd",
     "eval_out_dir": "evaluate",
     "eval_max_cases": "evaluate",
@@ -178,9 +175,6 @@ TRAIN_NEEDS: dict[str, str] = {
 
 STATUS_NEEDS: dict[str, str] = {"interval": "watch", "timeout": "watch"}
 """``status``'s options that need ``--watch``."""
-
-RESUME_NEEDS: dict[str, str] = {"expect": "confirm"}
-"""``resume``'s options that need ``--confirm``."""
 
 REQUIRED = "Required"
 RUN = "Run"
@@ -235,17 +229,6 @@ DetachOption = Annotated[
 ConfirmOption = Annotated[
     bool, typer.Option("--confirm", help="Run it (paid); without it, only preview.")
 ]
-ExpectOption = Annotated[
-    str | None,
-    typer.Option(
-        "--expect",
-        metavar="DIGEST",
-        hidden=True,
-        help="With --confirm: the preview's inputs_digest; refused when the inputs changed.",
-    ),
-]
-"""``--expect``, which a preview's ``next_command`` passes (see :mod:`pup_finetune.approval`):
-hidden, since people and agents run that command rather than type it."""
 CancelConfirmOption = Annotated[
     bool,
     typer.Option(
@@ -374,50 +357,6 @@ def _rows(inputs: RunInputs) -> dict[str, int]:
         "test": inputs.rows["test"],
         "rejected": len(inputs.rejected),
     }
-
-
-def _rows_now(rows: Mapping[str, int]) -> str:
-    return f"{rows['train']} train / {rows['validation']} validation rows"
-
-
-def _rows_part(inputs: RunInputs, rendering: Mapping[str, Any]) -> Part:
-    """The rendered rows a run trains on, as an approval pins them."""
-    rows = _rows(inputs)
-    value = {
-        "dataset_sha256": inputs.dataset_sha256,
-        "rendering": dict(rendering),
-        "rows": rows,
-        "train": [row.row_id for row in inputs.train_rows],
-        "validation": [row.row_id for row in inputs.validation_rows],
-        "rejected": [[row.row_id, row.code] for row in inputs.rejected],
-        "tokens": [inputs.tokens_per_epoch, inputs.validation.train_tokens],
-    }
-    return Part("the dataset", value, now=_rows_now(rows))
-
-
-def _train_parts(
-    provider: Provider,
-    profile: ModelProfile,
-    spec: TrainSpec,
-    inputs: RunInputs,
-    rendering: Mapping[str, Any],
-    plan: evaluation.EvalPlan | None,
-) -> list[Part]:
-    """What a ``train`` approval pins: the rendered rows, the settings, the evaluation."""
-    settings = {
-        "provider": provider.name,
-        "profile": dataclasses.asdict(profile),
-        "spec": spec.model_dump(mode="json"),
-    }
-    return [
-        _rows_part(inputs, rendering),
-        Part("the training settings", settings),
-        Part(
-            "the evaluation",
-            None if plan is None else plan.approval_value(),
-            now=None if plan is None else f"{len(plan.cases)} test cases",
-        ),
-    ]
 
 
 def _usage(
@@ -871,7 +810,6 @@ def train(
             help="With --evaluate: the old name of --eval-max-cases.",
         ),
     ] = None,
-    expect: ExpectOption = None,
 ) -> dict[str, Any] | CommandResult:
     require_enablers(TRAIN_NEEDS)
     eval_max_cases = renamed("eval_max_cases", "old_eval_max_cases")
@@ -986,10 +924,8 @@ def train(
         # The consent fields name every recipient, the evaluation's judge included.
         preview["data_destination"] += f"; {preview['evaluation']['data_destination']}"
         preview["data_recipients"] += preview["evaluation"]["data_recipients"]
-    parts = _train_parts(provider, profile, spec, inputs, renderer.identity(), plan)
-    preview = with_digest(preview, inputs_digest(parts))
     # The rerun pins the provider, run id and directory (even when inferred or defaulted),
-    # so it trains exactly what was previewed; none of them is part of the digest.
+    # so it trains exactly what was previewed.
     rerun = [*PROGRAM, "train", "--provider", provider.name]
     rerun += ["--dataset", str(dataset_dir), "--model", model]
     rerun += ["--run-dir", str(run_dir), "--run-id", run_id]
@@ -1008,14 +944,12 @@ def train(
     # PUP_READ_ONLY refuses paid and remote runs; one that never leaves the machine (the
     # offline fake provider, and an evaluation that is offline too) is allowed.
     offline = provider.name == "fake" and (plan is None or plan.offline)
-    if confirm:
-        if not offline:
-            require_writable(runtime, f"training on {provider.name}", what=PAID_RUN)
-        require_expected(expect, parts, preview=shlex.join(rerun))
+    if confirm and not offline:
+        require_writable(runtime, f"training on {provider.name}", what=PAID_RUN)
     require_confirm(
         confirm,
         preview,
-        shlex.join([*rerun, "--expect", preview["inputs_digest"], "--confirm"]),
+        shlex.join([*rerun, "--confirm"]),
         read_only=runtime.read_only and not offline,
     )
     # A new ./runs gets a .gitignore: runs hold trace-derived rows.
@@ -1188,9 +1122,7 @@ def resume(
     run_dir: RunDirArgument,
     detach: DetachOption = False,
     confirm: ConfirmOption = False,
-    expect: ExpectOption = None,
 ) -> dict[str, Any]:
-    require_enablers(RESUME_NEEDS)
     runtime = get_runtime()
     if detach:
         require_detach_supported()
@@ -1242,29 +1174,14 @@ def resume(
         "data_recipients": [f"training rows -> {provider.name}"],
         "warnings": [],
     }
-    point = {
-        "run_id": manifest["run_id"],
-        "settings_hash": manifest.get("settings_hash"),
-        "phase": state.phase,
-        "mode": mode,
-        "resume_from": resume_from,
-        "epochs_completed": state.epochs,
-    }
-    parts = [
-        Part("the run", point, now=f"{state.phase}; {action}"),
-        _rows_part(inputs, manifest.get("rendering") or {}),
-    ]
-    preview = with_digest(preview, inputs_digest(parts))
     rerun = [*PROGRAM, "resume", str(run_dir), *(["--detach"] if detach else [])]
     offline = provider.name == "fake"
-    if confirm:
-        if not offline:
-            require_writable(runtime, f"training on {provider.name}", what=PAID_RUN)
-        require_expected(expect, parts, preview=shlex.join(rerun))
+    if confirm and not offline:
+        require_writable(runtime, f"training on {provider.name}", what=PAID_RUN)
     require_confirm(
         confirm,
         preview,
-        shlex.join([*rerun, "--expect", preview["inputs_digest"], "--confirm"]),
+        shlex.join([*rerun, "--confirm"]),
         read_only=runtime.read_only and not offline,
     )
     if detach:

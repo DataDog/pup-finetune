@@ -123,12 +123,8 @@ def test_the_preview_counts_the_calls_and_calls_nothing(
     assert len(preview["rubric_hash"]) == 12
     assert not {"rows_to_review", "rows_skipped_labeled"} & set(preview)  # under rows
     assert preview["approx_input_tokens"] > 0
-    digest = preview["inputs_digest"]
     assert data["next_command"] == shlex.join(
-        [
-            *("pup", "finetune", "dataset", "triage", str(dataset), "--rubric", str(rubric)),
-            *("--expect", digest, "--confirm"),
-        ]
+        ["pup", "finetune", "dataset", "triage", str(dataset), "--rubric", str(rubric), "--confirm"]
     )
     assert chat.requests == []
     assert not (dataset / JUDGMENTS_FILE).exists()
@@ -477,28 +473,6 @@ def test_agreement_compares_the_council_with_the_user_s_labels(
     assert labeled.exit_code == 0, labeled.stderr
     assert output(labeled)["rows_reviewed"] == accepted(dataset) - 4
     assert output(labeled)["rows_skipped_labeled"] == 4
-
-
-def test_agreement_refuses_reference_labels_changed_after_the_preview(
-    dataset: Path, chat: FakeChatApi, tmp_path: Path
-) -> None:
-    labels = tmp_path / "labels.jsonl"
-
-    def label(keep: bool) -> None:
-        line = {"id": "row-weather-001", "keep": keep, "reason": "" if keep else "off topic"}
-        labels.write_text(json.dumps(line) + "\n")
-        assert invoke("dataset", "label", str(dataset), "--file", str(labels)).exit_code == 0
-
-    label(True)
-    args = ["dataset", "triage", str(dataset), "--rule", "stay on topic", "--agreement"]
-    preview = output(invoke(*args, "--judges", "fireworks/judge-a"))
-    label(False)  # the same rows to review, against another reference
-    refused = invoke(*shlex.split(preview["next_command"])[2:])
-    assert refused.exit_code == 2
-    assert "Error [settings_conflict]: the rows to review changed since the preview" in (
-        refused.stderr
-    )
-    assert chat.requests == []
 
 
 def test_agreement_without_labels_is_a_usage_error(dataset: Path, chat: FakeChatApi) -> None:
