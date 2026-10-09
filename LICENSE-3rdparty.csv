@@ -1,6 +1,6 @@
 Component,Origin,License,Copyright
 anthropic,https://pypi.org/project/anthropic/,MIT,"Anthropic, PBC"
-baseten-loops,https://pypi.org/project/baseten-loops/,NOASSERTION,Baseten
+baseten-loops,https://pypi.org/project/baseten-loops/,MIT,Baseten
 docstring-parser,https://pypi.org/project/docstring-parser/,MIT,Marcin Kurczewski
 fireworks-ai,https://pypi.org/project/fireworks-ai/,Apache-2.0,"Fireworks AI, Inc."
 httpcore2,https://pypi.org/project/httpcore2/,BSD-3-Clause,Pydantic Services Inc. and individual contributors; Encode OSS Ltd

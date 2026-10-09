@@ -126,13 +126,7 @@ def test_disallowed_license_row_is_reported() -> None:
     assert problems == ["line 2: httpx: license 'GPL-3.0-only' not allowed"]
 
 
-@pytest.mark.parametrize("license_expr", ["NOASSERTION", "MIT"])
-def test_excepted_package_passes(license_expr: str) -> None:
-    csv_text = _HEADER + _row("Baseten_Loops", license_expr)
-    assert check_3rdparty.find_problems(_pyproject(["baseten-loops==0.26.0"]), csv_text) == []
-
-
-def test_noassertion_fails_for_other_packages() -> None:
+def test_noassertion_is_not_allowed() -> None:
     csv_text = _HEADER + _row("httpx", "NOASSERTION")
     problems = check_3rdparty.find_problems(_pyproject(["httpx"]), csv_text)
     assert problems == ["line 2: httpx: license 'NOASSERTION' not allowed"]

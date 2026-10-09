@@ -25,7 +25,7 @@ from typer.testing import CliRunner, Result
 
 from pup_finetune import output
 from pup_finetune.cli import app
-from pup_finetune.cli._summary import CAVEAT, MAX_LINES, SUMMARIES, summarize
+from pup_finetune.cli._summary import CAVEAT, MAX_LINES, SUMMARIES, format_duration, summarize
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
 
@@ -147,8 +147,11 @@ def test_evaluate_prints_its_warning_then_one_summary_line(run_dir: Path) -> Non
 def test_status_ends_with_the_status_line(run_dir: Path) -> None:
     result = invoke("status", str(run_dir))
     data = output_of(result)
+    # The fake run takes a second on a slow runner, which the line then reports.
+    elapsed = data["elapsed_seconds"]
+    took = f" {format_duration(elapsed)} elapsed" if elapsed else ""
     assert result.stderr == (
-        f"completed: epoch 2/2 step 2/2 loss 1.400 val 1.600 (best epoch 2). Next: "
+        f"completed: epoch 2/2 step 2/2 loss 1.400 val 1.600 (best epoch 2){took}. Next: "
         f"{data['next_command']}\n"
     )
 

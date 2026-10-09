@@ -76,7 +76,7 @@ __all__ = [
     "training_limit",
 ]
 
-LOOPS_VERSION: Final = "0.26.0"
+LOOPS_VERSION: Final = "0.28.0"
 """The ``baseten-loops`` version the ``baseten`` extra pins and the client is tested with."""
 
 
