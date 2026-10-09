@@ -64,7 +64,7 @@ fireworks = [
 # Judges on Anthropic: the official SDK (anthropic_client.py is the only module that loads it).
 anthropic = ["anthropic>=1,<2"]
 # The Baseten Loops SDK, pinned to the version the client is tested with (providers/baseten).
-baseten = ["pup-finetune[hf]", "baseten-loops==0.26.0"]
+baseten = ["pup-finetune[hf]", "baseten-loops==0.28.0"]
 
 [project.scripts]
 pup-finetune = "pup_finetune.cli:main"
