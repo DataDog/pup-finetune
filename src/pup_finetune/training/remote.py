@@ -31,7 +31,7 @@ import tempfile
 import threading
 import tomllib
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -457,13 +457,10 @@ def _behind(record: Mapping[str, Any], stored: Mapping[str, Any]) -> bool:
 def _save(run: RunDir, record: Mapping[str, Any]) -> None:
     """Write ``record`` under the run's lock; nothing while another process holds it, or
     when ``remote.json`` is gone or already knows more."""
-    try:
-        with run.lock():
-            stored = run.read_remote()
-            if stored is not None and not _behind(record, stored):
-                run.write_remote(record)
-    except LockBusy:
-        pass
+    with suppress(LockBusy), run.lock():
+        stored = run.read_remote()
+        if stored is not None and not _behind(record, stored):
+            run.write_remote(record)
 
 
 def _since(moment: datetime | None, current: datetime) -> float | None:
