@@ -15,7 +15,9 @@
   deactivation, an update or a deletion) and failed in a way worth retrying (a timeout, a dropped
   connection, HTTP 408, 500, 502, 503 or 504), for a create Baseten accepted whose answer
   cannot be read, as what it created exists and may bill, and for a checkpoint deployment
-  whose outcome is unknown, which the caller finds again by name.
+  whose outcome is unknown, which the caller finds again by name. Its training job reads
+  (teams and their secret names, training projects, jobs and job logs) back ``train
+  --remote``.
 - :func:`loops_sdk` imports the Loops SDK (``baseten-loops``, from the ``baseten`` extra) on
   first use, never when this module is imported, after refusing the environment variables
   that would make it send data elsewhere or reuse other resources.
@@ -376,6 +378,62 @@ class BasetenHTTP:
             raise ExternalError(f"{label} returned an unexpected response", source=SOURCE)
         return True
 
+    # --- Training jobs (train --remote), read only --------------------------------------
+
+    def teams(self) -> list[dict[str, Any]]:
+        """The teams the key sees (``id``, ``name``, ``default``...)."""
+        label = "the team listing"
+        return _records(self._request("GET", f"{API_BASE}/v1/teams", label), "teams", label)
+
+    def team_secret_names(self, team_id: str) -> list[str]:
+        """The names of the team's secrets (never their values)."""
+        label = "the team secret listing"
+        url = f"{API_BASE}/v1/teams/{_id(team_id, 'team')}/secrets"
+        secrets = _records(self._request("GET", url, label), "secrets", label)
+        return [str(secret.get("name")) for secret in secrets]
+
+    def training_projects(self) -> list[dict[str, Any]]:
+        """Every training project (``id``, ``name``, ``team_name``...)."""
+        label = "the training project listing"
+        found = self._request("GET", f"{API_BASE}/v1/training_projects", label)
+        return _records(found, "training_projects", label)
+
+    def training_jobs(self, project_id: str) -> list[dict[str, Any]]:
+        """The training project's jobs."""
+        label = "the training job listing"
+        url = f"{API_BASE}/v1/training_projects/{_id(project_id, 'project')}/jobs"
+        return _records(self._request("GET", url, label), "training_jobs", label)
+
+    def training_job(self, project_id: str, job_id: str) -> dict[str, Any] | None:
+        """The training job, or ``None`` when Baseten no longer has it."""
+        label = "the training job lookup"
+        found = self._request("GET", _job_url(project_id, job_id), label, missing_ok=True)
+        return None if found is None else _object(_object(found, label).get("training_job"), label)
+
+    def training_job_logs(
+        self,
+        project_id: str,
+        job_id: str,
+        *,
+        start_ms: int,
+        end_ms: int,
+        limit: int = 1000,
+        min_level: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """At most ``limit`` of the job's log lines between ``start_ms`` and ``end_ms`` (epoch
+        milliseconds), newest first."""
+        label = "the training job log query"
+        params = {
+            "start_epoch_millis": str(start_ms),
+            "end_epoch_millis": str(end_ms),
+            "limit": str(limit),
+            "direction": "desc",
+        }
+        if min_level is not None:
+            params["min_level"] = min_level
+        url = f"{_job_url(project_id, job_id)}/logs"
+        return _records(self._request("GET", url, label, params=params), "logs", label)
+
     # --- transport -----------------------------------------------------------------------
 
     def _request(
@@ -513,6 +571,10 @@ def _deployment_url(model_id: str, deployment_id: str) -> str:
         f"{API_BASE}/v1/models/{_id(model_id, 'model')}"
         f"/deployments/{_id(deployment_id, 'deployment')}"
     )
+
+
+def _job_url(project_id: str, job_id: str) -> str:
+    return f"{API_BASE}/v1/training_projects/{_id(project_id, 'project')}/jobs/{_id(job_id, 'job')}"
 
 
 def inference_url(url: str) -> str:

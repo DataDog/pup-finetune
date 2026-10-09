@@ -78,15 +78,22 @@ call is recorded in ``loops.calls`` with its keyword arguments. :attr:`FakeLoops
 An answer is ``(status, json_body)``, an ``httpx.Response`` or a callable taking the request.
 A request without a route goes to ``fallback`` (``FakeLoops.transport`` passes its own
 routes), else fails the test.
+
+``FakeTrainingJobs`` is what ``train --remote`` reads: teams and their secret names, training
+projects, jobs with scripted statuses (:meth:`~FakeTrainingJobs.set_status`) and the log
+lines a job wrote (:meth:`~FakeTrainingJobs.emit`); its :meth:`~FakeTrainingJobs.routes` merge
+into :meth:`FakeLoops.transport`.
 """
 
 from __future__ import annotations
 
+import functools
 import json as jsonlib
 import re
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 import httpx
@@ -983,3 +990,166 @@ def capabilities(*base_models: str, **fields: Any) -> dict[str, Any]:
         "enablement_details": None,
     }
     return {"supported_models": [{"model_name": name, **entry, **fields} for name in base_models]}
+
+
+# --- Training jobs (train --remote) ------------------------------------------------------
+
+_LEVELS: dict[str, int] = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40}
+DEFAULT_TEAM = "Baseten Research"
+
+
+def _iso(moment: datetime) -> str:
+    return moment.isoformat()
+
+
+@dataclass
+class FakeTrainingJob:
+    """A training job: its status, when it was created (``None``: Baseten did not say) and
+    last changed, and its log lines."""
+
+    job_id: str
+    project_id: str
+    status: str
+    created_at: datetime | None
+    updated_at: datetime
+    logs: list[dict[str, Any]] = field(default_factory=list)
+
+    def record(self) -> dict[str, Any]:
+        return {
+            "id": self.job_id,
+            "training_project_id": self.project_id,
+            "current_status": self.status,
+            "error_message": None,
+            "created_at": None if self.created_at is None else _iso(self.created_at),
+            "updated_at": _iso(self.updated_at),
+        }
+
+
+class FakeTrainingJobs:
+    """Baseten's teams, team secrets, training projects, jobs and job logs, in memory.
+
+    ``routes()`` answers ``GET /v1/teams``, ``GET /v1/teams/<id>/secrets``, ``GET
+    /v1/training_projects``, ``GET .../<project>/jobs``, ``GET .../jobs/<job>`` and ``GET
+    .../jobs/<job>/logs`` (``start_epoch_millis`` and ``end_epoch_millis`` inclusive,
+    ``limit``, ``direction`` and ``min_level``) for what exists when it is called; pass them
+    to :meth:`FakeLoops.transport`. ``fail`` answers a route kind (``teams``, ``secrets``,
+    ``projects``, ``jobs``, ``job``, ``logs``) with its ``(status, body)`` instead.
+    """
+
+    def __init__(
+        self,
+        *,
+        teams: list[dict[str, Any]] | None = None,
+        secrets: Mapping[str, list[str]] | None = None,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        self.now = now
+        self.teams = (
+            [{"id": "team1", "name": DEFAULT_TEAM, "default": True, "created_at": "2026-01-01"}]
+            if teams is None
+            else teams
+        )
+        self.secrets: dict[str, list[str]] = (
+            {team["id"]: ["pup_finetune_api_key"] for team in self.teams}
+            if secrets is None
+            else dict(secrets)
+        )
+        self.projects: dict[str, dict[str, Any]] = {}
+        self.jobs: dict[str, FakeTrainingJob] = {}
+        self.fail: dict[str, tuple[int, Any]] = {}
+        self.log_queries: list[dict[str, str]] = []
+
+    def project(self, name: str, team: str = DEFAULT_TEAM) -> str:
+        """The id of project ``name`` in ``team``, created when missing."""
+        for project_id, project in self.projects.items():
+            if (project["name"], project["team_name"]) == (name, team):
+                return project_id
+        project_id = f"proj{len(self.projects) + 1}"
+        self.projects[project_id] = {"id": project_id, "name": name, "team_name": team}
+        return project_id
+
+    def create_job(
+        self, project: str, team: str = DEFAULT_TEAM, *, status: str = "TRAINING_JOB_CREATED"
+    ) -> str:
+        project_id = self.project(project, team)
+        job_id = f"job{len(self.jobs) + 1}"
+        moment = self.now()
+        self.jobs[job_id] = FakeTrainingJob(job_id, project_id, status, moment, moment)
+        return job_id
+
+    def set_status(self, job_id: str, status: str, *, at: datetime | None = None) -> None:
+        job = self.jobs[job_id]
+        job.status, job.updated_at = status, at or self.now()
+
+    def emit(
+        self,
+        job_id: str,
+        messages: Sequence[str],
+        *,
+        replica: str | None = "g00r0",
+        level: str = "INFO",
+        at: datetime | None = None,
+    ) -> None:
+        """Log ``messages`` for ``job_id``, a nanosecond apart from ``at`` (by default, now);
+        a ``None`` replica is a platform line."""
+        job = self.jobs[job_id]
+        start = int((at or self.now()).timestamp() * 1_000_000_000)
+        for index, message in enumerate(messages):
+            line = {"timestamp": str(start + index), "message": message, "level": level}
+            job.logs.append({**line, "replica": replica})
+
+    def routes(self) -> dict[str, Answer]:
+        routes: dict[str, Answer] = {
+            "GET /v1/teams": lambda request: self._answer("teams", {"teams": self.teams}),
+            "GET /v1/training_projects": lambda request: self._answer(
+                "projects", {"training_projects": list(self.projects.values())}
+            ),
+        }
+        for team in self.teams:
+            routes[f"GET /v1/teams/{team['id']}/secrets"] = functools.partial(self._secrets, team)
+        for project_id in self.projects:
+            routes[f"GET /v1/training_projects/{project_id}/jobs"] = functools.partial(
+                self._jobs, project_id
+            )
+        for job_id, job in self.jobs.items():
+            url = f"GET /v1/training_projects/{job.project_id}/jobs/{job_id}"
+            routes[url] = functools.partial(self._job, job_id)
+            routes[f"{url}/logs"] = functools.partial(self._logs, job_id)
+        return routes
+
+    def _answer(self, kind: str, body: Any) -> httpx.Response:
+        status, body = self.fail.get(kind, (200, body))
+        return httpx.Response(status, json=body)
+
+    def _secrets(self, team: Mapping[str, Any], request: httpx.Request) -> httpx.Response:
+        names = self.secrets.get(team["id"], [])
+        secrets = [
+            {"id": f"s{i}", "name": name, "team_name": team["name"]} for i, name in enumerate(names)
+        ]
+        return self._answer("secrets", {"secrets": secrets})
+
+    def _jobs(self, project_id: str, request: httpx.Request) -> httpx.Response:
+        found = [job.record() for job in self.jobs.values() if job.project_id == project_id]
+        body = {"training_project": self.projects[project_id], "training_jobs": found}
+        return self._answer("jobs", body)
+
+    def _job(self, job_id: str, request: httpx.Request) -> httpx.Response:
+        job = self.jobs[job_id]
+        body = {"training_project": self.projects[job.project_id], "training_job": job.record()}
+        return self._answer("job", body)
+
+    def _logs(self, job_id: str, request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        self.log_queries.append(params)
+        start, end = int(params["start_epoch_millis"]), int(params["end_epoch_millis"])
+        least = _LEVELS.get(params.get("min_level", "DEBUG"), 0)
+        found = [
+            line
+            for line in self.jobs[job_id].logs
+            if start <= int(line["timestamp"]) // 1_000_000 <= end
+            and _LEVELS.get(line["level"], 0) >= least
+        ]
+        found.sort(
+            key=lambda line: int(line["timestamp"]), reverse=params.get("direction") == "desc"
+        )
+        return self._answer("logs", {"logs": found[: int(params.get("limit", "1000"))]})

@@ -40,6 +40,7 @@ _RUNTIME_ENV: tuple[str, ...] = (
     "PUP_FINETUNE_PROGRESS",
     "PUP_FINETUNE_PUP",
     "PUP_FINETUNE_KEEP_DD_TOKEN",
+    "PUP_FINETUNE_BASETEN_CLI",
     # Terminal and color overrides that change how rich renders stderr.
     "FORCE_COLOR",
     "NO_COLOR",

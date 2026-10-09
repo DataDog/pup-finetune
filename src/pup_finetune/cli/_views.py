@@ -199,6 +199,7 @@ STATUS_KEYS: Final = (
     "finalize_error",
     "resume_mode",
     "worker",
+    "remote",
     "warnings",
     "watch_timed_out",
     "settings",
@@ -208,7 +209,8 @@ STATUS_KEYS: Final = (
 )
 """What ``status`` prints, in order; ``estimated_spend_usd`` (with an hourly rate),
 ``evaluation`` (the run was evaluated), ``resume_mode`` (a resumable run), ``worker`` (one
-exists), ``watch_timed_out``
+exists, and no remote job trains the run), ``remote`` (the job of a run started with
+``train --remote``), ``watch_timed_out``
 (``--watch``) and ``settings`` (what the run trains with that differs from the defaults,
 :func:`changed_settings`; every setting is in ``run.json``, ``files.run``) only when they
 apply."""
@@ -259,8 +261,13 @@ def status_view(data: Mapping[str, Any]) -> dict[str, Any]:
     }
     if phase not in RESUMABLE_PHASES:
         shown.pop("resume_mode", None)
+    remote = data.get("remote")
+    if isinstance(remote, Mapping) and remote.get("state") != "ended":
+        shown["worker"] = None
     if shown["worker"] is None:
         shown.pop("worker")
+    if shown.get("remote") is None:
+        shown.pop("remote", None)
     if shown.get("evaluation") is None:
         shown.pop("evaluation", None)
     if shown.get("settings") is None:  # a run recorded before run.json had them

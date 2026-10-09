@@ -161,6 +161,15 @@ or recorded as the run's `deployable_checkpoint` on Baseten, which has no promot
 Baseten models are `qwen3p5-9b` and `glm-5p3-flash`:
 `pup finetune train --dataset datasets/my-agent --model qwen3p5-9b --detach`.
 
+`--remote` (Baseten only) runs the training loop in a Baseten CPU job, so training continues
+while this machine sleeps; `--team` names the Baseten team (by default your only or default
+team). It needs the `baseten` CLI and `uv` on `PATH`, pup-finetune installed from a source
+checkout, and a team secret `pup_finetune_api_key` holding a Baseten API key of your workspace.
+The job bills on top of the trainer. `status` reads the job and its logs and copies the run's
+state into the run directory, so `status --watch`, `evaluate` and `deploy` work as for a local
+run. `cancel` cannot stop a remote run yet: stop its job, and its Loops trainer, in the Baseten
+UI.
+
 `pup finetune runs` lists your runs. Run commands take a run id or a run directory, and
 `status` alone shows the newest run. `status --watch` prints progress until training ends;
 Ctrl-C stops only the watch. `pup finetune resume ft-20261007183443-a8b181` continues an
@@ -258,7 +267,10 @@ Training, `evaluate` and `dataset triage` send conversation content to the provi
 choose, and every preview lists each recipient in `data_recipients`. `PUP_READ_ONLY=true` (or
 `pup --read-only`) refuses `--confirm` on `train`, `resume`, `evaluate`, `dataset push`,
 `deploy` and `undeploy`; previews still run. `dataset triage` writes nothing to Datadog, so it
-stays allowed, and it still sends rows to the judges. [docs/data-format.md](docs/data-format.md)
+stays allowed, and it still sends rows to the judges. `train --remote` uploads the train and
+validation rows, their split assignments, the run files and pup-finetune's source to Baseten
+storage for its job; the test split and dropped rows stay on this machine.
+[docs/data-format.md](docs/data-format.md)
 describes the rows, the exclusion codes and the files in a dataset directory.
 
 ## Develop

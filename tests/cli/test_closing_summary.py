@@ -449,6 +449,37 @@ def test_a_detached_train_names_its_worker_and_log() -> None:
     )
 
 
+def test_a_remote_train_names_its_job_team_and_project() -> None:
+    result = {
+        "status": "started",
+        "run_id": "ft-1",
+        "run_dir": "run",
+        "remote": {
+            "backend": "baseten job",
+            "team": "Research",
+            "project": "pup-finetune-ft-1",
+            "job_id": "j1",
+            "compute": {"cpu_count": 16},
+            "logs": "baseten train job logs --job-id j1",
+        },
+        "upload": {"files": 120, "bytes": 2_600_000},
+        "notes": [],
+        "warnings": [],
+        "next_command": "pup finetune status run --watch",
+    }
+    found = summarize("train", result)
+    assert found is not None
+    assert found.lines == (
+        "run ft-1 started in Baseten job j1 (team Research)",
+        "project: pup-finetune-ft-1",
+        "next: pup finetune status run --watch",
+    )
+    assert found.line == (
+        "run ft-1 started in Baseten job j1 (team Research); project: pup-finetune-ft-1. "
+        "Next: pup finetune status run --watch"
+    )
+
+
 def test_an_unexpected_result_has_no_summary() -> None:
     assert summarize("evaluate", {"status": "complete"}) is None  # no summary in it
     assert summarize("dataset show", {"anything": 1}) is None  # no summarizer

@@ -5,8 +5,8 @@
 # This product includes software developed at Datadog (https://www.datadoghq.com/).
 # Copyright 2026-present Datadog, Inc.
 """What the registry says each built-in provider needs matches the providers themselves:
-the keys they sign in with, the extras that install their packages, the flags they refuse
-and whether they deploy."""
+the keys they sign in with, the extras that install their packages, the flags they refuse,
+whether they deploy and whether they train remotely."""
 
 from __future__ import annotations
 
@@ -17,8 +17,14 @@ import pytest
 
 from pup_finetune import credentials
 from pup_finetune.errors import UsageError
-from pup_finetune.providers import provider_info, provider_infos
-from pup_finetune.providers.base import LoraConfig
+from pup_finetune.providers import (
+    get_provider,
+    provider_info,
+    provider_infos,
+    remote_jobs,
+    require_remote,
+)
+from pup_finetune.providers.base import LoraConfig, SupportsRemote
 from pup_finetune.providers.baseten import backend as baseten_backend
 from pup_finetune.providers.baseten.provider import PROFILES as BASETEN_PROFILES
 from pup_finetune.providers.fireworks import client as fireworks_client
@@ -72,3 +78,16 @@ def test_only_providers_that_deploy_say_so() -> None:
 def test_the_fake_is_the_only_offline_provider() -> None:
     assert [info.name for info in provider_infos(DEV) if info.offline] == ["fake"]
     assert provider_info("fake", DEV).dev_only
+
+
+def test_only_baseten_runs_remotely() -> None:
+    assert [info.name for info in provider_infos(DEV) if info.remote] == ["baseten"]
+    for name in ("fireworks", "fake"):
+        provider = get_provider(name, DEV)
+        assert not isinstance(provider, SupportsRemote)
+        with pytest.raises(UsageError, match="not available in this version"):
+            require_remote(name, DEV)
+        with pytest.raises(UsageError, match="not available in this version"):
+            remote_jobs(provider)
+    require_remote("baseten", DEV)
+    assert isinstance(get_provider("baseten", DEV), SupportsRemote)

@@ -22,6 +22,7 @@ from pup_finetune import output
 from pup_finetune.cli import _common, app
 from pup_finetune.cli import doctor as doctor_cli
 from pup_finetune.cli._presentation import COMMAND_ORDER
+from pup_finetune.cli._summary import status_line
 from pup_finetune.cli._views import (
     STATUS_KEYS,
     TABLE_VIEWS,
@@ -110,6 +111,38 @@ def test_status_prints_the_decision_in_order_and_names_its_checkpoint() -> None:
     # Keys that are sometimes null stay.
     assert shown["error"] is None
     assert shown["approx_eta_seconds"] is None
+
+
+REMOTE = {"backend": "baseten job", "job_id": "j1", "state": "running"}
+
+
+def test_status_hides_the_worker_while_a_remote_job_trains_the_run() -> None:
+    stand_in = worker(pid=None, alive=True, running=True)
+    shown = status_view(_status(phase="training", worker=stand_in, remote=REMOTE))
+    assert "worker" not in shown
+    assert shown["remote"] == REMOTE
+    keys = list(shown)
+    assert keys.index("finalize_error") < keys.index("remote") < keys.index("warnings")
+    ended = {**REMOTE, "state": "ended"}
+    shown = status_view(_status(phase="training", worker=worker(pid=None), remote=ended))
+    assert shown["worker"]["state"] == "exited"
+    assert "remote" not in status_view(_status())
+
+
+def test_the_status_line_names_the_remote_job_s_state() -> None:
+    fields = {"epoch": 1, "max_epochs": 2, "step": 3, "max_steps": 10, "val_losses": []}
+    stand_in = worker(pid=None, alive=True, running=True, starting=True)
+    starting = {**REMOTE, "state": "starting"}
+    line = status_line(
+        status_view(_status(phase="training", worker=stand_in, remote=starting, **fields))
+    )
+    assert line == "training: epoch 1/2 step 3/10 (Baseten job starting)"
+    ended = status_view(
+        _status(
+            phase="training", worker=worker(pid=None), remote={**REMOTE, "state": "ended"}, **fields
+        )
+    )
+    assert status_line(ended).endswith("(its process not running)")
 
 
 def test_an_evaluation_without_a_summary_prints_as_it_is() -> None:
