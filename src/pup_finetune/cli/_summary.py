@@ -478,6 +478,48 @@ def evaluate_summary(result: Mapping[str, Any]) -> Summary | None:
     return Summary(summary.lines, line)
 
 
+def benchmark_summary(result: Mapping[str, Any]) -> Summary | None:
+    """``benchmark``: the cases and judge, each model's judge agreement with its CI and gap
+    to the best, the recommendation and the caveat."""
+    status = result.get("status")
+    if status == "calibration_failed":
+        return _evaluation_parts(result, compact=False)
+    board = [entry for entry in result.get("leaderboard") or [] if isinstance(entry, Mapping)]
+    if status is None or not board:
+        return None
+    what = {"complete": "complete", "partial": "partial"}.get(str(status), "complete with errors")
+    headline = (
+        f"benchmark {what}: {_n(len(board), 'model')} on {_n(result.get('cases'), 'case')} from "
+        f"{_n(result.get('trajectories'), 'test conversation')}; judge {result.get('judge_model')}"
+    )
+    width = max(len(str(entry.get("model"))) for entry in board) + 2
+    rows = []
+    for entry in board:
+        ci = entry.get("ci95")
+        interval = f" [{_percent(ci[0])}, {_percent(ci[1])}]" if isinstance(ci, list) else ""
+        gap = entry.get("gap_to_best")
+        if isinstance(gap, Mapping) and isinstance(gap.get("judge_pass_rate"), int | float):
+            noise = ", within noise" if entry.get("within_noise_of_best") else ""
+            interval += f"  {_points(-float(gap['judge_pass_rate']))} vs best{noise}"
+        elif entry.get("status") == "error":
+            interval = f"  {_error_text(entry.get('error')) or 'error'}"
+        rows.append(
+            f"{entry.get('model')!s:<{width}}{_percent(entry.get('judge_pass_rate'))}{interval}"
+        )
+    recommendation = result.get("recommendation") or {}
+    verdict = {
+        "fine_tune": f"recommended: fine-tune {recommendation.get('model')}",
+        "base_meets_target": f"recommended: {recommendation.get('model')} already meets the "
+        f"{_percent(recommendation.get('target_pass_rate'))} target; fine-tuning may add little",
+    }.get(str(recommendation.get("verdict")), "no recommendation yet")
+    return _summary(
+        headline,
+        [*rows, verdict, CAVEAT],
+        brief=[*rows, verdict],
+        next_command=result.get("next_command"),
+    )
+
+
 # --- dataset -----------------------------------------------------------------------------
 
 
@@ -1012,6 +1054,27 @@ def _evaluate_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
     return headline, rows
 
 
+def _benchmark_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
+    settings = preview.get("settings") or {}
+    models = ", ".join(str(model) for model in settings.get("models") or [])
+    headline = f"benchmark {models} with judge {settings.get('judge_model')}"
+    detail = (
+        f"at most {_count(settings.get('max_tokens'))} tokens per generation, "
+        f"{settings.get('max_cases')} turns per conversation, target pass rate "
+        f"{_percent(settings.get('target_pass_rate'))}"
+    )
+    rows = [
+        _row("data", _evaluation_calls(preview)),
+        _row("settings", detail),
+        _row("sends", _sends(preview)),
+        _row(
+            "bills",
+            _bills(preview.get("billing")) or "nothing: the fake provider and judge run offline",
+        ),
+    ]
+    return headline, rows
+
+
 def _triage_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
     judges = [judge for judge in preview.get("judges") or [] if isinstance(judge, Mapping)]
     rows = preview.get("rows") or {}
@@ -1099,6 +1162,7 @@ PREVIEW_CARDS: Final[dict[str, PreviewCard]] = {
     "train": _train_card,
     "resume": _resume_card,
     "evaluate": _evaluate_card,
+    "benchmark": _benchmark_card,
     "dataset triage": _triage_card,
     "dataset push": _push_card,
     "deploy": _deploy_card,
@@ -1151,6 +1215,7 @@ SUMMARIES: Final[dict[str, Summarizer]] = {
     "cancel": cancel_summary,
     "runs": runs_summary,
     "evaluate": evaluate_summary,
+    "benchmark": benchmark_summary,
     "dataset preview": preview_summary,
     "dataset pull": pull_summary,
     "dataset import": import_summary,

@@ -15,6 +15,7 @@ import typer
 from pup_finetune import __version__
 from pup_finetune.cli import (
     auth,
+    benchmark,
     dataset,
     deploy,
     doctor,
@@ -71,6 +72,7 @@ def root(
 
 
 auth.register(app)
+benchmark.register(app)
 triage.register(dataset.dataset_app)
 dataset.register(app)
 deploy.register(app)

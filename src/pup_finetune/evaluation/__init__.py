@@ -20,7 +20,9 @@ agreement with the recorded behavior, not task success. Evaluation is provider-n
 nothing here imports a provider SDK or client; it samples through the
 :class:`~pup_finetune.providers.base.Sampler` protocol, and the judge talks to its endpoint
 through :mod:`pup_finetune.inference`. :mod:`pup_finetune.evaluation.runner` plans and runs an
-evaluation for the ``evaluate`` and ``train --evaluate`` commands.
+evaluation for the ``evaluate`` and ``train --evaluate`` commands, and
+:mod:`pup_finetune.evaluation.benchmark` replays the same cases with several base models for
+``benchmark``.
 
 The names below are imported on first use, so importing a submodule (the runner, which the
 CLI loads for every command) does not load the judge's HTTP client. The ``judge`` function is

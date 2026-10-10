@@ -144,6 +144,7 @@ def test_commands_are_listed_in_workflow_order() -> None:
     assert shown[:5] == ["doctor", "auth", "models", "skill", "help"]
     assert shown[5:] == [
         "dataset",
+        "benchmark",
         "train",
         "status",
         "runs",
@@ -183,6 +184,7 @@ def test_the_top_level_help_groups_commands_under_the_flow() -> None:
         "skill": SET_UP,
         "help": SET_UP,
         "dataset": BUILD_A_DATASET,
+        "benchmark": TRAIN,
         "train": TRAIN,
         "status": TRAIN,
         "runs": TRAIN,
@@ -193,7 +195,10 @@ def test_the_top_level_help_groups_commands_under_the_flow() -> None:
         "undeploy": EVALUATE_AND_SHIP,
     }
     text = " ".join(rendered(()).split())
-    assert "Flow: dataset preview -> dataset pull -> review -> train -> evaluate -> deploy" in text
+    assert (
+        "Flow: dataset preview -> dataset pull -> review -> benchmark -> train -> evaluate -> "
+        "deploy" in text
+    )
 
 
 def test_train_groups_its_options_in_panels() -> None:
@@ -246,7 +251,15 @@ def test_the_safety_record_matches_the_command(name: str) -> None:
 
 def test_read_only_refuses_confirm_for_paid_runs_and_remote_writes_only() -> None:
     refused = {name for name in leaves() if DOCS[name].safety.read_only == "confirm_refused"}
-    assert refused == {"dataset push", "train", "resume", "evaluate", "deploy", "undeploy"}
+    assert refused == {
+        "dataset push",
+        "benchmark",
+        "train",
+        "resume",
+        "evaluate",
+        "deploy",
+        "undeploy",
+    }
 
 
 def test_the_footer_says_cost_data_and_read_only() -> None:

@@ -512,6 +512,11 @@ def dataset_next(
             "see the models a provider can fine-tune",
         ),
         step(
+            template("benchmark", directory, "--models", "<MODELS>"),
+            "compare base models on the test split to choose the one to fine-tune (paid; it "
+            "previews first)",
+        ),
+        step(
             template("train", "--dataset", directory, "--model", "<MODEL>"),
             "preview a training run on the kept rows (free); choose the model with the user "
             "(its provider is inferred, and the run goes in runs/RUN_ID)",

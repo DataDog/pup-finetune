@@ -84,6 +84,7 @@ def test_label_applies_labels_and_emits_the_report(dataset: Path, tmp_path: Path
     assert data["next_command"] is None
     assert [step["command"] for step in data["next_steps"]] == [
         "pup finetune models list",
+        f"pup finetune benchmark {quoted} --models <MODELS>",
         f"pup finetune train --dataset {quoted} --model <MODEL>",
         f"pup finetune dataset push {quoted} --name <NAME>",
     ]

@@ -205,6 +205,7 @@ def test_triage_labels_rows_and_is_allowed_read_only(
     assert data["next_command"] is None
     assert [step["command"] for step in data["next_steps"]] == [
         "pup finetune models list",
+        f"pup finetune benchmark {dataset} --models <MODELS>",
         f"pup finetune train --dataset {dataset} --model <MODEL>",
         f"pup finetune dataset push {dataset} --name <NAME>",
     ]

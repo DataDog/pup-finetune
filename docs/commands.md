@@ -53,6 +53,7 @@ These print text on stdout instead of one JSON document: `help` (alone or with a
 - [`pup finetune dataset label`](#pup-finetune-dataset-label): Record keep/drop labels for a dataset's rows.
 - [`pup finetune dataset triage`](#pup-finetune-dataset-triage): Label rows with judge models (paid; previews without --confirm).
 - [`pup finetune dataset push`](#pup-finetune-dataset-push): Push kept rows to Datadog (previews without --confirm).
+- [`pup finetune benchmark`](#pup-finetune-benchmark): Compare base models before training (paid; previews without --confirm).
 - [`pup finetune train`](#pup-finetune-train): Fine-tune a model (paid; previews without --confirm).
 - [`pup finetune status`](#pup-finetune-status): Show a run's phase, progress, losses and worker.
 - [`pup finetune runs`](#pup-finetune-runs): List the training runs under ./runs, newest first.
@@ -84,6 +85,7 @@ What each command does without and with `--confirm`, where its data goes, and wh
 | `pup finetune dataset label` | records labels in DIR | no `--confirm` | nowhere: local files | allowed |
 | `pup finetune dataset triage` | previews the judge calls | runs the judges and labels rows (paid) | each judge's provider: Fireworks, Anthropic or OpenAI | allowed |
 | `pup finetune dataset push` | previews the records | pushes the kept rows (a remote write) | Datadog: an Agent Observability dataset | preview allowed; `--confirm` refused |
+| `pup finetune benchmark` | previews the calls | benchmarks every model (paid) | each model's provider, the judge's provider | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider and judge) |
 | `pup finetune train` | previews the run | trains (paid) | the training provider; with --evaluate, also the judge's provider and Datadog (experiments, when the dataset was pushed) | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider and judge) |
 | `pup finetune status` | shows the run | no `--confirm` | nowhere: local files | allowed |
 | `pup finetune runs` | lists the runs | no `--confirm` | nowhere: local files | allowed |
@@ -532,6 +534,46 @@ pup finetune dataset push datasets/my-agent
 ```
 
 Safety: Free · --confirm writes the kept rows to Datadog · PUP_READ_ONLY: preview only.
+
+## `pup finetune benchmark`
+
+Replay each held-out test conversation of a dataset with several base models, one recorded assistant turn at a time, and score each with the tool-call metrics and the LLM judge evaluate uses. Without --confirm, previews the calls and where the data goes. The result ranks the models and recommends the one to fine-tune.
+
+Each model runs in a session of its own, one after another, into OUT/&lt;model&gt;; rerun the same command to continue a benchmark that stopped. A model below --target-pass-rate is worth fine-tuning; one at or above it may need no training. Models within noise of the best are named, so the cheapest to serve can be chosen. Tools are not executed, so the scores measure agreement with the recorded behavior, not task success.
+
+```
+pup finetune benchmark [OPTIONS] DATASET
+```
+
+| Argument | Description |
+| --- | --- |
+| `DATASET` | The dataset directory whose test split is replayed. |
+
+| Option | Value | Default | Description |
+| --- | --- | --- | --- |
+| **Models** | | | |
+| `--models` | `M1,M2` | required | Base models to compare, comma-separated (see models list). |
+| `--target-pass-rate` | `RATE (0.0<=x<=1.0)` | `0.9` | Judge pass rate at which a base model needs no fine-tuning. |
+| **Cases** | | | |
+| `--max-cases` | `N (x>=1)` | `2` | Turns replayed per conversation. |
+| `--max-tokens` | `N (x>=1)` | `1024` | Most tokens each generation may produce. |
+| `--seed` | `N (x>=0)` | `0` | Seed for picking cases and the bootstrap. |
+| **Judge** | | | |
+| `--judge-model` | `MODEL` | deepseek-v4p1-flash | An alias (glm-5p3-flash), anthropic/MODEL, openai/MODEL or a Fireworks id. |
+| `--skip-calibration` |  |  | Do not check the judge on known answers first. |
+| **Run** | | | |
+| `--out-dir` | `DIR` | DATASET/benchmark | Output directory. |
+| `--concurrency` | `N (1<=x<=64)` | `4` | Cases at once (1-64). |
+| `--confirm` |  |  | Run it (paid); without it, only preview. |
+
+Examples:
+
+```sh
+pup finetune benchmark ds --models qwen3p5-9b,glm-5p3-flash
+pup finetune benchmark ds --models qwen3p5-9b,glm-5p3-flash --max-cases 1
+```
+
+Safety: Paid with --confirm · sends test rows to each model's provider and to the judge · PUP_READ_ONLY: preview only unless offline.
 
 ## `pup finetune train`
 

@@ -166,6 +166,20 @@ Baseten models are `qwen3p5-9b` and `glm-5p3-flash`:
 Ctrl-C stops only the watch. `pup finetune resume ft-20261007183443-a8b181` continues an
 interrupted run from its last checkpoint, and `cancel` stops one, keeping its best epoch.
 
+### Choose the base model
+
+Before training, compare candidate base models on the test split. Each one replays it with
+the judge `evaluate` uses (paid; it previews first):
+
+```sh
+pup finetune benchmark datasets/my-agent --models qwen3p5-9b,glm-5p3-flash
+```
+
+The result ranks the models by judge pass rate with a confidence interval and recommends one
+to fine-tune. A base model at or above `--target-pass-rate` (90% by default) may need no
+training, and models within noise of the best are named, so the cheapest to serve can win.
+Results go in `datasets/my-agent/benchmark`; rerun the command to continue one that stopped.
+
 ### A cheap first run
 
 One epoch on a token budget, evaluated on one turn per test conversation. It checks the
