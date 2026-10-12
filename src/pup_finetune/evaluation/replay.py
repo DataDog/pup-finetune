@@ -300,7 +300,9 @@ class EvalDir:
         atomic_write_json(self.summary_path, finite_json(dict(summary)))
 
 
-def remaining_work(eval_dir: EvalDir, cases: Sequence[ReplayCase]) -> dict[str, int]:
+def remaining_work(
+    eval_dir: EvalDir, cases: Sequence[ReplayCase], targets: Sequence[str] = TARGETS
+) -> dict[str, int]:
     """What a run in ``eval_dir`` would still do: ``{"done", "generate", "judge"}`` pairs.
 
     ``done`` pairs have an ``ok`` result; every other pair is judged, and generated too
@@ -309,7 +311,7 @@ def remaining_work(eval_dir: EvalDir, cases: Sequence[ReplayCase]) -> dict[str, 
     generations, results = eval_dir.read_generations(), eval_dir.read_results()
     done = generate = judge = 0
     for case in cases:
-        for target in TARGETS:
+        for target in targets:
             key = (target, case.id)
             if results.get(key, {}).get("status") == "ok":
                 done += 1
@@ -497,15 +499,17 @@ class _Replay:
             append(record)
             return True
 
-    def todo(self, cases: Sequence[ReplayCase]) -> list[tuple[Target, ReplayCase]]:
+    def todo(
+        self, cases: Sequence[ReplayCase], targets: Sequence[str]
+    ) -> list[tuple[str, ReplayCase]]:
         return [
             (target, case)
             for case in cases
-            for target in TARGETS
+            for target in targets
             if self.results.get((target, case.id), {}).get("status") != "ok"
         ]
 
-    def pair(self, target: Target, case: ReplayCase) -> dict[str, Any] | None:
+    def pair(self, target: str, case: ReplayCase) -> dict[str, Any] | None:
         """Generate (unless stored), score and judge one pair; ``None`` when cancelled first.
 
         Failures of the sampler or the judge become the pair's error result; anything else
@@ -545,7 +549,7 @@ class _Replay:
             return None
         return {**result, "generation": record}
 
-    def collect(self, target: Target, case: ReplayCase, outcome: dict[str, Any] | None) -> None:
+    def collect(self, target: str, case: ReplayCase, outcome: dict[str, Any] | None) -> None:
         if outcome is None:
             return
         generation = outcome.pop("generation", None)
@@ -566,8 +570,10 @@ def run_replay(
     cancel: threading.Event | None = None,
     publisher: Publisher | None = None,
     on_progress: ProgressSink | None = None,
+    targets: Sequence[str] = TARGETS,
 ) -> ReplaySummary:
-    """Replay ``cases`` with the ``base`` and ``tuned`` samplers into ``out_dir``.
+    """Replay ``cases`` with the ``base`` and ``tuned`` samplers (or ``targets``'s) into
+    ``out_dir``.
 
     ``identity`` is :func:`evaluation_identity` for these cases (checked against
     ``evaluation.json``, see :meth:`EvalDir.check_identity`); each generation is capped at
@@ -597,7 +603,7 @@ def run_replay(
     with eval_dir.lock():
         eval_dir.check_identity(identity)
         replay = _Replay(eval_dir, samplers, judge_fn, max_tokens=max_tokens, cancel=cancel)
-        todo = replay.todo(cases)
+        todo = replay.todo(cases, targets)
         missing = sorted(
             {
                 target
@@ -608,10 +614,10 @@ def run_replay(
         if missing:
             raise ValueError(f"no sampler for {', '.join(missing)}, which has cases to generate")
         _run_pool(replay, todo, concurrency=concurrency, on_progress=on_progress)
-        summary = summarize(cases, replay.results, replay.generations, seed=seed)
+        summary = summarize(cases, replay.results, replay.generations, seed=seed, targets=targets)
         eval_dir.write_summary(summary)
         pending = sum(
-            1 for case in cases for target in TARGETS if (target, case.id) not in replay.results
+            1 for case in cases for target in targets if (target, case.id) not in replay.results
         )
         outcome = ReplaySummary(
             summary=summary, pending=pending, cancelled=cancel.is_set(), out_dir=eval_dir.path
@@ -630,7 +636,7 @@ def run_replay(
 
 def _run_pool(
     replay: _Replay,
-    todo: Sequence[tuple[Target, ReplayCase]],
+    todo: Sequence[tuple[str, ReplayCase]],
     *,
     concurrency: int,
     on_progress: ProgressSink | None,
@@ -648,7 +654,7 @@ def _run_pool(
     if not todo:
         return
     pool = DaemonPool(concurrency, name="replay")
-    futures: dict[Future[dict[str, Any] | None], tuple[Target, ReplayCase]] = {}
+    futures: dict[Future[dict[str, Any] | None], tuple[str, ReplayCase]] = {}
     done_count = 0
     interrupted = False
 
@@ -814,6 +820,7 @@ def summarize(
     generations: Mapping[PairKey, Mapping[str, Any]],
     *,
     seed: int,
+    targets: Sequence[str] = TARGETS,
 ) -> dict[str, Any]:
     """``summary.json`` for ``cases`` from the last result of each pair; strict JSON.
 
@@ -827,9 +834,25 @@ def summarize(
     cases where both or one target failed with an error, or one is still pending.
     ``tuned_minus_base`` is the mean paired difference of the judge pass (``null`` without
     paired cases) with a 95% paired bootstrap CI over trajectories
-    (:func:`paired_bootstrap_ci`, ``null`` when too few).
+    (:func:`paired_bootstrap_ci`, ``null`` when too few). Other ``targets`` get no
+    ``paired`` or ``tuned_minus_base``.
     """
-    targets = {target: _target_summary(target, cases, results, generations) for target in TARGETS}
+    by_target = {target: _target_summary(target, cases, results, generations) for target in targets}
+    complete = all(summary["pending"] == 0 for summary in by_target.values())
+    head: dict[str, Any] = {
+        "status": "complete" if complete else "partial",
+        "n_cases": len(cases),
+        "n_trajectories": len({case.row_id for case in cases}),
+        "targets": by_target,
+    }
+    tail: dict[str, Any] = {
+        "errors": {target: by_target[target]["errors"] for target in targets},
+        "tokens": {target: by_target[target]["tokens"] for target in targets},
+        "metrics_version": METRICS_VERSION,
+        "caveat": CAVEAT,
+    }
+    if tuple(targets) != TARGETS:
+        return finite_json({**head, **tail})
     paired: Counter[str] = Counter(
         {"wins": 0, "regressions": 0, "ties": 0, "both_error": 0, "one_error": 0, "pending": 0}
     )
@@ -851,13 +874,9 @@ def summarize(
         clusters[case.row_id].append(float(difference))
     differences = [value for cluster in clusters.values() for value in cluster]
     interval = paired_bootstrap_ci(list(clusters.values()), seed=seed)
-    complete = paired["pending"] == 0
     return finite_json(
         {
-            "status": "complete" if complete else "partial",
-            "n_cases": len(cases),
-            "n_trajectories": len({case.row_id for case in cases}),
-            "targets": targets,
+            **head,
             "paired": {"n": len(differences), **paired},
             "tuned_minus_base": {
                 "judge_pass_rate": sum(differences) / len(differences) if differences else None,
@@ -867,9 +886,6 @@ def summarize(
                 "resamples": BOOTSTRAP_RESAMPLES,
                 "seed": seed,
             },
-            "errors": {target: targets[target]["errors"] for target in TARGETS},
-            "tokens": {target: targets[target]["tokens"] for target in TARGETS},
-            "metrics_version": METRICS_VERSION,
-            "caveat": CAVEAT,
+            **tail,
         }
     )

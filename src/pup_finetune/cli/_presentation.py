@@ -75,6 +75,7 @@ COMMAND_ORDER: Final[tuple[str, ...]] = (
     "dataset label",
     "dataset triage",
     "dataset push",
+    "benchmark",
     "train",
     "status",
     "runs",
@@ -93,7 +94,9 @@ TRAIN: Final = "Train"
 EVALUATE_AND_SHIP: Final = "Evaluate and ship"
 """The panels of the top-level help."""
 
-FLOW: Final = "dataset preview -> dataset pull -> review -> train -> evaluate -> deploy"
+FLOW: Final = (
+    "dataset preview -> dataset pull -> review -> benchmark -> train -> evaluate -> deploy"
+)
 """The workflow, in one line under the top-level description."""
 
 EXAMPLE_WIDTH: Final = 74

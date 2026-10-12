@@ -220,7 +220,11 @@ def test_nothing_left_to_push_reports_the_receipt_without_confirm(
     assert "not deleted" in data["warnings"][0]
     # Labeled and pushed: training is the step left (no push step any more).
     assert data["next_command"] is None
-    assert [step["command"].split()[2] for step in data["next_steps"]] == ["models", "train"]
+    assert [step["command"].split()[2] for step in data["next_steps"]] == [
+        "models",
+        "benchmark",
+        "train",
+    ]
     assert len(fake.calls) == calls  # nothing reached Datadog
     assert output_json(push(dataset, "--confirm")) == data
 

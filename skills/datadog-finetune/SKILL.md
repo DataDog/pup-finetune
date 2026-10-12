@@ -13,7 +13,7 @@ with the user. Datadog access is Pup's login; provider keys stay out of the chat
 
 ```text
 Step 0 doctor -> 1 explore spans -> 2 dataset preview, pull -> 3 review (sample + label, or triage)
-  -> 4 dataset push -> 5 train, status -> 6 evaluate -> 7 deploy, undeploy
+  -> 4 dataset push -> 5 benchmark, train, status -> 6 evaluate -> 7 deploy, undeploy
 ```
 
 | The user has | Start at |
@@ -207,7 +207,11 @@ Check:
 
 ## Step 5: train
 
+To choose the model, first compare candidates on the test split (paid; it previews). Its
+`recommendation` names the one to fine-tune, or says a base model already meets the target:
+
 ```sh
+pup finetune benchmark datasets/my-agent --models qwen3p5-9b,glm-5p3-flash
 pup finetune train --dataset datasets/my-agent --model qwen3p8-27b --detach
 pup finetune status ft-20261007183443-a8b181 --watch --timeout 90s
 ```

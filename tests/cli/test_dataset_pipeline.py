@@ -95,6 +95,7 @@ def test_labels_move_the_pipeline_on_to_training_and_a_first_push(tmp_path: Path
     assert data["next_command"] is None
     assert [step["command"] for step in data["next_steps"]] == [
         "pup finetune models list",
+        "pup finetune benchmark ds --models <MODELS>",
         "pup finetune train --dataset ds --model <MODEL>",
         "pup finetune dataset push ds --name <NAME>",
     ]

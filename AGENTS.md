@@ -67,6 +67,9 @@ uv run pup-finetune train --model fake-model --dataset /tmp/ds --run-dir /tmp/ru
 uv run pup-finetune train --model fake-model --dataset /tmp/ds --run-dir /tmp/run --confirm
 uv run pup-finetune status /tmp/run  # phase, steps, losses, best epoch, elapsed, approx ETA,
                                      # worker, promoted model
+uv run pup-finetune benchmark /tmp/ds --models fake-model   # preview only (exit 2); with
+                                     # --confirm, ranks base models on the test split into
+                                     # /tmp/ds/benchmark and recommends one to fine-tune
 uv run pup-finetune evaluate /tmp/run          # preview only (exit 2): cases and calls
 uv run pup-finetune evaluate /tmp/run --confirm
                                      # replays the test split with base and tuned into
@@ -338,7 +341,8 @@ Source lives under `src/pup_finetune/`.
   `runs.py` has `runs`, the runs under `./runs` (or `--dir`) newest first, over
   `workspace.list_runs`;
   `evaluate.py` has `evaluate`, which only parses its flags and emits what
-  `evaluation/runner.py` returns; `deploy.py` has `deploy` and `undeploy` (over
+  `evaluation/runner.py` returns; `benchmark.py` has `benchmark`, which does the same for
+  `evaluation/benchmark.py`; `deploy.py` has `deploy` and `undeploy` (over
   `deployment.py`); `triage.py` has `dataset triage` (over `curation/triage.py`; its
   `open_clients` builds one chat client per judge provider); `skill.py` has `skill show` and `skill
   install` (its `find_npx` and `run_npx` are what tests replace); `help.py` has `help
@@ -670,6 +674,14 @@ Source lives under `src/pup_finetune/`.
   pins every setting after `train --evaluate`, so its retry passes the identity check; a
   preview into an `--out-dir` that holds an evaluation with other settings fails (exit 2,
   with a free `--out-dir`) instead of offering a `--confirm` that would be refused.
+  `benchmark.py` is `benchmark`: `plan_benchmark` (the test split's cases, the judge and
+  one `Candidate` per base model), `execute` (the judge calibrated once, then each model
+  replayed in a session of its own into `OUT/<model>` through `run_replay` with the model as
+  its one target, so each resumes; a model whose session fails is an error entry and the
+  others still run), `leaderboard` (judge pass rate with a bootstrap CI over trajectories,
+  and each model's paired gap to the best) and `recommend` (`fine_tune`,
+  `base_meets_target` at `--target-pass-rate`, or `no_result`; models within noise of the
+  best are named).
   The package exports its names lazily, so importing the runner (the CLI does, for every
   command) loads no judge client. `targets.py` makes the two samplers from a session: the live training
   session's best sampler checkpoint, or the best training checkpoint loaded and saved again
