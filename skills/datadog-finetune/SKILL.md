@@ -293,6 +293,9 @@ Check:
   a pup-finetune process. On `could not deactivate Baseten run <id> (...); it may still bill`,
   tell the user at once. A standalone `evaluate` starts a new trainer; `train --evaluate`
   reuses one.
+- **Remote.** `--remote` (instead of `--detach`) runs the loop in a Baseten CPU job, which also
+  bills, so training survives a sleeping laptop. It needs the `baseten` CLI, `uv` and a team secret
+  `pup_finetune_api_key`. `cancel` cannot stop it: the user stops the job in the Baseten UI.
 - **Checkpoints.** No promotion: the best epoch's sampler checkpoint is the run's
   `deployable_checkpoint` (`bt://loops:<run>/sampler_weights/<name>`). An expired checkpoint
   needs a new run.

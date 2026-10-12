@@ -9,7 +9,9 @@
 `train` and `resume` are paid: without ``--confirm`` they preview what would run (free, and
 allowed with ``PUP_READ_ONLY`` set) and print the exact command that runs it. They train in
 the foreground, with progress on stderr, or with ``--detach`` in a worker that keeps going
-after the command returns (see :mod:`pup_finetune.training.worker`).
+after the command returns (see :mod:`pup_finetune.training.worker`), or with ``--remote`` in a
+provider job (see :mod:`pup_finetune.training.remote`), which ``status``, ``resume`` and
+``cancel`` read back first.
 
 ``train --evaluate`` also evaluates the run (see :mod:`pup_finetune.evaluation.runner`) in its
 training session, after the best checkpoint is promoted and before the session closes, so
@@ -36,6 +38,7 @@ import signal
 import threading
 import time
 from collections.abc import Iterator, Mapping, Sequence
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Annotated, Any, Final
 
@@ -58,7 +61,7 @@ from pup_finetune.cli._dirs import (
 )
 from pup_finetune.cli._flags import given, renamed, require_enablers
 from pup_finetune.cli._presentation import TRAIN as TRAIN_PANEL
-from pup_finetune.cli._presentation import CommandDoc, Safety, default_note, describe, local
+from pup_finetune.cli._presentation import CommandDoc, Safety, default_note, describe
 from pup_finetune.cli._summary import format_duration, status_line
 from pup_finetune.cli._views import (
     changed_settings,
@@ -90,7 +93,9 @@ from pup_finetune.providers import (
     providers_for_model,
     registered_option_keys,
     registered_providers,
+    remote_jobs,
     require_packages,
+    require_remote,
     require_supported_flags,
 )
 from pup_finetune.providers.base import (
@@ -99,11 +104,14 @@ from pup_finetune.providers.base import (
     OFFLINE_BILLING,
     ModelProfile,
     Provider,
+    RemotePlan,
     TrainingUsage,
     TrainSpec,
 )
 from pup_finetune.rendering.base import Renderer
 from pup_finetune.runs import (
+    RUN_FILE,
+    STATE_FILE,
     RunDir,
     RunState,
     check_run_id,
@@ -115,6 +123,18 @@ from pup_finetune.runs import (
 from pup_finetune.runtime import Runtime
 from pup_finetune.storage import finite_json
 from pup_finetune.training.inputs import RunInputs, build_inputs, load_run_inputs
+from pup_finetune.training.remote import (
+    RemoteSync,
+    SourceTree,
+    ended_sync,
+    job_name,
+    package_source,
+    remote_ended,
+    require_locked_renderer,
+    submit_remote,
+    sync_remote,
+)
+from pup_finetune.training.report import StateReporter
 from pup_finetune.training.runner import AfterFinalize
 from pup_finetune.training.worker import (
     WORKER_MODES,
@@ -169,6 +189,7 @@ TRAIN_NEEDS: dict[str, str] = {
     "eval_seed": "evaluate",
     "eval_skip_calibration": "evaluate",
     "eval_no_publish": "evaluate",
+    "team": "remote",
 }
 """``train``'s options that do nothing without another one: each needs the one it maps to
 (see :mod:`pup_finetune.cli._flags`)."""
@@ -198,12 +219,9 @@ def provider_choices() -> str:
 
 def model_example() -> str:
     """An example of what ``--model`` takes, for its help: the first model alias of the first
-    provider, e.g. ``qwen3p8-27b (fireworks)`` (``models list`` names them all);
-    development-only providers left out. Imports no provider module."""
-    return next(
-        (f"{info.models[0]} ({info.name})" for info in provider_infos(Runtime()) if info.models),
-        "",
-    )
+    provider, e.g. ``qwen3p8-27b`` (``models list`` names them all); development-only
+    providers left out. Imports no provider module."""
+    return next((info.models[0] for info in provider_infos(Runtime()) if info.models), "")
 
 
 def provider_option_keys() -> str:
@@ -546,6 +564,82 @@ def _detached(
     }
 
 
+REMOTE_UPLOAD: Final = (
+    "train and validation rows, run files and pup-finetune source -> Baseten storage (the "
+    "job's upload)"
+)
+
+
+def _add_remote_preview(
+    preview: dict[str, Any],
+    plan: RemotePlan,
+    inputs: RunInputs,
+    spec: TrainSpec,
+    source: SourceTree,
+) -> None:
+    """Add to a ``train --remote`` preview where its training loop runs and what it uploads."""
+    remote = plan.preview(
+        {
+            "rows": {"train": inputs.rows["train"], "validation": inputs.rows["validation"]},
+            "code": f"pup-finetune {source.version} from {display_path(source.root)}",
+            "run_files": [RUN_FILE, STATE_FILE],
+        }
+    )
+    if spec.max_spend_usd is not None:
+        remote["warnings"].append(
+            "--max-spend-usd counts the trainer's time only; the CPU job bills on top"
+        )
+    preview["remote"] = remote
+    preview["action"] += (
+        f", in a Baseten CPU job in team {plan.team} that runs the training loop, so training "
+        "continues while this machine sleeps"
+    )
+    preview["billing"] += f"; {plan.billing}"
+    preview["data_destination"] += (
+        "; the train and validation rows, their split assignments, the run files and "
+        "pup-finetune's source are uploaded to Baseten storage for the job"
+    )
+    preview["data_recipients"] += [REMOTE_UPLOAD]
+
+
+def _remote_started(
+    run: RunDir,
+    run_id: str,
+    record: Mapping[str, Any],
+    upload: Mapping[str, int],
+    notes: ParentSetup,
+) -> dict[str, Any]:
+    return {
+        "status": "started",
+        "run_id": run_id,
+        "run_dir": display_path(run.path),
+        "remote": {
+            "backend": record["backend"],
+            "team": record["team"],
+            "project": record["project"]["name"],
+            "job_id": record["job_id"],
+            "compute": record["compute"],
+            "logs": record["logs"],
+        },
+        "upload": dict(upload),
+        "notes": list(notes.notes),
+        "warnings": list(notes.warnings),
+        "next_command": watch_command(run.path),
+    }
+
+
+def _remote_sync(run: RunDir) -> RemoteSync | None:
+    """Where the job of a run started with ``train --remote`` stands, its state copied into
+    the run directory first; ``None`` for a run without one."""
+    record = run.read_remote()
+    if record is None:
+        return None
+    if remote_ended(record):
+        return ended_sync(record)
+    provider = get_provider(str(run.manifest()["provider"]), get_runtime())
+    return sync_remote(run, remote_jobs(provider))
+
+
 def _joined(names: Sequence[str]) -> str:
     return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
 
@@ -636,6 +730,20 @@ def train(
             "--detach", help="Train in a background worker; see status.", rich_help_panel=RUN
         ),
     ] = False,
+    remote: Annotated[
+        bool,
+        typer.Option("--remote", help="Train in a Baseten job; see status.", rich_help_panel=RUN),
+    ] = False,
+    team: Annotated[
+        str | None,
+        typer.Option(
+            "--team",
+            metavar="NAME",
+            help=f"With --remote: Baseten team. {default_note('your default')}",
+            show_default=False,
+            rich_help_panel=RUN,
+        ),
+    ] = None,
     confirm: Annotated[
         bool,
         typer.Option("--confirm", help="Train (paid); without it, preview.", rich_help_panel=RUN),
@@ -823,6 +931,14 @@ def train(
             hint="drop --detach, or evaluate the run with `pup finetune evaluate` once it "
             "completed",
         )
+    if remote and detach:
+        raise UsageError("--remote already trains away from this machine", hint="drop --detach")
+    if remote and evaluate:
+        raise UsageError(
+            "--evaluate needs the foreground: the evaluation runs in the training session",
+            hint="drop --evaluate, and evaluate the run with `pup finetune evaluate RUN` once "
+            "status shows it completed",
+        )
     run_id = check_run_id(run_id) if run_id is not None else new_run_id()
     default_dir = run_dir is None
     if run_dir is None:
@@ -833,6 +949,8 @@ def train(
     provider_name, provider_source = provider_for_model(model, provider_name, runtime)
     # What the preview can know fails here, not after --confirm: a package the provider needs
     # (its SDK, the renderer), or a flag it cannot honor.
+    if remote:
+        require_remote(provider_name, runtime)
     for needed in ("train", "evaluate") if evaluate else ("train",):
         require_packages(provider_name, runtime, needed)
     provider = get_provider(provider_name, runtime)
@@ -887,6 +1005,13 @@ def train(
         defaults_used=defaults_used,
         max_seq_len_flag=seq_flag,
     )
+    rplan: RemotePlan | None = None
+    if remote:
+        jobs = remote_jobs(provider)
+        source = package_source()
+        require_locked_renderer(source)
+        rplan = jobs.plan(run_id=run_id, team=team)
+        _add_remote_preview(preview, rplan, inputs, spec, source)
     plan: evaluation.EvalPlan | None = None
     if evaluate:
         settings = evaluation.EvalSettings(
@@ -939,6 +1064,8 @@ def train(
             rerun += ["--provider-option", f"{key}={value}"]
     if detach:
         rerun.append("--detach")
+    if rplan is not None:
+        rerun += ["--remote", "--team", rplan.team]
     if plan is not None:
         rerun += plan.train_flags()
     # PUP_READ_ONLY refuses paid and remote runs; one that never leaves the machine (the
@@ -954,6 +1081,24 @@ def train(
     )
     # A new ./runs gets a .gitignore: runs hold trace-derived rows.
     notes = ignore_new_parent(run_dir)
+    if rplan is not None:
+        created_dir = not run_dir.exists()
+        run = _create_run(
+            provider,
+            run_dir,
+            run_id,
+            profile,
+            spec,
+            dataset,
+            inputs,
+            renderer,
+            defaults_used,
+            max_seq_len_flag=seq_flag,
+        )
+        record, upload = submit_remote(
+            run, jobs, rplan, source, mode="train", created_dir=created_dir
+        )
+        return _remote_started(run, run_id, record, upload, notes)
     if plan is not None:
         with evaluation.open_judge_client(plan.judge) as client:
             # Before anything is trained: a judge that fails calibration stops the run here.
@@ -1128,6 +1273,13 @@ def resume(
         require_detach_supported()
     run_dir, source = resolve_run_ref(run_dir, "resume")
     run = RunDir(run_dir)
+    sync = _remote_sync(run)
+    if sync is not None and sync.view["state"] != "ended":
+        raise WrongPhase(
+            f"the run in {run_dir} trains in {job_name(sync.view)} ({sync.view['state']})",
+            hint=f"follow it with `pup finetune status {_q(run_dir)} --watch`; cancel cannot "
+            "stop a Baseten job yet",
+        )
     manifest = run.manifest()
     state = run.load_state()
     mode = _resume_mode(run, state)
@@ -1172,8 +1324,12 @@ def resume(
         "defaults_used": list(manifest.get("defaults_used") or []),
         "data_destination": f"training data is sent to {provider.name}",
         "data_recipients": [f"training rows -> {provider.name}"],
-        "warnings": [],
+        "warnings": [] if sync is None else list(sync.warnings),
     }
+    if sync is not None and sync.view["job_id"]:
+        preview["warnings"].append(
+            f"this run trained in {job_name(sync.view)}; this resume trains on this machine"
+        )
     rerun = [*PROGRAM, "resume", str(run_dir), *(["--detach"] if detach else [])]
     offline = provider.name == "fake"
     if confirm and not offline:
@@ -1298,16 +1454,22 @@ def run_status(run: RunDir, *, source: str = "given") -> dict[str, Any]:
     ./runs``). ``evaluation`` is the run's recorded evaluation
     (:func:`~pup_finetune.evaluation.runner.recorded_evaluation`), or ``None``.
     """
+    sync = _remote_sync(run)
     summary = run.status()
-    worker = worker_status(
-        run,
-        phase=summary["phase"],
-        pid=summary["pid"],
-        heartbeat_at=summary["heartbeat_at"],
-    )
+    if sync is not None and sync.worker is not None:
+        worker = sync.worker
+    else:
+        worker = worker_status(
+            run,
+            phase=summary["phase"],
+            pid=summary["pid"],
+            heartbeat_at=summary["heartbeat_at"],
+        )
     best = summary["best"] or {}
     stale_alive = worker.stale and worker.alive
     warnings = list(summary["warnings"])
+    if sync is not None:
+        warnings += sync.warnings
     if worker.problem is not None:
         warnings.append(worker.problem)
     live = summary["phase"] == "training" and worker.running
@@ -1352,10 +1514,13 @@ def run_status(run: RunDir, *, source: str = "given") -> dict[str, Any]:
                 state=run.state_path,
                 epochs=run.epochs_path,
                 result=run.result_path if run.result_path.exists() else None,
+                **({"remote": run.remote_path} if sync is not None else {}),
             ),
         }
     )
     data["worker"] = worker
+    if sync is not None:
+        data["remote"] = sync.view
     return data
 
 
@@ -1412,6 +1577,9 @@ def _watched(data: Mapping[str, Any], *, timed_out: bool, next_command: str) -> 
 def _stopped_watching(data: Mapping[str, Any], why: str, again: str) -> tuple[str, str]:
     """The stderr line for a watch that stops before training ends, and the next command."""
     worker: WorkerStatus = data["worker"]
+    remote = data.get("remote")
+    if worker.running and isinstance(remote, Mapping) and remote.get("state") != "ended":
+        return f"{why}; the run keeps training in {job_name(remote)}. Watch again: {again}", again
     if worker.running:
         pid = f" (pid {worker.pid})" if worker.pid is not None else ""
         what = (
@@ -1550,6 +1718,16 @@ def status(
 def cancel(run_dir: RunDirArgument, confirm: CancelConfirmOption = False) -> dict[str, Any]:
     run_dir, source = resolve_run_ref(run_dir, "cancel")
     run = RunDir(run_dir)
+    sync = _remote_sync(run)
+    if sync is not None and sync.view["state"] != "ended":
+        view = sync.view
+        raise UsageError(
+            f"cancel cannot stop {job_name(view)} yet (team {view['team']}, project "
+            f"{view['project']})",
+            hint="stop the job in the Baseten UI; a stop skips the run's final save and "
+            "promotion, and its Loops trainer may keep billing until you deactivate it there "
+            f"too; then run `pup finetune status {_q(run_dir)}`",
+        )
     run_id = run.run_id
     pid = cancellable_pid(run)
     preview = {
@@ -1559,6 +1737,7 @@ def cancel(run_dir: RunDirArgument, confirm: CancelConfirmOption = False) -> dic
         "pid": pid,
         "action": f"send SIGTERM to process {pid}: training stops after the current step, "
         "saves a resumable checkpoint and promotes the best epoch so far",
+        **({"warnings": sync.warnings} if sync is not None and sync.warnings else {}),
     }
     require_confirm(confirm, preview, command("cancel", run_dir, "--confirm"))
     pid = cancel_training(run)
@@ -1579,27 +1758,31 @@ def cancel(run_dir: RunDirArgument, confirm: CancelConfirmOption = False) -> dic
 def worker(
     run_dir: RunDirArgument,
     mode: Annotated[str, typer.Option("--mode", help="train, resume or finalize.")],
+    report_state: Annotated[
+        bool, typer.Option("--report-state", hidden=True, help="Report the state on stdout.")
+    ] = False,
 ) -> None:
     if mode not in WORKER_MODES:
         raise UsageError(
             f"unknown worker mode {mode!r}", hint=f"use one of {', '.join(WORKER_MODES)}"
         )
     run = RunDir(run_dir)
-    try:
-        runtime = get_runtime()
-        # It runs what `train --confirm` or `resume --confirm` already allowed, but is a
-        # command of its own: PUP_READ_ONLY must stop it too.
-        provider_name = str(run.manifest()["provider"])
-        if provider_name != "fake":
-            require_writable(runtime, f"training on {provider_name}", what=PAID_RUN)
-        info(f"worker {os.getpid()} started: {mode} {run_dir}")
-        provider, inputs = load_run_inputs(run, runtime, finalize_only=mode == "finalize")
-        result = run_in_dir(provider, run, mode, inputs, on_event=TrainingProgress())
-    except BaseException as exc:
-        record_worker_exit(run, mode, exc)
-        raise
-    record_worker_exit(run, mode, None)
-    info(f"worker {os.getpid()} finished: the run is {result.get('phase')}")
+    with StateReporter(run) if report_state else nullcontext():
+        try:
+            runtime = get_runtime()
+            # It runs what `train --confirm` or `resume --confirm` already allowed, but is a
+            # command of its own: PUP_READ_ONLY must stop it too.
+            provider_name = str(run.manifest()["provider"])
+            if provider_name != "fake":
+                require_writable(runtime, f"training on {provider_name}", what=PAID_RUN)
+            info(f"worker {os.getpid()} started: {mode} {run_dir}")
+            provider, inputs = load_run_inputs(run, runtime, finalize_only=mode == "finalize")
+            result = run_in_dir(provider, run, mode, inputs, on_event=TrainingProgress())
+        except BaseException as exc:
+            record_worker_exit(run, mode, exc)
+            raise
+        record_worker_exit(run, mode, None)
+        info(f"worker {os.getpid()} finished: the run is {result.get('phase')}")
 
 
 TRAIN_DOC = CommandDoc(
@@ -1622,7 +1805,14 @@ TRAIN_DOC = CommandDoc(
         "and --eval-out-dir checked before training starts, so a failed calibration trains "
         "nothing; --detach is refused with it; and the evaluation stops, partial, at "
         "--max-spend-usd. --max-seq-len caps the context (and so the cost): longer rows "
-        "are left out, as the preview shows (exceeds_context).",
+        "are left out, as the preview shows (exceeds_context). "
+        "--remote (Baseten only) runs the training loop in a Baseten CPU job, so training "
+        "continues while this machine sleeps; --team names the team (default: your only or "
+        "default team). It needs the baseten CLI and uv on PATH, a source checkout of "
+        "pup-finetune and a team secret pup_finetune_api_key; it uploads the train and "
+        "validation rows, the run files and pup-finetune's source to Baseten storage, and is "
+        "refused with --detach and --evaluate. status copies the job's state into the run "
+        "directory; cancel cannot stop the job yet.",
     ),
     examples=(
         "pup finetune train --dataset ds --model qwen3p8-27b",
@@ -1631,8 +1821,9 @@ TRAIN_DOC = CommandDoc(
     ),
     safety=Safety(
         data="sends rows to the provider (and the judge)",
-        recipients="the training provider; with --evaluate, also the judge's provider and "
-        "Datadog (experiments, when the dataset was pushed)",
+        recipients="the training provider; with --remote, also Baseten storage (the job's "
+        "upload); with --evaluate, also the judge's provider and Datadog (experiments, when "
+        "the dataset was pushed)",
         without="previews the run",
         confirm="trains (paid)",
         paid=True,
@@ -1677,10 +1868,16 @@ STATUS_DOC = CommandDoc(
         "Training keeps going when the watch stops: the status then has watch_timed_out "
         "true, and the command exits 0. Under a coding agent (PUP_AGENT_MODE, AI_AGENT or "
         f"CLAUDECODE set), a watch stops after {AGENT_WATCH_TIMEOUT_S:g}s unless --timeout "
-        "says otherwise, below the time agents' shell tools commonly allow a command.",
+        "says otherwise, below the time agents' shell tools commonly allow a command. "
+        "For a run started with train --remote, status first reads its Baseten job and logs "
+        "and copies the run's state into the run directory.",
     ),
     examples=("pup finetune status", "pup finetune status run --watch --timeout 10m"),
-    safety=local("shows the run"),
+    safety=Safety(
+        data="local files; reads a remote run's Baseten job",
+        recipients="nowhere: it reads a remote run's Baseten job and its logs",
+        without="shows the run",
+    ),
     panel=TRAIN_PANEL,
 )
 CANCEL_DOC = CommandDoc(

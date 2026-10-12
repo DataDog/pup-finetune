@@ -209,12 +209,21 @@ def status_line(
         line += f" {format_duration(data['elapsed_seconds'])} elapsed"
         if data["approx_eta_seconds"] is not None:
             line += f", eta ~{format_duration(data['approx_eta_seconds'], rough=True)}"
+    remote = data.get("remote")
+    if isinstance(remote, Mapping) and remote.get("state") != "ended":
+        return f"{line} ({_kind(remote.get('backend'))} {remote.get('state')})"
     worker = data.get("worker")
     state = worker.get("state") if isinstance(worker, Mapping) else None
     if data["phase"] == "training" and state not in {"running", "starting"}:
         pid = worker.get("pid") if isinstance(worker, Mapping) else None
         line += f" ({f'pid {pid}' if pid is not None else 'its process'} not running)"
     return line
+
+
+def _kind(backend: object) -> str:
+    """A remote job's kind as text says it: ``Baseten job`` for ``baseten job``."""
+    text = str(backend or "remote job")
+    return text[:1].upper() + text[1:]
 
 
 def _model_line(result: Mapping[str, Any]) -> str | None:
@@ -315,6 +324,15 @@ def train_summary(result: Mapping[str, Any]) -> Summary | None:
     """``train`` and ``resume``: how the run ended, its best epoch, its model and next step;
     with ``--evaluate``, the evaluation too."""
     status = result.get("status")
+    remote = result.get("remote")
+    if status == "started" and isinstance(remote, Mapping):
+        return _summary(
+            f"run {result['run_id']} started in {_kind(remote.get('backend'))} "
+            f"{remote.get('job_id')} (team {remote.get('team')})",
+            [f"project: {remote.get('project')}"],
+            brief=[f"project: {remote.get('project')}"],
+            next_command=result.get("next_command"),
+        )
     if status == "started":
         return _summary(
             f"run {result['run_id']} started in a background worker (pid {result['pid']})",
@@ -870,7 +888,16 @@ KEPT_ROWS: Final = frozenset({"refused", "cost", "bills", "sends"})
 """The rows a card never drops: why ``--confirm`` is refused, what is billed, what it costs
 and who is sent what."""
 
-DROPPED_FIRST: Final = ("settings", "rubric", "publishes", "project", "judges", "evaluate", "data")
+DROPPED_FIRST: Final = (
+    "settings",
+    "runs",
+    "rubric",
+    "publishes",
+    "project",
+    "judges",
+    "evaluate",
+    "data",
+)
 """The rows a card too long for :data:`CARD_LINES` drops, first to last."""
 
 Row = tuple[str, str]
@@ -1004,6 +1031,9 @@ def _train_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
         _row("data", _token_data(preview)),
         _row("settings", _training_settings(settings)),
     ]
+    remote = preview.get("remote")
+    if isinstance(remote, Mapping):
+        rows.append(_row("runs", f"a Baseten CPU job in team {remote.get('team')}"))
     evaluation = preview.get("evaluation")
     if isinstance(evaluation, Mapping):
         rows.append(_row("evaluate", _evaluation_calls(evaluation)))

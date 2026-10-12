@@ -287,6 +287,8 @@ Environment variables for development and unusual setups:
   still printed). On values as for `PUP_FINETUNE_DEV`.
 - `PUP_FINETUNE_PROGRESS=steps` - a progress line per training step and per evaluated pair
   even off a terminal, where they are otherwise throttled (`auto`, the default).
+- `PUP_FINETUNE_BASETEN_CLI` - the `baseten` CLI `train --remote` runs (a path, or a name on
+  `PATH`) instead of `baseten`.
 
 The `datadog-finetune` agent skill (`skills/datadog-finetune/SKILL.md`, the one source, in the
 layout the skills CLI discovers) ships in the wheel as `pup_finetune/_skills/` through
@@ -369,7 +371,7 @@ Source lives under `src/pup_finetune/`.
   never in Typer's box);
   `default_note` writes a default the option itself cannot hold. `tests/cli/test_help_layout.py`
   holds every `--help` to 80 columns with nothing cut off and at most 60 lines (`train`, with
-  33 options in six panels, 64), and parses every example against the app.
+  35 options in six panels, 65), and parses every example against the app.
 - `skill.py` - the bundled agent skill: `bundled_skills_dir` (the package's `_skills/`, else
   the repository's `skills/`), `npx_argv`, `npx_env` (the environment without
   `datadog/pup.py`'s `SECRET_ENV` and every registered provider key variable) and
@@ -586,6 +588,14 @@ Source lives under `src/pup_finetune/`.
   `python -P -m pup_finetune _worker` in a new session, in the run directory, output in
   `worker.log`, the environment inherited and no secret passed on; the worker notes how it
   ended in `worker.json`), and has the liveness checks behind `status` and `cancel`.
+  `remote.py` is `train --remote`, provider-neutral: `stage_run` (pup-finetune's source and
+  `uv.lock` from the checkout, the kept train and validation rows with their splits, and the
+  run files, in a private temporary directory), `submit_remote` (`remote.json` first, the
+  files rolled back when the provider refused before creating anything) and `sync_remote`
+  (the job's state and state reports, a `WorkerStatus` stand-in, adoption of a job a lost
+  answer did not name); `report.py` is the return channel: `StateReporter` (`_worker
+  --report-state` prints checksummed `PUPFT1` snapshots of the run files on stdout),
+  `newest_snapshot` and `apply_snapshot`.
 - `workspace.py` - the working directory's `runs/` and `datasets/`: `default_run_dir`
   (`runs/<run id>`), `find_run_dir` (an existing path, else `runs/<id>` for a bare run id),
   `run_dirs`, `latest_run_dir` and `list_runs` (newest first by `created_at`), and
@@ -594,7 +604,7 @@ Source lives under `src/pup_finetune/`.
   `ParentSetup`: the note the result shows in `notes` (echoed on stderr as `note: ...`), or
   a warning when an existing one lies unignored in a git work tree.
 - `runs.py` - the run directory (`run.json`, `state.json`, `epochs.json`, `result.json`,
-  `deployment.json`, and `evaluation.json`, each evaluation of the run by its directory with
+  `deployment.json`, `remote.json` (the job of a `train --remote` run), and `evaluation.json`, each evaluation of the run by its directory with
   every setting, how it stands and its headline, written by
   `evaluation/runner.py`'s `record_evaluation`; `status` names the pinned command that
   continues one, or `deploy` once one is complete),
@@ -685,7 +695,8 @@ Source lives under `src/pup_finetune/`.
   (`known_models`, `providers_for_model`, which `train` infers `--provider` from without
   importing a provider; a test holds them to the profiles), and what it needs
   (`ProviderInfo`: its `label`, the `credential` it signs in with, the `packages` each step
-  needs, the training flags it `refuses`, whether it `deploys`, whether it is `offline`;
+  needs, the training flags it `refuses`, whether it `deploys`, whether it is `offline`,
+  whether it trains in a job of its own (`remote`, for `train --remote`: `require_remote`);
   `tests/providers/test_provider_needs.py` holds them to the providers). The `train`,
   `resume`, `evaluate` and `deploy` previews call `require_packages`,
   `require_supported_flags` and `require_deploys` with it, so a missing SDK or a refused flag
@@ -767,7 +778,12 @@ Source lives under `src/pup_finetune/`.
   completion naming the checkpoint on the deployment's `/sync/v1` route, retried while it
   scales up, and an idempotent `undeploy` that deletes the model. `deployment_name` is
   `None` (Baseten assigns the ids), and the `Endpoint`'s `name` is
-  `models/<model id>/deployments/<deployment id>`. See `docs/architecture.md`.
+  `models/<model id>/deployments/<deployment id>`. `baseten/jobs.py` is `train --remote`'s
+  `BasetenJobs` (`provider.remote_jobs()`): the plan (the CLI and `uv`, the team, its
+  `pup_finetune_api_key` secret, no project of the run's name with jobs), one `baseten loops
+  exec` with the key in its environment only (exit codes and HTTP statuses mapped to what was
+  or may have been created), and the reads of the job, its logs page by page and its trainer.
+  See `docs/architecture.md`.
 
 Tests live under `tests/` and mirror `src/`. Shared fakes live in `tests/fakes/` (import them
 as `tests.fakes...`); `tests/fakes/pup.py` has `FakePup`, a fake pup runner that answers by
@@ -805,7 +821,10 @@ failures), and `BasetenTransport`, Baseten's HTTP routes by `"METHOD /path"`
 records, instance types, checkpoint deployments as models with scripted statuses,
 autoscaling and config, model deletion and each deployment's chat route, with `fail`, `lost`
 and `after_deploy` to inject failures before or after a create took effect);
-`capabilities()` builds a Loops capabilities answer.
+`capabilities()` builds a Loops capabilities answer; `FakeTrainingJobs` has the teams, team
+secrets, training projects, jobs and job logs `train --remote` reads, whose `routes()` merge
+into `FakeLoops.transport()`. `tests/fakes/baseten_cli.py` has `FakeBasetenCli`, the `baseten`
+CLI as a `CliRunner` that records each call with its upload tree and answers as scripted.
 `tests/fakes/keyring.py` has in-memory, failing and locked keyring backends; every test starts
 on the failing one, so none touches the real keychain.
 `tests/providers/contract/` has the `RendererContract`, `BackendContract` and
@@ -826,7 +845,8 @@ Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds can
   most seven lines, dropping lower-value rows rather than the cost, billing, recipients or a
   refusal, then its warnings, and its `Next` line last). The
   exceptions print text on stdout: `help`, `--help`, `--version`, a group's help when run
-  bare (exit 2) and `dataset triage --print-template`; `docs/commands.md` lists them. Hints
+  bare (exit 2) and `dataset triage --print-template`; `docs/commands.md` lists them. The
+  hidden `_worker --report-state` prints only its state report lines on stdout. Hints
   that send the reader to a command's help name `<prog> help <command>` (`prog_name`:
   `pup finetune` under pup, `pup-finetune` standalone), never `--help`. Wrap
   commands with `run_command` from `cli/_common.py`: return the result mapping and raise a
@@ -863,7 +883,8 @@ Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds can
 - Never ignore what the user asked: an option that does nothing without another one is a
   usage error (add it to its command's table for `_flags.require_enablers`), and a preview
   names every recipient of the data it would send in `data_recipients`.
-- Only `datadog/pup.py` spawns `pup`. Only `providers/<provider>/client.py` imports a training
+- Only `datadog/pup.py` spawns `pup`. Only `providers/baseten/jobs.py` spawns `baseten`.
+  Only `providers/<provider>/client.py` imports a training
   provider's SDK, and only `anthropic_client.py` imports `anthropic` (and `httpx2`).
   Only `rendering/hf.py` imports `transformers`, and only when a tokenizer is first loaded.
 - Secrets are never printed, logged or written to disk, and never accepted as a flag value.

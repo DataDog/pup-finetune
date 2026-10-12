@@ -46,9 +46,9 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 WIDTH = 80
 """What help renders at with stdout piped and no ``COLUMNS``: every agent sees this."""
 MAX_LINES = 60
-LINE_LIMITS = {"train": 64}
-"""Commands allowed more than :data:`MAX_LINES`, and why: ``train`` has 33 options in six
-panels, which take 45 lines before its usage, description and examples (60 at the least)."""
+LINE_LIMITS = {"train": 65}
+"""Commands allowed more than :data:`MAX_LINES`, and why: ``train`` has 35 options in six
+panels, which take 47 lines before its usage, description and examples (60 at the least)."""
 
 SHELL_STOP = {">", ">>", "<", "|", "&&", "||", ";"}
 
@@ -215,7 +215,15 @@ def test_train_groups_its_options_in_panels() -> None:
         "Advanced",
     ]
     assert panels["Required"] == ["--dataset", "--model"]
-    assert panels["Run"] == ["--provider", "--run-dir", "--run-id", "--detach", "--confirm"]
+    assert panels["Run"] == [
+        "--provider",
+        "--run-dir",
+        "--run-id",
+        "--detach",
+        "--remote",
+        "--team",
+        "--confirm",
+    ]
     assert "--max-seq-len" in panels["Training"]
     assert "--provider-option" in panels["Advanced"]
     assert all(flag.startswith("--eval") for flag in panels[list(panels)[4]])

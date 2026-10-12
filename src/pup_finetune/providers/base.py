@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, Protocol, Self, runtime_checkable
 
 from pydantic import (
@@ -615,6 +616,92 @@ class Generation:
     stop_reason: str | None = None
 
 
+# --- Remote runs (train --remote) ----------------------------------------------------------
+
+
+class RemoteJobRejected(ExternalError):
+    """Refused before anything that bills was created."""
+
+
+class RemoteJobGone(ExternalError):
+    """The provider no longer has the job, e.g. it was deleted."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RemotePlan:
+    """Where ``train --remote`` would run a run's training loop, as :meth:`RemoteJobs.plan`
+    resolved it, read only.
+
+    ``root`` is the job's working directory, ``extra`` the extra the job installs, ``cli`` the
+    provider CLI that submits it, ``secret`` the name of the secret the job reads its API key
+    from (never the key), ``billing`` what the job bills, for the preview's billing sentence,
+    and ``warnings`` what the preview must say.
+    """
+
+    backend: str
+    team: str
+    team_source: str
+    project: str
+    root: str
+    extra: str
+    cli: str
+    compute: Mapping[str, Any]
+    secret: str
+    tool_versions: Mapping[str, str]
+    billing: str
+    warnings: tuple[str, ...]
+
+    def preview(self, uploads: Mapping[str, Any]) -> dict[str, Any]:
+        """The plan as a preview shows it (``preview.remote``), with what the job is sent
+        (``uploads``)."""
+        return {
+            "backend": self.backend,
+            "team": self.team,
+            "team_source": self.team_source,
+            "project": self.project,
+            "compute": dict(self.compute),
+            "api_key_secret": self.secret,
+            "uploads": dict(uploads),
+            "baseten_cli": self.cli,
+            **{f"{tool}_version": version for tool, version in self.tool_versions.items()},
+            "warnings": list(self.warnings),
+        }
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SubmittedJob:
+    """The job :meth:`RemoteJobs.submit` created, as the provider reported it."""
+
+    job_id: str
+    project_id: str | None
+    project: str
+    compute: Mapping[str, Any]
+
+
+JobState = Literal["queued", "running", "ended", "unknown"]
+"""Where a remote job stands, whatever the provider calls its status."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class JobStatus:
+    """A remote job as the provider reports it: its ``status`` and what that means."""
+
+    job_id: str
+    project_id: str
+    status: str
+    state: JobState
+    created_at: datetime | None
+    updated_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class LogLine:
+    """One line a remote job's command wrote, with its time in nanoseconds."""
+
+    timestamp_ns: int
+    message: str
+
+
 # --- Protocols ---------------------------------------------------------------------------
 
 
@@ -877,4 +964,61 @@ class Provider(Protocol):
         Idempotent: returns ``False`` when the deployment was already gone, ``True`` when
         this call deleted it.
         """
+        ...
+
+
+class RemoteJobs(Protocol):
+    """Runs a run's training loop in a provider job (``train --remote``) and reads it back.
+
+    :meth:`plan` and every read are free and change nothing; :meth:`submit` creates a job that
+    bills, sent once and never retried. It raises :class:`RemoteJobRejected`,
+    :class:`ProviderAuthError` or :class:`ProviderCapacityError` only when nothing was
+    created, and any other :class:`ExternalError` when the job may exist.
+    """
+
+    def plan(self, *, run_id: str, team: str | None) -> RemotePlan:
+        """Where run ``run_id`` would run, in ``team`` (``None``: the default team); raises
+        :class:`UsageError` when it cannot."""
+        ...
+
+    def submit(self, plan: RemotePlan, staged: Path, command: Sequence[str]) -> SubmittedJob:
+        """Upload ``staged`` and start ``command`` in a new job, as ``plan`` says."""
+        ...
+
+    def find(self, *, team: str, project: str, after: datetime) -> list[JobStatus]:
+        """The jobs of ``project`` in ``team`` created at ``after`` or later (or at an
+        unknown time)."""
+        ...
+
+    def job(self, *, project_id: str, job_id: str) -> JobStatus:
+        """The job ``job_id`` as it stands now; :class:`RemoteJobGone` when there is none."""
+        ...
+
+    def output_pages(
+        self, job: JobStatus, *, since: datetime | None, now: datetime
+    ) -> Iterator[list[LogLine]]:
+        """The lines ``job``'s command wrote, page by page, newest first, back to about
+        ``since`` (by default, the job's start)."""
+        ...
+
+    def failure(self, job: JobStatus, *, now: datetime) -> str | None:
+        """Why ``job`` failed, as the provider logged it, if it did; redacted and short."""
+        ...
+
+    def trainer_active(self, session_id: str) -> bool | None:
+        """Whether the trainer of training session ``session_id`` is still active (and
+        bills); ``None`` when that cannot be read."""
+        ...
+
+    def logs_command(self, job_id: str) -> str:
+        """The command that shows job ``job_id``'s logs."""
+        ...
+
+
+@runtime_checkable
+class SupportsRemote(Protocol):
+    """A provider that can run a run's training loop in a job of its own."""
+
+    def remote_jobs(self) -> RemoteJobs:
+        """The remote jobs; builds nothing remote."""
         ...

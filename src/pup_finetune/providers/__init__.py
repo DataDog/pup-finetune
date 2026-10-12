@@ -20,11 +20,11 @@ Finally, it says what a provider needs before anything is paid for (:class:`Prov
 its display label, the API key it signs in with, the optional packages each step needs
 (:class:`Package`, found with :func:`importlib.util.find_spec`, never imported:
 :func:`module_state`), the
-training flags it refuses (:class:`RefusedFlag`) and whether it deploys. ``doctor`` and the
-``train``, ``resume``, ``evaluate`` and ``deploy`` previews read it
-(:func:`require_packages`, :func:`require_supported_flags`, :func:`require_deploys`), so
-nothing a preview can know fails only after ``--confirm``. The protocols live in
-:mod:`pup_finetune.providers.base`.
+training flags it refuses (:class:`RefusedFlag`), whether it deploys and whether it trains
+remotely. ``doctor`` and the ``train``, ``resume``, ``evaluate`` and ``deploy`` previews read
+it (:func:`require_packages`, :func:`require_supported_flags`, :func:`require_deploys`,
+:func:`require_remote`), so nothing a preview can know fails only after ``--confirm``. The
+protocols live in :mod:`pup_finetune.providers.base`.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from typing import Any, Final, Literal
 
 from pup_finetune.errors import FinetuneError, UsageError, install_hint
-from pup_finetune.providers.base import Provider
+from pup_finetune.providers.base import Provider, RemoteJobs, SupportsRemote
 from pup_finetune.redaction import redact
 from pup_finetune.runtime import Runtime
 
@@ -60,8 +60,10 @@ __all__ = [
     "register_provider",
     "registered_option_keys",
     "registered_providers",
+    "remote_jobs",
     "require_deploys",
     "require_packages",
+    "require_remote",
     "require_supported_flags",
 ]
 
@@ -121,7 +123,8 @@ class ProviderInfo:
     :class:`~pup_finetune.credentials.CredentialSpec` its key is registered under (``None``
     for one without a key); ``packages`` what it needs installed, by step; ``refuses`` the
     flags it cannot honor; ``deploys`` whether it deploys a promoted model; ``offline``
-    whether it never leaves the machine (so ``PUP_READ_ONLY`` allows its runs).
+    whether it never leaves the machine (so ``PUP_READ_ONLY`` allows its runs); ``remote``
+    whether ``train --remote`` can run its training loop in a job of the provider's.
     """
 
     name: str
@@ -135,6 +138,7 @@ class ProviderInfo:
     refuses: tuple[RefusedFlag, ...] = ()
     deploys: bool = True
     offline: bool = False
+    remote: bool = False
 
     def packages_for(self, step: Step) -> tuple[Package, ...]:
         """The packages ``step`` needs."""
@@ -157,6 +161,7 @@ def register_provider(
     refuses: tuple[RefusedFlag, ...] = (),
     deploys: bool = True,
     offline: bool = False,
+    remote: bool = False,
 ) -> None:
     """Register ``name`` as the provider ``target`` (``"package.module:attr"``) builds, with
     the ``--provider-option`` keys it takes (``options``), the aliases of the model
@@ -183,6 +188,7 @@ def register_provider(
         refuses=tuple(refuses),
         deploys=deploys,
         offline=offline,
+        remote=remote,
     )
     existing = _REGISTRY.get(name)
     if existing is not None and existing != entry:
@@ -309,6 +315,28 @@ def require_deploys(name: str, runtime: Runtime) -> None:
             f"deploying on {info.label} is not available in this version of pup-finetune",
             hint="use the promoted model on the provider directly",
         )
+
+
+def require_remote(name: str, runtime: Runtime) -> None:
+    """Raise :class:`UsageError` when provider ``name`` cannot train in a job of its own."""
+    info = provider_info(name, runtime)
+    if not info.remote:
+        raise _no_remote(info.label)
+
+
+def remote_jobs(provider: Provider) -> RemoteJobs:
+    """``provider``'s remote jobs; the :func:`require_remote` error when it has none."""
+    if not isinstance(provider, SupportsRemote):
+        entry = _REGISTRY.get(provider.name)
+        raise _no_remote(entry.label if entry is not None else provider.name)
+    return provider.remote_jobs()
+
+
+def _no_remote(label: str) -> UsageError:
+    return UsageError(
+        f"training remotely on {label} is not available in this version of pup-finetune",
+        hint="drop --remote; --detach trains in a background worker on this machine",
+    )
 
 
 def registered_option_keys(*, include_dev: bool = False) -> dict[str, tuple[str, ...]]:
@@ -490,6 +518,7 @@ register_provider(
             field="lora_alpha", flag="--lora-alpha", reason="Baseten sets the LoRA alpha itself"
         ),
     ),
+    remote=True,
 )
 
 # Providers with an API key register its CredentialSpec in their (lightweight) package, so

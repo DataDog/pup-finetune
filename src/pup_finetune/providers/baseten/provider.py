@@ -11,7 +11,9 @@ workspace can train a model before anything is paid (:meth:`~BasetenProvider.pre
 renders each profile with its model family's Hugging Face chat template, and trains through
 :class:`~.backend.BasetenBackend`. It deploys a run's sampler checkpoint as a dedicated Baseten
 model, smoke-tests it and deletes it (:mod:`.deploy`: :meth:`~BasetenProvider.deploy`,
-:meth:`~BasetenProvider.smoke_test`, :meth:`~BasetenProvider.undeploy`).
+:meth:`~BasetenProvider.smoke_test`, :meth:`~BasetenProvider.undeploy`), and runs a run's
+training loop in a Baseten training job for ``train --remote``
+(:meth:`~BasetenProvider.remote_jobs`, :mod:`.jobs`).
 
 Building the provider is cheap: the Loops SDK is imported by preflight and when a session
 opens, ``transformers`` when a renderer first loads its tokenizer. The API key
@@ -27,6 +29,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import shutil
 import time
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Final, TypeGuard
@@ -65,7 +68,8 @@ from pup_finetune.runtime import Runtime
 if TYPE_CHECKING:
     import httpx
 
-    from pup_finetune.providers.base import Provider
+    from pup_finetune.providers.base import Provider, SupportsRemote
+    from pup_finetune.providers.baseten.jobs import BasetenJobs, CliRunner
 
 __all__ = [
     "LOOPS_VERSION",
@@ -200,7 +204,9 @@ class BasetenProvider:
     ``transport`` replaces the network for Baseten's HTTP routes (a deployment's chat route
     included), ``loops`` the Loops SDK, ``tokenizer`` the Hugging Face tokenizer, ``sleep``
     the wait between polls and retries and ``clock`` the monotonic clock a deploy's waits run
-    on, so tests run against the fakes in ``tests/fakes/baseten.py``.
+    on, so tests run against the fakes in ``tests/fakes/baseten.py``; ``cli_runner``, ``which``
+    and ``job_root`` replace how :meth:`remote_jobs` runs the ``baseten`` CLI, finds
+    executables and where the job's files land.
     :meth:`validate_options` also makes the validated options this provider's configuration,
     which :meth:`training_profile` and :meth:`backend` use.
     """
@@ -215,6 +221,9 @@ class BasetenProvider:
         tokenizer: ChatTokenizer | None = None,
         sleep: Sleep = time.sleep,
         clock: Callable[[], float] = time.monotonic,
+        cli_runner: CliRunner | None = None,
+        which: Callable[[str], str | None] | None = None,
+        job_root: str | None = None,
     ) -> None:
         self.runtime = runtime
         self.options = BasetenOptions()
@@ -224,6 +233,9 @@ class BasetenProvider:
         self._tokenizer = tokenizer
         self._sleep = sleep
         self._clock = clock
+        self._cli_runner = cli_runner
+        self._which = which
+        self._job_root = job_root
         self._api_key: SecretStr | None = None
 
     @property
@@ -367,6 +379,20 @@ class BasetenProvider:
         with self._http() as http:
             return serving.undeploy(http, endpoint)
 
+    def remote_jobs(self) -> BasetenJobs:
+        """Baseten training jobs that run a run's training loop (``train --remote``); builds
+        nothing remote."""
+        from pup_finetune.providers.baseten.jobs import JOB_ROOT, BasetenJobs, run_cli
+
+        return BasetenJobs(
+            http=self._http,
+            key=self._key,
+            environ=self._environ(),
+            runner=self._cli_runner or run_cli,
+            which=self._which or shutil.which,
+            root=self._job_root or JOB_ROOT,
+        )
+
     # Internals.
 
     def _own(self, profile: ModelProfile) -> None:
@@ -404,4 +430,7 @@ class BasetenProvider:
 if TYPE_CHECKING:
     # mypy checks that the provider satisfies the protocol.
     def _conforms(provider: BasetenProvider) -> Provider:
+        return provider
+
+    def _runs_remotely(provider: BasetenProvider) -> SupportsRemote:
         return provider

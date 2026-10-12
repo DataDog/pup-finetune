@@ -26,7 +26,7 @@ from pup_finetune.cli import _summary as summary_module
 from pup_finetune.cli import app
 from pup_finetune.cli import dataset as dataset_cli
 from pup_finetune.cli import triage as triage_cli
-from pup_finetune.cli._summary import CARD_LINES
+from pup_finetune.cli._summary import CARD_LINES, preview_card
 from pup_finetune.inference import ChatClient, ChatCompleter
 from pup_finetune.runs import RunDir
 from tests.fakes.chat_api import API_KEY, BASE_URL, FakeChatApi
@@ -211,6 +211,55 @@ def test_a_read_only_card_says_confirm_is_refused_and_never_cuts_the_cost(
     )
     assert lines[-1] == "  cost      nothing: the fake provider runs offline"
     assert "Next: " not in result.stderr
+
+
+def test_a_remote_train_card_says_where_the_loop_runs() -> None:
+    preview = {
+        "model": "qwen3p5-9b",
+        "provider": "baseten",
+        "run_dir": "run",
+        "rows": {"train": 7, "validation": 5, "test": 2, "rejected": 0},
+        "tokens_per_epoch": 1000,
+        "max_tokens_total": 5000,
+        "validation_tokens": 0,
+        "settings": {
+            "max_epochs": 5,
+            "patience": 1,
+            "batch_size": 32,
+            "learning_rate": 1e-4,
+            "lora": {"rank": 8, "rank_source": "model default"},
+        },
+        "remote": {"team": "Research"},
+        "data_recipients": [
+            "training rows -> baseten",
+            "train and validation rows, run files and pup-finetune source -> Baseten storage "
+            "(the job's upload)",
+        ],
+        "billing": "Baseten bills the trainer at its own rates: while it runs; Baseten bills "
+        "the CPU job at its own rates: from the job's start until training ends",
+    }
+    lines = preview_card("train", preview)
+    assert len(lines) == CARD_LINES
+    assert [line.split()[0] for line in lines[1:]] == [
+        "data",
+        "settings",
+        "runs",
+        "sends",
+        "bills",
+        "cost",
+    ]
+    assert lines[3] == "  runs      a Baseten CPU job in team Research"
+    refused = preview_card("train", preview, refused="--confirm is refused")
+    # A read-only card drops the settings, never where the loop runs or who bills it.
+    assert len(refused) == CARD_LINES
+    assert [line.split()[0] for line in refused[1:]] == [
+        "refused",
+        "data",
+        "runs",
+        "sends",
+        "bills",
+        "cost",
+    ]
 
 
 def test_a_read_only_run_that_stays_offline_is_allowed(

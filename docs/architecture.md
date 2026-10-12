@@ -274,6 +274,38 @@ Baseten Loops through `providers/baseten/client.py`, the only module that loads 
   cuts the training profile, so it also sizes the samplers and the trainer a standalone
   evaluation opens.
 
+## Training in a Baseten job (`train --remote`)
+
+`train --remote` runs the same training loop in a Baseten CPU job instead of on this machine,
+so a run survives a sleeping laptop. The provider-neutral half is
+[`training/remote.py`](../src/pup_finetune/training/remote.py) and
+[`training/report.py`](../src/pup_finetune/training/report.py); the provider reaches it
+through its `remote_jobs()` (`RemoteJobs` in `providers/base.py`), implemented by
+[`providers/baseten/jobs.py`](../src/pup_finetune/providers/baseten/jobs.py), the only module
+that runs the `baseten` CLI.
+
+- **Who owns what.** The machine that ran `train` owns the run directory: `remote.json`
+  records the job before the submit (so a lost answer is found again by project name and
+  time), and `status`, `resume` and `cancel` sync from the job first. The job owns a copy of
+  the run, staged in a private temporary directory: pup-finetune's source and `uv.lock` from
+  the checkout (it installs the locked dependencies itself), the train and validation rows
+  with their split assignments, and `run.json` naming that copy with its own row hash.
+  `deploy` and `evaluate` read the local files only, as for a local run.
+- **The return channel.** The job's `_worker --report-state` writes snapshots of
+  `state.json`, `epochs.json` and `result.json` to stdout as checksummed `PUPFT1` lines, on a
+  change, every minute and at exit with the worker's error. `status` reads them back from the
+  job's logs, newest first, and copies the newest complete one into the run directory (the
+  pid cleared), skipping the write while another process holds the run's lock.
+- **The key.** The job reads a Baseten API key from the team secret `pup_finetune_api_key`;
+  the local key goes only into the CLI's environment, never on its command line or in a file.
+  Both keys must belong to the same workspace, since `deploy` and a local `resume` load the
+  job's checkpoints with the local one.
+- **Limits.** `cancel` cannot stop the job yet, and `resume` is refused (`wrong_phase`) until
+  the job ended, then trains on this machine. A job that ends without its final report, or
+  that Baseten no longer has, is reported with Baseten's error line and a warning that its
+  Loops trainer may still bill, which every later `status` repeats. Logs older than seven
+  days are not read.
+
 ## Replay evaluation
 
 [`evaluation/`](../src/pup_finetune/evaluation/) is provider-neutral: it never imports a
