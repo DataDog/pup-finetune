@@ -16,7 +16,7 @@ import os
 import subprocess
 import sys
 import textwrap
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +34,7 @@ from pup_finetune.providers.base import (
     Provider,
 )
 from pup_finetune.providers.baseten import client
+from pup_finetune.providers.baseten.jobs import CliRunner
 from pup_finetune.providers.baseten.provider import (
     MAX_SEQ_LEN,
     PROFILES,
@@ -63,19 +64,31 @@ FAKE_TOKENIZERS: dict[str, Callable[[], ChatTokenizer]] = {
 
 
 def provider_on(
-    loops: FakeLoops, tokenizer: ChatTokenizer | None = None, *, clock: FakeClock | None = None
+    loops: FakeLoops,
+    tokenizer: ChatTokenizer | None = None,
+    *,
+    clock: FakeClock | None = None,
+    cli: CliRunner | None = None,
+    which: Callable[[str], str | None] | None = None,
+    job_root: str | None = None,
+    routes: Mapping[str, Answer] | None = None,
 ) -> BasetenProvider:
     """The real provider on the Loops fake, with a key and a workspace offering every model;
-    its waits run on ``clock`` (by default, a new one)."""
+    its waits run on ``clock`` (by default, a new one). ``cli``, ``which`` and ``job_root``
+    stand in for the ``baseten`` CLI, the executables found and the job's directory, and
+    ``routes`` (e.g. ``FakeTrainingJobs.routes()``) answer before the fake's own."""
     time = clock or FakeClock()
     return BasetenProvider(
         Runtime(),
         env=ENV,
-        transport=loops.transport({CAPABILITIES_ROUTE: (200, CAPABILITIES)}),
+        transport=loops.transport({CAPABILITIES_ROUTE: (200, CAPABILITIES), **(routes or {})}),
         loops=loops,
         tokenizer=tokenizer or FakeChatTokenizer(),
         sleep=time.sleep,
         clock=time.now,
+        cli_runner=cli,
+        which=which,
+        job_root=job_root,
     )
 
 

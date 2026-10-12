@@ -291,14 +291,15 @@ WARNING_PATHS: tuple[tuple[str, ...], ...] = (
     ("preview",),
     ("preview", "evaluation"),
     ("preview", "publication"),
+    ("preview", "remote"),
     ("evaluation",),
     ("evaluation", "publication"),
     ("publication",),
 )
 """The mappings, by their keys from the result, whose ``warnings`` are pup-finetune's own:
-the result's, a dataset summary's, a preview's, an evaluation's and its publication's.
-Nothing else is searched, so a ``warnings`` key inside trace-derived data (a sample record,
-a row's tool schema) is never printed as one of ours."""
+the result's, a dataset summary's, a preview's (and its remote job's), an evaluation's and its
+publication's. Nothing else is searched, so a ``warnings`` key inside trace-derived data (a
+sample record, a row's tool schema) is never printed as one of ours."""
 
 
 def result_warnings(result: Any) -> list[str]:

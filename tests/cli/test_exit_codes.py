@@ -196,6 +196,9 @@ MISTAKES: list[tuple[str, Setup, int, str]] = [
     ("a mistyped command", lambda w: ["evalute"], 2, "usage"),
     ("a malformed value", lambda w: w.train("--max-epochs", "many"), 2, "usage"),
     ("a flag without the one it needs", lambda w: w.train("--eval-max-tokens", "9"), 2, "usage"),
+    ("--team without --remote", lambda w: w.train("--team", "T"), 2, "usage"),
+    ("--remote with --detach", lambda w: w.train("--remote", "--detach"), 2, "usage"),
+    ("--remote on a provider without it", lambda w: w.train("--remote"), 2, "usage"),
     # A preview is exit 2 too: nothing ran.
     ("train without --confirm", lambda w: w.train(), 2, "confirmation_required"),
     ("a remote write under PUP_READ_ONLY", _read_only_deploy, 2, "read_only"),

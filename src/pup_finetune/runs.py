@@ -30,6 +30,9 @@ Files, all ``0600`` in a ``0700`` directory, written atomically:
 - ``deployment.json`` - the receipt of the run's deployment (written by
   :mod:`pup_finetune.deployment`): what was created where, its state, the smoke test and,
   once undeployed, when it was deleted.
+- ``remote.json`` - for a run started with ``train --remote``, the job that runs its training
+  loop (written by :mod:`pup_finetune.training.remote`): where it was submitted, its id, its
+  last status and state report, and how it ended.
 
 Every number written is finite: a non-finite loss is stored as ``null``.
 
@@ -105,6 +108,7 @@ RESULT_FILE = "result.json"
 WORKER_FILE = "worker.json"
 WORKER_LOG = "worker.log"
 DEPLOYMENT_FILE = "deployment.json"
+REMOTE_FILE = "remote.json"
 EVALUATIONS_FILE = "evaluation.json"
 """Each evaluation of the run (``evaluate`` and ``train --evaluate``), by its directory:
 its settings, how it stands and its headline (see
@@ -419,6 +423,10 @@ class RunDir:
     def evaluations_path(self) -> Path:
         return self.path / EVALUATIONS_FILE
 
+    @property
+    def remote_path(self) -> Path:
+        return self.path / REMOTE_FILE
+
     def lock(self) -> DirectoryLock:
         """The directory's lock; hold it while training or changing the run."""
         return DirectoryLock(self.path)
@@ -476,6 +484,12 @@ class RunDir:
         if not self.deployment_path.exists():
             return None
         return self._read_object(self.deployment_path)
+
+    def read_remote(self) -> dict[str, Any] | None:
+        """``remote.json``, or ``None`` when the run was not started with ``train --remote``."""
+        if not self.remote_path.exists():
+            return None
+        return self._read_object(self.remote_path)
 
     def read_evaluations(self) -> dict[str, Any] | None:
         """``evaluation.json``, or ``None`` when the run was never evaluated."""
@@ -549,6 +563,9 @@ class RunDir:
 
     def write_deployment(self, receipt: Mapping[str, Any]) -> None:
         atomic_write_json(self.deployment_path, finite_json(dict(receipt)))
+
+    def write_remote(self, record: Mapping[str, Any]) -> None:
+        atomic_write_json(self.remote_path, finite_json(dict(record)))
 
     def write_evaluations(self, record: Mapping[str, Any]) -> None:
         atomic_write_json(self.evaluations_path, finite_json(dict(record)))

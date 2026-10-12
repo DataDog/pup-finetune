@@ -84,8 +84,8 @@ What each command does without and with `--confirm`, where its data goes, and wh
 | `pup finetune dataset label` | records labels in DIR | no `--confirm` | nowhere: local files | allowed |
 | `pup finetune dataset triage` | previews the judge calls | runs the judges and labels rows (paid) | each judge's provider: Fireworks, Anthropic or OpenAI | allowed |
 | `pup finetune dataset push` | previews the records | pushes the kept rows (a remote write) | Datadog: an Agent Observability dataset | preview allowed; `--confirm` refused |
-| `pup finetune train` | previews the run | trains (paid) | the training provider; with --evaluate, also the judge's provider and Datadog (experiments, when the dataset was pushed) | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider and judge) |
-| `pup finetune status` | shows the run | no `--confirm` | nowhere: local files | allowed |
+| `pup finetune train` | previews the run | trains (paid) | the training provider; with --remote, also Baseten storage (the job's upload); with --evaluate, also the judge's provider and Datadog (experiments, when the dataset was pushed) | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider and judge) |
+| `pup finetune status` | shows the run | no `--confirm` | nowhere: it reads a remote run's Baseten job and its logs | allowed |
 | `pup finetune runs` | lists the runs | no `--confirm` | nowhere: local files | allowed |
 | `pup finetune resume` | previews where it resumes | resumes training (paid) | the training provider | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider and judge) |
 | `pup finetune cancel` | previews which process gets the signal | sends it SIGTERM | nowhere: a signal to a local process | allowed |
@@ -537,7 +537,7 @@ Safety: Free · --confirm writes the kept rows to Datadog · PUP_READ_ONLY: prev
 
 Fine-tune --model with LoRA SFT on --dataset's train split, keeping the best epoch by validation loss. Without --confirm, previews the run and prints the command that starts it. With --confirm, trains (Ctrl-C cancels gracefully).
 
-The run goes in runs/RUN_ID unless --run-dir names another directory (a runs/ this creates gets a .gitignore, since runs hold trace-derived rows), and --provider is inferred from the --model alias when it is offered by one provider only; the preview says so (provider_source), and its next_command pins both. The preview lists rows and rendered tokens per split, the rejected rows, tokens per epoch and in total, the settings and where the data goes. --detach trains in a background worker; follow it with `status --watch`. Training stops early after --patience epochs without a validation-loss improvement; a Ctrl-C or `cancel` still promotes the best epoch. With --evaluate, the run is also evaluated on the test split in its training session once the best epoch is promoted (see `evaluate`): the judge is calibrated and --eval-out-dir checked before training starts, so a failed calibration trains nothing; --detach is refused with it; and the evaluation stops, partial, at --max-spend-usd. --max-seq-len caps the context (and so the cost): longer rows are left out, as the preview shows (exceeds_context).
+The run goes in runs/RUN_ID unless --run-dir names another directory (a runs/ this creates gets a .gitignore, since runs hold trace-derived rows), and --provider is inferred from the --model alias when it is offered by one provider only; the preview says so (provider_source), and its next_command pins both. The preview lists rows and rendered tokens per split, the rejected rows, tokens per epoch and in total, the settings and where the data goes. --detach trains in a background worker; follow it with `status --watch`. Training stops early after --patience epochs without a validation-loss improvement; a Ctrl-C or `cancel` still promotes the best epoch. With --evaluate, the run is also evaluated on the test split in its training session once the best epoch is promoted (see `evaluate`): the judge is calibrated and --eval-out-dir checked before training starts, so a failed calibration trains nothing; --detach is refused with it; and the evaluation stops, partial, at --max-spend-usd. --max-seq-len caps the context (and so the cost): longer rows are left out, as the preview shows (exceeds_context). --remote (Baseten only) runs the training loop in a Baseten CPU job, so training continues while this machine sleeps; --team names the team (default: your only or default team). It needs the baseten CLI and uv on PATH, a source checkout of pup-finetune and a team secret pup_finetune_api_key; it uploads the train and validation rows, the run files and pup-finetune's source to Baseten storage, and is refused with --detach and --evaluate. status copies the job's state into the run directory; cancel cannot stop the job yet.
 
 ```
 pup finetune train [OPTIONS]
@@ -547,12 +547,14 @@ pup finetune train [OPTIONS]
 | --- | --- | --- | --- |
 | **Required** | | | |
 | `--dataset` | `DIR` | required | The dataset directory to train on. |
-| `--model` | `MODEL` | required | A model, e.g. qwen3p8-27b (fireworks); see models list. |
+| `--model` | `MODEL` | required | A model, e.g. qwen3p8-27b; see models list. |
 | **Run** | | | |
 | `--provider` | `NAME` | from --model | Provider: fireworks or baseten. |
 | `--run-dir` | `DIR` | runs/RUN_ID | A new or empty run directory. |
 | `--run-id` | `ID` | generated | Run and model id. |
 | `--detach` |  |  | Train in a background worker; see status. |
+| `--remote` |  |  | Train in a Baseten job; see status. |
+| `--team` | `NAME` | your default | With --remote: Baseten team. |
 | `--confirm` |  |  | Train (paid); without it, preview. |
 | **Training** | | | |
 | `--max-epochs` | `N` | `5` | Most epochs to train. |
@@ -597,7 +599,7 @@ Safety: Paid with --confirm · sends rows to the provider (and the judge) · PUP
 
 Show a run's phase, epoch and step, losses, best epoch, elapsed time and ETA, promoted model, and whether its process is alive; with no RUN_DIR, the newest run under ./runs. With --watch, prints progress to stderr until training ends, then the status; Ctrl-C or --timeout stops only the watch.
 
-RUN_DIR may also be a bare run id, read as runs/RUN_ID when no such path exists (here and in resume, cancel, evaluate, deploy and undeploy, which always need one). Training keeps going when the watch stops: the status then has watch_timed_out true, and the command exits 0. Under a coding agent (PUP_AGENT_MODE, AI_AGENT or CLAUDECODE set), a watch stops after 90s unless --timeout says otherwise, below the time agents' shell tools commonly allow a command.
+RUN_DIR may also be a bare run id, read as runs/RUN_ID when no such path exists (here and in resume, cancel, evaluate, deploy and undeploy, which always need one). Training keeps going when the watch stops: the status then has watch_timed_out true, and the command exits 0. Under a coding agent (PUP_AGENT_MODE, AI_AGENT or CLAUDECODE set), a watch stops after 90s unless --timeout says otherwise, below the time agents' shell tools commonly allow a command. For a run started with train --remote, status first reads its Baseten job and logs and copies the run's state into the run directory.
 
 ```
 pup finetune status [OPTIONS] [RUN_DIR]
@@ -620,7 +622,7 @@ pup finetune status
 pup finetune status run --watch --timeout 10m
 ```
 
-Safety: Free · local files only · PUP_READ_ONLY: allowed.
+Safety: Free · local files; reads a remote run's Baseten job · PUP_READ_ONLY: allowed.
 
 ## `pup finetune runs`
 
