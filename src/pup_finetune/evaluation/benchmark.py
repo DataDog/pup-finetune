@@ -394,15 +394,28 @@ def plan_benchmark(
 
 @contextmanager
 def _base_sampler(plan: BenchmarkPlan, candidate: Candidate) -> Iterator[Sampler]:
-    """A sampler of ``candidate``'s base model, in a session of its own; both end on exit."""
+    """A sampler of ``candidate``'s base model, in a session of its own; both end on exit.
+
+    The session's context fits the longest case and its generation, not the profile's whole
+    context: a provider provisions a smaller trainer for it, which starts sooner.
+    """
     provider = get_provider(candidate.provider, plan.runtime)
     provider.validate_options({})
     profile = candidate.profile
+    renderer = provider.renderer(profile)
+    longest = max(
+        len(
+            renderer.generation_prompt_tokens(
+                [dict(m) for m in case.prefix], [dict(t) for t in case.tools]
+            )
+        )
+        for case in plan.cases
+    )
     with provider.backend().open_session(
         profile,
         LoraConfig(rank=profile.default_lora_rank),
         seed=plan.settings.seed,
-        max_seq_len=profile.max_seq_len,
+        max_seq_len=min(profile.max_seq_len, longest + plan.settings.max_tokens),
     ) as session:
         sampler = session.sampler(None)
         try:

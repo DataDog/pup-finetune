@@ -17,6 +17,7 @@ from typer.testing import CliRunner
 
 from pup_finetune.cli import app
 from pup_finetune.data.dataset_dir import DatasetDir
+from pup_finetune.evaluation import benchmark as benchmark_module
 from pup_finetune.evaluation.benchmark import (
     BenchmarkPlan,
     BenchmarkSettings,
@@ -27,7 +28,7 @@ from pup_finetune.evaluation.benchmark import (
 from pup_finetune.evaluation.cases import ReplayCase, cases_from_dataset
 from pup_finetune.evaluation.fake_judge import fake_judge_config
 from pup_finetune.evaluation.replay import EvalDir
-from pup_finetune.providers.fake import FAKE_PROFILE
+from pup_finetune.providers.fake import FAKE_PROFILE, FakeProvider
 from pup_finetune.runtime import Runtime
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
@@ -152,3 +153,23 @@ def test_recommend_without_any_judged_case() -> None:
         "model": None,
         "reason": "no model has a judged case yet, so there is nothing to compare",
     }
+
+
+def test_the_session_context_fits_the_longest_case(
+    plan: BenchmarkPlan, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = FakeProvider(plan.runtime)
+    monkeypatch.setattr(benchmark_module, "get_provider", lambda name, runtime: provider)
+    candidate = plan.candidates[0]
+    renderer = provider.renderer(candidate.profile)
+    longest = max(
+        len(renderer.generation_prompt_tokens(list(case.prefix), list(case.tools)))
+        for case in plan.cases
+    )
+
+    with benchmark_module._base_sampler(plan, candidate):
+        pass
+
+    [settings] = provider.backend().session_settings
+    assert settings["max_seq_len"] == longest + plan.settings.max_tokens
+    assert settings["max_seq_len"] < candidate.profile.max_seq_len
