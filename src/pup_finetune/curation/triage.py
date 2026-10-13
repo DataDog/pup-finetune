@@ -16,7 +16,9 @@ which ``<`` and ``>`` are escaped, so it cannot close its block. The rubric (or 
 is the user's, and goes in the system message.
 
 **Votes and decisions.** A row is kept only on a strict majority of keep votes: a tie drops
-it. A row missing a judge's vote is undecided. A call that fails (after the client's
+it. A row missing a judge's vote is undecided, unless the votes cast already drop it: when
+even every missing vote being keep would make no strict majority (with two judges, one drop
+vote), the row is dropped and its remaining calls are not made. A call that fails (after the client's
 retries), whose answer holds no vote, or that the judge's provider refused to answer is not
 a vote: it is reported, and retried on the next run. A row a judge refuses as longer than its
 context window is never cut to fit: that answer is stored as the judge's ``too_long`` vote,
@@ -398,7 +400,8 @@ class Decision:
 
 def decide(row_id: str, votes: Mapping[str, Vote], judges: Sequence[str]) -> Decision:
     """The decision from ``votes`` (by judge): kept on a strict majority of keep votes; a tie
-    or a drop majority drops it; any judge without a vote leaves it undecided. A ``too_long``
+    or a drop majority drops it; a judge without a vote leaves it undecided, unless the votes
+    cast drop it whatever the missing ones would be (:func:`_drop_settled`). A ``too_long``
     vote drops it, whatever the other votes are and whether they were cast.
 
     The reason is the most common reason among the winning side's votes (judge order breaks
@@ -412,7 +415,7 @@ def decide(row_id: str, votes: Mapping[str, Vote], judges: Sequence[str]) -> Dec
     if unread:
         reason = f"too long for the judge {unread[0]} to read whole ({TOO_LONG_REASON})"
         return Decision(row_id, False, len(keeps), len(drops), missing, reason, too_long=True)
-    if missing:
+    if missing and not _drop_settled(len(keeps), missing, len(judges)):
         return Decision(row_id, None, len(keeps), len(drops), missing)
     keep = len(keeps) * 2 > len(judges)
     side = keeps if keep else drops
@@ -420,7 +423,14 @@ def decide(row_id: str, votes: Mapping[str, Vote], judges: Sequence[str]) -> Dec
     reason = max(reasons, key=lambda text: reasons[text]) if reasons else ""
     if not keep and not reason:
         reason = "dropped by the judges"
-    return Decision(row_id, keep, len(keeps), len(drops), 0, reason)
+    return Decision(row_id, keep, len(keeps), len(drops), missing, reason)
+
+
+def _drop_settled(keeps: int, missing: int, judges: int) -> bool:
+    """Whether ``keeps`` keep votes cannot become a strict majority of ``judges`` even with
+    every one of the ``missing`` votes keep. A keep is never settled early: a missing judge
+    could still find the row too long, which drops it."""
+    return (keeps + missing) * 2 <= judges
 
 
 # --- planning -----------------------------------------------------------------------------
@@ -484,12 +494,13 @@ class TriagePlan:
 
     @property
     def pending(self) -> list[tuple[TrainingRow, str]]:
-        """Every (row, judge) without a vote that counts, in review order. A row a judge
-        found too long has none left: it is dropped whatever the others would vote."""
+        """Every (row, judge) without a vote that counts, in review order. A row already
+        dropped (a judge found it too long, or its votes drop it whatever the others would
+        be) has none left."""
         return [
             (row, judge)
             for row in self.rows
-            if not _unread(self.votes.get(row.id, {}))
+            if not _settled(self.votes.get(row.id, {}), self.judges, early=self.references is None)
             for judge in self.judges
             if judge not in self.votes.get(row.id, {})
         ]
@@ -630,6 +641,21 @@ def _by_provider(
 def _unread(votes: Mapping[str, Vote]) -> bool:
     """Whether a judge found the row longer than its context window."""
     return any(vote.too_long for vote in votes.values())
+
+
+def _settled(votes: Mapping[str, Vote], judges: Sequence[str], *, early: bool = True) -> bool:
+    """Whether a row's drop is decided before every judge voted: a judge found it too long,
+    or (with ``early``) the votes cast drop it whatever the missing ones would be. An
+    agreement measure passes ``early=False``: it compares every judge's vote with the
+    reference labels, so each judge is asked about every row."""
+    if _unread(votes):
+        return True
+    if not early:
+        return False
+    cast = [votes[judge] for judge in judges if judge in votes]
+    missing = len(judges) - len(cast)
+    keeps = sum(1 for vote in cast if vote.keep)
+    return missing > 0 and _drop_settled(keeps, missing, len(judges))
 
 
 def _and(items: Sequence[str]) -> str:
@@ -1035,7 +1061,8 @@ class TriageReport:
     skipped_labeled: int = 0
     """Decided rows not labeled because the agent or a person labeled them after planning."""
     calls_skipped: int = 0
-    """Calls not made because another judge had found their row too long."""
+    """Calls not made because their row was already dropped: another judge found it too long,
+    or the votes cast decided it (see :func:`_settled`)."""
     agreement: Agreement | None = None
     """With ``agreement``: the council against the labels of the rows it reviewed."""
 
@@ -1159,11 +1186,12 @@ def run_triage(
     queue = iter(pending)
 
     def next_pairs(n: int) -> list[tuple[TrainingRow, str]]:
-        """Up to ``n`` more calls, skipping those of rows a judge found too long."""
+        """Up to ``n`` more calls, skipping those of rows already dropped (see
+        :func:`_settled`)."""
         nonlocal skipped
         taken: list[tuple[TrainingRow, str]] = []
         for row, judge in queue:
-            if _unread(plan.votes.get(row.id, {})):
+            if _settled(plan.votes.get(row.id, {}), plan.judges, early=plan.references is None):
                 skipped += 1
                 continue
             taken.append((row, judge))
@@ -1225,7 +1253,12 @@ def run_triage(
             pool.shutdown(wait=False)
         # A call that failed on a row another judge found too long needs no retry: the row is
         # decided, and the next run makes no call for it.
-        failures = [f for f in failures if not _unread(plan.votes.get(f.row_id, {}))]
+        early = plan.references is None
+        failures = [
+            f
+            for f in failures
+            if not _settled(plan.votes.get(f.row_id, {}), plan.judges, early=early)
+        ]
         if plan.references is not None:
             decisions = tuple(
                 decide(row.id, plan.votes.get(row.id, {}), plan.judges) for row in plan.rows

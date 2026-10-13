@@ -970,6 +970,24 @@ def test_a_row_too_long_for_one_judge_is_dropped_and_its_other_calls_skipped(
     assert stored.reason == TOO_LONG_REASON
 
 
+def test_two_drop_votes_decide_a_row_whose_third_call_failed(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path, n=2)
+    plan = plan_triage(dataset, RUBRIC, (J1, J2, J3))
+    dropped = plan.rows[0].id
+
+    def policy(judge: str, row_id: str) -> bool | Exception:
+        if row_id == dropped:
+            return ExternalError("unreachable", source="x") if judge == J3 else False
+        return True
+
+    report = run_triage(plan, FakeCouncil(policy), concurrency=1)
+    assert report.counts() == {"keep": 1, "drop": 1, "undecided": 0}
+    assert dataset.labels()[dropped].keep is False
+    # A rerun has nothing left to ask about the row: two of three drop votes decided it.
+    again = plan_triage(dataset, RUBRIC, (J1, J2, J3))
+    assert [row.id for row, _ in again.pending] == []
+
+
 def test_a_row_found_too_long_is_not_asked_about_again(tmp_path: Path) -> None:
     dataset = make_dataset(tmp_path, n=2)
     plan = plan_triage(dataset, RUBRIC, (J1, J2))
@@ -1018,6 +1036,28 @@ def test_a_too_long_vote_drops_the_row_even_while_other_votes_are_missing() -> N
     assert J3 in decision.reason
 
 
+@pytest.mark.parametrize(
+    ("judges", "cast", "status"),
+    [
+        # Two drop votes of three: no third vote could make a keep majority.
+        ((J1, J2, J3), {J1: False, J2: False}, "drop"),
+        # One drop of two: both must keep.
+        ((J1, J2), {J1: False}, "drop"),
+        # One keep and one drop of three: the third decides.
+        ((J1, J2, J3), {J1: True, J2: False}, "undecided"),
+        # A keep majority still waits: the last judge could find the row too long.
+        ((J1, J2, J3), {J1: True, J2: True}, "undecided"),
+    ],
+)
+def test_a_drop_the_missing_votes_cannot_change_is_decided(
+    judges: tuple[str, ...], cast: dict[str, bool], status: str
+) -> None:
+    votes = {judge: _vote(judge, keep) for judge, keep in cast.items()}
+    decision = decide("r", votes, judges)
+    assert decision.status == status
+    assert decision.missing == len(judges) - len(cast)
+
+
 # --- agreement with the user's labels ------------------------------------------------------
 
 
@@ -1053,6 +1093,9 @@ def test_agreement_reviews_only_labeled_rows_and_labels_nothing(tmp_path: Path) 
     council = FakeCouncil(policy)
     report = run_triage(plan, council)
     assert {row_id for _, row_id in council.calls} == {"row-0", "row-1", "row-2", "row-3"}
+    # Every judge is asked about every row, even once two drops decided it: the agreement
+    # compares each judge's vote with the labels.
+    assert len(council.calls) == 3 * 4
     assert (dataset.path / "labels.jsonl").read_text() == labels_before
     assert report.labels is None
     assert report.complete
