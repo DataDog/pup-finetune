@@ -956,3 +956,40 @@ def test_a_first_pull_resolves_at_the_clock(tmp_path: Path) -> None:
         NOW_MS,
     )
     assert not dataset.path.exists()
+
+
+def test_dropped_rows_do_not_count_toward_the_target() -> None:
+    dropped = frozenset({"trace-1:synthetic-span-1", "trace-2:synthetic-span-2"})
+    api = FakeExportApi(three_pages())
+    pup = api.install(FakePup()).client()
+    collection = collect(
+        pup, PullOptions(SpanQuery(ml_app="synthetic"), target_count=3), dropped=dropped
+    )
+    assert api.cursors == [None, "cursor-2", "cursor-3"]
+    assert [row.id for row in collection.rows] == [
+        "trace-1:synthetic-span-1",
+        "trace-2:synthetic-span-2",
+        "trace-3:synthetic-span-3",
+        "trace-4:synthetic-span-4",
+        "trace-5:synthetic-span-5",
+    ]
+    assert collection.stopped == "target_count"
+
+
+def test_a_rerun_after_a_review_reads_on_to_replace_the_dropped_rows(tmp_path: Path) -> None:
+    from pup_finetune.data.labels import Label
+
+    dataset = DatasetDir(tmp_path / "ds")
+
+    def pull_three() -> Any:
+        api = FakeExportApi(three_pages())
+        pup = api.install(FakePup()).client()
+        options = PullOptions(SpanQuery(ml_app="synthetic"), target_count=3)
+        return pull(pup, options, dataset, SplitParams())
+
+    pull_three()
+    assert len(dataset.rows()) == 3
+    dataset.append_labels([Label(id="trace-2:synthetic-span-2", keep=False, reason="synthetic")])
+    _, added = pull_three()
+    assert added.added == 1
+    assert len(dataset.kept_rows()) == 3

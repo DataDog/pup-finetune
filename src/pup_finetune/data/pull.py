@@ -17,7 +17,9 @@ dataset directory (:func:`pull`):
    and exclude a row repeating the conversation of an earlier one as
    ``duplicate_conversation``.
 4. After each page, stop once ``target_count`` rows are accepted, before fetching the next
-   page; the accepted rows are cut to ``target_count``.
+   page; the accepted rows are cut to ``target_count``. Into a dataset directory, rows its
+   labels drop do not count (:func:`pull` passes them as ``dropped``): the target is the rows
+   to keep, so a pull re-run after a review reads on to replace the rows it dropped.
 
 Conversion groups spans by trace, so it runs again over every span read after each page;
 the last run is the result. A trace whose spans straddle the page the export stopped at is
@@ -49,6 +51,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
@@ -79,7 +82,7 @@ from pup_finetune.datadog.spans import (
 )
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.next_steps import command
-from pup_finetune.storage import DirectoryLock, make_private_dir
+from pup_finetune.storage import DirectoryLock, atomic_write_json, make_private_dir, read_json
 
 DEFAULT_TARGET_COUNT = 200
 DEFAULT_MAX_CANDIDATES = 5000
@@ -177,6 +180,8 @@ class Collection:
     failed_checks: int = 0
     """Spans excluded by a span-level check."""
     over_target: int = 0
+    counted: int = 0
+    """The rows that count toward ``target_count``: those not in ``dropped``."""
     """Accepted rows left out because ``target_count`` was already reached."""
     stopped: StopReason = "exhausted"
     read_ids: set[str] = field(default_factory=set)
@@ -211,12 +216,13 @@ def collect(
     clock: Clock = time.time,
     sleep: Callable[[float], None] = time.sleep,
     progress: Progress | None = None,
+    dropped: AbstractSet[str] = frozenset(),
 ) -> Collection:
     """Export, check and convert the spans ``options`` select; see the module docstring.
 
     ``cache_dir`` is the raw page cache :func:`~pup_finetune.datadog.spans.iter_span_pages`
     resumes from; without one nothing is written. Options without a window are resolved at
-    ``clock`` first.
+    ``clock`` first. Rows whose id is in ``dropped`` do not count toward ``target_count``.
     """
     if options.window is None:
         options = options.resolved(epoch_ms(clock))
@@ -246,7 +252,7 @@ def collect(
                 result.exclusions.append(exclusion)
         if added:
             converted = _convert(passing, options.reasoning)
-        accepted = len(converted.rows)
+        accepted = sum(1 for row in converted.rows if row.id not in dropped)
         if progress is not None:
             progress(f"page {number}: {len(seen)} spans read, {accepted} rows accepted")
         if accepted >= options.target_count:
@@ -263,8 +269,9 @@ def collect(
         e.row_id for e in result.exclusions if e.row_id is not None
     }
     result.exclusions.extend(_unreadable(span) for span in pages.stats.unreadable)
-    result.rows = rows[: options.target_count]
+    result.rows = _up_to_target(rows, options.target_count, dropped)
     result.over_target = len(rows) - len(result.rows)
+    result.counted = sum(1 for row in result.rows if row.id not in dropped)
     if stopped is None:
         stopped = "exhausted" if pages.stats.exhausted else "max_candidates"
     result.stopped = stopped
@@ -648,9 +655,12 @@ def pull(
     # The raw/ lock is held through the add, so no other pull changes the stored rows between
     # the read below and the add. DatasetDir.add locks the dataset directory itself, through
     # another lock file, so holding this one does not block it.
+    dropped = {row_id for row_id, label in dataset.labels().items() if not label.keep}
     with DirectoryLock(raw):
         try:
-            collection = collect(pup, options, cache_dir=raw, sleep=sleep, progress=progress)
+            collection = collect(
+                pup, options, cache_dir=raw, sleep=sleep, progress=progress, dropped=dropped
+            )
         except ExternalError as exc:
             raise _with_resume_note(exc, raw, rerun_command(dataset.path, options)) from exc
         stored = dataset.rows()
@@ -671,6 +681,56 @@ def pull(
             updated=updated,
         )
     return collection, added
+
+
+LIMITS_FILE = "pull_limits.json"
+"""The limits of a dataset's last pull (``target_count``, ``max_candidates``): not frozen, they
+are what a rerun without them continues toward."""
+
+
+def read_limits(dataset: DatasetDir) -> tuple[int, int, bool] | None:
+    """``(target_count, max_candidates, exhausted)`` of ``dataset``'s last pull (``exhausted``:
+    it read every matching span), or ``None``."""
+    try:
+        data = read_json(dataset.path / LIMITS_FILE)
+    except (FileNotFoundError, ValueError):
+        return None
+    target, candidates = (
+        (data.get("target_count"), data.get("max_candidates"))
+        if isinstance(data, dict)
+        else (None, None)
+    )
+    if type(target) is int and type(candidates) is int and target > 0 and candidates > 0:
+        return target, candidates, bool(isinstance(data, dict) and data.get("exhausted"))
+    return None
+
+
+def write_limits(dataset: DatasetDir, options: PullOptions, collection: Collection) -> None:
+    """Record ``options``' limits as ``dataset``'s last pull's, and whether it read every
+    matching span."""
+    atomic_write_json(
+        dataset.path / LIMITS_FILE,
+        {
+            "target_count": options.target_count,
+            "max_candidates": options.max_candidates,
+            "exhausted": collection.stopped == "exhausted",
+        },
+    )
+
+
+def _up_to_target(
+    rows: Sequence[TrainingRow], target: int, dropped: AbstractSet[str]
+) -> list[TrainingRow]:
+    """The first ``rows`` that hold ``target`` rows not in ``dropped``, with the dropped rows
+    among them (stored already, they are unchanged)."""
+    kept: list[TrainingRow] = []
+    counted = 0
+    for row in rows:
+        if counted >= target:
+            break
+        kept.append(row)
+        counted += row.id not in dropped
+    return kept
 
 
 def _with_resume_note(error: ExternalError, raw: Path, rerun: str) -> ExternalError:

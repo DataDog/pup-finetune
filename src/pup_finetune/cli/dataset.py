@@ -51,8 +51,10 @@ from pup_finetune.data.pull import (
     collect,
     frozen_window,
     pull,
+    read_limits,
     rerun_command,
     resolve_window,
+    write_limits,
 )
 from pup_finetune.data.push import (
     IN_FLIGHT_SETTLE,
@@ -287,6 +289,31 @@ IMPORT_DOC = CommandDoc(
     safety=local("imports rows into DIR"),
 )
 
+FETCH_DOC = CommandDoc(
+    path="dataset fetch",
+    short="Fetch an Agent Observability dataset to train on.",
+    description=describe(
+        "Read the current records of the dataset --name in --project into DIR, so what was "
+        "curated in Datadog (records edited, added or removed in the product or through "
+        "pup) is what trains. Each record becomes a canonical row: its input messages and "
+        "expected output, its tools, and the split it names (records without one are "
+        "assigned by trace). A record that is not a conversation is excluded.",
+        "DIR freezes the dataset and its version: fetch a later version into a new DIR. "
+        "The fetch writes the dataset's push receipt, so `evaluate` publishes its "
+        "experiments onto the same dataset. Nothing is written to Datadog.",
+    ),
+    examples=(
+        "pup finetune dataset fetch datasets/my-agent-v2 --project pup-finetune "
+        "--name my-agent-sft",
+        "pup finetune dataset fetch datasets/curated --project my-team --name curated-sft --seed 7",
+    ),
+    safety=Safety(
+        data="reads Datadog",
+        recipients="nowhere: reads the dataset through pup into local files",
+        without="fetches the dataset into DIR",
+    ),
+)
+
 SHOW_DOC = CommandDoc(
     path="dataset show",
     short="Show a dataset's counts, exclusions, splits and settings.",
@@ -439,7 +466,8 @@ def dataset_next(
 
     With accepted rows and none labeled, the next command is a ``dataset sample`` to
     review (``None`` right after one, ``sampled``), and labeling them, by hand or with a
-    judge council, are the steps. A triage that is not complete gets a step to finish it.
+    judge council, are the steps; a fetched dataset (``dataset fetch``) was curated in
+    Datadog, so its rows go straight to training. A triage that is not complete gets a step to finish it.
     Once rows are labeled, training is: its preview needs a model that cannot be chosen
     without guessing, so it is a step. So is the push: with ``--name`` while the dataset
     was never pushed, and without any flag (the receipt names the dataset) while kept rows
@@ -479,7 +507,10 @@ def dataset_next(
         if state.triage == "unreadable"
         else []
     )
-    if not state.labeled:
+    source = dataset.settings().get("source")
+    # A fetched dataset was curated in Datadog: its rows are the ones to train on.
+    fetched = isinstance(source, Mapping) and source.get("kind") == "datadog_dataset"
+    if not state.labeled and not fetched:
         triage_step = step(
             template(
                 "dataset",
@@ -505,6 +536,7 @@ def dataset_next(
             ],
         }
     steps = [label_step] if sampled else []
+    steps += _pull_more_steps(dataset, directory, state)
     steps += triage_steps
     steps += [
         step(
@@ -532,6 +564,24 @@ def dataset_next(
         )
     steps += _push_steps(state, directory)
     return {**shown, "next_command": None, "next_steps": steps}
+
+
+def _pull_more_steps(dataset: DatasetDir, directory: Path, state: Pipeline) -> list[dict[str, str]]:
+    """A step to pull more rows when a review dropped some and fewer than the last pull's
+    ``--target-count`` are kept: a rerun reads on to replace them (dropped rows do not count
+    toward the target)."""
+    limits = read_limits(dataset)
+    if limits is None or limits[2] or not state.dropped or state.kept >= limits[0]:
+        return []  # no pull, or the last one read every matching span
+    return [
+        step(
+            command("dataset", "pull", directory),
+            f"{state.kept} of --target-count {limits[0]} rows are kept (or not reviewed yet) "
+            f"after the review dropped {state.dropped}: pull again to read on and "
+            "replace them (it continues from the last pull), then review the new rows (a "
+            "triage judges only rows without a label)",
+        )
+    ]
 
 
 def merge_next(result: dict[str, Any], following: Mapping[str, Any]) -> dict[str, Any]:
@@ -614,6 +664,66 @@ def import_rows(
                 "added": result.added,
                 "unchanged": result.unchanged,
                 "excluded": result.excluded,
+            },
+        },
+        dataset_next(dataset, directory, summary=summary),
+    )
+
+
+@dataset_app.command(**FETCH_DOC.typer())
+@run_command
+def fetch(
+    directory: DirArgument,
+    project: Annotated[
+        str,
+        typer.Option(
+            "--project",
+            metavar="NAME",
+            help="The project the dataset belongs to.",
+            show_default=False,
+        ),
+    ],
+    name: Annotated[
+        str,
+        typer.Option("--name", metavar="NAME", help="The dataset to fetch.", show_default=False),
+    ],
+    seed: SeedOption = DEFAULT_SEED,
+    validation_fraction: ValidationFractionOption = DEFAULT_VALIDATION_FRACTION,
+    test_fraction: TestFractionOption = DEFAULT_TEST_FRACTION,
+) -> dict[str, Any]:
+    from pup_finetune.data.fetch import fetch_dataset
+    from pup_finetune.datadog.datasets import LLMObsDatasets
+
+    params = SplitParams(seed, validation_fraction, test_fraction)
+    require_dataset_dir(directory)
+    dataset = DatasetDir(directory)
+    notes = _ignore_note(directory)
+    fetched = fetch_dataset(
+        dataset, LLMObsDatasets(Pup()), project=project, name=name, split=params
+    )
+    summary = fetched.added.summary
+    info(
+        f"fetched {fetched.records} records of dataset {name!r} (version "
+        f"{fetched.dataset_version}): {summary['accepted']} rows, {summary['excluded']} excluded"
+    )
+    return merge_next(
+        {
+            "dataset_dir": display_path(dataset.path),
+            "accepted": summary["accepted"],
+            "excluded": summary["excluded"],
+            "excluded_by_code": summary["excluded_by_code"],
+            "splits": summary["splits"],
+            "notes": notes.notes,
+            "warnings": [*notes.warnings, *summary["warnings"]],
+            "fetch": {
+                "project": project,
+                "dataset_name": name,
+                "dataset_id": fetched.dataset_id,
+                "dataset_version": fetched.dataset_version,
+                "records": fetched.records,
+                "added": fetched.added.added,
+                "unchanged": fetched.added.unchanged,
+                "excluded": fetched.added.excluded,
             },
         },
         dataset_next(dataset, directory, summary=summary),
@@ -893,6 +1003,13 @@ def pull_rows(
         },
     )
     params = SplitParams(values["seed"], values["validation_fraction"], values["test_fraction"])
+    # The last pull's limits, for a rerun that leaves them out: it continues toward them.
+    remembered = read_limits(dataset) if dataset.is_dataset() else None
+    ctx = current_context()
+    if remembered is not None and (ctx is None or not given(ctx, "target_count")):
+        target_count = remembered[0]
+    if remembered is not None and (ctx is None or not given(ctx, "max_candidates")):
+        max_candidates = remembered[1]
     options = _pull_options(
         ml_app=values["ml_app"],
         span_name=values["span_name"],
@@ -915,10 +1032,11 @@ def pull_rows(
         )
     notes = _ignore_note(directory)
     collection, added = pull(Pup(), options, dataset, params, progress=info)
+    write_limits(dataset, options, collection)
     summary = added.summary
     following = dataset_next(dataset, directory, summary=summary)
     pipeline_warnings: list[str] = following.pop("warnings", [])
-    if collection.stopped == "max_candidates" and len(collection.rows) < options.target_count:
+    if collection.stopped == "max_candidates" and collection.counted < options.target_count:
         further = replace(options, max_candidates=options.max_candidates * 2)
         following["next_steps"].insert(
             0,
@@ -1440,7 +1558,7 @@ def _collection_warnings(collection: Collection, options: PullOptions) -> list[s
             "no LLM spans matched; check --ml-app, --span-name, --query, --tag and the time "
             "range (--from, --to)"
         )
-    elif len(collection.rows) < options.target_count:
+    elif collection.counted < options.target_count:
         if collection.stopped == "max_candidates":
             warnings.append(
                 f"read --max-candidates {options.max_candidates} spans before "
@@ -1449,7 +1567,7 @@ def _collection_warnings(collection: Collection, options: PullOptions) -> list[s
             )
         else:
             warnings.append(
-                f"only {len(collection.rows)} rows were accepted from every matching span, "
+                f"only {collection.counted} rows were accepted from every matching span, "
                 f"fewer than --target-count {options.target_count}; widen the filter or the "
                 "time range for more"
             )

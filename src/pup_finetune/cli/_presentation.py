@@ -75,6 +75,7 @@ COMMAND_ORDER: Final[tuple[str, ...]] = (
     "dataset label",
     "dataset triage",
     "dataset push",
+    "dataset fetch",
     "benchmark",
     "train",
     "status",

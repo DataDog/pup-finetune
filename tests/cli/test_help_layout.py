@@ -165,6 +165,7 @@ def test_commands_are_listed_in_workflow_order() -> None:
         "label",
         "triage",
         "push",
+        "fetch",
     ]
     assert set(leaves()) == set(COMMAND_ORDER)
     assert leaves() == list(COMMAND_ORDER)
