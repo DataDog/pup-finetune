@@ -465,7 +465,14 @@ def _replay_model(
     config = plan.judge
 
     def judge_fn(case: ReplayCase, generation: Generation) -> Judgment:
-        return judge(case, generation.message, client, config, format_valid=generation.format_valid)
+        return judge(
+            case,
+            generation.message,
+            client,
+            config,
+            format_valid=generation.format_valid,
+            cut_off=generation.stop_reason == "length",
+        )
 
     def replay(samplers: Mapping[str, Sampler]) -> None:
         run_replay(

@@ -76,9 +76,13 @@ SPLITS_FILE = "splits.json"
 SUMMARY_FILE = "summary.json"
 RAW_DIR = "raw"
 
-SourceKind = Literal["import", "datadog"]
+SourceKind = Literal["import", "datadog", "datadog_dataset"]
 
-SOURCE_COMMANDS: Final[dict[str, str]] = {"import": "dataset import", "datadog": "dataset pull"}
+SOURCE_COMMANDS: Final[dict[str, str]] = {
+    "import": "dataset import",
+    "datadog": "dataset pull",
+    "datadog_dataset": "dataset fetch",
+}
 """The command that builds a dataset from each source."""
 
 
@@ -301,6 +305,7 @@ class DatasetDir:
         settings: DatasetSettings,
         retired: Iterable[Exclusion] = (),
         updated: Iterable[TrainingRow] = (),
+        split_overrides: Mapping[str, SplitName] | None = None,
     ) -> AddResult:
         """Add valid ``rows`` and record ``exclusions``, creating the directory if needed.
 
@@ -328,6 +333,10 @@ class DatasetDir:
         also holds, a change to anything but reasoning, or an update that leaves the row
         holding the same conversation as another stored row raises :class:`ValueError`.
 
+        ``split_overrides`` assigns split keys to the splits a source already gave them (the
+        splits recorded on a fetched dataset's records) before new keys are assigned; a key
+        assigned to another split already raises :class:`StateError`.
+
         A validation error (a conflicting id, changed settings) leaves existing dataset files
         unchanged. If writing fails part-way, re-running the same add repairs the directory;
         the exclusions of ``retired`` are written before the rows are, so a retired row is
@@ -354,6 +363,12 @@ class DatasetDir:
             new_rows, unchanged = _merge(existing, incoming, excluded)
             all_rows = [*existing, *new_rows]
             splits = SplitAssignments.load(self.splits_path, settings.split)
+            for key, split in (split_overrides or {}).items():
+                if splits.get(key) not in (None, split):
+                    raise StateError(
+                        f"{self.splits_path} assigns {key!r} to {splits.get(key)}, not {split}"
+                    )
+                splits.assignments[key] = split
             for row in all_rows:
                 splits.assign(split_key(row))
             check_isolation(_group_by_split(all_rows, splits, where=self.splits_path))

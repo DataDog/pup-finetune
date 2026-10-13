@@ -534,6 +534,9 @@ Source lives under `src/pup_finetune/`.
   re-run reads more reasoning for is updated in place, never losing reasoning it has
   (`reasoning_updates`, `DatasetDir.add(updated=...)`), and a stored row that update makes
   repeat another stored row is retired as `duplicate_conversation` (`repeat_retirements`).
+  `fetch.py` is `dataset fetch`: an Agent Observability dataset's current records back into
+  rows (input messages plus expected output, the split from metadata or tags), frozen per
+  dataset version, with the dataset's `push.json` so evaluations publish onto it.
   `push.py` is `dataset push`: `dataset_record`
   (input = the messages before the final assistant message plus tools, expected output = that
   message, metadata = row id, split and source, tags `split:*` and `source:pup-finetune`),

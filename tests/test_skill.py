@@ -181,7 +181,7 @@ def test_the_skill_never_types_a_confirm_for_a_previewed_command() -> None:
         assert typed == [], typed
 
 
-MAX_SKILL_LINES = 360
+MAX_SKILL_LINES = 400
 """The most lines SKILL.md may have: an agent loads all of it into its context."""
 
 

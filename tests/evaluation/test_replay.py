@@ -13,6 +13,7 @@ import json
 import os
 import stat
 import threading
+import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -735,3 +736,60 @@ def test_the_bootstrap_needs_two_trajectories() -> None:
     assert paired_bootstrap_ci([[1.0, 0.0, 1.0]], seed=0) is None
     assert paired_bootstrap_ci([[1.0], []], seed=0) is None
     assert paired_bootstrap_ci([], seed=0) is None
+
+
+def test_generations_cut_off_at_max_tokens_are_counted(tmp_path: Path) -> None:
+    class Rambling(ScriptedSampler):
+        def generate(
+            self, messages: list[ChatMessage], tools: list[ToolSpec], *, max_tokens: int
+        ) -> Generation:
+            found = super().generate(messages, tools, max_tokens=max_tokens)
+            return dataclasses.replace(found, stop_reason="length", format_valid=False)
+
+    outcome = replay(tmp_path / "eval", {"base": Rambling(), "tuned": ScriptedSampler()}, Judge())
+    assert outcome.summary["targets"]["base"]["truncated"] == len(CASES)
+    assert outcome.summary["targets"]["tuned"]["truncated"] == 0
+
+
+class LiveRecorder:
+    """A live publisher that records when it was started and offered results."""
+
+    def __init__(self, sampler_calls: list[str]) -> None:
+        self.sampler_calls = sampler_calls
+        self.started_after_calls: int | None = None
+        self.offered: list[int] = []
+        self.published = False
+
+    def start(self) -> str | None:
+        self.started_after_calls = len(self.sampler_calls)
+        return "https://example.invalid/compare"
+
+    def publish_ready(
+        self,
+        *,
+        cases: Sequence[ReplayCase],
+        generations: Mapping[PairKey, Mapping[str, Any]],
+        results: Mapping[PairKey, Mapping[str, Any]],
+    ) -> None:
+        self.offered.append(len(results))
+
+    def publish(self, **kwargs: Any) -> dict[str, Any]:
+        self.published = True
+        return {"status": "published"}
+
+
+def test_a_live_publisher_starts_before_the_first_pair_and_is_offered_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import pup_finetune.evaluation.replay as replay_module
+
+    monkeypatch.setattr(replay_module, "LIVE_PUBLISH_INTERVAL_S", 0.0)
+    base = ScriptedSampler(on_call=lambda count: time.sleep(0.01))
+    live = LiveRecorder(base.calls)
+    outcome = replay(
+        tmp_path / "eval", {"base": base, "tuned": ScriptedSampler()}, Judge(), publisher=live
+    )
+    assert live.started_after_calls == 0
+    assert live.offered and max(live.offered) <= 2 * len(CASES)
+    assert live.published
+    assert outcome.link == "https://example.invalid/compare"

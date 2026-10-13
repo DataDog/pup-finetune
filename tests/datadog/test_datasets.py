@@ -160,7 +160,9 @@ def test_find_dataset_filters_by_name_and_picks_the_exact_one(
     project_id = api.add_project("pup-finetune")
     api.add_dataset(project_id, "trip planner v2")
     wanted = api.add_dataset(project_id, "trip planner", "about trips")
-    assert client.find_dataset(project_id, "trip planner") == DatasetInfo(wanted.id, "about trips")
+    assert client.find_dataset(project_id, "trip planner") == DatasetInfo(
+        wanted.id, "about trips", current_version=wanted.version
+    )
     assert fake.last.args[1] == f"v2/llm-obs/v1/{project_id}/datasets?filter[name]=trip%20planner"
     assert client.find_dataset(project_id, "trip") is None
 
@@ -281,7 +283,7 @@ def test_list_records_reads_ids_and_metadata(
     dataset = api.add_dataset(project_id, "synthetic-ds")
     client.add_records(project_id, dataset.id, [{"input": {}, "metadata": {"row_id": "r-1"}}])
     assert client.list_records(dataset.id) == RecordsListing(
-        [DatasetRecord(dataset.record_ids[0], {"row_id": "r-1"})]
+        [DatasetRecord(dataset.record_ids[0], {"row_id": "r-1"}, input={})]
     )
     assert fake.last.args == ("llm-obs", "datasets", "records-all", "--dataset-id", dataset.id)
 
@@ -303,7 +305,7 @@ def test_list_records_counts_unreadable_items(fake: FakePup, client: LLMObsDatas
     assert client.list_records("d1") == RecordsListing(
         [
             DatasetRecord("rec-1", {"row_id": "r-1"}),
-            DatasetRecord("rec-3", {}),
+            DatasetRecord("rec-3", {}, input={}),
             DatasetRecord("rec-4", {}),
         ],
         unreadable=len(unreadable),

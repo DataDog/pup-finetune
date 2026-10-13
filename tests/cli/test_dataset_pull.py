@@ -595,7 +595,8 @@ def test_pull_stops_at_the_target_count_and_reads_further_with_a_higher_one(
     assert data["pull"]["stopped"] == "target_count"
     assert data["pull"]["rows_over_target"] == 0
 
-    more = output_json(pull(target))
+    # A rerun without --target-count keeps the last pull's; a higher one reads further.
+    more = output_json(pull(target, "--target-count", "200"))
     assert api.cursors == [None, PAGE_2_CURSOR]
     assert more["accepted"] == FIXTURE_ROWS
     assert (more["pull"]["added"], more["pull"]["unchanged"]) == (2, 2)
@@ -614,7 +615,7 @@ def test_a_rerun_retires_a_stored_prefix_of_a_conversation_on_a_later_page(
     assert first["pull"]["stopped"] == "target_count"
     assert api.cursors == [None]
 
-    result = pull(target)
+    result = pull(target, "--target-count", "200")
     assert result.exit_code == 0, result.stderr
     data = output_json(result)
     rows = [json.loads(line)["id"] for line in (target / "rows.jsonl").read_text().splitlines()]
@@ -765,7 +766,7 @@ def test_a_finished_pull_rerun_later_with_a_higher_target_reads_the_same_window(
     target = tmp_path / "ds"
     assert pull(target, "--target-count", "2").exit_code == 0
     clock.now_ms += 30 * DAY_MS
-    result = pull(target)
+    result = pull(target, "--target-count", "200")
     assert result.exit_code == 0, result.stderr
     assert api.cursors == [None, PAGE_2_CURSOR]
     assert sent_windows(api) == [(WEEK_AGO_MS, NOW_MS)] * 2
@@ -923,3 +924,47 @@ def test_preview_samples_show_the_first_user_and_final_assistant_messages(
     assert sample["first_user_message"].startswith("Synthetic question x")
     assert len(sample["first_user_message"]) == 300
     assert sample["final_assistant_message"] == "Synthetic answer."
+
+
+def test_a_rerun_keeps_the_last_target_and_a_review_s_drops_are_replaced(
+    api: FakeExportApi, tmp_path: Path
+) -> None:
+    target = tmp_path / "ds"
+    assert output_json(pull(target, "--target-count", "2"))["accepted"] == 2
+    again = output_json(pull(target))
+    assert again["accepted"] == 2  # the remembered --target-count 2, not the default
+    assert api.cursors == [None]  # page 1 is cached; nothing further is read
+    first_row = json.loads((target / "rows.jsonl").read_text().splitlines()[0])["id"]
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(json.dumps({"id": first_row, "keep": False, "reason": "synthetic"}) + "\n")
+    labeled = output_json(invoke("label", str(target), "--file", str(labels)))
+    pull_more = [step for step in labeled["next_steps"] if " dataset pull " in step["command"]]
+    assert pull_more and "dropped 1" in pull_more[0]["why"]
+    refilled = output_json(pull(target))
+    assert refilled["pull"]["added"] == 1
+    assert refilled["pipeline"]["rows"]["kept"] == 2
+
+
+def test_the_pull_more_step_stops_once_every_matching_span_was_read(
+    api: FakeExportApi, tmp_path: Path
+) -> None:
+    target = tmp_path / "ds"
+    assert output_json(pull(target, "--target-count", "200"))["pull"]["stopped"] == "exhausted"
+    first_row = json.loads((target / "rows.jsonl").read_text().splitlines()[0])["id"]
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(json.dumps({"id": first_row, "keep": False, "reason": "synthetic"}) + "\n")
+    labeled = output_json(invoke("label", str(target), "--file", str(labels)))
+    assert not [step for step in labeled["next_steps"] if " dataset pull " in step["command"]]
+
+
+def test_a_pull_that_failed_part_way_resumes_toward_the_limits_it_was_given(
+    api: FakeExportApi, tmp_path: Path
+) -> None:
+    target = tmp_path / "ds"
+    assert output_json(pull(target, "--target-count", "2"))["accepted"] == 2
+    api.failures[PAGE_2_CURSOR] = 1
+    assert pull(target, "--target-count", "200").exit_code == 1
+    limits = json.loads((target / "pull_limits.json").read_text())
+    assert limits["target_count"] == 200
+    resumed = output_json(pull(target))  # what the failure's hint runs: no --target-count
+    assert resumed["accepted"] == FIXTURE_ROWS

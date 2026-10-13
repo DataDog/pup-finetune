@@ -82,12 +82,14 @@ DOC = CommandDoc(
         "with --max-rows 20 to calibrate the rubric.",
         "A judge reviews every turn of a row and its tools, since training imitates every "
         "assistant turn. A tie drops a row; a row missing a vote (a failed call) stays "
-        "undecided and unlabeled. Decisions are recorded as labels by judge; rows the agent "
-        "or a person labeled are not reviewed. Votes are appended to DIR/judgments.jsonl as "
-        "they arrive, so a rerun retries only failed calls. The rubric and the judges are "
-        "frozen in DIR/triage.json once votes exist: change them in a new directory or with "
-        "--reset-triage. Row content is sent to each judge's provider: Fireworks serverless "
-        "(the default judges), Anthropic or OpenAI, with that provider's API key; the "
+        "undecided and unlabeled, unless the votes cast already drop it (one drop of two "
+        "judges, two of three), which also skips its other calls. Decisions are recorded as "
+        "labels by judge; rows the agent or a person labeled are not reviewed. Votes are "
+        "appended to DIR/judgments.jsonl as they arrive, so a rerun retries only failed "
+        "calls. The rubric and the judges are frozen in DIR/triage.json once votes exist: "
+        "change them in a new directory or with --reset-triage. Row content is sent to each "
+        "judge's provider: Fireworks serverless (the default judges), Anthropic or OpenAI, "
+        "with that provider's API key; the "
         "preview names every one. --agreement measures the council against rows you "
         "labeled first; --print-template prints a rubric to start from.",
     ),
@@ -304,7 +306,7 @@ def triage_rows(
         "calls_made": report.calls_made,
         "votes_cast": report.votes_cast,
         "calls_failed": len(report.failures),
-        "calls_skipped_too_long": report.calls_skipped,
+        "calls_skipped": report.calls_skipped,
         "failures": triage.failures_shown(report.failures),
         "failure_counts": report.failure_counts(),
         "stale_judge_labels": len(report.stale_labels),
@@ -372,7 +374,7 @@ def _agreement_result(
         "calls_made": report.calls_made,
         "votes_cast": report.votes_cast,
         "calls_failed": len(report.failures),
-        "calls_skipped_too_long": report.calls_skipped,
+        "calls_skipped": report.calls_skipped,
         "failures": triage.failures_shown(report.failures),
         "failure_counts": report.failure_counts(),
         "judgments_file": display_path(dataset.path / triage.JUDGMENTS_FILE),

@@ -53,18 +53,24 @@ _SOURCE = "Agent Observability"
 
 @dataclass(frozen=True, slots=True)
 class DatasetInfo:
-    """A dataset found by name: its id and description."""
+    """A dataset found by name: its id, description and current version (``None`` when the
+    listing does not say)."""
 
     id: str
     description: str
+    current_version: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class DatasetRecord:
-    """A record of a dataset, as listed: its id and metadata."""
+    """A record of a dataset, as listed: its id, metadata, and its input, expected output and
+    tags as stored (``None`` and empty when absent)."""
 
     id: str
     metadata: Mapping[str, Any]
+    input: Any = None
+    expected_output: Any = None
+    tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,7 +145,12 @@ class LLMObsDatasets:
         if item is None:
             return None
         description = item["attributes"].get("description")
-        return DatasetInfo(str(item["id"]), description if isinstance(description, str) else "")
+        version = item["attributes"].get("current_version")
+        return DatasetInfo(
+            str(item["id"]),
+            description if isinstance(description, str) else "",
+            version if type(version) is int else None,
+        )
 
     def create_dataset(
         self, project_id: str, name: str, *, description: str = "", marker: str | None = None
@@ -303,8 +314,17 @@ def _dataset_record(item: Any) -> DatasetRecord | None:
         return None
     metadata = attributes.get("metadata")
     if metadata is None:
-        return DatasetRecord(identifier, {})
-    return DatasetRecord(identifier, metadata) if isinstance(metadata, dict) else None
+        metadata = {}
+    if not isinstance(metadata, dict):
+        return None
+    tags = attributes.get("tags")
+    return DatasetRecord(
+        identifier,
+        metadata,
+        input=attributes.get("input"),
+        expected_output=attributes.get("expected_output"),
+        tags=tuple(tag for tag in tags if isinstance(tag, str)) if isinstance(tags, list) else (),
+    )
 
 
 def _records_added(data: Any, *, expected: int, dataset_id: str) -> RecordsAdded:

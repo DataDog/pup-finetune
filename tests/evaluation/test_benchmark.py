@@ -158,6 +158,8 @@ def test_recommend_without_any_judged_case() -> None:
 def test_the_session_context_fits_the_longest_case(
     plan: BenchmarkPlan, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A budget well under the fake model's context, so the session is sized, not capped.
+    plan = dataclasses.replace(plan, settings=dataclasses.replace(plan.settings, max_tokens=256))
     provider = FakeProvider(plan.runtime)
     monkeypatch.setattr(benchmark_module, "get_provider", lambda name, runtime: provider)
     candidate = plan.candidates[0]

@@ -94,6 +94,8 @@ _ANTHROPIC_SDK_ENV: tuple[str, ...] = (
     "ANTHROPIC_ORGANIZATION_ID",
     "ANTHROPIC_IDENTITY_TOKEN",
     "ANTHROPIC_IDENTITY_TOKEN_FILE",
+    # Where the SDK sends requests when no base URL is passed (a gateway, say).
+    "ANTHROPIC_BASE_URL",
 )
 
 

@@ -32,6 +32,8 @@ from pup_finetune.datadog.experiments import (
     ROOT_SPAN_NAME,
     ExperimentsPublisher,
     PublishSettings,
+    app_url,
+    comparison_url,
 )
 from pup_finetune.errors import ReadOnlyError
 from pup_finetune.evaluation.cases import ReplayCase
@@ -968,3 +970,123 @@ def test_events_that_cannot_be_counted_are_a_warning(
         assert entry["events_indexed"] is None
         assert f"could not count the events of the {target} experiment" in warning
     assert len(report["warnings"]) == 2
+
+
+# --- the comparison link and publishing while the evaluation runs ---------------------------
+
+
+@pytest.mark.parametrize(
+    ("site", "app"),
+    [
+        ("datadoghq.com", "https://app.datadoghq.com"),
+        ("datadoghq.eu", "https://app.datadoghq.eu"),
+        ("ddog-gov.com", "https://app.ddog-gov.com"),
+        ("us3.datadoghq.com", "https://us3.datadoghq.com"),
+        ("https://ap1.datadoghq.com/", "https://ap1.datadoghq.com"),
+    ],
+)
+def test_the_app_of_each_site(site: str, app: str) -> None:
+    assert app_url(site) == app
+
+
+def test_the_comparison_link_names_the_dataset_the_experiments_and_the_project() -> None:
+    assert comparison_url("datadoghq.com", "my project", "ds-1", ["base-1", "tuned-1"]) == (
+        "https://app.datadoghq.com/llm/experiment-comparison?compareDatasetId=ds-1"
+        "&experimentIds=base-1,tuned-1&project=my%20project"
+    )
+
+
+def signed_in(fake: FakePup, site: str = "datadoghq.com") -> None:
+    fake.on("auth", "status", json={"authenticated": True, "site": site})
+
+
+def test_start_creates_the_experiments_and_returns_the_comparison_link(
+    fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
+) -> None:
+    signed_in(fake)
+    evaluation = Evaluation()
+    live = publisher(fake, evaluation, tmp_path / "eval", clock)
+    link = live.start()
+    assert len(api.create_bodies) == 2
+    ids = [json.loads((tmp_path / "eval" / EXPERIMENTS_FILE).read_text())[t] for t in TARGETS]
+    assert link == comparison_url(
+        "datadoghq.com",
+        "pup-finetune-dev",
+        "synthetic-dataset-0001",
+        [entry["experiment_id"] for entry in ids],
+    )
+    report = live.publish(
+        cases=evaluation.cases,
+        generations=evaluation.generations,
+        results=evaluation.results,
+        summary={},
+    )
+    assert len(api.create_bodies) == 2  # the experiments start made are reused
+    assert report["comparison_url"] == link
+
+
+def test_finished_rows_are_published_live_and_rows_with_errors_wait(
+    fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
+) -> None:
+    signed_in(fake)
+    evaluation = Evaluation()
+    failing = evaluation.cases[0]
+    evaluation.fail("tuned", failing.id)
+    live = publisher(fake, evaluation, tmp_path / "eval", clock)
+    live.start()
+    live.publish_ready(
+        cases=evaluation.cases, generations=evaluation.generations, results=evaluation.results
+    )
+    by_target = {
+        experiment.attributes["config"]["target"]: experiment
+        for experiment in api.experiments.values()
+    }
+    per_row = 1 + 2  # a root and two cases
+    assert len(by_target["base"].spans) == 2 * per_row
+    assert len(by_target["tuned"].spans) == per_row  # the row with an error waits
+    assert failing.row_id not in json.dumps(by_target["tuned"].spans)
+    live.publish_ready(
+        cases=evaluation.cases, generations=evaluation.generations, results=evaluation.results
+    )
+    assert len(by_target["base"].spans) == 2 * per_row  # nothing is sent twice
+    report = live.publish(
+        cases=evaluation.cases,
+        generations=evaluation.generations,
+        results=evaluation.results,
+        summary={},
+    )
+    assert report["status"] == "published"
+    assert len(by_target["tuned"].spans) == 2 * per_row
+    assert report["experiments"]["base"]["already_published"] == 2 * per_row
+
+
+def test_a_failure_while_live_waits_for_the_final_publish(
+    fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
+) -> None:
+    signed_in(fake)
+    evaluation = Evaluation()
+    live = publisher(fake, evaluation, tmp_path / "eval", clock)
+    live.start()
+    api.events_failures = {1}
+    live.publish_ready(
+        cases=evaluation.cases, generations=evaluation.generations, results=evaluation.results
+    )
+    live.publish_ready(
+        cases=evaluation.cases, generations=evaluation.generations, results=evaluation.results
+    )
+    assert api.events_calls == 1  # live publishing stopped after the failure
+    report = live.publish(
+        cases=evaluation.cases,
+        generations=evaluation.generations,
+        results=evaluation.results,
+        summary={},
+    )
+    assert report["status"] == "published"
+
+
+def test_without_a_site_there_is_no_link(
+    fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
+) -> None:
+    fake.on("auth", "status", json={"authenticated": True})
+    assert publisher(fake, Evaluation(), tmp_path / "eval", clock).start() is None
+    assert len(api.create_bodies) == 2

@@ -109,7 +109,9 @@ would accept, and why it leaves the rest out. `--tag` repeats, and every tag mus
 `7d`, `24h`, `now-7d`, `now`.
 
 The first pull freezes the filter and the time window, so `pup finetune dataset pull datasets/my-agent`
-with no flags resumes it over the same window. Every dataset command reports a `pipeline`
+with no flags resumes it over the same window and limits. `--target-count` is the number of
+rows to keep: rows a review drops do not count, so pulling again after a review reads on to
+replace them. Every dataset command reports a `pipeline`
 block (rows kept, dropped and unlabeled, triage, push), and its `next_command` follows from it.
 
 ### Review the rows
@@ -133,7 +135,9 @@ pup finetune dataset triage datasets/my-agent --rubric rubric.md
 
 `--agreement` measures how often the council agrees with the rows you labeled, and labels
 nothing. With the two default judges, a row is kept only when both vote keep; add a third
-judge with `--judges` for a true majority.
+judge with `--judges` for a true majority. A row is dropped as soon as the votes cast decide
+it (one drop of two judges, two of three), so its remaining calls are not made, and a failed
+call does not leave it undecided.
 
 ### Push the dataset
 
@@ -143,6 +147,14 @@ dataset, so a later push of new rows needs no flag.
 
 ```sh
 pup finetune dataset push datasets/my-agent --name my-agent-sft
+```
+
+The dataset in Datadog can then be curated there: records edited, added or removed in the
+product. To train on it as it stands, fetch it into a new directory, which records the
+dataset's version and gets its push receipt, so evaluations publish onto it:
+
+```sh
+pup finetune dataset fetch datasets/my-agent-v2 --project pup-finetune --name my-agent-sft
 ```
 
 ## Train
@@ -221,8 +233,15 @@ result leads with its `headline`:
 
 An interval (`ci95`) that includes 0 is not a clear difference. The result also has each
 tool-call metric per model and, when the dataset was pushed, the two Agent Observability
-experiments it published. Replay measures agreement with the recorded behavior, not task
-success. Rerun the command to continue an evaluation; other settings need a new `--out-dir`.
+experiments it published. They are created when the evaluation starts, which prints a link to
+compare them (`publication.comparison_url`), and fill in as cases finish. Replay measures
+agreement with the recorded behavior, not task success. Rerun the command to continue an
+evaluation; other settings need a new `--out-dir`.
+
+A generation cut off at `--max-tokens` fails, so the result counts them per model
+(`headline.truncated`) and warns. A reasoning base model can spend the whole budget thinking
+while a tuned model that learned to answer directly does not: raise `--max-tokens` before
+you read the delta.
 
 ## Deploy
 

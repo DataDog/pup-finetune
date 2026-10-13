@@ -42,6 +42,12 @@ class ExclusionCode(StrEnum):
     UNREADABLE_SPAN = "unreadable_span"
     """An exported item that does not fit the LLM span model at all (for example no trace id),
     so it could not be converted."""
+    UNREADABLE_RECORD = "unreadable_record"
+    """A fetched dataset record whose input is not chat messages (``{"messages": [...]}``)
+    or whose expected output is not an assistant message, so it is not a conversation."""
+    SPLIT_CONFLICT = "split_conflict"
+    """A fetched dataset record names a split other than the one another record of the same
+    trace names; a trace is never in two splits."""
 
 
 ExclusionReason = RowErrorCode | ExclusionCode
@@ -85,6 +91,14 @@ EXPLANATIONS: Mapping[ExclusionReason, str] = {
     ExclusionCode.UNREADABLE_SPAN: (
         "the exported span does not have the fields of an LLM span (such as its trace id), "
         "so it could not be converted"
+    ),
+    ExclusionCode.UNREADABLE_RECORD: (
+        "the dataset record's input is not chat messages, or its expected output is not an "
+        "assistant message, so it is not a conversation to train on"
+    ),
+    ExclusionCode.SPLIT_CONFLICT: (
+        "the dataset record names another split than a record of the same trace does, and a "
+        "trace is never in two splits"
     ),
 }
 """A short, human-readable explanation of every exclusion code."""

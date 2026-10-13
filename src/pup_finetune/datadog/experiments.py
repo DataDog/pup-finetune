@@ -26,6 +26,13 @@ Metrics are stamped with the time they are submitted, since the API refuses time
 than a day old. At most :data:`SPANS_PER_REQUEST` spans go in one request, with their
 metrics, and a row's spans stay together where they fit.
 
+Publishing starts with the evaluation. :meth:`ExperimentsPublisher.start` creates (or
+adopts) both experiments before the first pair is generated and returns the comparison link
+(:func:`comparison_url`), and :meth:`ExperimentsPublisher.publish_ready` sends each row as
+soon as every one of its cases has an ``ok`` result, so the comparison fills in while the
+evaluation runs. A row with an error result waits for :meth:`ExperimentsPublisher.publish`,
+since a rerun may retry it and a span keeps the result it was first sent with.
+
 Publishing resumes. Span and trace ids are derived (uuid5) from the evaluation's identity,
 the target and the row or case, so they are the same in every run of one evaluation. The
 evaluation directory keeps, both ``0600``:
@@ -94,7 +101,9 @@ __all__ = [
     "LLMObsExperiments",
     "PublishSettings",
     "SpanGroup",
+    "app_url",
     "build_span_groups",
+    "comparison_url",
     "experiment_name",
 ]
 
@@ -125,6 +134,30 @@ def _utc_now() -> datetime:
 def experiment_name(target: str, run_id: str) -> str:
     """The name the experiment of ``target`` is created with (the API may make it unique)."""
     return f"pup-finetune-{target}-{run_id}"
+
+
+_APP_HOSTS: Final = {
+    "datadoghq.com": "app.datadoghq.com",
+    "datadoghq.eu": "app.datadoghq.eu",
+    "ddog-gov.com": "app.ddog-gov.com",
+}
+"""The sites whose web app is not served on the site's own host."""
+
+
+def app_url(site: str) -> str:
+    """The web app of the Datadog ``site`` (``datadoghq.com``, ``us3.datadoghq.com``...)."""
+    host = site.strip().lower().removeprefix("https://").strip("/")
+    return f"https://{_APP_HOSTS.get(host, host)}"
+
+
+def comparison_url(site: str, project: str, dataset_id: str, experiment_ids: Sequence[str]) -> str:
+    """The Agent Observability page comparing ``experiment_ids`` (in that order) on the
+    dataset ``dataset_id`` of ``project`` (its name)."""
+    ids = ",".join(quote(identifier, safe="") for identifier in experiment_ids)
+    return (
+        f"{app_url(site)}/llm/experiment-comparison?compareDatasetId={quote(dataset_id, safe='')}"
+        f"&experimentIds={ids}&project={quote(project, safe='')}"
+    )
 
 
 # --- the API ------------------------------------------------------------------------------
@@ -644,7 +677,10 @@ class ExperimentsPublisher:
     ) -> None:
         if batch_size < 1:
             raise ValueError("batch_size must be at least 1")
+        self.pup = pup
         self.api = LLMObsExperiments(pup)
+        self.link: str | None = None
+        self._live_failed = False
         self.settings = settings
         self.out_dir = Path(out_dir)
         self.runtime = runtime
@@ -684,6 +720,7 @@ class ExperimentsPublisher:
             "dataset_id": settings.dataset_id,
             "dataset_version": settings.push.dataset_version,
             "experiments": {},
+            "comparison_url": self.link,
             "warnings": [],
         }
         rerun = (
@@ -695,6 +732,8 @@ class ExperimentsPublisher:
             experiments = {
                 target: self._experiment(target, report["warnings"]) for target in TARGETS
             }
+            self._set_link(list(experiments.values()))
+            report["comparison_url"] = self.link
             for target, experiment in experiments.items():
                 report["experiments"][target] = self._submit(
                     target, experiment, cases, generations, results, report["warnings"]
@@ -718,6 +757,73 @@ class ExperimentsPublisher:
     def _check_cancel(self) -> None:
         if self.cancel.is_set():
             raise _PublishCancelled
+
+    # --- while the evaluation runs --------------------------------------------------------
+
+    def start(self) -> str | None:
+        """Create (or adopt) every target's experiment, and the comparison link to watch.
+
+        Called before the first pair. A failure is not raised: it is remembered for
+        :meth:`publish`, which tries again and reports it, and nothing is published live.
+        """
+        require_writable(self.runtime, "publishing the evaluation as experiments")
+        try:
+            experiments = [self._experiment(target, []) for target in TARGETS]
+        except (ExternalError, _PublishCancelled):
+            self._live_failed = True
+            return None
+        self._set_link(experiments)
+        return self.link
+
+    def _set_link(self, experiments: Sequence[CreatedExperiment]) -> None:
+        """Set :attr:`link` to the comparison of ``experiments`` and print it, once; left
+        ``None`` when pup cannot say which site it is signed in to."""
+        if self.link is not None:
+            return
+        try:
+            site = self.pup.auth_status().get("site")
+        except ExternalError:
+            site = None
+        if isinstance(site, str) and site:
+            self.link = comparison_url(
+                site,
+                self.settings.push.project,
+                self.settings.dataset_id,
+                [experiment.id for experiment in experiments],
+            )
+            self.progress(f"comparison: {self.link}")
+
+    def publish_ready(
+        self,
+        *,
+        cases: Sequence[ReplayCase],
+        generations: Mapping[PairKey, Mapping[str, Any]],
+        results: Mapping[PairKey, Mapping[str, Any]],
+    ) -> None:
+        """Send the rows whose cases all have an ``ok`` result and are not sent yet.
+
+        Never raises: a failure stops live publishing, and :meth:`publish` sends the rest.
+        """
+        if self._live_failed or self.cancel.is_set():
+            return
+        by_row: dict[str, list[ReplayCase]] = {}
+        for case in cases:
+            by_row.setdefault(case.row_id, []).append(case)
+        try:
+            for target in TARGETS:
+                ready = [
+                    case
+                    for row in by_row.values()
+                    if all(
+                        (results.get((target, case.id)) or {}).get("status") == "ok" for case in row
+                    )
+                    for case in row
+                ]
+                if ready:
+                    experiment = self._experiment(target, [])
+                    self._submit(target, experiment, ready, generations, results, [])
+        except (ExternalError, _PublishCancelled):
+            self._live_failed = True
 
     # --- experiments ----------------------------------------------------------------------
 

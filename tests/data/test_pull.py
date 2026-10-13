@@ -18,6 +18,7 @@ from pup_finetune.data import dataset_dir, jsonl
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.exclusions import Exclusion, ExclusionCode
 from pup_finetune.data.pull import (
+    LIMITS_FILE,
     Collection,
     PullOptions,
     collect,
@@ -551,13 +552,16 @@ def test_a_pull_fails_while_another_holds_the_raw_cache(tmp_path: Path) -> None:
     dataset = DatasetDir(tmp_path / "ds")
     pull_into(dataset, target_count=1)
     rows = dataset.rows_path.read_bytes()
+    limits = (dataset.path / LIMITS_FILE).read_bytes()
     api = FakeExportApi(two_page_conversation())
     pup = api.install(FakePup()).client()
-    options = PullOptions(SpanQuery(ml_app="synthetic"))
+    options = PullOptions(SpanQuery(ml_app="synthetic"), target_count=7)
     with DirectoryLock(dataset.raw_path), pytest.raises(LockBusy):
         pull(pup, options, dataset, SplitParams())
     assert api.requests == []
     assert dataset.rows_path.read_bytes() == rows
+    # The refused pull's limits are not what a rerun of the active one continues toward.
+    assert (dataset.path / LIMITS_FILE).read_bytes() == limits
 
 
 class LockProbingDataset(DatasetDir):
@@ -956,3 +960,40 @@ def test_a_first_pull_resolves_at_the_clock(tmp_path: Path) -> None:
         NOW_MS,
     )
     assert not dataset.path.exists()
+
+
+def test_dropped_rows_do_not_count_toward_the_target() -> None:
+    dropped = frozenset({"trace-1:synthetic-span-1", "trace-2:synthetic-span-2"})
+    api = FakeExportApi(three_pages())
+    pup = api.install(FakePup()).client()
+    collection = collect(
+        pup, PullOptions(SpanQuery(ml_app="synthetic"), target_count=3), dropped=dropped
+    )
+    assert api.cursors == [None, "cursor-2", "cursor-3"]
+    assert [row.id for row in collection.rows] == [
+        "trace-1:synthetic-span-1",
+        "trace-2:synthetic-span-2",
+        "trace-3:synthetic-span-3",
+        "trace-4:synthetic-span-4",
+        "trace-5:synthetic-span-5",
+    ]
+    assert collection.stopped == "target_count"
+
+
+def test_a_rerun_after_a_review_reads_on_to_replace_the_dropped_rows(tmp_path: Path) -> None:
+    from pup_finetune.data.labels import Label
+
+    dataset = DatasetDir(tmp_path / "ds")
+
+    def pull_three() -> Any:
+        api = FakeExportApi(three_pages())
+        pup = api.install(FakePup()).client()
+        options = PullOptions(SpanQuery(ml_app="synthetic"), target_count=3)
+        return pull(pup, options, dataset, SplitParams())
+
+    pull_three()
+    assert len(dataset.rows()) == 3
+    dataset.append_labels([Label(id="trace-2:synthetic-span-2", keep=False, reason="synthetic")])
+    _, added = pull_three()
+    assert added.added == 1
+    assert len(dataset.kept_rows()) == 3

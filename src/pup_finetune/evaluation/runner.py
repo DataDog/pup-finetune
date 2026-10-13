@@ -133,7 +133,7 @@ __all__ = [
 DEFAULT_OUT_DIR_NAME: Final = "eval"
 DEFAULT_MAX_CASES_PER_TRAJECTORY: Final = 2
 DEFAULT_CONCURRENCY: Final = 4
-DEFAULT_MAX_TOKENS: Final = 1024
+DEFAULT_MAX_TOKENS: Final = 4096
 DEFAULT_SEED: Final = 0
 CALIBRATION_CASES: Final = 4
 """How many cases :func:`~pup_finetune.evaluation.judge.calibrate` judges, three times each
@@ -867,7 +867,14 @@ def replay(
     config = plan.judge
 
     def judge_fn(case: ReplayCase, generation: Generation) -> Judgment:
-        return judge(case, generation.message, client, config, format_valid=generation.format_valid)
+        return judge(
+            case,
+            generation.message,
+            client,
+            config,
+            format_valid=generation.format_valid,
+            cut_off=generation.stop_reason == "length",
+        )
 
     return run_replay(
         plan.cases,
@@ -891,10 +898,16 @@ def _publication(plan: EvalPlan, outcome: ReplaySummary) -> dict[str, Any]:
         return dict(outcome.publication)
     status = plan.publishing.status()
     if status["status"] == "planned" and not outcome.complete:
+        published = (
+            "rows finished before the last live publish are published; the rest are"
+            if outcome.link
+            else "it is"
+        )
         return {
             "status": "pending",
-            "reason": "the evaluation is published once every case has a result; run "
+            "reason": f"{published} published once every case has a result; run "
             "next_command to finish it",
+            "comparison_url": outcome.link,
         }
     return status
 
@@ -942,6 +955,15 @@ def replay_result(
                 ". Spans already published keep the results they were sent with, these errors "
                 "included: a retry updates the local results only, so evaluate into a new "
                 "--out-dir to publish experiments with every result"
+            )
+    for name, target in summary["targets"].items():
+        truncated = int(target.get("truncated") or 0)
+        if truncated:
+            warnings.append(
+                f"{truncated} of the {name} model's generations reached --max-tokens "
+                f"({plan.settings.max_tokens}) and were cut off; they count as failures, so "
+                "evaluate into a new --out-dir with a higher --max-tokens to compare the "
+                "models on their answers rather than their length"
             )
     no_verdict = sum(int(target["judge_no_verdict"]) for target in summary["targets"].values())
     if no_verdict:
@@ -1079,7 +1101,7 @@ def headline(summary: Mapping[str, Any]) -> dict[str, Any]:
         found = (targets.get(name) or {}).get("judge_pass")
         return found.get("rate") if isinstance(found, Mapping) else None
 
-    return {
+    found: dict[str, Any] = {
         "judge_pass_rate": {
             "base": rate("base"),
             "tuned": rate("tuned"),
@@ -1090,6 +1112,14 @@ def headline(summary: Mapping[str, Any]) -> dict[str, Any]:
         "cases": summary.get("n_cases"),
         "trajectories": summary.get("n_trajectories"),
     }
+    truncated = {
+        name: int(target.get("truncated") or 0)
+        for name, target in targets.items()
+        if isinstance(target, Mapping) and target.get("truncated")
+    }
+    if truncated:
+        found["truncated"] = truncated
+    return found
 
 
 def _out_dir_key(out_dir: Path, run_dir: Path) -> str:

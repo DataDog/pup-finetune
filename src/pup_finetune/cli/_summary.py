@@ -409,6 +409,8 @@ def _publication(result: Mapping[str, Any]) -> str | None:
     if not isinstance(publication, Mapping):
         return None
     status = publication.get("status")
+    link = publication.get("comparison_url")
+    compare = f"; compare them at {link}" if isinstance(link, str) and link else ""
     if status == "published":
         experiments = publication.get("experiments") or {}
         names = [
@@ -416,14 +418,16 @@ def _publication(result: Mapping[str, Any]) -> str | None:
             for entry in experiments.values()
             if isinstance(entry, Mapping) and entry.get("name")
         ]
-        return "published as experiments " + " and ".join(names) if names else "published"
-    return {
+        found = "published as experiments " + " and ".join(names) if names else "published"
+        return found + compare
+    line = {
         "skipped": "not published (see the warning above)",
         "disabled": "not published (publishing was turned off)",
         "failed": "publishing failed; next publishes the rest",
         "cancelled": "publishing was cancelled; next publishes the rest",
-        "pending": "not published yet: it is published once every case has a result",
+        "pending": "not fully published yet: the rest is published once every case has a result",
     }.get(str(status))
+    return None if line is None else line + compare
 
 
 def _evaluation_parts(result: Mapping[str, Any], *, compact: bool) -> Summary:
