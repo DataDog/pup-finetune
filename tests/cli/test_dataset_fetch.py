@@ -29,8 +29,12 @@ runner = CliRunner()
 
 
 @pytest.fixture
-def api(monkeypatch: pytest.MonkeyPatch) -> FakeDatasetsApi:
-    fake = FakePup()
+def fake() -> FakePup:
+    return FakePup()
+
+
+@pytest.fixture
+def api(fake: FakePup, monkeypatch: pytest.MonkeyPatch) -> FakeDatasetsApi:
     remote = FakeDatasetsApi()
     remote.install(fake)
     monkeypatch.setattr(dataset_cli, "Pup", fake.client)
@@ -176,3 +180,34 @@ def test_a_copied_record_keeps_its_own_row(
     result = fetch(tmp_path / "fetched")
     assert result.exit_code == 0, result.stderr
     assert "record-copy" in rows(tmp_path / "fetched")
+
+
+def test_a_split_named_only_by_a_tag_is_kept(
+    api: FakeDatasetsApi, pushed: Path, tmp_path: Path
+) -> None:
+    remote = api.dataset_named(NAME)
+    record = next(r for r in remote.records if r["metadata"]["split"] == "test")
+    record["metadata"].pop("split")
+    assert "split:test" in record["tags"]
+    target = tmp_path / "fetched"
+    assert fetch(target).exit_code == 0
+    trace = record["metadata"]["trace_id"]
+    assert splits(target)[trace] == "test"
+
+
+def test_a_dataset_that_changes_while_it_is_read_is_refused(
+    fake: FakePup, api: FakeDatasetsApi, pushed: Path, tmp_path: Path
+) -> None:
+    listed = fake.handler("llm-obs", "datasets", "records-all")
+    assert listed is not None
+
+    def edited_meanwhile(call: Any) -> Any:
+        answer = listed(call)
+        api.dataset_named(NAME).version += 1  # someone edits the dataset during the read
+        return answer
+
+    fake.on("llm-obs", "datasets", "records-all", handler=edited_meanwhile)
+    result = fetch(tmp_path / "fetched")
+    assert result.exit_code == 1
+    assert "changed while its records were read" in result.stderr
+    assert not (tmp_path / "fetched" / "rows.jsonl").exists()

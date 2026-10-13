@@ -1253,6 +1253,7 @@ def run_triage(
             pool.shutdown(wait=False)
         # A call that failed on a row another judge found too long needs no retry: the row is
         # decided, and the next run makes no call for it.
+        attempted = cast + len(failures)
         early = plan.references is None
         failures = [
             f
@@ -1265,7 +1266,7 @@ def run_triage(
             )
             agreement = measure_agreement(decisions, plan.references, plan.votes, plan.judges)
             return TriageReport(
-                calls_made=cast + len(failures),
+                calls_made=attempted,
                 votes_cast=cast,
                 failures=tuple(failures),
                 decisions=decisions,
@@ -1298,7 +1299,7 @@ def run_triage(
         ]
         report = apply_labels(dataset, labels, locked=True) if labels else None
     return TriageReport(
-        calls_made=cast + len(failures),
+        calls_made=attempted,
         votes_cast=cast,
         failures=tuple(failures),
         decisions=decisions,

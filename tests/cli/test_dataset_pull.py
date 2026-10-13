@@ -955,3 +955,16 @@ def test_the_pull_more_step_stops_once_every_matching_span_was_read(
     labels.write_text(json.dumps({"id": first_row, "keep": False, "reason": "synthetic"}) + "\n")
     labeled = output_json(invoke("label", str(target), "--file", str(labels)))
     assert not [step for step in labeled["next_steps"] if " dataset pull " in step["command"]]
+
+
+def test_a_pull_that_failed_part_way_resumes_toward_the_limits_it_was_given(
+    api: FakeExportApi, tmp_path: Path
+) -> None:
+    target = tmp_path / "ds"
+    assert output_json(pull(target, "--target-count", "2"))["accepted"] == 2
+    api.failures[PAGE_2_CURSOR] = 1
+    assert pull(target, "--target-count", "200").exit_code == 1
+    limits = json.loads((target / "pull_limits.json").read_text())
+    assert limits["target_count"] == 200
+    resumed = output_json(pull(target))  # what the failure's hint runs: no --target-count
+    assert resumed["accepted"] == FIXTURE_ROWS

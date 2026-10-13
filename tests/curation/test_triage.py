@@ -980,9 +980,14 @@ def test_two_drop_votes_decide_a_row_whose_third_call_failed(tmp_path: Path) -> 
             return ExternalError("unreachable", source="x") if judge == J3 else False
         return True
 
-    report = run_triage(plan, FakeCouncil(policy), concurrency=1)
+    council = FakeCouncil(policy)
+    report = run_triage(plan, council, concurrency=1)
     assert report.counts() == {"keep": 1, "drop": 1, "undecided": 0}
     assert dataset.labels()[dropped].keep is False
+    # Every call made is counted, the failed one on the decided row included; it is not
+    # reported as a failure to retry.
+    assert report.calls_made == len(council.calls) == 6
+    assert report.failures == ()
     # A rerun has nothing left to ask about the row: two of three drop votes decided it.
     again = plan_triage(dataset, RUBRIC, (J1, J2, J3))
     assert [row.id for row, _ in again.pending] == []

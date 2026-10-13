@@ -17,8 +17,9 @@ canonical row, validated as ``dataset import`` validates rows:
 - the row id is ``metadata.row_id`` (as ``dataset push`` writes it), else the record id, and
   the record id too when an earlier record already has that row id (a copied record); the
   source is ``metadata``'s ``trace_id``, ``span_id``, ``ml_app`` and ``source_model``;
-- the split is ``metadata.split``; a record without one is assigned as any new row is, by its
-  trace. Two records of one trace that name different splits are excluded as
+- the split is ``metadata.split``, else a ``split:<name>`` tag (``dataset push`` writes both;
+  a record edited in the product may keep only the tag); a record without one is assigned as
+  any new row is, by its trace. Two records of one trace that name different splits are excluded as
   ``split_conflict``.
 
 A record that is not a conversation is excluded as ``unreadable_record``, and an invalid one
@@ -35,7 +36,7 @@ from __future__ import annotations
 import secrets
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any, Final, cast
 
 from pup_finetune.data.dataset_dir import AddResult, DatasetDir, DatasetSettings, SourceKind
 from pup_finetune.data.exclusions import Exclusion, ExclusionCode
@@ -55,6 +56,9 @@ from pup_finetune.storage import atomic_write_json, settings_hash
 __all__ = ["SOURCE_KIND", "FetchResult", "fetch_dataset", "rows_from_records"]
 
 SOURCE_KIND: SourceKind = "datadog_dataset"
+
+
+_SPLIT_TAG: Final = "split:"
 
 
 @dataclass(slots=True)
@@ -81,7 +85,12 @@ class FetchResult:
 
 def _named_split(record: DatasetRecord) -> SplitName | None:
     named = record.metadata.get("split")
-    return cast(SplitName, named) if named in SPLITS else None
+    if named in SPLITS:
+        return cast(SplitName, named)
+    for tag in record.tags:
+        if tag.startswith(_SPLIT_TAG) and tag[len(_SPLIT_TAG) :] in SPLITS:
+            return cast(SplitName, tag[len(_SPLIT_TAG) :])
+    return None
 
 
 def _text(value: Any) -> str | None:
@@ -195,6 +204,14 @@ def fetch_dataset(
             "read as records, which may be records the dataset needs",
             source="agent observability",
             hint="check the dataset in Agent Observability, then fetch again",
+        )
+    after = datasets.find_dataset(project_id, name)
+    if after is None or after.id != info.id or after.current_version != info.current_version:
+        raise ExternalError(
+            f"dataset {name!r} changed while its records were read (version "
+            f"{info.current_version}, then {None if after is None else after.current_version})",
+            source="agent observability",
+            hint="fetch again into a new directory to read one version",
         )
     fetched = rows_from_records(listing.records)
     settings = DatasetSettings(

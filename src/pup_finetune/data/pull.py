@@ -651,6 +651,7 @@ def pull(
     options = resolve_window(options, dataset, clock)
     settings = options.dataset_settings(split)
     dataset.create_or_check(settings)
+    write_limits(dataset, options)
     raw = make_private_dir(dataset.raw_path)
     # The raw/ lock is held through the add, so no other pull changes the stored rows between
     # the read below and the add. DatasetDir.add locks the dataset directory itself, through
@@ -680,6 +681,7 @@ def pull(
             retired=retired,
             updated=updated,
         )
+    write_limits(dataset, options, exhausted=collection.stopped == "exhausted")
     return collection, added
 
 
@@ -705,15 +707,16 @@ def read_limits(dataset: DatasetDir) -> tuple[int, int, bool] | None:
     return None
 
 
-def write_limits(dataset: DatasetDir, options: PullOptions, collection: Collection) -> None:
+def write_limits(dataset: DatasetDir, options: PullOptions, *, exhausted: bool = False) -> None:
     """Record ``options``' limits as ``dataset``'s last pull's, and whether it read every
-    matching span."""
+    matching span. :func:`pull` records them when it starts, so the rerun that resumes a pull
+    which failed part-way continues toward the limits it was given, and again once it ends."""
     atomic_write_json(
         dataset.path / LIMITS_FILE,
         {
             "target_count": options.target_count,
             "max_candidates": options.max_candidates,
-            "exhausted": collection.stopped == "exhausted",
+            "exhausted": exhausted,
         },
     )
 

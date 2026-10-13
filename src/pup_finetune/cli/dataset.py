@@ -54,7 +54,6 @@ from pup_finetune.data.pull import (
     read_limits,
     rerun_command,
     resolve_window,
-    write_limits,
 )
 from pup_finetune.data.push import (
     IN_FLIGHT_SETTLE,
@@ -1032,7 +1031,6 @@ def pull_rows(
         )
     notes = _ignore_note(directory)
     collection, added = pull(Pup(), options, dataset, params, progress=info)
-    write_limits(dataset, options, collection)
     summary = added.summary
     following = dataset_next(dataset, directory, summary=summary)
     pipeline_warnings: list[str] = following.pop("warnings", [])
