@@ -48,13 +48,14 @@ import dataclasses
 import hashlib
 import random
 import threading
+import time
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, wait
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final, Literal, Protocol, get_args
+from typing import Any, Final, Literal, Protocol, get_args, runtime_checkable
 
 from pup_finetune.concurrency import DaemonPool
 from pup_finetune.errors import SettingsConflict, StateError
@@ -118,6 +119,8 @@ SUMMARY_FILE: Final = "summary.json"
 CALIBRATION_FILE: Final = "calibration.json"
 
 _POLL_S: Final = 0.1
+LIVE_PUBLISH_INTERVAL_S: Final = 30.0
+"""How often a :class:`LivePublisher` is offered the rows finished since it last published."""
 
 JudgeFn = Callable[[ReplayCase, Generation], Judgment]
 """Judges one generation of a case; raises when the judge cannot be reached (an outage)."""
@@ -369,6 +372,28 @@ class Publisher(Protocol):
     ) -> dict[str, Any] | None: ...
 
 
+@runtime_checkable
+class LivePublisher(Protocol):
+    """A :class:`Publisher` that also publishes while the evaluation runs.
+
+    :meth:`start` is called before the first pair, with the directory's lock held: it makes
+    whatever the evaluation publishes into (for experiments, creates them) and returns a link
+    to watch it, or ``None``. :meth:`publish_ready` is offered the results so far, every
+    :data:`LIVE_PUBLISH_INTERVAL_S` while pairs finish, and publishes what is final; it never
+    raises (a failure waits for :meth:`Publisher.publish`, which reports it).
+    """
+
+    def start(self) -> str | None: ...
+
+    def publish_ready(
+        self,
+        *,
+        cases: Sequence[ReplayCase],
+        generations: Mapping[PairKey, Mapping[str, Any]],
+        results: Mapping[PairKey, Mapping[str, Any]],
+    ) -> None: ...
+
+
 class NoopPublisher:
     """The default :class:`Publisher`: publishes nothing."""
 
@@ -401,6 +426,8 @@ class ReplaySummary:
     cancelled: bool
     out_dir: Path
     publication: dict[str, Any] | None = None
+    link: str | None = None
+    """Where to watch what is published (a :class:`LivePublisher`'s), even when incomplete."""
 
     @property
     def complete(self) -> bool:
@@ -584,7 +611,9 @@ def run_replay(
     "error"}`` per finished pair (``no_verdict`` the judge's answer's flaw, if it held no
     verdict; ``error`` the error result's ``{"stage", "type", "message"}``).
     ``publisher`` gets the evaluation once every pair has a result, and what it reports is
-    the outcome's ``publication``. Returns the summary also written to ``summary.json``.
+    the outcome's ``publication``; a :class:`LivePublisher` also starts before the first pair
+    (its link is the outcome's ``link``) and publishes finished rows as the pairs run.
+    Returns the summary also written to ``summary.json``.
     """
     max_tokens, seed = identity.get("max_tokens"), identity.get("seed")
     if concurrency < 1:
@@ -613,14 +642,33 @@ def run_replay(
         )
         if missing:
             raise ValueError(f"no sampler for {', '.join(missing)}, which has cases to generate")
-        _run_pool(replay, todo, concurrency=concurrency, on_progress=on_progress)
+        live = publisher if isinstance(publisher, LivePublisher) else None
+        link = live.start() if live is not None else None
+
+        def publish_ready() -> None:
+            if live is not None:
+                live.publish_ready(
+                    cases=cases, generations=replay.generations, results=replay.results
+                )
+
+        _run_pool(
+            replay,
+            todo,
+            concurrency=concurrency,
+            on_progress=on_progress,
+            on_tick=publish_ready if live is not None else None,
+        )
         summary = summarize(cases, replay.results, replay.generations, seed=seed, targets=targets)
         eval_dir.write_summary(summary)
         pending = sum(
             1 for case in cases for target in targets if (target, case.id) not in replay.results
         )
         outcome = ReplaySummary(
-            summary=summary, pending=pending, cancelled=cancel.is_set(), out_dir=eval_dir.path
+            summary=summary,
+            pending=pending,
+            cancelled=cancel.is_set(),
+            out_dir=eval_dir.path,
+            link=link,
         )
         if outcome.complete:
             publication = (publisher or NoopPublisher()).publish(
@@ -640,8 +688,12 @@ def _run_pool(
     *,
     concurrency: int,
     on_progress: ProgressSink | None,
+    on_tick: Callable[[], None] | None = None,
 ) -> None:
     """Run ``todo`` on ``concurrency`` threads until done or ``replay.cancel`` is set.
+
+    ``on_tick``, when given, runs in this thread every :data:`LIVE_PUBLISH_INTERVAL_S` while
+    pairs finish, between collecting them (it must not raise).
 
     On cancel, the pairs not started are dropped and the ones in flight finish. An interrupt
     in this thread (a second Ctrl-C) sets cancel, closes the workers' writes (waiting only
@@ -685,10 +737,14 @@ def _run_pool(
         for target, case in todo:
             futures[pool.submit(replay.pair, target, case)] = (target, case)
         pending: set[Future[dict[str, Any] | None]] = set(futures)
+        ticked = time.monotonic()
         while pending and not replay.cancel.is_set():
             done, pending = wait(pending, timeout=_POLL_S, return_when=FIRST_COMPLETED)
             for future in done:
                 finish(future)
+            if on_tick is not None and time.monotonic() - ticked >= LIVE_PUBLISH_INTERVAL_S:
+                on_tick()
+                ticked = time.monotonic()
         for future in pending:
             future.cancel()
         for future in pending:
@@ -790,12 +846,14 @@ def _target_summary(
         by_trajectory[str(result.get("row_id"))].append(_passed(result))
     means = [sum(values) / len(values) for values in by_trajectory.values()]
     tokens = {"prompt_tokens": 0, "completion_tokens": 0, "generations": 0}
+    truncated = 0
     for case in cases:
         generation = generations.get((target, case.id))
         if generation is not None:
             tokens["prompt_tokens"] += int(generation.get("prompt_tokens") or 0)
             tokens["completion_tokens"] += int(generation.get("completion_tokens") or 0)
             tokens["generations"] += 1
+            truncated += generation.get("stop_reason") == "length"
     return {
         "completed": len(ok),
         "errors": sum(errors.values()),
@@ -805,6 +863,7 @@ def _target_summary(
         "judge_pass": _rate(sum(_passed(result) for result in ok), len(ok)),
         "judge_no_verdict": sum(unanswered.values()),
         "judge_no_verdict_by_error": dict(sorted(unanswered.items())),
+        "truncated": truncated,
         "metrics": aggregate(result.get("metrics") or {} for result in ok),
         "trajectory_agreement": {
             "mean": sum(means) / len(means) if means else None,
@@ -835,7 +894,8 @@ def summarize(
     ``tuned_minus_base`` is the mean paired difference of the judge pass (``null`` without
     paired cases) with a 95% paired bootstrap CI over trajectories
     (:func:`paired_bootstrap_ci`, ``null`` when too few). Other ``targets`` get no
-    ``paired`` or ``tuned_minus_base``.
+    ``paired`` or ``tuned_minus_base``. ``truncated`` counts a target's generations cut off
+    at ``max_tokens``, which fail.
     """
     by_target = {target: _target_summary(target, cases, results, generations) for target in targets}
     complete = all(summary["pending"] == 0 for summary in by_target.values())

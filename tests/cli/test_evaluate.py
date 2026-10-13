@@ -219,7 +219,7 @@ def test_the_preview_exits_2_with_the_calls_and_pins_the_rerun(run_dir: Path) ->
     assert preview["generation_calls"] == 2 * cases
     assert preview["calibration_calls"] == 3 * 4
     assert preview["judge_calls"] == 2 * cases + preview["calibration_calls"]
-    assert preview["max_generated_tokens"] == 2 * cases * 1024
+    assert preview["max_generated_tokens"] == 2 * cases * runner_module.DEFAULT_MAX_TOKENS
     assert preview["targets"]["base"] == "fake/fake-model"
     assert "epoch" in preview["targets"]["tuned"]
     assert preview["judge_model"] == FAKE_JUDGE_MODEL
@@ -1121,3 +1121,12 @@ def test_cases_too_long_for_the_judge_say_a_retry_cannot_fix_them(
     assert summary["targets"]["tuned"]["errors_too_long"] == cases
     assert "retry cannot fix" in data["hint"]
     assert "larger context window" in data["hint"]
+
+
+def test_generations_cut_off_at_max_tokens_are_counted_and_warned_about(run_dir: Path) -> None:
+    result = invoke("evaluate", str(run_dir), "--max-tokens", "2", "--confirm")
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    truncated = data["headline"]["truncated"]
+    assert truncated["base"] > 0 and truncated["tuned"] > 0
+    assert any("reached --max-tokens (2)" in warning for warning in data["warnings"])

@@ -52,6 +52,7 @@ from pup_finetune.evaluation.cases import ReplayCase
 from pup_finetune.inference import ChatCompleter, JudgeConfig
 
 __all__ = [
+    "CUT_OFF_REASON",
     "MALFORMED_REASON",
     "REFUSED",
     "SYSTEM_PROMPT",
@@ -81,6 +82,7 @@ REFUSED: Final = "refused"
 """``Judgment.error`` when the judge's provider declined to answer (``finish_reason``
 ``refusal``)."""
 MALFORMED_REASON: Final = "candidate output was malformed"
+CUT_OFF_REASON: Final = "candidate output was cut off at max_tokens"
 
 
 def verdict_schema(key: str) -> dict[str, Any]:
@@ -322,11 +324,13 @@ def judge(
     config: JudgeConfig,
     *,
     format_valid: bool,
+    cut_off: bool = False,
 ) -> Judgment:
     """Whether ``candidate_message`` is an acceptable substitute for ``case.reference``.
 
     ``format_valid`` comes from the sampler: when it is ``False`` the candidate fails with
-    :data:`MALFORMED_REASON` and no judge is called. An answer without a verdict
+    :data:`MALFORMED_REASON`, or :data:`CUT_OFF_REASON` when ``cut_off`` (the generation
+    stopped at its ``max_tokens``), and no judge is called. An answer without a verdict
     fails with ``error`` :data:`UNPARSEABLE`, or :data:`TRUNCATED` when the judge stopped at
     ``max_tokens`` (``finish_reason`` ``length``); a refused one (``finish_reason``
     ``refusal``) fails with :data:`REFUSED`, even when its text holds a verdict. A judge call
@@ -334,7 +338,7 @@ def judge(
     docstring).
     """
     if not format_valid:
-        return Judgment(passed=False, reason=MALFORMED_REASON)
+        return Judgment(passed=False, reason=CUT_OFF_REASON if cut_off else MALFORMED_REASON)
     completion = client.complete(
         build_messages(case, candidate_message),
         model=config.model,

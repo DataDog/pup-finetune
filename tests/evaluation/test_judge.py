@@ -771,3 +771,30 @@ def test_a_judge_outage_during_calibration_raises() -> None:
     fake.script += [httpx.Response(429)] * 2
     with chat_client(fake, max_attempts=2) as client, pytest.raises(ExternalError):
         calibrate([text_case()], client, CONFIG)
+
+
+def test_a_cut_off_candidate_fails_with_its_own_reason_without_a_judge_call() -> None:
+    from pup_finetune.evaluation.judge import CUT_OFF_REASON
+
+    class Unreachable:
+        def complete(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("the judge must not be called")
+
+    case = ReplayCase(
+        id="r:1",
+        row_id="r",
+        trace_id="t",
+        message_index=1,
+        prefix=({"role": "user", "content": "q"},),
+        tools=(),
+        reference={"role": "assistant", "content": "a"},
+    )
+    found = judge(
+        case,
+        {"role": "assistant", "content": ""},
+        Unreachable(),  # type: ignore[arg-type]
+        JudgeConfig(),
+        format_valid=False,
+        cut_off=True,
+    )
+    assert found == Judgment(passed=False, reason=CUT_OFF_REASON)
