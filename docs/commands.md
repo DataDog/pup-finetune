@@ -53,6 +53,7 @@ These print text on stdout instead of one JSON document: `help` (alone or with a
 - [`pup finetune dataset label`](#pup-finetune-dataset-label): Record keep/drop labels for a dataset's rows.
 - [`pup finetune dataset triage`](#pup-finetune-dataset-triage): Label rows with judge models (paid; previews without --confirm).
 - [`pup finetune dataset push`](#pup-finetune-dataset-push): Push kept rows to Datadog (previews without --confirm).
+- [`pup finetune dataset fetch`](#pup-finetune-dataset-fetch): Fetch an Agent Observability dataset to train on.
 - [`pup finetune benchmark`](#pup-finetune-benchmark): Compare base models before training (paid; previews without --confirm).
 - [`pup finetune train`](#pup-finetune-train): Fine-tune a model (paid; previews without --confirm).
 - [`pup finetune status`](#pup-finetune-status): Show a run's phase, progress, losses and worker.
@@ -85,6 +86,7 @@ What each command does without and with `--confirm`, where its data goes, and wh
 | `pup finetune dataset label` | records labels in DIR | no `--confirm` | nowhere: local files | allowed |
 | `pup finetune dataset triage` | previews the judge calls | runs the judges and labels rows (paid) | each judge's provider: Fireworks, Anthropic or OpenAI | allowed |
 | `pup finetune dataset push` | previews the records | pushes the kept rows (a remote write) | Datadog: an Agent Observability dataset | preview allowed; `--confirm` refused |
+| `pup finetune dataset fetch` | fetches the dataset into DIR | no `--confirm` | nowhere: reads the dataset through pup into local files | allowed |
 | `pup finetune benchmark` | previews the calls | benchmarks every model (paid) | each model's provider, the judge's provider | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider and judge) |
 | `pup finetune train` | previews the run | trains (paid) | the training provider; with --remote, also Baseten storage (the job's upload); with --evaluate, also the judge's provider and Datadog (experiments, when the dataset was pushed) | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider and judge) |
 | `pup finetune status` | shows the run | no `--confirm` | nowhere: it reads a remote run's Baseten job and its logs | allowed |
@@ -468,7 +470,7 @@ Safety: Free · local files only · PUP_READ_ONLY: allowed.
 
 Have each judge model vote keep or drop on each whole row of DIR against --rubric and/or --rule; a strict majority of keep votes keeps a row. Without --confirm, previews the calls and where the rows go. Rerun the same command to resume; start with --max-rows 20 to calibrate the rubric.
 
-A judge reviews every turn of a row and its tools, since training imitates every assistant turn. A tie drops a row; a row missing a vote (a failed call) stays undecided and unlabeled. Decisions are recorded as labels by judge; rows the agent or a person labeled are not reviewed. Votes are appended to DIR/judgments.jsonl as they arrive, so a rerun retries only failed calls. The rubric and the judges are frozen in DIR/triage.json once votes exist: change them in a new directory or with --reset-triage. Row content is sent to each judge's provider: Fireworks serverless (the default judges), Anthropic or OpenAI, with that provider's API key; the preview names every one. --agreement measures the council against rows you labeled first; --print-template prints a rubric to start from.
+A judge reviews every turn of a row and its tools, since training imitates every assistant turn. A tie drops a row; a row missing a vote (a failed call) stays undecided and unlabeled, unless the votes cast already drop it (one drop of two judges, two of three), which also skips its other calls. Decisions are recorded as labels by judge; rows the agent or a person labeled are not reviewed. Votes are appended to DIR/judgments.jsonl as they arrive, so a rerun retries only failed calls. The rubric and the judges are frozen in DIR/triage.json once votes exist: change them in a new directory or with --reset-triage. Row content is sent to each judge's provider: Fireworks serverless (the default judges), Anthropic or OpenAI, with that provider's API key; the preview names every one. --agreement measures the council against rows you labeled first; --print-template prints a rubric to start from.
 
 ```
 pup finetune dataset triage [OPTIONS] [DIR]
@@ -535,6 +537,38 @@ pup finetune dataset push datasets/my-agent
 
 Safety: Free · --confirm writes the kept rows to Datadog · PUP_READ_ONLY: preview only.
 
+## `pup finetune dataset fetch`
+
+Read the current records of the dataset --name in --project into DIR, so what was curated in Datadog (records edited, added or removed in the product or through pup) is what trains. Each record becomes a canonical row: its input messages and expected output, its tools, and the split it names (records without one are assigned by trace). A record that is not a conversation is excluded.
+
+DIR freezes the dataset and its version: fetch a later version into a new DIR. The fetch writes the dataset's push receipt, so `evaluate` publishes its experiments onto the same dataset. Nothing is written to Datadog.
+
+```
+pup finetune dataset fetch [OPTIONS] DIR
+```
+
+| Argument | Description |
+| --- | --- |
+| `DIR` | The dataset directory. |
+
+| Option | Value | Default | Description |
+| --- | --- | --- | --- |
+| `--project` | `NAME` | required | The project the dataset belongs to. |
+| `--name` | `NAME` | required | The dataset to fetch. |
+| **Splits** | | | |
+| `--seed` | `N` | `42` | Seed for the split assignment. |
+| `--validation-fraction` | `X` | `0.1` | Share of traces for validation. |
+| `--test-fraction` | `X` | `0.1` | Share of traces for test. |
+
+Examples:
+
+```sh
+pup finetune dataset fetch datasets/my-agent-v2 --project pup-finetune --name my-agent-sft
+pup finetune dataset fetch datasets/curated --project my-team --name curated-sft --seed 7
+```
+
+Safety: Free · reads Datadog · PUP_READ_ONLY: allowed.
+
 ## `pup finetune benchmark`
 
 Replay each held-out test conversation of a dataset with several base models, one recorded assistant turn at a time, and score each with the tool-call metrics and the LLM judge evaluate uses. Without --confirm, previews the calls and where the data goes. The result ranks the models and recommends the one to fine-tune.
@@ -556,7 +590,7 @@ pup finetune benchmark [OPTIONS] DATASET
 | `--target-pass-rate` | `RATE (0.0<=x<=1.0)` | `0.9` | Judge pass rate at which a base model needs no fine-tuning. |
 | **Cases** | | | |
 | `--max-cases` | `N (x>=1)` | `2` | Turns replayed per conversation. |
-| `--max-tokens` | `N (x>=1)` | `1024` | Most tokens each generation may produce. |
+| `--max-tokens` | `N (x>=1)` | `4096` | Most tokens each generation may produce. |
 | `--seed` | `N (x>=0)` | `0` | Seed for picking cases and the bootstrap. |
 | **Judge** | | | |
 | `--judge-model` | `MODEL` | deepseek-v4p1-flash | An alias (glm-5p3-flash), anthropic/MODEL, openai/MODEL or a Fireworks id. |
@@ -619,7 +653,7 @@ pup finetune train [OPTIONS]
 | `--eval-max-cases` | `N (x>=1)` | `2` | Turns per conversation. |
 | `--eval-judge-model` | `MODEL` |  | The judge, as evaluate --judge-model. |
 | `--eval-concurrency` | `N (1<=x<=64)` | `4` | Cases at once (1-64). |
-| `--eval-max-tokens` | `N (x>=1)` | `1024` | Most tokens per generation. |
+| `--eval-max-tokens` | `N (x>=1)` | `4096` | Most tokens per generation. |
 | `--eval-seed` | `N (x>=0)` | `0` | Seed for cases and bootstrap. |
 | `--eval-skip-calibration` |  |  | Do not check the judge first. |
 | `--eval-no-publish` |  |  | Do not publish to Datadog. |
@@ -756,7 +790,7 @@ pup finetune evaluate [OPTIONS] RUN_DIR
 | --- | --- | --- | --- |
 | **Cases** | | | |
 | `--max-cases` | `N (x>=1)` | `2` | Turns replayed per conversation. |
-| `--max-tokens` | `N (x>=1)` | `1024` | Most tokens each generation may produce. |
+| `--max-tokens` | `N (x>=1)` | `4096` | Most tokens each generation may produce. |
 | `--seed` | `N (x>=0)` | `0` | Seed for picking cases and the bootstrap. |
 | **Judge** | | | |
 | `--judge-model` | `MODEL` | deepseek-v4p1-flash | An alias (glm-5p3-flash), anthropic/MODEL, openai/MODEL or a Fireworks id. |

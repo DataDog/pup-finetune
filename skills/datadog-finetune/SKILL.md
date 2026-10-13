@@ -13,13 +13,15 @@ with the user. Datadog access is Pup's login; provider keys stay out of the chat
 
 ```text
 Step 0 doctor -> 1 explore spans -> 2 dataset preview, pull -> 3 review (sample + label, or triage)
-  -> 4 dataset push -> 5 benchmark, train, status -> 6 evaluate -> 7 deploy, undeploy
+  -> 4 dataset push (curate in Datadog, dataset fetch) -> 5 benchmark, train, status -> 6 evaluate
+  -> 7 deploy, undeploy
 ```
 
 | The user has | Start at |
 | --- | --- |
 | An ml_app that sends LLM spans | Step 0, then step 1 |
 | A dataset directory | Step 0, then `dataset show` and step 3 (or step 5 if it is reviewed) |
+| A dataset in Agent Observability | Step 0, then `dataset fetch` (step 4) and step 5 |
 | A run (its id or directory) | `status`, then step 6 or step 7 |
 
 Commands below use `datasets/my-agent` and the run id `ft-20261007183443-a8b181` as examples. Use the real
@@ -28,9 +30,9 @@ result. Never use shell variables: your shell state does not persist between cal
 
 ## Help and results under Pup
 
-- Help: `pup finetune help <COMMAND>`. Pup answers `--help` after `pup finetune` itself.
-- Pup wraps each result as `{status, data, metadata}`, and its `status` always reads
-  `success`. Read our fields under `data`. Pup's flags go before `finetune`.
+- Help: `pup finetune help <COMMAND>` (Pup answers `--help` itself; for Pup's own commands use
+  `pup --no-agent <COMMAND> --help`). Pup's flags go before `finetune`.
+- Pup wraps each result as `{status, data, metadata}`; read our fields under `data`.
 
 ## Rules for every step
 
@@ -50,8 +52,7 @@ result. Never use shell variables: your shell state does not persist between cal
 8. **Respect read-only mode.** With `PUP_READ_ONLY` set, `--confirm` on paid runs and remote
    writes is refused. Do not change `PUP_READ_ONLY` yourself; that is the user's call.
 
-When something fails, report the command, the directory, the `Error` line and `Hint`, and any
-run or dataset ids.
+When something fails, report the command, directory, `Error` line, `Hint` and any run or dataset id.
 
 ## Presenting a preview
 
@@ -70,8 +71,7 @@ Present a dataset sample the same way, one block per row, with your proposal:
 
 ```text
 row-weather-002 (train, 2 turns, tools: get_weather)
-  User:    Is it warmer in Port Alder or Eastbrook today?
-  Answer:  Port Alder is warmer: 21°C and sunny, versus 17°C and cloudy in Eastbrook.
+  User: Is it warmer in Port Alder or Eastbrook today?   Answer: Port Alder, 21°C vs 17°C.
   Propose: keep - it calls the tool, then answers from the result.
 ```
 
@@ -97,19 +97,17 @@ row-weather-002 (train, 2 turns, tools: get_weather)
 pup finetune doctor --provider fireworks --check
 ```
 
-Pass the provider the user trains on (`fireworks` or `baseten`). `ready` lists each step and
-what blocks it (`blocked_by`). A failed check has a `fix`. For a missing key, the user runs
-the `auth login` command from `next_steps` in their own terminal.
+Pass the provider the user trains on (`fireworks` or `baseten`). `ready` lists what blocks each
+step (`blocked_by`); a failed check has a `fix` (a missing key: the user runs `auth login`).
 
 Check:
 
 - [ ] `"status": "ready"`, signed in to the right Datadog site (the `datadog_auth` check).
 - [ ] The provider's key, SDK, renderer and model checks (`fireworks:model:qwen3p8-27b`) pass.
 
-## Step 1: explore the spans and agree on what good data means
+## Step 1: explore the spans and agree on the goal
 
-Look at real spans before you filter. Check the flags with
-`pup --no-agent llm-obs spans search --help` (under an agent, plain `--help` prints Pup's schema).
+Look at real spans before you filter:
 
 ```sh
 pup llm-obs spans search --ml-app <ML_APP> --span-kind llm --from 24h --limit 50 --summary
@@ -117,8 +115,19 @@ pup llm-obs spans search --ml-app <ML_APP> --span-kind llm --from 24h --limit 20
 pup llm-obs spans get-content --trace-id <TRACE_ID> --span-id <SPAN_ID> --field messages --from 24h
 ```
 
-Note the span names, tags, evaluations, models and error rate. Agree with the user on what
-good training data is. The filter's building blocks, flags of `dataset preview` and `pull`:
+Note the span names, tags, evaluations, models and error rate. An ml_app evaluator can select
+good rows once verified: read it (`pup llm-obs evals list-by-ml-app --ml-app <ML_APP>`, then
+`get-evaluator <NAME>` and `get-aggregate-stats`) and check passing and failing spans against
+its criteria. One that fails good answers or scored redacted content is no signal: tell the
+user. Filter on a verified one with `--query '@evaluation.<NAME>.value:true'`. With no
+verified signal, say so: the review (step 3) is then the quality signal; a filter is not.
+
+Agree on the goal before you curate: what the tuned model must get right; when the app makes
+a rare, valuable decision (say, recommending a change), which mistake costs more: a wrong one
+(optimize precision), a missed one (recall), or both alike (F1); and whether cost or latency
+drives this. Agree how to read that decision from an answer (a tool called, an output field's
+value) and the bar to reach; do not switch metrics after seeing results. This decides
+rebalancing (step 4) and the recipe kept (step 6). The filter's flags, for `preview` and `pull`:
 
 | Flag | Selects |
 | --- | --- |
@@ -128,7 +137,7 @@ good training data is. The filter's building blocks, flags of `dataset preview` 
 | `--query '<QUERY>'` | Only spans matching a search query, passed to Datadog as written. |
 | `--include-errors` | Also errored LLM calls (`span_error` rows). Off by default; ask first. |
 | `--from 7d`, `--to now` | The window: `7d`, `24h`, `now-7d`, `now`, ISO 8601 or epoch ms. |
-| `--target-count`, `--max-candidates` | Caps on rows kept and spans read. |
+| `--target-count`, `--max-candidates` | Rows to keep (rows dropped in review do not count) and spans read. |
 
 Build a filter only from values you saw. Test every filter, a `--query` above all, with
 `dataset preview` before you pull.
@@ -136,7 +145,8 @@ Build a filter only from values you saw. Test every filter, a `--query` above al
 Check:
 
 - [ ] The ml_app has LLM spans in the window, and every filter value appears in them.
-- [ ] The user agreed on the quality signal and the time range.
+- [ ] The user named the metric that decides success, and agreed on the quality signal and
+      the time range.
 
 ## Step 2: preview, then pull the dataset
 
@@ -149,13 +159,14 @@ pup finetune dataset show datasets/my-agent
 The preview writes nothing. Read its `sample_accepted` rows and exclusion reasons with the
 user. Its `next_command` is the same pull into `datasets/<ml_app>`, which gets a `.gitignore`.
 The pull freezes the filter, splits and window, so `pup finetune dataset pull datasets/my-agent` resumes
-it. Every dataset command reports `pipeline` (rows, `triage`, `push`) and a `next_command`.
+it with the last limits; after a review drops rows, it reads on to replace them.
 
 Check:
 
 - [ ] The accepted rows and exclusion reasons look right to the user.
 - [ ] Every split is non-empty. Fix a skewed split by pulling more rows, never with the seed.
-- [ ] The directory holds trace content: keep it local, and never commit it.
+- [ ] Trace content stays out of git: keep the dataset, label files and any rubric quoting
+      rows under `datasets/` (ignored).
 
 ## Step 3: review the rows
 
@@ -164,27 +175,34 @@ Show a sample in the format above and agree on each row:
 
 ```sh
 pup finetune dataset sample datasets/my-agent --count 20
-pup finetune dataset label datasets/my-agent --file labels.jsonl
+pup finetune dataset label datasets/my-agent --file datasets/my-agent-labels.jsonl
 ```
 
-`labels.jsonl` holds one `{"id": "<row id>", "keep": true|false, "reason": "..."}` per line.
+The labels file holds one `{"id": "<row id>", "keep": true|false, "reason": "..."}` per line.
 Dropping needs a reason; a row's last label wins. Dropped rows never train or get pushed.
 
 For a larger dataset, a judge council labels rows against a rubric. It is paid, sends rows to
-the judges and previews first. Write the rubric's Task, Keep, Drop and Examples with the user
-(the template's Task is refused):
+the judges and previews first. First read 10 to 20 varied rows with the user (clear keeps,
+clear drops, unclear ones); every trained turn is imitated, so judge whole rows. Then write
+the rubric's Task, Keep, Drop and Examples together (the template's Task is refused):
 
 ```sh
-pup finetune dataset triage --print-template > rubric.md
-pup finetune dataset triage datasets/my-agent --rubric rubric.md --agreement
-pup finetune dataset triage datasets/my-agent --rubric rubric.md
+pup finetune dataset triage --print-template > datasets/rubric.md
+pup finetune dataset triage datasets/my-agent --rubric datasets/rubric.md --agreement
+pup finetune dataset triage datasets/my-agent --rubric datasets/rubric.md
 ```
 
 Start with `--agreement` against 20 or more labels you and the user agreed on; it labels
 nothing. Show `agreement.rate`, `agreement.kappa` and the disagreements. Sharpen the rubric
 and measure again (`--reset-triage`) until the user is satisfied. With the two default
-judges, a row is kept only when both vote keep. Add a third judge with `--judges` for a true
+judges, a row is kept only when both vote keep; add a third with `--judges` for a true
 majority.
+
+Also check what no command does: answers that break the app's own output contract (invalid
+JSON, duplicate keys, two answers in one), and one request in two splits: group rows by their
+normalized user request, and when a group spans splits drop its train and validation copies,
+so test and early stopping stay clean. Drop with labels, or fix the records in Datadog and
+fetch the dataset (step 4). Show the user what you found.
 
 Check:
 
@@ -195,11 +213,23 @@ Check:
 ## Step 4: push the dataset to Agent Observability
 
 ```sh
-pup finetune dataset push datasets/my-agent --name <DATASET_NAME>
+pup finetune dataset push datasets/my-agent --name <DATASET_NAME> --project <PROJECT>
 ```
 
-It previews; run its `next_command` after a yes. The push writes one record per kept row
-and saves `push.json`. Training does not need it; publishing an evaluation does.
+Ask which project: everyone with access to it can read the records. It previews; run its
+`next_command` after a yes. The push writes one record per kept row and saves `push.json`;
+publishing an evaluation needs it. The dataset in Datadog can then be
+curated there (records edited, added or removed); to train on it as it is now, fetch it into
+a new directory, which gets its push receipt (the project and name are the ones `push.json` names):
+
+```sh
+pup finetune dataset fetch datasets/my-agent-v2 --project <PROJECT> --name <DATASET_NAME>
+```
+
+When the decision the user cares about is rare, rebalance here, so the dataset in Datadog
+stays whole: fetch one directory per share and label each (keep every row with the decision,
+drop a share of the others in train only). Dropping more raises recall and lowers precision;
+agree on the share. Never pull into a fetched directory (a pull refills dropped rows).
 
 Check:
 
@@ -212,19 +242,17 @@ To choose the model, first compare candidates on the test split (paid; it previe
 
 ```sh
 pup finetune benchmark datasets/my-agent --models qwen3p5-9b,glm-5p3-flash
-pup finetune train --dataset datasets/my-agent --model qwen3p8-27b --detach
+pup finetune train --dataset datasets/my-agent --model <MODEL> --detach
 pup finetune status ft-20261007183443-a8b181 --watch --timeout 90s
 ```
 
-The first command previews the tokens per split, the rows left out and the recipients. The
-run goes in `runs/<run id>`. After a yes, run its `next_command`. Cap spend with
-`--max-train-tokens`, or `--max-spend-usd` with `--hourly-rate-usd`.
+Set `--target-pass-rate` to what the user would accept from a base model. `train` previews
+tokens, rows left out and recipients (rerun `doctor --provider` if the provider changed); cap
+spend with `--max-train-tokens`, or `--max-spend-usd` with `--hourly-rate-usd`.
 
-Always train with `--detach`; its `next_command` watches with `--timeout 90s`. Never watch
-without `--timeout`: a run takes hours, and the timeout leaves it training. `--evaluate` needs
-the foreground (no `--detach`), so evaluate a detached run in step 6. `pup finetune runs` lists runs. The best epoch by
-validation loss is promoted (on Baseten, kept as `deployable_checkpoint`). Both of these preview; run their `next_command` after a yes. A
-resume bills again. A cancel finishes the step and promotes the best epoch so far:
+Always train with `--detach`; watch only with `--timeout` (as its `next_command` does), then
+evaluate in step 6. The best epoch by validation loss is promoted (Baseten keeps a
+`deployable_checkpoint`). A resume bills again; a cancel promotes the best epoch so far:
 
 ```sh
 pup finetune resume ft-20261007183443-a8b181 --detach
@@ -236,7 +264,8 @@ Check:
 - [ ] The user saw the token counts and authorized this training (and any resume).
 - [ ] `status` ends `completed` (or `cancelled`) with a `best_epoch` and a `promoted_model`
       (Fireworks) or a `deployable_checkpoint` (Baseten).
-- [ ] Validation loss improved over the first epoch; if not, tell the user before evaluating.
+- [ ] Validation loss fell, then flattened; if it rose from the first epoch, tell the user
+      (overfitting or too little data). After rebalancing it no longer tracks the user's metric.
 
 ## Step 6: evaluate
 
@@ -245,18 +274,30 @@ pup finetune evaluate ft-20261007183443-a8b181
 ```
 
 The preview counts cases, generations and judge calls, and names the judge (Fireworks by
-default). A judge named `anthropic/<MODEL>` or `openai/<MODEL>` needs that key and a new
-consent. After a yes, run its `next_command`. It replays each test conversation with both
-models and publishes two experiments. Rerun it to continue one that stopped. Report:
+default; `anthropic/<MODEL>` or `openai/<MODEL>` needs that key and a new consent). After a
+yes, run its `next_command`: both models replay each test conversation into two experiments
+that fill in as it runs; share the link it prints (`publication.comparison_url`). Rerun to
+continue one that stopped. Report:
 
 - `headline.judge_pass_rate` (`base`, `tuned`, `delta`, `ci95`), `headline.paired`, and the
   `cases` and `trajectories` behind them. An interval that includes 0 is no clear difference.
 - `metrics.<name>.base` and `.tuned`, and the experiment ids under `publication.experiments`.
 - The caveat: replay measures agreement with the recorded behavior, not task success.
+- `headline.truncated`: failures from length, not quality, which inflate the delta. Do not
+  report the delta then: evaluate again into a new `--out-dir` with a higher `--max-tokens`.
+- The user's metric (step 1) for base and tuned: join `generations.jsonl` (the answers) to
+  the file `files.results` names on `target` and `case_id`, whose `row_id` and `message_index`
+  give the reference in `rows.jsonl`. Report true and false positives and negatives per case;
+  with fewer than about 30 positives, precision and recall move 20 points on a few cases.
+
+Compare recipes, not single runs: one recipe trained twice can differ by 5 points, so a
+smaller gap is noise. Choose on the user's metric and call the chosen run's test number
+optimistic; if no gap is clear, keep the simpler one.
 
 Check:
 
 - [ ] `status` is `complete`, and `publication.status` is `published`.
+- [ ] The user's metric is reported with its counts, and the run kept was chosen by it.
 
 ## Step 7 (optional): deploy, then undeploy
 
@@ -266,8 +307,7 @@ pup finetune undeploy ft-20261007183443-a8b181
 ```
 
 A deployment bills per GPU-second while a replica runs, until it is undeployed.
-Deploying needs the user's explicit authorization for this deployment; never deploy on your
-own. `deploy --confirm` waits until it serves and runs a smoke test. Show the user `usage`
+Deploying needs the user's explicit authorization for this deployment; never deploy alone. `deploy --confirm` waits until it serves and runs a smoke test. Show the user `usage`
 and `undeploy_command` (a preview); run its `--confirm` only when they say they are done.
 
 Check:
@@ -309,11 +349,14 @@ Check:
 
 ## End state
 
-- [ ] A reviewed dataset and a run with a `promoted_model` or a
-      `deployable_checkpoint`.
-- [ ] An evaluation reported with its delta, interval, experiment ids and caveat.
-- [ ] No deployment left running unless the user asked to keep it.
-- [ ] No API key in the chat, the shell history or any file you wrote.
+Hand the user, in one message:
+
+- Dataset: directory, filter, window, kept and dropped rows, its Datadog name and version.
+- Run: id, base model, best epoch, `promoted_model` or `deployable_checkpoint`.
+- Evaluation: delta, interval, the user's metric with its counts, comparison link, caveat.
+- What still bills: each deployment with its `undeploy` command, or none.
+
+No API key in the chat, the shell history or any file you wrote.
 
 ## Debugging
 
@@ -352,8 +395,6 @@ Errors read `Error [<code>]: <message>`, then `Hint: ...`. The codes, with their
 | `Error [wrong_phase]` | The run is still training, or already finished | Check `status`. Resume only `interrupted`, `failed` or `cancelled` runs. |
 | The judge fails calibration, answers `refused`, or triage reports `too_long` rows | The judge cannot grade these | None is a pass or a keep. Pick another `--judge-model` or `--judges` with the user. |
 | The evaluation was not published | No `push.json`, or the push missed the test split | Publishing is optional; `next_command` goes on to deploy. To publish, follow `next_steps`: push with a yes, then rerun; finished results are reused. |
-| `deploy` times out, or the smoke test fails | It did not serve in time | It may still bill: undeploy now. Redeploy only after a yes, with a longer `--timeout-minutes`. |
+| `deploy` times out, or the smoke test fails | It did not serve in time | It may still bill: preview `undeploy` at once, tell the user, confirm on their yes. Redeploy only after a yes. |
 | `undeploy` refuses: not the requested deployment | The deployment id holds another deployment | Nothing was deleted; never delete it. With an OK, follow the error's steps. |
-| `could not deactivate Baseten run <id> (...); it may still bill` | Cleanup failed; the trainer may still bill | Tell the user at once: they deactivate it in the Baseten UI or with the hinted `curl` command. |
-| Hint `a run may remain in Loops session <id>` or `a sampler may remain ...` | Creating a Baseten trainer or sampler was interrupted; it may bill | Tell the user at once: they deactivate it in the Baseten UI. |
-| `deploy` on Baseten fails with a hint about BDN volumes | The workspace has no BDN volumes; nothing was created | The user asks Baseten to enable them, then deploys again. |
+| `could not deactivate Baseten run <id> (...)`, or a hint that a run or sampler `may remain` | Baseten cleanup failed or was interrupted; it may still bill | Tell the user at once: they deactivate it in the Baseten UI (or with the hinted `curl` command). |

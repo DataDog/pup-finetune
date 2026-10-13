@@ -135,6 +135,8 @@ cannot see. `dataset show` counts them.
 | `span_error` | dataset | The LLM call ended in an error, so it is not a completed model turn; pass --include-errors to keep errored calls. |
 | `contained_conversation` | dataset | A later pull read a longer conversation of the same trace that contains this one; the longer row trains on the same turns. |
 | `unreadable_span` | dataset | The exported span does not have the fields of an LLM span (such as its trace id), so it could not be converted. |
+| `unreadable_record` | dataset | The dataset record's input is not chat messages, or its expected output is not an assistant message, so it is not a conversation to train on. |
+| `split_conflict` | dataset | The dataset record names another split than a record of the same trace does, and a trace is never in two splits. |
 <!-- END GENERATED: exclusion codes -->
 
 `train` can also leave rows out when it renders them for the model. These rows stay in the
@@ -155,13 +157,14 @@ content. Keep it out of version control.
 
 | File | What it holds |
 | --- | --- |
-| `settings.json` | The source (`import` or `datadog`) and its settings, such as the span filter and time window, plus the split settings. Frozen on first use: later runs may leave a flag out (it takes the frozen value), but may not pass another value (later imports pass the same split settings). |
+| `settings.json` | The source (`import`, `datadog`, or `datadog_dataset` for `dataset fetch`, which freezes the dataset's project, name, id and version) and its settings, such as the span filter and time window, plus the split settings. Frozen on first use: later runs may leave a flag out (it takes the frozen value), but may not pass another value (later imports pass the same split settings). |
 | `rows.jsonl` | The accepted rows, one canonical row per line. Never rewritten by labeling. |
 | `excluded.jsonl` | One `{"code", "detail", "row_id", "trace_id", "span_id", "line_sha256"}` per excluded row (fields that do not apply are left out). |
 | `labels.jsonl` | Keep/drop decisions appended by `dataset label` and `dataset triage`: `{"id", "keep", "reason", "by", "at"}`, where `by` is `manual` (recorded with `dataset label`) or `judge` (decided by the `dataset triage` council; triage never relabels a manual row). Older files that say `agent` or `human` read as `manual`. The last label of an id wins, a reason is required to drop, and a dropped row never trains and is never pushed. |
 | `splits.json` | The split of every trace and the frozen seed and fractions. A trace never changes split once assigned. |
 | `summary.json` | Counts, splits and warnings, rewritten after every change. |
 | `raw/` | For a Datadog pull, the Export API pages it read, so a rerun resumes without fetching them again. |
+| `pull_limits.json` | For a Datadog pull, the last pull's `--target-count` and `--max-candidates`, which a rerun without them continues toward. Not frozen. |
 | `judgments.jsonl`, `triage.json` | For `dataset triage`, every judge vote (`{"row_id", "row_sha256", "judge", "criteria_sha256", "keep", "reason", "at"}`, plus `"too_long": true` when the judge refused the row as longer than its context window, which drops it) and the frozen rubric hash, judges and the settings they are called with. |
 | `push.json` | The receipt `dataset push` writes (see below). |
 
@@ -199,6 +202,19 @@ the hash of the dataset settings. It is saved after every batch, so pushing agai
 rows not yet pushed and an interrupted push resumes without adding a row twice, and it names
 the dataset, so a later push needs no `--name` or `--project`. `evaluate` publishes its Agent
 Observability experiments on the dataset and version this receipt names.
+
+## The fetched dataset
+
+`dataset fetch` reads an Agent Observability dataset's current records back into a dataset
+directory ([`src/pup_finetune/data/fetch.py`](../src/pup_finetune/data/fetch.py)), so a
+dataset curated in Datadog is what trains. Each record becomes the row the pushed record
+describes: its `input.messages` followed by its `expected_output` (which must be an
+assistant message), its `input.tools`, the id `metadata.row_id` (else the record id) and the
+source in `metadata`. The split is `metadata.split` or a `split:<name>` tag; a record without
+one is assigned by its trace. A record that is not a conversation is excluded as
+`unreadable_record`, and one naming another split than a record of the same trace as
+`split_conflict`. The fetch also writes the dataset's `push.json`, with every row's record,
+so `evaluate` publishes onto that dataset and `dataset push` has nothing to send.
 
 ## Where a dataset stands
 
