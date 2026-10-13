@@ -176,10 +176,15 @@ def test_a_copied_record_keeps_its_own_row(
     copy = json.loads(json.dumps(remote.records[0]))
     copy["expected_output"]["content"] = "An edited answer to the same question."
     remote.records.append(copy)
-    remote.record_ids.append("record-copy")
+    remote.record_ids.append("synthetic-record-copy")  # sorts after the original's id
     result = fetch(tmp_path / "fetched")
     assert result.exit_code == 0, result.stderr
-    assert "record-copy" in rows(tmp_path / "fetched")
+    assert "synthetic-record-copy" in rows(tmp_path / "fetched")
+    # Listed in another order, each row id still holds the same content.
+    remote.records.insert(0, remote.records.pop())
+    remote.record_ids.insert(0, remote.record_ids.pop())
+    assert fetch(tmp_path / "reordered").exit_code == 0
+    assert rows(tmp_path / "reordered") == rows(tmp_path / "fetched")
 
 
 def test_a_split_named_only_by_a_tag_is_kept(
@@ -211,3 +216,29 @@ def test_a_dataset_that_changes_while_it_is_read_is_refused(
     assert result.exit_code == 1
     assert "changed while its records were read" in result.stderr
     assert not (tmp_path / "fetched" / "rows.jsonl").exists()
+
+
+def test_a_dataset_without_a_readable_version_is_refused(
+    api: FakeDatasetsApi, pushed: Path, tmp_path: Path
+) -> None:
+    api.dataset_named(NAME).version = None  # type: ignore[assignment]
+    result = fetch(tmp_path / "fetched")
+    assert result.exit_code == 1
+    assert "readable current version" in result.stderr
+    assert not (tmp_path / "fetched" / "rows.jsonl").exists()
+
+
+def test_a_refetch_keeps_the_record_of_a_row_dropped_in_review(
+    api: FakeDatasetsApi, pushed: Path, tmp_path: Path
+) -> None:
+    target = tmp_path / "fetched"
+    assert fetch(target).exit_code == 0
+    receipt = json.loads((target / PUSH_FILE).read_text())
+    dropped = next(iter(rows(target)))
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(json.dumps({"id": dropped, "keep": False, "reason": "synthetic"}) + "\n")
+    assert invoke("label", str(target), "--file", str(labels)).exit_code == 0
+    assert fetch(target).exit_code == 0
+    refetched = json.loads((target / PUSH_FILE).read_text())
+    assert refetched["record_ids"] == receipt["record_ids"]
+    assert dropped in refetched["record_ids"]

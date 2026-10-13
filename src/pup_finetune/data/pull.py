@@ -646,18 +646,19 @@ def pull(
 
     The cache is locked from the export through the add, so a concurrent pull into the same
     dataset fails with :class:`~pup_finetune.errors.LockBusy` instead of changing the stored
-    rows this one reconciles against.
+    rows this one reconciles against, or the limits a rerun continues toward
+    (:func:`write_limits`).
     """
     options = resolve_window(options, dataset, clock)
     settings = options.dataset_settings(split)
     dataset.create_or_check(settings)
-    write_limits(dataset, options)
     raw = make_private_dir(dataset.raw_path)
     # The raw/ lock is held through the add, so no other pull changes the stored rows between
     # the read below and the add. DatasetDir.add locks the dataset directory itself, through
     # another lock file, so holding this one does not block it.
     dropped = {row_id for row_id, label in dataset.labels().items() if not label.keep}
     with DirectoryLock(raw):
+        write_limits(dataset, options)
         try:
             collection = collect(
                 pup, options, cache_dir=raw, sleep=sleep, progress=progress, dropped=dropped
@@ -681,7 +682,7 @@ def pull(
             retired=retired,
             updated=updated,
         )
-    write_limits(dataset, options, exhausted=collection.stopped == "exhausted")
+        write_limits(dataset, options, exhausted=collection.stopped == "exhausted")
     return collection, added
 
 
@@ -709,8 +710,9 @@ def read_limits(dataset: DatasetDir) -> tuple[int, int, bool] | None:
 
 def write_limits(dataset: DatasetDir, options: PullOptions, *, exhausted: bool = False) -> None:
     """Record ``options``' limits as ``dataset``'s last pull's, and whether it read every
-    matching span. :func:`pull` records them when it starts, so the rerun that resumes a pull
-    which failed part-way continues toward the limits it was given, and again once it ends."""
+    matching span. :func:`pull` records them, under the ``raw/`` lock, when it starts, so the
+    rerun that resumes a pull which failed part-way continues toward the limits it was given,
+    and again once it ends."""
     atomic_write_json(
         dataset.path / LIMITS_FILE,
         {

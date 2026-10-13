@@ -209,8 +209,8 @@ Observability experiments on the dataset and version this receipt names.
 directory ([`src/pup_finetune/data/fetch.py`](../src/pup_finetune/data/fetch.py)), so a
 dataset curated in Datadog is what trains. Each record becomes the row the pushed record
 describes: its `input.messages` followed by its `expected_output` (which must be an
-assistant message), its `input.tools`, the id `metadata.row_id` (else the record id) and the
-source in `metadata`. The split is `metadata.split` or a `split:<name>` tag; a record without
+assistant message), its `input.tools`, the id `metadata.row_id` (else the record id, which
+a copy of a record with a lower id also gets) and the source in `metadata`. The split is `metadata.split` or a `split:<name>` tag; a record without
 one is assigned by its trace. A record that is not a conversation is excluded as
 `unreadable_record`, and one naming another split than a record of the same trace as
 `split_conflict`. The fetch also writes the dataset's `push.json`, with every row's record,

@@ -15,7 +15,8 @@ canonical row, validated as ``dataset import`` validates rows:
 - the messages are the record's ``input.messages`` followed by its ``expected_output`` (an
   assistant message); the tools are ``input.tools``;
 - the row id is ``metadata.row_id`` (as ``dataset push`` writes it), else the record id, and
-  the record id too when an earlier record already has that row id (a copied record); the
+  the record id too when a record with a lower id already has that row id (a copied record:
+  records are read in record-id order, so a refetch gives each row id the same content); the
   source is ``metadata``'s ``trace_id``, ``span_id``, ``ml_app`` and ``source_model``;
 - the split is ``metadata.split``, else a ``split:<name>`` tag (``dataset push`` writes both;
   a record edited in the product may keep only the tag); a record without one is assigned as
@@ -122,9 +123,9 @@ def _row_data(record: DatasetRecord) -> dict[str, Any] | None:
 
 
 def rows_from_records(records: Sequence[DatasetRecord]) -> FetchedRows:
-    """The rows of ``records`` (see the module docstring), in record order."""
+    """The rows of ``records`` (see the module docstring), in record-id order."""
     found = FetchedRows()
-    for record in records:
+    for record in sorted(records, key=lambda item: item.id):
         data = _row_data(record)
         metadata = record.metadata
         if data is None:
@@ -197,6 +198,12 @@ def fetch_dataset(
             f"no dataset named {name!r} in project {project!r}",
             hint="pass the dataset's exact name",
         )
+    if info.current_version is None:
+        raise ExternalError(
+            f"dataset {name!r} did not report a readable current version",
+            source="agent observability",
+            hint="check the dataset's version in Agent Observability, then fetch again",
+        )
     listing = datasets.list_records(info.id)
     if listing.unreadable:
         raise ExternalError(
@@ -241,17 +248,20 @@ def _write_receipt(
     name: str,
     info: DatasetInfo,
 ) -> None:
-    """``push.json`` naming the fetched dataset, with the record of every kept row."""
+    """``push.json`` naming the fetched dataset, with the record of every accepted row.
+
+    Rows dropped in review keep their record, as after a push, so keeping one again later
+    does not push it as a new record."""
     previous = read_push_state(dataset)
-    by_split = dataset.rows_by_split()
+    splits = dataset.splits()
     record_ids: dict[str, str] = {}
     digests: dict[str, str] = {}
-    for split_name, rows in by_split.items():
-        for row in rows:
-            record = fetched.record_ids.get(row.id)
-            if record is not None:
-                record_ids[row.id] = record
-                digests[row.id] = record_digest(dataset_record(row, split_name))
+    for row in dataset.rows():
+        record = fetched.record_ids.get(row.id)
+        split_name = splits.get(split_key(row))
+        if record is not None and split_name is not None:
+            record_ids[row.id] = record
+            digests[row.id] = record_digest(dataset_record(row, split_name))
     state = PushState(
         project=project,
         project_id=project_id,

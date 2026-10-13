@@ -18,6 +18,7 @@ from pup_finetune.data import dataset_dir, jsonl
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.exclusions import Exclusion, ExclusionCode
 from pup_finetune.data.pull import (
+    LIMITS_FILE,
     Collection,
     PullOptions,
     collect,
@@ -551,13 +552,16 @@ def test_a_pull_fails_while_another_holds_the_raw_cache(tmp_path: Path) -> None:
     dataset = DatasetDir(tmp_path / "ds")
     pull_into(dataset, target_count=1)
     rows = dataset.rows_path.read_bytes()
+    limits = (dataset.path / LIMITS_FILE).read_bytes()
     api = FakeExportApi(two_page_conversation())
     pup = api.install(FakePup()).client()
-    options = PullOptions(SpanQuery(ml_app="synthetic"))
+    options = PullOptions(SpanQuery(ml_app="synthetic"), target_count=7)
     with DirectoryLock(dataset.raw_path), pytest.raises(LockBusy):
         pull(pup, options, dataset, SplitParams())
     assert api.requests == []
     assert dataset.rows_path.read_bytes() == rows
+    # The refused pull's limits are not what a rerun of the active one continues toward.
+    assert (dataset.path / LIMITS_FILE).read_bytes() == limits
 
 
 class LockProbingDataset(DatasetDir):
