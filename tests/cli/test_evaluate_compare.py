@@ -487,3 +487,11 @@ def test_the_action_says_the_judge_is_calibrated_first_when_that_is_all_left(
     assert preview["judge_calls"] == preview["calibration_calls"] > 0
     assert preview["action"].startswith("calibrate the fake judge first, then summarize")
     assert "judge each answer" not in preview["action"]
+
+
+def test_the_progress_line_lists_every_target_that_generates(run_dir: Path) -> None:
+    result = invoke(
+        "evaluate", str(run_dir), "--compare-model", "fake-compare", "--no-publish", "--confirm"
+    )
+    assert result.exit_code == 0, result.stderr
+    assert "cases, base, tuned and compare (Ctrl-C stops)" in result.stderr

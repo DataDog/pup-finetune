@@ -1743,7 +1743,7 @@ class StandaloneEvaluation:
             if samplers:
                 info(
                     f"evaluating run {plan.run_id}: {len(plan.cases)} cases, "
-                    f"{' and '.join(samplers)} (Ctrl-C stops)"
+                    f"{joined(list(samplers))} (Ctrl-C stops)"
                 )
             else:
                 info(
