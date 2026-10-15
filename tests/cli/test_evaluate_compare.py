@@ -136,7 +136,8 @@ def test_attaching_a_compare_model_redoes_neither_base_nor_tuned(
         invoke("evaluate", str(evaluated), "--compare-model", "fake-compare", "--no-publish")
     )
     shown = preview["preview"]
-    assert shown["generation_calls_by_target"] == {"base": 0, "tuned": 0, "compare": cases}
+    assert shown["generation_calls_by_target"] == {"base": 0, "tuned": 0, "compare": cases + 1}
+    assert f"{cases + 1} calls" in shown["billing"]
     assert shown["already_done"] == 2 * cases
     assert shown["targets"]["compare"] == "fake-compare"
     assert shown["compare"] == {
@@ -344,6 +345,23 @@ def test_a_compare_model_attached_again_under_a_new_identity_is_probed_first(
     assert "Error [provider_auth]" in again.stderr
     assert len(revoked.calls) == 1
     assert not compare_json.exists()
+
+
+def test_the_preview_counts_the_probe_exactly_when_the_run_attaches(
+    run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_capacity(*args: Any, **kwargs: Any) -> Any:
+        raise ProviderCapacityError("no capacity right now")
+
+    monkeypatch.setattr(FakeBackend, "open_session", no_capacity)
+    args = ("evaluate", str(run_dir), "--compare-model", "fake-compare", "--no-publish")
+    assert invoke(*args, "--confirm").exit_code == 1
+    assert (run_dir / "eval" / "compare.json").exists()
+
+    kept = output(invoke(*args))["preview"]
+    assert kept["generation_calls_by_target"]["compare"] == kept["cases"]
+    replaced = output(invoke(*args, "--seed", "7"))["preview"]
+    assert replaced["generation_calls_by_target"]["compare"] == replaced["cases"] + 1
 
 
 def test_a_stored_compare_target_that_resolves_otherwise_now_is_refused(

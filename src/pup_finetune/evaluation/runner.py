@@ -564,9 +564,14 @@ class EvalPlan:
         }
         calibration = self.calibration_calls()
         eval_dir = EvalDir(self.out_dir)
-        stored = eval_dir.stored_identity() if tuned_checkpoint is not None else None
-        if tuned_checkpoint is not None and stored is not None:
-            wanted = finite_json(self.identity(tuned_checkpoint))
+        wanted = None if tuned_checkpoint is None else finite_json(self.identity(tuned_checkpoint))
+        stored = eval_dir.stored_identity() if wanted is not None else None
+        # The run probes a compare model right before it writes compare.json, which it does
+        # when there is none, or when check_identity drops the one there.
+        probe = self.compare is not None and (
+            wanted is None or not eval_dir.compare_path.exists() or eval_dir.replaces(wanted)
+        )
+        if wanted is not None and stored is not None:
             if wanted == stored:
                 # --confirm would refuse another compare model: fail now, never offer it.
                 if self.compare_identity is not None:
@@ -593,6 +598,8 @@ class EvalPlan:
                 )
         from pup_finetune.judges import destination as judge_destination
 
+        if probe:
+            by_target[COMPARE]["generate"] += 1
         remaining = {
             key: sum(counts[key] for counts in by_target.values())
             for key in ("done", "generate", "judge")
@@ -637,7 +644,11 @@ class EvalPlan:
                 )
             )
         if self.compare is not None and compared:
-            models.append(self.compare.spec)
+            models.append(
+                f"{self.compare.spec} (after one call that checks it answers)"
+                if probe
+                else self.compare.spec
+            )
             billing.append(self.compare.billing(compared))
         elif self.compare is not None:
             reused.append("compare")

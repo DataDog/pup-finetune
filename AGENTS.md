@@ -693,7 +693,9 @@ Source lives under `src/pup_finetune/`.
   judge's before anything is written; `prepare_eval_dir` has it answer one `probe` under the
   directory's lock right before `compare.json` is written, so also after `check_identity`
   dropped the one attached. The preview names only the targets that generate (their provider, billing and
-  recipients); the others' answers are reused.
+  recipients); the others' answers are reused. It counts the probe as one more compare call
+  when the run will make it: no `compare.json`, or one `check_identity` drops
+  (`EvalDir.replaces`, which `check_identity` itself decides by).
   `compare.py` is the compare target: `resolve_compare` (the judge spec grammar,
   `COMPARE_MAX_TOKENS` and the provider's lowest effort; the dev-only `fake-compare`; a stored
   spec is resolved as the flag is, never from the stored endpoint), `CompareTarget` (its

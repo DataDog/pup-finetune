@@ -260,7 +260,7 @@ class EvalDir:
             raise StateError(f"{self.identity_path}: expected a JSON object")
         if canonical_json(stored) == canonical_json(wanted):
             return
-        if not self.has_work():
+        if self.replaces(identity):
             self.calibration_path.unlink(missing_ok=True)
             self.compare_path.unlink(missing_ok=True)
             atomic_write_json(self.identity_path, wanted)
@@ -270,6 +270,16 @@ class EvalDir:
             f"{self.path} holds an evaluation with other settings "
             f"(changed: {', '.join(changed)}), so its results cannot be reused",
             hint="pass a new --out-dir to evaluate with these settings",
+        )
+
+    def replaces(self, identity: Mapping[str, Any]) -> bool:
+        """Whether :meth:`check_identity` takes ``identity`` in place of another one stored,
+        dropping the calibration and the compare target: the directory has no work yet."""
+        stored = self.stored_identity()
+        return (
+            stored is not None
+            and canonical_json(stored) != canonical_json(finite_json(dict(identity)))
+            and not self.has_work()
         )
 
     def stored_identity(self) -> dict[str, Any] | None:
