@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ import pytest
 from pydantic import SecretStr
 
 from pup_finetune.errors import SettingsConflict, UsageError
+from pup_finetune.evaluation import compare
 from pup_finetune.evaluation.cases import ReplayCase
 from pup_finetune.evaluation.compare import (
     COMPARE_MAX_TOKENS,
@@ -200,12 +202,12 @@ def test_a_compare_conflict_names_what_changed_and_a_free_out_dir(tmp_path: Path
 def test_attaching_another_compare_model_raises_the_same_conflict(tmp_path: Path) -> None:
     eval_dir = EvalDir(tmp_path / "eval")
     eval_dir.create()
-    attach_compare(eval_dir, identity_of("openai/gpt-5.5"))
+    attach_compare(eval_dir.compare_path, identity_of("openai/gpt-5.5"))
     wanted = identity_of("anthropic/claude-opus-5-5")
     expected = compare_conflict(identity_of("openai/gpt-5.5"), wanted, out_dir=eval_dir.path)
     assert expected is not None
     with pytest.raises(SettingsConflict) as raised:
-        attach_compare(eval_dir, wanted)
+        attach_compare(eval_dir.compare_path, wanted)
     assert (str(raised.value), raised.value.hint) == (str(expected), expected.hint)
 
 
@@ -238,3 +240,11 @@ def test_a_compare_model_spec_error_names_the_compare_model() -> None:
     assert info.value.hint is not None and "did you mean deepseek-v4p1-flash?" in info.value.hint
     with pytest.raises(UsageError, match=r"^the compare model 'openai/' has no model"):
         resolve_compare("openai/", None, runtime=DEV)
+
+
+def test_the_compare_module_does_not_depend_on_replay() -> None:
+    tree = ast.parse(Path(compare.__file__).read_text(encoding="utf-8"))
+    imported = {
+        node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module
+    }
+    assert "pup_finetune.evaluation.replay" not in imported

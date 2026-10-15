@@ -346,6 +346,15 @@ def finite_json(value: Any) -> Any:
     return value
 
 
+def identity_changes(stored: Mapping[str, Any], wanted: Mapping[str, Any]) -> list[str]:
+    """The keys of two JSON objects whose values differ as :func:`canonical_json`, sorted."""
+    return sorted(
+        key
+        for key in set(stored) | set(wanted)
+        if canonical_json(stored.get(key)) != canonical_json(wanted.get(key))
+    )
+
+
 def settings_hash(settings: Mapping[str, Any]) -> str:
     """The sha256 hex digest of ``settings`` as canonical JSON."""
     return hashlib.sha256(canonical_json(settings).encode("utf-8")).hexdigest()

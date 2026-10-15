@@ -77,6 +77,7 @@ from pup_finetune.storage import (
     atomic_write_json,
     canonical_json,
     finite_json,
+    identity_changes,
     make_private_dir,
     parse_jsonl_line,
     read_json,
@@ -98,7 +99,6 @@ __all__ = [
     "Target",
     "cases_sha256",
     "evaluation_identity",
-    "identity_changes",
     "paired_bootstrap_ci",
     "remaining_work",
     "run_replay",
@@ -187,15 +187,6 @@ def evaluation_identity(
         "seed": seed,
         "max_cases_per_trajectory": max_cases_per_trajectory,
     }
-
-
-def identity_changes(stored: Mapping[str, Any], wanted: Mapping[str, Any]) -> list[str]:
-    """The keys of two :func:`evaluation_identity` records that differ, sorted."""
-    return sorted(
-        key
-        for key in set(stored) | set(wanted)
-        if canonical_json(stored.get(key)) != canonical_json(wanted.get(key))
-    )
 
 
 # --- the evaluation directory -------------------------------------------------------------
@@ -658,7 +649,7 @@ def run_replay(
     eval_dir.create()
     with eval_dir.lock():
         eval_dir.check_identity(identity)
-        attach_compare(eval_dir, compare)
+        attach_compare(eval_dir.compare_path, compare)
         replay = _Replay(eval_dir, samplers, judge_fn, max_tokens=limits, cancel=cancel)
         todo = replay.todo(cases, targets)
         missing = sorted(

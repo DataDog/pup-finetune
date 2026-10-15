@@ -87,7 +87,13 @@ from pup_finetune.runs import (
 )
 from pup_finetune.runs import cancel_on_signals as _cancel_on_signals
 from pup_finetune.runtime import Runtime
-from pup_finetune.storage import LOCK_FILE_NAME, canonical_json, finite_json, free_sibling
+from pup_finetune.storage import (
+    LOCK_FILE_NAME,
+    canonical_json,
+    finite_json,
+    free_sibling,
+    identity_changes,
+)
 from pup_finetune.training.records import StoppedReason, TrainResult
 
 if TYPE_CHECKING:
@@ -547,13 +553,7 @@ class EvalPlan:
         ``--out-dir`` already holds under the same settings is left out of the counts."""
         from pup_finetune.datadog.experiments import experiment_name
         from pup_finetune.evaluation.compare import compare_conflict, stored_compare
-        from pup_finetune.evaluation.replay import (
-            CAVEAT,
-            COMPARE,
-            EvalDir,
-            identity_changes,
-            remaining_work,
-        )
+        from pup_finetune.evaluation.replay import CAVEAT, COMPARE, EvalDir, remaining_work
 
         settings = self.settings
         warnings: list[str] = []
@@ -571,7 +571,9 @@ class EvalPlan:
                 # --confirm would refuse another compare model: fail now, never offer it.
                 if self.compare_identity is not None:
                     conflict = compare_conflict(
-                        stored_compare(eval_dir), self.compare_identity, out_dir=self.out_dir
+                        stored_compare(eval_dir.compare_path),
+                        self.compare_identity,
+                        out_dir=self.out_dir,
                     )
                     if conflict is not None:
                         raise conflict
@@ -754,7 +756,9 @@ def plan_evaluation(
 
     judge_config = resolve_judge(settings.judge_model, provider=provider, runtime=runtime)
     compare = resolve_compare(
-        settings.compare_model, stored_compare(EvalDir(settings.out_dir)), runtime=runtime
+        settings.compare_model,
+        stored_compare(EvalDir(settings.out_dir).compare_path),
+        runtime=runtime,
     )
     tuned = [model_id_for_run(run_id)]
     if promoted is not None:
@@ -913,7 +917,7 @@ def prepare_eval_dir(
     eval_dir.create()
     with eval_dir.lock():
         eval_dir.check_identity(plan.identity(tuned_checkpoint))
-        attach_compare(eval_dir, plan.compare_identity)
+        attach_compare(eval_dir.compare_path, plan.compare_identity)
         if plan.settings.skip_calibration:
             return None
         stored = eval_dir.read_calibration()

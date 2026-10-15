@@ -60,7 +60,13 @@ from pup_finetune.providers.base import (
 from pup_finetune.redaction import redact
 from pup_finetune.runs import error_json
 from pup_finetune.runtime import Runtime
-from pup_finetune.storage import DirectoryLock, atomic_write_json, canonical_json, finite_json
+from pup_finetune.storage import (
+    DirectoryLock,
+    atomic_write_json,
+    canonical_json,
+    finite_json,
+    identity_changes,
+)
 
 if TYPE_CHECKING:
     from pup_finetune.evaluation.cases import ReplayCase
@@ -177,7 +183,7 @@ class BenchmarkPlan:
         Raises :class:`SettingsConflict` when its directory holds work done under other
         settings, which ``--confirm`` would refuse.
         """
-        from pup_finetune.evaluation.replay import EvalDir, identity_changes, remaining_work
+        from pup_finetune.evaluation.replay import EvalDir, remaining_work
 
         eval_dir = EvalDir(self.model_dir(candidate))
         stored = eval_dir.stored_identity()

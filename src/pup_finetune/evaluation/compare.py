@@ -27,7 +27,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Literal
+from typing import Any, Final, Literal
 
 from pup_finetune.data.split import split_position
 from pup_finetune.display import quoted
@@ -42,11 +42,9 @@ from pup_finetune.storage import (
     canonical_json,
     finite_json,
     free_sibling,
+    identity_changes,
     read_json,
 )
-
-if TYPE_CHECKING:
-    from pup_finetune.evaluation.replay import EvalDir
 
 __all__ = [
     "COMPARE_MAX_TOKENS",
@@ -175,9 +173,9 @@ def resolve_compare(
     return CompareTarget(config=config, source=source)
 
 
-def stored_compare(eval_dir: EvalDir) -> dict[str, Any] | None:
-    """``compare.json`` in ``eval_dir``, or ``None`` when no compare target is attached."""
-    path = eval_dir.compare_path
+def stored_compare(path: Path) -> dict[str, Any] | None:
+    """The compare target attached at ``path`` (an evaluation directory's ``compare.json``),
+    or ``None`` when none is."""
     if not path.exists():
         return None
     stored = read_json(path)
@@ -192,8 +190,6 @@ def compare_conflict(
     """Why the compare target ``wanted`` cannot replay into ``out_dir``, which has
     ``stored`` attached (both :meth:`CompareTarget.identity`), naming what changed and a
     free ``--out-dir``; ``None`` when it can (none attached yet, or the same one)."""
-    from pup_finetune.evaluation.replay import identity_changes
-
     wanted = finite_json(dict(wanted))
     if stored is None or canonical_json(stored) == canonical_json(wanted):
         return None
@@ -211,28 +207,29 @@ def compare_conflict(
     )
 
 
-def attach_compare(eval_dir: EvalDir, identity: Mapping[str, Any] | None) -> None:
-    """Attach the compare target ``identity`` to ``eval_dir`` (``compare.json``) the first
-    time; later, raise :func:`compare_conflict` unless it is the one attached. ``None`` (an
-    evaluation planned without one) raises when one is attached, as another process may have
-    done since it was planned. Call it under the directory's lock.
+def attach_compare(path: Path, identity: Mapping[str, Any] | None) -> None:
+    """Attach the compare target ``identity`` at ``path`` (an evaluation directory's
+    ``compare.json``) the first time; later, raise :func:`compare_conflict` unless it is the
+    one attached. ``None`` (an evaluation planned without one) raises when one is attached,
+    as another process may have done since it was planned. Call it under the directory's
+    lock.
 
     A different compare target is a :class:`SettingsConflict` even before its first pair: an
     experiment may have been created for it already.
     """
-    stored = stored_compare(eval_dir)
+    stored = stored_compare(path)
     if identity is None:
         if stored is not None:
             raise SettingsConflict(
-                f"{eval_dir.path} has a compare target ({stored.get('spec')}) this evaluation "
+                f"{path.parent} has a compare target ({stored.get('spec')}) this evaluation "
                 "was planned without",
                 hint="run the command again: it continues the compare target too",
             )
         return
     if stored is None:
-        atomic_write_json(eval_dir.compare_path, finite_json(dict(identity)))
+        atomic_write_json(path, finite_json(dict(identity)))
         return
-    conflict = compare_conflict(stored, identity, out_dir=eval_dir.path)
+    conflict = compare_conflict(stored, identity, out_dir=path.parent)
     if conflict is not None:
         raise conflict
 

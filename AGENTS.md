@@ -438,7 +438,7 @@ Source lives under `src/pup_finetune/`.
   one per error. Retries inside the judge and sampler clients print no evaluation line yet
   (training's retries do). Tests pass `write`, `clock` and the modes in.
 - `storage.py` - atomic writes, `0600` files and `0700` directories, directory locks, frozen
-  settings.
+  settings, and `identity_changes`, the keys two recorded identities differ in.
 - `doctor.py` - what a `doctor` check reports (`CheckResult`: `status`, `detail`, `label`,
   `needed_for`, `fix`, `required`) and the registry of extra checks modules add with
   `register_check`, which `doctor` runs after its own.
@@ -699,7 +699,8 @@ Source lives under `src/pup_finetune/`.
   identity, recipient and billing), `probe`, `stored_compare`, `compare_conflict` (the one
   check the preview and `attach_compare` share: what changed and a free `--out-dir`),
   `attach_compare` (writes `compare.json` under the lock), `ChatSampler` (a `Sampler` over any
-  `ChatCompleter`, the prefix without `reasoning_content`) and `FakeCompareSampler`.
+  `ChatCompleter`, the prefix without `reasoning_content`) and `FakeCompareSampler`; it takes
+  the `compare.json` path and imports nothing from `replay.py`, which imports it.
   `benchmark.py` is `benchmark`: `plan_benchmark` (the test split's cases, the judge and
   one `Candidate` per base model), `execute` (the judge calibrated once, then each model
   replayed in a session of its own into `OUT/<model>` through `run_replay` with the model as
