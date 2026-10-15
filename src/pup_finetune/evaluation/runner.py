@@ -569,7 +569,8 @@ class EvalPlan:
         # The run probes a compare model right before it writes compare.json, which it does
         # when there is none, or when check_identity drops the one there.
         probe = self.compare is not None and (
-            wanted is None or not eval_dir.compare_path.exists() or eval_dir.replaces(wanted)
+            not eval_dir.compare_path.exists()
+            or (wanted is not None and eval_dir.replaces(wanted))
         )
         if wanted is not None and stored is not None:
             if wanted == stored:
