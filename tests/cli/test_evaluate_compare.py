@@ -24,7 +24,7 @@ from pup_finetune import judges
 from pup_finetune.cli import app
 from pup_finetune.inference import ChatCompletion, ContextLimitError, JudgeConfig
 from pup_finetune.providers.base import ProviderAuthError, ProviderCapacityError
-from pup_finetune.providers.fake import FakeBackend
+from pup_finetune.providers.fake import FakeBackend, FakeSampler
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
 
@@ -401,3 +401,19 @@ def test_cases_too_long_for_the_compare_model_point_to_another_compare_model(
     assert "longer than the compare model's context window" in data["hint"]
     assert "another --compare-model" in data["hint"]
     assert "--judge-model" not in data["hint"]
+
+
+def test_cases_too_long_for_the_trained_model_do_not_blame_the_compare_model(
+    run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def too_long(self: FakeSampler, *args: Any, **kwargs: Any) -> Any:
+        raise ContextLimitError("the request is longer than the context window", source="fake")
+
+    monkeypatch.setattr(FakeSampler, "generate", too_long)
+    result = invoke(
+        "evaluate", str(run_dir), "--compare-model", "fake-compare", "--no-publish", "--confirm"
+    )
+    data = output(result)
+    assert data["status"] == "complete_with_errors"
+    assert data["errors"]["compare"] == 0
+    assert "compare model's context window" not in data["hint"]

@@ -1049,11 +1049,12 @@ def replay_result(
             f"{errors} case(s) ended in an error, left out of every rate (see the file "
             "files.results names); run next_command to retry them"
         )
-        too_long = [
-            target.get("errors_too_long_by_stage") or {} for target in summary["targets"].values()
-        ]
-        judged = sum(int(stages.get("judge", 0)) for stages in too_long)
-        compared = sum(int(stages.get("generation", 0)) for stages in too_long)
+        too_long = {
+            name: target.get("errors_too_long_by_stage") or {}
+            for name, target in summary["targets"].items()
+        }
+        judged = sum(int(stages.get("judge", 0)) for stages in too_long.values())
+        compared = int(too_long.get(COMPARE, {}).get("generation", 0))
         if judged:
             hint += (
                 f". {judged} of them are longer than the judge's context window, which a "

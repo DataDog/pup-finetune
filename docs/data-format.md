@@ -232,7 +232,8 @@ has answered one short probe and never changed: `{"spec", "model": {"provider", 
 
 `summary.json` has, per target under `targets`, the judge pass rate, every metric, errors by
 stage, `errors_too_long` (requests longer than a context window, no retry fixes them) and
-`errors_too_long_by_stage` (`generation` for the compare model's, `judge` for the judge's),
+`errors_too_long_by_stage` (the same requests by the stage that sent them: `generation` for
+the target's own model, `judge` for the judge),
 `truncated` (generations cut off at their limit) and `refused` (answers the provider refused).
 With base and tuned, `paired` and `tuned_minus_base`; with a compare target,
 `tuned_minus_compare` (`judge_pass_rate`, `ci95`, `n_cases`, `n_trajectories`, `resamples`,
