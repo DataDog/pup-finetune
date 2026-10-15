@@ -83,7 +83,7 @@ from pup_finetune.datadog.jsonapi import JSON_API, object_id, private_json_file
 from pup_finetune.datadog.pup import DEFAULT_TIMEOUT_SECONDS, Pup
 from pup_finetune.errors import ExternalError, StateError, require_writable
 from pup_finetune.evaluation.cases import ReplayCase
-from pup_finetune.evaluation.replay import METRICS_VERSION, TARGETS, PairKey
+from pup_finetune.evaluation.replay import COMPARE, METRICS_VERSION, TARGETS, PairKey
 from pup_finetune.redaction import redact
 from pup_finetune.runtime import Runtime
 from pup_finetune.storage import atomic_write_json, canonical_json, finite_json, read_json
@@ -312,7 +312,9 @@ class PublishSettings:
     evaluation into another directory has the same ``eval_key`` but its own nonces, so a
     lookup for one directory's create never finds another's experiment. ``records`` maps
     each test row id to its dataset record (``input``, ``expected_output``, ``metadata``),
-    as pushed.
+    as pushed. ``targets`` are the experiments' targets in order, ``compare`` last when the
+    evaluation has a compare target, ``compare_model`` its spec and ``compare_max_tokens``
+    its limit; base and tuned are described the same way with or without it.
     """
 
     eval_key: str
@@ -324,6 +326,9 @@ class PublishSettings:
     max_tokens: int
     push: PushState
     records: Mapping[str, Mapping[str, Any]]
+    targets: tuple[str, ...] = TARGETS
+    compare_model: str | None = None
+    compare_max_tokens: int | None = None
 
     @property
     def dataset_id(self) -> str:
@@ -345,6 +350,19 @@ class PublishSettings:
     def experiment_attributes(self, target: str, nonce: str) -> dict[str, Any]:
         """The body attributes of ``target``'s experiment create, marked with ``nonce``."""
         model = self.base_model if target == "base" else f"{self.base_model}, tuned"
+        config: dict[str, Any] = {
+            "provider": self.provider,
+            "base_model": self.base_model,
+            "target": target,
+            "run_id": self.run_id,
+            "checkpoint": self.tuned_checkpoint if target == "tuned" else None,
+            "judge_model": self.judge_model,
+            "max_tokens": self.max_tokens,
+            "metrics_version": METRICS_VERSION,
+        }
+        if target == COMPARE:
+            model = str(self.compare_model)
+            config |= {"compare_model": self.compare_model, "max_tokens": self.compare_max_tokens}
         attributes: dict[str, Any] = {
             "name": experiment_name(target, self.run_id),
             "description": (
@@ -354,16 +372,7 @@ class PublishSettings:
             ),
             "dataset_id": self.dataset_id,
             "project_id": self.push.project_id,
-            "config": {
-                "provider": self.provider,
-                "base_model": self.base_model,
-                "target": target,
-                "run_id": self.run_id,
-                "checkpoint": self.tuned_checkpoint if target == "tuned" else None,
-                "judge_model": self.judge_model,
-                "max_tokens": self.max_tokens,
-                "metrics_version": METRICS_VERSION,
-            },
+            "config": config,
             "metadata": {"tags": self.tags(target)},
             "ensure_unique": True,
             "run_count": 1,
@@ -730,7 +739,7 @@ class ExperimentsPublisher:
         )
         try:
             experiments = {
-                target: self._experiment(target, report["warnings"]) for target in TARGETS
+                target: self._experiment(target, report["warnings"]) for target in settings.targets
             }
             self._set_link(list(experiments.values()))
             report["comparison_url"] = self.link
@@ -768,7 +777,7 @@ class ExperimentsPublisher:
         """
         require_writable(self.runtime, "publishing the evaluation as experiments")
         try:
-            experiments = [self._experiment(target, []) for target in TARGETS]
+            experiments = [self._experiment(target, []) for target in self.settings.targets]
         except (ExternalError, _PublishCancelled):
             self._live_failed = True
             return None
@@ -810,7 +819,7 @@ class ExperimentsPublisher:
         for case in cases:
             by_row.setdefault(case.row_id, []).append(case)
         try:
-            for target in TARGETS:
+            for target in self.settings.targets:
                 ready = [
                     case
                     for row in by_row.values()
