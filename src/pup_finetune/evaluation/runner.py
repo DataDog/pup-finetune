@@ -38,7 +38,7 @@ import hashlib
 import os
 import shlex
 import threading
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,7 +54,7 @@ from pup_finetune.data.push import (
     record_digest,
 )
 from pup_finetune.datadog.pup import Pup
-from pup_finetune.display import display_path, quoted
+from pup_finetune.display import display_path, joined, quoted
 from pup_finetune.errors import (
     FinetuneError,
     Interrupted,
@@ -653,7 +653,7 @@ class EvalPlan:
         elif self.compare is not None:
             reused.append("compare")
         billing.append(judge_billing(self.judge, judge_calls))
-        steps = [f"reuse the {_and(reused)} answers already generated"] if reused else []
+        steps = [f"reuse the {joined(reused)} answers already generated"] if reused else []
         if models:
             steps.append(f"generate each with {' and with '.join(models)}")
         cases = f"{_cases(len(self.cases))} from {trajectories} test conversations"
@@ -710,10 +710,6 @@ class EvalPlan:
 
 
 _COUNTS: Final = {2: "two", 3: "three"}
-
-
-def _and(items: Sequence[str]) -> str:
-    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
 
 
 def _cases(count: int) -> str:

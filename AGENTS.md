@@ -422,7 +422,8 @@ Source lives under `src/pup_finetune/`.
   `quoted`, the shell-quoted `word`,
   use it for path words), `significant` (4 significant digits) and `rounded_floats`, which
   rounds only measurements (`MEASUREMENTS`: losses, rates, deltas, CI bounds, times, spend
-  estimates, ages) and never a value the user set (`UNROUNDED`: `settings` and the like).
+  estimates, ages) and never a value the user set (`UNROUNDED`: `settings` and the like),
+  and `joined`, the one way a list reads in a sentence (`a, b and c`).
 - `output.py` - the one stdout result (redacted, measurements rounded with `display.py`, keys in
   the order they were built, text not escaped, plain lists and objects on one line when they
   fit; through `pup format` under pup, with `--command

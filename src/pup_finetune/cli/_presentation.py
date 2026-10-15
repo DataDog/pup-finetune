@@ -38,6 +38,7 @@ from typer import rich_utils
 from typer.core import TyperCommand, TyperGroup
 
 from pup_finetune.cli._common import click_module, plain_click_errors
+from pup_finetune.display import joined
 
 __all__ = [
     "BUILD_A_DATASET",
@@ -341,10 +342,6 @@ def _param_name(param: Any) -> str:
     return str(param.human_readable_name)
 
 
-def _joined(names: Sequence[str]) -> str:
-    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
-
-
 class Command(TyperCommand):
     """A command as every ``pup finetune`` command is built (see the module docstring)."""
 
@@ -357,7 +354,7 @@ class Command(TyperCommand):
             return super().parse_args(ctx, args)
         except exceptions.MissingParameter as exc:
             missing = self._missing(ctx, given) or [exc.param]
-            names = _joined([_param_name(param) for param in missing if param is not None])
+            names = joined([_param_name(param) for param in missing if param is not None])
             raise exceptions.UsageError(f"{' '.join(_path(ctx))} needs {names}", ctx=ctx) from exc
 
     def _missing(self, ctx: Any, given: list[str]) -> list[Any]:

@@ -71,7 +71,7 @@ from pup_finetune.cli._views import (
     train_view,
 )
 from pup_finetune.data.dataset_dir import DatasetDir
-from pup_finetune.display import display_path, quoted
+from pup_finetune.display import display_path, joined, quoted
 from pup_finetune.errors import (
     PAID_RUN,
     FinetuneError,
@@ -640,10 +640,6 @@ def _remote_sync(run: RunDir) -> RemoteSync | None:
     return sync_remote(run, remote_jobs(provider))
 
 
-def _joined(names: Sequence[str]) -> str:
-    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
-
-
 def provider_for_model(model: str, given: str | None, runtime: Runtime) -> tuple[str, str]:
     """The provider ``train`` uses for ``--model`` and where it came from: ``given``
     (``--provider``), else the one provider whose profiles name the alias ``model``
@@ -657,7 +653,7 @@ def provider_for_model(model: str, given: str | None, runtime: Runtime) -> tuple
         return found[0], f"inferred from --model {model}"
     if found:
         raise UsageError(
-            f"{model} is offered by {_joined(found)}; pass --provider",
+            f"{model} is offered by {joined(found)}; pass --provider",
             hint=f"for example --provider {found[0]}",
         )
     known = "; ".join(
