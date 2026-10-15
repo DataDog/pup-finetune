@@ -417,3 +417,23 @@ def test_cases_too_long_for_the_trained_model_do_not_blame_the_compare_model(
     assert data["status"] == "complete_with_errors"
     assert data["errors"]["compare"] == 0
     assert "compare model's context window" not in data["hint"]
+
+
+def test_the_action_names_what_is_reused_and_what_is_left(evaluated: Path) -> None:
+    args = ("evaluate", str(evaluated), "--compare-model", "fake-compare", "--no-publish")
+    assert invoke(*args, "--confirm").exit_code == 0
+    done = output(invoke(*args))["preview"]
+    assert done["generation_calls"] == done["judge_calls"] == 0
+    assert "every answer is already generated and judged" in done["action"]
+    assert "judge each answer" not in done["action"]
+
+    results = evaluated / "eval" / "results.jsonl"
+    kept = [line for line in results.read_text().splitlines() if '"target":"compare"' not in line]
+    results.write_text("".join(f"{line}\n" for line in kept))
+    judging = output(invoke(*args))["preview"]
+    assert judging["generation_calls"] == 0
+    assert judging["judge_calls"] == judging["cases"]
+    assert (
+        "reuse the base, tuned and compare answers already generated, and judge each answer"
+        in judging["action"]
+    )

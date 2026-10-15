@@ -38,7 +38,7 @@ import hashlib
 import os
 import shlex
 import threading
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -635,7 +635,7 @@ class EvalPlan:
         # Only what generates bills or is named: base and tuned answers already stored are
         # reused, so attaching a compare model never mentions the training provider.
         models = [f"the base and the tuned model on {self.provider}"] if trained else []
-        reused = [] if trained else ["base and tuned"]
+        reused = [] if trained else ["base", "tuned"]
         billing = []
         if trained:
             billing.append(
@@ -653,12 +653,15 @@ class EvalPlan:
         elif self.compare is not None:
             reused.append("compare")
         billing.append(judge_billing(self.judge, judge_calls))
-        steps = [f"reuse the {' and '.join(reused)} answers already generated"] if reused else []
+        steps = [f"reuse the {_and(reused)} answers already generated"] if reused else []
         if models:
             steps.append(f"generate each with {' and with '.join(models)}")
         action = (
             f"evaluate {_cases(len(self.cases))} from {trajectories} test conversations: "
             f"{', '.join(steps)}, and judge each answer with {judge_name}"
+            if models or judge_calls
+            else f"summarize {_cases(len(self.cases))} from {trajectories} test conversations: "
+            "every answer is already generated and judged"
         )
         if publish["status"] == "planned":
             action += f", then publish {_COUNTS[len(targets)]} experiments to Datadog"
@@ -706,6 +709,10 @@ class EvalPlan:
 
 
 _COUNTS: Final = {2: "two", 3: "three"}
+
+
+def _and(items: Sequence[str]) -> str:
+    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
 
 
 def _cases(count: int) -> str:
