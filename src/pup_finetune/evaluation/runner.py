@@ -1684,7 +1684,11 @@ class StandaloneEvaluation:
         with ExitStack() as stack:
             client = stack.enter_context(open_judge_client(plan.judge))
             compare, target = self._open_compare(stack), plan.compare
-            check = None if compare is None or target is None else lambda: probe(compare, target)
+            check = (
+                None
+                if compare is None or target is None
+                else lambda: probe(compare, target, plan.cases)
+            )
             report = prepare_eval_dir(plan, self.training, client, probe=check)
             if report is not None and not report.get("ok"):
                 return calibration_failed(plan, report)

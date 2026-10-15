@@ -319,6 +319,46 @@ def test_the_probe_runs_once_when_the_compare_model_is_attached(
     assert len(model.calls) == cases
 
 
+def test_the_probe_sends_no_tool_when_no_test_case_has_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plain = tmp_path / "plain.jsonl"
+    plain.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "id": f"row-plain-{index:03d}",
+                    "messages": [
+                        {"role": "user", "content": f"Say the number {index} in words."},
+                        {"role": "assistant", "content": f"The number is {index}."},
+                    ],
+                }
+            )
+            + "\n"
+            for index in range(30)
+        )
+    )
+    dataset, run = tmp_path / "ds", tmp_path / "run"
+    imported = invoke(
+        "dataset", "import", str(dataset), "--file", str(plain), "--test-fraction", "0.3"
+    )
+    assert imported.exit_code == 0, imported.stderr
+    trained = invoke(
+        "train", "--model", "fake-model", "--dataset", str(dataset), "--run-dir", str(run),
+        "--max-epochs", "1", "--confirm",
+    )  # fmt: skip
+    assert trained.exit_code == 0, trained.stderr
+    model = CompareModel()
+    serve_compare(monkeypatch, model)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-synthetic")
+    result = invoke(
+        "evaluate", str(run), "--compare-model", "openai/gpt-5.5", "--no-publish", "--confirm"
+    )
+    assert result.exit_code == 0, result.stderr
+    assert len(model.calls) > 1
+    assert [options["tools"] for options in model.options] == [None] * len(model.calls)
+
+
 def test_a_compare_model_attached_again_under_a_new_identity_is_probed_first(
     run_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

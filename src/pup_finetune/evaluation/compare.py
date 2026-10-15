@@ -373,16 +373,17 @@ def _prompt_key(messages: Sequence[Mapping[str, Any]], tools: Sequence[Mapping[s
     return canonical_json([list(messages), list(tools)])
 
 
-def probe(sampler: Sampler, target: CompareTarget) -> None:
+def probe(sampler: Sampler, target: CompareTarget, cases: Sequence[ReplayCase]) -> None:
     """One short call to the compare model before it is attached, so a model that cannot
     answer (a mistyped name, a rejected key) fails the command before ``compare.json``
     freezes it. It is sent as replay calls it, with the target's ``max_tokens`` and reasoning
-    effort and a tool (:data:`PROBE_TOOL`), so a model that refuses those fails here too.
-    Any answer passes, a cut-off one included; a failure raises the provider's error."""
+    effort, and a tool (:data:`PROBE_TOOL`) when any of ``cases`` has tools, so a model that
+    refuses those fails here too. Any answer passes, a cut-off one included; a failure raises
+    the provider's error."""
     info(f"checking that the compare model {target.spec} answers")
     sampler.generate(
         [{"role": "user", "content": PROBE_PROMPT}],
-        [PROBE_TOOL],
+        [PROBE_TOOL] if any(case.tools for case in cases) else [],
         max_tokens=target.config.max_tokens,
     )
 
