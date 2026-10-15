@@ -177,7 +177,7 @@ def resolve_compare(
 
     parsed = parse_judge(spec, what="compare model")
     config = parsed.model_copy(update={"max_tokens": COMPARE_MAX_TOKENS})
-    check_available(config)
+    check_available(config, what="compare model")
     return CompareTarget(config=config, source=source)
 
 

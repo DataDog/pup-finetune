@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -248,3 +249,11 @@ def test_the_compare_module_does_not_depend_on_replay() -> None:
         node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module
     }
     assert "pup_finetune.evaluation.replay" not in imported
+
+
+def test_a_missing_anthropic_extra_names_the_compare_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "anthropic", None)
+    with pytest.raises(UsageError, match=r"^Anthropic compare models need the 'anthropic' package"):
+        resolve_compare("anthropic/claude-opus-5-5", None, runtime=DEV)

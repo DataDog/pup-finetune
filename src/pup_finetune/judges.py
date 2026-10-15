@@ -253,16 +253,17 @@ def billing(
     )
 
 
-def check_available(config: JudgeConfig) -> None:
+def check_available(config: JudgeConfig, *, what: str = "judge") -> None:
     """Raise :class:`UsageError` with an install hint when ``config``'s judge needs a
-    package that is not installed (the ``anthropic`` extra). Imports nothing."""
+    package that is not installed (the ``anthropic`` extra), naming the model as ``what``
+    (``judge``, or ``compare model``). Imports nothing."""
     if config.provider == "anthropic" and importlib.util.find_spec("anthropic") is None:
-        raise _anthropic_missing()
+        raise _anthropic_missing(what)
 
 
-def _anthropic_missing() -> UsageError:
+def _anthropic_missing(what: str = "judge") -> UsageError:
     return UsageError(
-        "Anthropic judges need the 'anthropic' package, which is not installed",
+        f"Anthropic {what}s need the 'anthropic' package, which is not installed",
         hint=ANTHROPIC_INSTALL_HINT,
     )
 
