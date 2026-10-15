@@ -524,18 +524,22 @@ class EvalPlan:
             progress=info,
         )
 
-    def recipients(self) -> list[str]:
+    def recipients(self, *, trained: bool = True, compared: bool = True) -> list[str]:
         """Who receives the evaluation's data, one entry per kind of data, e.g.
-        ``test split -> fireworks (generate), Anthropic api.anthropic.com (judge)``."""
+        ``test split -> fireworks (generate), Anthropic api.anthropic.com (judge)``: the
+        training provider only when base or tuned has a case left to generate (``trained``),
+        and the compare model only when it has (``compared``)."""
         from pup_finetune.judges import recipient
 
-        judge = (
+        sent = [f"{self.provider} (generate)"] if trained else []
+        if self.compare is not None and compared:
+            sent.append(self.compare.recipient())
+        sent.append(
             "the offline fake judge (judge; nothing is sent)"
             if self.judge.provider == "fake"
             else f"{recipient(self.judge)} (judge)"
         )
-        compare = "" if self.compare is None else f", {self.compare.recipient()}"
-        found = [f"test split -> {self.provider} (generate){compare}, {judge}"]
+        found = [f"test split -> {', '.join(sent)}"]
         if self.publishing.ready:
             found.append("test cases, generated answers and scores -> Datadog (experiments)")
         return found
@@ -601,11 +605,11 @@ class EvalPlan:
             if self.judge.provider == "fake"
             else judge_destination(self.judge)
         )
-        compare_to = "" if self.compare is None else f", to {self.compare.destination()}"
-        destination = (
-            f"the test split's conversations are sent to {self.provider} to generate"
-            f"{compare_to} and to {judged_at} to judge"
-        )
+        generators = [self.provider] if trained else []
+        if self.compare is not None and compared:
+            generators.append(self.compare.destination())
+        generate = f"{' and to '.join(generators)} to generate and to " if generators else ""
+        destination = f"the test split's conversations are sent to {generate}{judged_at} to judge"
         publish = self.publishing.status()
         if publish["status"] == "skipped":
             warnings.append(f"the evaluation will not be published: {publish['reason']}")
@@ -620,23 +624,33 @@ class EvalPlan:
         from pup_finetune.providers.base import SamplingUsage
 
         judge_calls = remaining["judge"] + calibration
-        sampling = get_provider(self.provider, self.runtime).sampling_billing(
-            SamplingUsage(calls=trained, max_tokens_per_call=settings.max_tokens)
-        )
         judge_name = "the fake judge" if self.judge.provider == "fake" else self.judge.spec
-        models = "the base and the tuned model on " + self.provider
-        if self.compare is not None:
-            models += f" and with {self.compare.spec}"
+        # Only what generates bills or is named: base and tuned answers already stored are
+        # reused, so attaching a compare model never mentions the training provider.
+        models = [f"the base and the tuned model on {self.provider}"] if trained else []
+        reused = [] if trained else ["base and tuned"]
+        billing = []
+        if trained:
+            billing.append(
+                get_provider(self.provider, self.runtime).sampling_billing(
+                    SamplingUsage(calls=trained, max_tokens_per_call=settings.max_tokens)
+                )
+            )
+        if self.compare is not None and compared:
+            models.append(self.compare.spec)
+            billing.append(self.compare.billing(compared))
+        elif self.compare is not None:
+            reused.append("compare")
+        billing.append(judge_billing(self.judge, judge_calls))
+        steps = [f"reuse the {' and '.join(reused)} answers already generated"] if reused else []
+        if models:
+            steps.append(f"generate each with {' and with '.join(models)}")
         action = (
             f"evaluate {_cases(len(self.cases))} from {trajectories} test conversations: "
-            f"generate each with {models}, and judge each answer with {judge_name}"
+            f"{', '.join(steps)}, and judge each answer with {judge_name}"
         )
         if publish["status"] == "planned":
             action += f", then publish {_COUNTS[len(targets)]} experiments to Datadog"
-        billing = [sampling]
-        if self.compare is not None:
-            billing.append(self.compare.billing(compared))
-        billing.append(judge_billing(self.judge, judge_calls))
         target_names: dict[str, str] = {"base": self.profile.base_model, "tuned": tuned}
         if self.compare is not None:
             target_names[COMPARE] = self.compare.spec
@@ -674,7 +688,7 @@ class EvalPlan:
             },
             "publish": publish,
             "data_destination": destination,
-            "data_recipients": self.recipients(),
+            "data_recipients": self.recipients(trained=bool(trained), compared=bool(compared)),
             "caveat": CAVEAT,
             "warnings": warnings,
         }

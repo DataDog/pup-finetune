@@ -140,9 +140,16 @@ def test_attaching_a_compare_model_redoes_neither_base_nor_tuned(
         "model": "fake-compare", "provider": "fake", "endpoint": "offline",
         "max_tokens": 16000, "reasoning_effort": None, "source": "flag",
     }  # fmt: skip
+    assert shown["data_recipients"] == [
+        "test split -> the offline fake compare model (compare; nothing is sent), "
+        "the offline fake judge (judge; nothing is sent)"
+    ]
     assert (
-        "the offline fake compare model (compare; nothing is sent)" in shown["data_recipients"][0]
+        "reuse the base and tuned answers already generated, generate each with fake-compare"
+        in (shown["action"])
     )
+    assert "fake provider" not in shown["billing"]
+    assert "sent to fake " not in shown["data_destination"]
     assert "--compare-model fake-compare" in preview["next_command"]
 
     monkeypatch.setattr(FakeBackend, "open_session", no_session)
