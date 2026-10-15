@@ -279,17 +279,23 @@ def anthropic_client_class() -> type[AnthropicChatClient]:
 
 
 @contextmanager
-def open_client(config: JudgeConfig, *, timeout_s: float | None = None) -> Iterator[ChatCompleter]:
+def open_client(
+    config: JudgeConfig, *, timeout_s: float | None = None, fallbacks: bool = True
+) -> Iterator[ChatCompleter]:
     """The client for ``config``'s judge, with the key of its credential. Closed on exit.
 
     Fireworks and OpenAI judges get a :class:`~pup_finetune.inference.ChatClient` (with
     OpenAI's request policy for OpenAI), Anthropic judges an
     :class:`~pup_finetune.anthropic_client.AnthropicChatClient`; ``timeout_s`` replaces the
-    client's limit per attempt. Raises :class:`UsageError` when no key is configured, or a
-    package the judge needs is missing.
+    client's limit per attempt, and ``fallbacks`` ``False`` turns off Anthropic's
+    server-side refusal fallbacks, which answer with another model. Raises
+    :class:`UsageError` when no key is configured, or a package the judge needs is missing.
     """
     if config.provider == "anthropic":
-        with anthropic_client_class().for_judge(config, timeout_s=timeout_s) as client:
+        opened = anthropic_client_class().for_judge(
+            config, timeout_s=timeout_s, fallbacks=fallbacks
+        )
+        with opened as client:
             yield client
         return
     if config.provider not in ("fireworks", "openai"):

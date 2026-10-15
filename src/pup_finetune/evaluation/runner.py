@@ -651,8 +651,6 @@ class EvalPlan:
         )
         if publish["status"] == "planned":
             action += f", then publish {_COUNTS[len(targets)]} experiments to Datadog"
-        # Each part names who bills it: the generation's provider, the compare model's, then
-        # the judge's.
         billing = [sampling]
         if self.compare is not None:
             billing.append(self.compare.billing(compared))

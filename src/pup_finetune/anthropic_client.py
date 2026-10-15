@@ -30,7 +30,8 @@ whose messages and tools are in the OpenAI form:
   none is given.
 - The models with server-side refusal fallbacks (:data:`FALLBACK_MODELS`) are called through
   the beta Messages API with ``fallbacks="default"``, so a declined request is retried on
-  the fallback model the API picks for the refusal's category.
+  the fallback model the API picks for the refusal's category. A compare model is opened
+  with ``fallbacks=False``: its answers must be its own.
 
 The answer maps back to a :class:`~pup_finetune.inference.ChatCompletion`: the text blocks
 concatenated (``thinking`` and ``fallback`` blocks are ignored), its ``tool_use`` blocks as
@@ -172,7 +173,8 @@ class AnthropicChatClient:
     ``api_key`` ``None`` lets the SDK sign in on its own (see the module docstring).
     ``client`` replaces the SDK client (tests pass a fake, or an SDK client on a mock
     transport); ``timeout_s`` bounds each attempt and ``max_attempts`` counts the SDK's
-    retries in. Use it as a context manager, or call :meth:`close`.
+    retries in; ``fallbacks`` ``False`` never asks for server-side refusal fallbacks. Use it
+    as a context manager, or call :meth:`close`.
     """
 
     def __init__(
@@ -183,6 +185,7 @@ class AnthropicChatClient:
         client: SdkClient | None = None,
         timeout_s: float = DEFAULT_TIMEOUT_S,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        fallbacks: bool = True,
     ) -> None:
         if max_attempts < 1:
             raise ValueError(f"max_attempts must be at least 1, got {max_attempts}")
@@ -208,6 +211,7 @@ class AnthropicChatClient:
                 ) from exc
             client = cast(SdkClient, built)
         self._client = client
+        self._fallbacks = fallbacks
 
     @classmethod
     def for_judge(
@@ -217,6 +221,7 @@ class AnthropicChatClient:
         env: Mapping[str, str] | None = None,
         client: SdkClient | None = None,
         timeout_s: float | None = None,
+        fallbacks: bool = True,
     ) -> AnthropicChatClient:
         """A client for ``config``'s judge (or compare model), with the key of its credential.
 
@@ -230,11 +235,19 @@ class AnthropicChatClient:
         timeout_s = DEFAULT_TIMEOUT_S if timeout_s is None else timeout_s
         found = credentials.lookup(config.credential, env=environment)
         if found is not None:
-            return cls(found.value, base_url=config.base_url, client=client, timeout_s=timeout_s)
+            return cls(
+                found.value,
+                base_url=config.base_url,
+                client=client,
+                timeout_s=timeout_s,
+                fallbacks=fallbacks,
+            )
         if credentials.sdk_login_source(config.credential, env=environment) is None:
             raise credentials.missing_key_error(config.credential, hint=_login_hint())
         credentials.register_sdk_secrets(config.credential, env=environment)
-        return cls(None, base_url=config.base_url, client=client, timeout_s=timeout_s)
+        return cls(
+            None, base_url=config.base_url, client=client, timeout_s=timeout_s, fallbacks=fallbacks
+        )
 
     def __enter__(self) -> Self:
         return self
@@ -296,7 +309,7 @@ class AnthropicChatClient:
         if output_config:
             params["output_config"] = output_config
         try:
-            if base in FALLBACK_MODELS:
+            if self._fallbacks and base in FALLBACK_MODELS:
                 message = self._client.beta.messages.create(
                     **params, betas=[FALLBACK_BETA], fallbacks="default"
                 )

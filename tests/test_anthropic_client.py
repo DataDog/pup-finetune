@@ -319,6 +319,29 @@ def test_models_with_fallbacks_use_the_beta_api_with_default_fallbacks(model: st
     }
 
 
+def test_a_compare_model_never_asks_for_fallbacks_and_a_judge_still_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pup_finetune.evaluation.compare import CompareTarget, open_compare_sampler
+    from pup_finetune.evaluation.runner import open_judge_client
+
+    sdk = FakeSdk()
+    monkeypatch.setattr(anthropic, "Anthropic", lambda **kwargs: sdk)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", API_KEY)
+    config = parse_judge("anthropic/claude-opus-5-5")
+    target = CompareTarget(config=config, source="flag")
+    with open_compare_sampler(target, [], seed=0) as sampler:
+        sampler.generate(MESSAGES, [], max_tokens=100)
+    (compared,) = sdk.messages.calls
+    assert "fallbacks" not in compared
+    assert "betas" not in compared
+    assert sdk.beta.messages.calls == []
+    with open_judge_client(config) as client:
+        client.complete(MESSAGES, model=config.model, max_tokens=100)
+    (judged,) = sdk.beta.messages.calls
+    assert judged["fallbacks"] == "default"
+
+
 @pytest.mark.parametrize("model", sorted(EFFORT_MODELS - FALLBACK_MODELS))
 def test_models_with_effort_only_get_low_effort_and_no_fallbacks(model: str) -> None:
     sdk = FakeSdk()

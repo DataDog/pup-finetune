@@ -293,11 +293,11 @@ def open_compare_sampler(
 ) -> Iterator[Sampler]:
     """The compare model's sampler: the fake one, or a :class:`ChatSampler` over the client
     :func:`~pup_finetune.judges.open_client` opens for it (with :data:`COMPARE_TIMEOUT_S`
-    per attempt), closed on exit."""
+    per attempt, and no server-side fallback to another model), closed on exit."""
     if target.offline:
         yield FakeCompareSampler(cases, seed=seed)
         return
     from pup_finetune.judges import open_client
 
-    with open_client(target.config, timeout_s=COMPARE_TIMEOUT_S) as client:
+    with open_client(target.config, timeout_s=COMPARE_TIMEOUT_S, fallbacks=False) as client:
         yield ChatSampler(client, target.config)
