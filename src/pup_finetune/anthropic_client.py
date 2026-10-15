@@ -7,13 +7,19 @@
 """Chat completions from Anthropic's Messages API, through the official SDK.
 
 This is the only module that imports the ``anthropic`` SDK (the ``anthropic`` extra); it is
-loaded only when an Anthropic judge is used (:func:`pup_finetune.judges.open_client`). The SDK
-1.x is built on ``httpx2``: nothing from the ``httpx`` package is ever passed to it.
+loaded only when an Anthropic judge or compare model is used
+(:func:`pup_finetune.judges.open_client`). The SDK 1.x is built on ``httpx2``: nothing from
+the ``httpx`` package is ever passed to it.
 
-:class:`AnthropicChatClient` answers :class:`~pup_finetune.inference.ChatCompleter` calls:
+:class:`AnthropicChatClient` answers :class:`~pup_finetune.inference.ChatCompleter` calls,
+whose messages and tools are in the OpenAI form:
 
 - A leading system message becomes the top-level ``system``; the other messages are sent as
-  they are, as text. ``model`` is the bare model id and ``max_tokens`` the judge's limit,
+  text, except tool calls and their results: an assistant message's ``tool_calls`` become
+  ``tool_use`` blocks (with their ids and parsed arguments), and each ``tool`` message a
+  ``tool_result`` block in a user turn, consecutive ones in one turn, so the turns alternate
+  as the API requires. ``tools`` become Anthropic tools (``input_schema`` from
+  ``parameters``). ``model`` is the bare model id and ``max_tokens`` the caller's limit,
   which thinking shares on current models.
 - No sampling parameter (``temperature``, ``top_p``, ``top_k``) is ever sent: current models
   reject them.
@@ -27,10 +33,11 @@ loaded only when an Anthropic judge is used (:func:`pup_finetune.judges.open_cli
   the fallback model the API picks for the refusal's category.
 
 The answer maps back to a :class:`~pup_finetune.inference.ChatCompletion`: the text blocks
-concatenated (``thinking`` and ``fallback`` blocks are ignored), the usage, the model that
-answered, and ``stop_reason`` as ``finish_reason`` (``end_turn`` is ``stop``, ``max_tokens``
-and ``model_context_window_exceeded`` are ``length``, ``refusal`` stays ``refusal``, anything
-else passes through).
+concatenated (``thinking`` and ``fallback`` blocks are ignored), its ``tool_use`` blocks as
+OpenAI ``tool_calls`` (``arguments`` the input as a JSON string), the usage, the model that
+answered, and ``stop_reason`` as ``finish_reason`` (``end_turn`` is ``stop``, ``tool_use`` is
+``tool_calls``, ``max_tokens`` and ``model_context_window_exceeded`` are ``length``,
+``refusal`` stays ``refusal``, anything else passes through).
 
 Errors are the SDK's typed exceptions, after its own retries (``max_retries`` is set
 explicitly): a rejected key, or a failed SDK sign-in (``CredentialsError``,
@@ -52,6 +59,7 @@ when the client is built is a :class:`~pup_finetune.errors.UsageError` with the 
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from collections.abc import Mapping, Sequence
@@ -117,6 +125,7 @@ STRUCTURED_OUTPUT_MODELS: Final = EFFORT_MODELS | frozenset(
 _DATED: Final = re.compile(r"^(?P<base>.+?)-\d{8}$")
 _FINISH_REASONS: Final = {
     "end_turn": "stop",
+    "tool_use": "tool_calls",
     "max_tokens": "length",
     "model_context_window_exceeded": "length",
     "refusal": "refusal",
@@ -207,8 +216,9 @@ class AnthropicChatClient:
         *,
         env: Mapping[str, str] | None = None,
         client: SdkClient | None = None,
+        timeout_s: float | None = None,
     ) -> AnthropicChatClient:
-        """A client for ``config``'s judge, with the key of its credential.
+        """A client for ``config``'s judge (or compare model), with the key of its credential.
 
         The key comes from :func:`pup_finetune.credentials.lookup` (the environment, then
         the keychain; ``env`` replaces the environment). Without one, the client is built
@@ -217,13 +227,14 @@ class AnthropicChatClient:
         :func:`~pup_finetune.credentials.resolve` would.
         """
         environment = os.environ if env is None else env
+        timeout_s = DEFAULT_TIMEOUT_S if timeout_s is None else timeout_s
         found = credentials.lookup(config.credential, env=environment)
         if found is not None:
-            return cls(found.value, base_url=config.base_url, client=client)
+            return cls(found.value, base_url=config.base_url, client=client, timeout_s=timeout_s)
         if credentials.sdk_login_source(config.credential, env=environment) is None:
             raise credentials.missing_key_error(config.credential, hint=_login_hint())
         credentials.register_sdk_secrets(config.credential, env=environment)
-        return cls(None, base_url=config.base_url, client=client)
+        return cls(None, base_url=config.base_url, client=client, timeout_s=timeout_s)
 
     def __enter__(self) -> Self:
         return self
@@ -269,14 +280,13 @@ class AnthropicChatClient:
         """One message from ``model``, mapped as the module docstring says.
 
         ``temperature`` is ignored (current models reject it); ``max_tokens`` is required by
-        the API, so it defaults to the Anthropic judge's limit. ``tools`` are not supported:
-        judges call none.
+        the API, so it defaults to the Anthropic judge's limit.
         """
         del temperature  # never sent: current models reject sampling parameters
-        if tools:
-            raise UsageError("the Anthropic judge client does not send tools")
         what = f"a message from {model}"
         params = self._params(messages, model=model, max_tokens=max_tokens)
+        if tools:
+            params["tools"] = [_anthropic_tool(tool) for tool in tools]
         base = _base_model(model)
         output_config: dict[str, Any] = {}
         if base in EFFORT_MODELS:
@@ -306,10 +316,7 @@ class AnthropicChatClient:
         params: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens if max_tokens is not None else _DEFAULT_MAX_TOKENS,
-            "messages": [
-                {"role": str(message.get("role")), "content": _text(message.get("content"))}
-                for message in rest
-            ],
+            "messages": _anthropic_messages(rest),
         }
         if system:
             params["system"] = "\n\n".join(system)
@@ -398,6 +405,88 @@ def _text(content: object) -> str:
     return "" if content is None else str(content)
 
 
+def _anthropic_tool(tool: Mapping[str, Any]) -> dict[str, Any]:
+    """An OpenAI function tool as an Anthropic tool."""
+    function = tool.get("function")
+    function = function if isinstance(function, Mapping) else tool
+    parameters = function.get("parameters")
+    return {
+        "name": str(function.get("name", "")),
+        "description": str(function.get("description") or ""),
+        "input_schema": dict(parameters) if parameters else {"type": "object", "properties": {}},
+    }
+
+
+def _anthropic_messages(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """OpenAI messages (after the system ones) as Anthropic turns: a turn of text alone
+    keeps its content a string; tool calls and results become blocks, and consecutive
+    messages of one role (a tool result is the user's) share a turn."""
+    turns: list[tuple[str, list[dict[str, Any]]]] = []
+    for message in messages:
+        role = str(message.get("role"))
+        text = _text(message.get("content"))
+        blocks: list[dict[str, Any]] = [{"type": "text", "text": text}] if text else []
+        if role == "tool":
+            role = "user"
+            blocks = [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": str(message.get("tool_call_id")),
+                    "content": text,
+                }
+            ]
+        calls = message.get("tool_calls") if role == "assistant" else None
+        for call in calls if isinstance(calls, Sequence) else ():
+            function = call.get("function") if isinstance(call, Mapping) else None
+            if isinstance(function, Mapping):
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": str(call.get("id")),
+                        "name": str(function.get("name")),
+                        "input": _arguments(function.get("arguments")),
+                    }
+                )
+        if not blocks:
+            continue  # e.g. an assistant turn of reasoning alone: the API refuses empty turns
+        if turns and turns[-1][0] == role:
+            turns[-1][1].extend(blocks)
+        else:
+            turns.append((role, blocks))
+    return [
+        {"role": role, "content": blocks[0]["text"]}
+        if len(blocks) == 1 and blocks[0]["type"] == "text"
+        else {"role": role, "content": blocks}
+        for role, blocks in turns
+    ]
+
+
+def _arguments(text: object) -> dict[str, Any]:
+    """A tool call's JSON arguments as the object ``tool_use`` takes; text that is not a JSON
+    object is kept under ``_raw``."""
+    try:
+        parsed = json.loads(text) if isinstance(text, str) else text
+    except ValueError:
+        parsed = None
+    return dict(parsed) if isinstance(parsed, Mapping) else {"_raw": str(text)}
+
+
+def _tool_calls(blocks: Sequence[Any]) -> list[dict[str, Any]]:
+    """The ``tool_use`` blocks of an answer as OpenAI tool calls."""
+    return [
+        {
+            "id": str(getattr(block, "id", "")),
+            "type": "function",
+            "function": {
+                "name": str(getattr(block, "name", "")),
+                "arguments": json.dumps(getattr(block, "input", None) or {}, ensure_ascii=False),
+            },
+        }
+        for block in blocks
+        if getattr(block, "type", None) == "tool_use"
+    ]
+
+
 def _detail(exc: anthropic.AnthropicError) -> str:
     """The API's error message for ``exc`` (else its text), short and redacted."""
     body = getattr(exc, "body", None)
@@ -414,11 +503,15 @@ def _detail(exc: anthropic.AnthropicError) -> str:
 
 def _completion(message: Any, model: str) -> ChatCompletion:
     """The SDK's message as a :class:`~pup_finetune.inference.ChatCompletion`."""
+    blocks = list(getattr(message, "content", None) or [])
     texts = [
         str(getattr(block, "text", "") or "")
-        for block in getattr(message, "content", None) or []
+        for block in blocks
         if getattr(block, "type", None) == "text"
     ]
+    answer: dict[str, Any] = {"role": "assistant", "content": "".join(texts)}
+    if calls := _tool_calls(blocks):
+        answer["tool_calls"] = calls
     usage: dict[str, Any] = {}
     raw_usage = getattr(message, "usage", None)
     prompt = getattr(raw_usage, "input_tokens", None)
@@ -432,7 +525,7 @@ def _completion(message: Any, model: str) -> ChatCompletion:
     stop = getattr(message, "stop_reason", None)
     answered = getattr(message, "model", None)
     return ChatCompletion(
-        message={"role": "assistant", "content": "".join(texts)},
+        message=answer,
         usage=usage,
         model=answered if isinstance(answered, str) and answered else model,
         finish_reason=_FINISH_REASONS.get(stop, stop) if isinstance(stop, str) else None,
