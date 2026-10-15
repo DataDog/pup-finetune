@@ -207,3 +207,17 @@ def test_attaching_another_compare_model_raises_the_same_conflict(tmp_path: Path
     with pytest.raises(SettingsConflict) as raised:
         attach_compare(eval_dir, wanted)
     assert (str(raised.value), raised.value.hint) == (str(expected), expected.hint)
+
+
+def test_a_stored_compare_target_is_resolved_from_its_spec(tmp_path: Path) -> None:
+    stored = identity_of("openai/gpt-5.5")
+    edited = {**stored, "model": {**stored["model"], "base_url": "https://elsewhere.example/v1"}}
+    target = resolve_compare(None, edited, runtime=DEV)
+    assert target is not None and target.source == "evaluation directory"
+    assert target.config.base_url == "https://api.openai.com/v1"
+    conflict = compare_conflict(edited, target.identity(), out_dir=tmp_path / "eval")
+    assert conflict is not None
+    assert "(changed: base_url)" in str(conflict)
+    fake = identity_of("fake-compare")
+    with pytest.raises(UsageError, match="development only"):
+        resolve_compare(None, fake, runtime=Runtime())

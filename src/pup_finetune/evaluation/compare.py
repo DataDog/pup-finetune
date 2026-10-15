@@ -136,23 +136,22 @@ class CompareTarget:
 def resolve_compare(
     spec: str | None, stored: Mapping[str, Any] | None, *, runtime: Runtime
 ) -> CompareTarget | None:
-    """The compare target: ``spec`` (``--compare-model``), else the one ``stored``
+    """The compare target: ``spec`` (``--compare-model``), else the spec ``stored``
     (``compare.json``) records, else ``None``.
 
-    :data:`FAKE_COMPARE_MODEL` needs development mode; a package the model needs must be
-    installed (:func:`~pup_finetune.judges.check_available`). A ``spec`` other than the
-    stored one is resolved all the same: replaying it into that directory is refused later.
+    Both are resolved alike: :data:`FAKE_COMPARE_MODEL` needs development mode, and a package
+    the model needs must be installed (:func:`~pup_finetune.judges.check_available`). The
+    stored spec is resolved as it is called now, never from the stored endpoint or
+    credential; when that differs from what is stored, or ``spec`` names another model,
+    replaying into the directory is refused later (:func:`compare_conflict`).
     """
-    from pup_finetune.judges import check_available, parse_judge
-
+    source: CompareSource = "flag"
     if spec is None:
         if stored is None:
             return None
-        try:
-            config = JudgeConfig.model_validate(stored.get("model"))
-        except ValueError as exc:
-            raise StateError(f"compare.json does not describe a compare model: {exc}") from None
-        return CompareTarget(config=config, source="evaluation directory")
+        spec, source = stored.get("spec"), "evaluation directory"
+        if not isinstance(spec, str):
+            raise StateError("compare.json does not name its compare model (spec)")
     if spec.strip() == FAKE_COMPARE_MODEL:
         if not runtime.dev_mode:
             raise UsageError(
@@ -167,11 +166,12 @@ def resolve_compare(
             temperature=None,
             max_tokens=COMPARE_MAX_TOKENS,
         )
-        return CompareTarget(config=config, source="flag")
-    parsed = parse_judge(spec)
-    config = parsed.model_copy(update={"max_tokens": COMPARE_MAX_TOKENS})
+        return CompareTarget(config=config, source=source)
+    from pup_finetune.judges import check_available, parse_judge
+
+    config = parse_judge(spec).model_copy(update={"max_tokens": COMPARE_MAX_TOKENS})
     check_available(config)
-    return CompareTarget(config=config, source="flag")
+    return CompareTarget(config=config, source=source)
 
 
 def stored_compare(eval_dir: EvalDir) -> dict[str, Any] | None:

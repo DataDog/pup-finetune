@@ -300,3 +300,26 @@ def test_the_probe_runs_once_when_the_compare_model_is_attached(
     again = invoke(*args, "--confirm")
     assert again.exit_code == 0, again.stderr
     assert len(model.calls) == cases
+
+
+def test_a_stored_compare_target_that_resolves_otherwise_now_is_refused(
+    evaluated: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = CompareModel()
+    serve_compare(monkeypatch, model)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-synthetic")
+    attached = invoke(
+        "evaluate", str(evaluated), "--compare-model", "openai/gpt-5.5", "--no-publish", "--confirm"
+    )
+    assert attached.exit_code == 0, attached.stderr
+    path = evaluated / "eval" / "compare.json"
+    stored = json.loads(path.read_text())
+    stored["model"]["base_url"] = "https://elsewhere.example/v1"
+    path.write_text(json.dumps(stored))
+    model.calls.clear()
+    for confirm in ((), ("--confirm",)):
+        result = invoke("evaluate", str(evaluated), "--no-publish", *confirm)
+        assert result.exit_code == 2
+        assert "Error [settings_conflict]" in result.stderr
+        assert "changed: base_url" in result.stderr
+    assert model.calls == []
