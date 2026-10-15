@@ -903,12 +903,16 @@ def prepare_eval_dir(
     client: ChatCompleter,
     *,
     calibration: Mapping[str, Any] | None = None,
+    probe: Callable[[], None] | None = None,
 ) -> dict[str, Any] | None:
-    """Create ``--out-dir``, check its identity and settle the calibration; the report.
+    """Create ``--out-dir``, check its identity, attach the compare target and settle the
+    calibration; the report.
 
-    A calibration that passed is stored and reused by later runs in the directory. Unless
-    one is stored or given in ``calibration``, the judge is calibrated now (see
-    :func:`run_calibration`). ``None`` with ``--skip-calibration``.
+    ``probe`` checks that the compare model answers right before it is attached, so a model
+    that cannot fails before ``compare.json`` freezes it. A calibration that passed is stored
+    and reused by later runs in the directory. Unless one is stored or given in
+    ``calibration``, the judge is calibrated now (see :func:`run_calibration`). ``None`` with
+    ``--skip-calibration``.
     """
     from pup_finetune.evaluation.compare import attach_compare
     from pup_finetune.evaluation.replay import EvalDir
@@ -917,7 +921,7 @@ def prepare_eval_dir(
     eval_dir.create()
     with eval_dir.lock():
         eval_dir.check_identity(plan.identity(tuned_checkpoint))
-        attach_compare(eval_dir.compare_path, plan.compare_identity)
+        attach_compare(eval_dir.compare_path, plan.compare_identity, probe=probe)
         if plan.settings.skip_calibration:
             return None
         stored = eval_dir.read_calibration()
@@ -1654,12 +1658,15 @@ class StandaloneEvaluation:
         Ctrl-C or SIGTERM stops it gracefully (a ``partial`` result); a second Ctrl-C stops
         at once with :class:`FinetuneError`.
         """
+        from pup_finetune.evaluation.compare import probe
+
         plan = self.plan
         cancel = threading.Event()
         with ExitStack() as stack:
             client = stack.enter_context(open_judge_client(plan.judge))
-            compare = self._open_compare(stack)
-            report = prepare_eval_dir(plan, self.training, client)
+            compare, target = self._open_compare(stack), plan.compare
+            check = None if compare is None or target is None else lambda: probe(compare, target)
+            report = prepare_eval_dir(plan, self.training, client, probe=check)
             if report is not None and not report.get("ok"):
                 return calibration_failed(plan, report)
             record_evaluation(plan, {"status": "running"})
@@ -1677,22 +1684,17 @@ class StandaloneEvaluation:
 
     def _open_compare(self, stack: ExitStack) -> Sampler | None:
         """The compare model's sampler when it has cases left to generate, opened on
-        ``stack`` before anything is written or any training session opens. A compare model
-        not attached yet is probed first (:func:`~pup_finetune.evaluation.compare.probe`)."""
-        from pup_finetune.evaluation.compare import open_compare_sampler, probe
+        ``stack`` before anything is written or any training session opens."""
+        from pup_finetune.evaluation.compare import open_compare_sampler
         from pup_finetune.evaluation.replay import COMPARE, EvalDir, remaining_work
 
         plan = self.plan
         eval_dir = EvalDir(plan.out_dir)
         if plan.compare is None or not remaining_work(eval_dir, plan.cases, (COMPARE,))["generate"]:
             return None
-        sampler = stack.enter_context(
+        return stack.enter_context(
             open_compare_sampler(plan.compare, plan.cases, seed=plan.settings.seed)
         )
-        if not eval_dir.compare_path.exists():
-            info(f"checking that the compare model {plan.compare.spec} answers")
-            probe(sampler)
-        return sampler
 
     def _replay(
         self,

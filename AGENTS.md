@@ -690,8 +690,9 @@ Source lives under `src/pup_finetune/`.
   `--compare-model` (or a `compare.json` the directory has), `EvalPlan.targets` adds
   `compare`, and `StandaloneEvaluation` opens a training session only when base or tuned has
   a case left to generate, and the compare model's client only when it has, next to the
-  judge's before anything is written; a compare model not attached yet answers one `probe`
-  first. The preview names only the targets that generate (their provider, billing and
+  judge's before anything is written; `prepare_eval_dir` has it answer one `probe` under the
+  directory's lock right before `compare.json` is written, so also after `check_identity`
+  dropped the one attached. The preview names only the targets that generate (their provider, billing and
   recipients); the others' answers are reused.
   `compare.py` is the compare target: `resolve_compare` (the judge spec grammar,
   `COMPARE_MAX_TOKENS` and the provider's lowest effort; the dev-only `fake-compare`; a stored

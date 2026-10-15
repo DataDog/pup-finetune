@@ -23,7 +23,7 @@ from typer.testing import CliRunner, Result
 from pup_finetune import judges
 from pup_finetune.cli import app
 from pup_finetune.inference import ChatCompletion, ContextLimitError, JudgeConfig
-from pup_finetune.providers.base import ProviderAuthError
+from pup_finetune.providers.base import ProviderAuthError, ProviderCapacityError
 from pup_finetune.providers.fake import FakeBackend
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
@@ -273,7 +273,7 @@ def test_read_only_allows_an_offline_compare_and_refuses_a_paid_one(
         (ProviderAuthError("the API key is not valid (HTTP 401)", source="openai"), 1),
     ],
 )
-def test_a_compare_model_that_cannot_answer_fails_before_anything_is_written(
+def test_a_compare_model_that_cannot_answer_is_never_attached(
     run_dir: Path, monkeypatch: pytest.MonkeyPatch, failure: Any, exit_code: int
 ) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -284,7 +284,8 @@ def test_a_compare_model_that_cannot_answer_fails_before_anything_is_written(
         "evaluate", str(run_dir), "--compare-model", "openai/gpt-5.5", "--no-publish", "--confirm"
     )
     assert result.exit_code == exit_code, result.stderr
-    assert not (run_dir / "eval").exists()
+    assert not (run_dir / "eval" / "compare.json").exists()
+    assert not (run_dir / "eval" / "generations.jsonl").exists()
     assert not (run_dir / "evaluation.json").exists()
 
 
@@ -309,6 +310,34 @@ def test_the_probe_runs_once_when_the_compare_model_is_attached(
     again = invoke(*args, "--confirm")
     assert again.exit_code == 0, again.stderr
     assert len(model.calls) == cases
+
+
+def test_a_compare_model_attached_again_under_a_new_identity_is_probed_first(
+    run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-synthetic")
+    serve_compare(monkeypatch, CompareModel())
+
+    def no_capacity(*args: Any, **kwargs: Any) -> Any:
+        raise ProviderCapacityError("no capacity right now")
+
+    monkeypatch.setattr(FakeBackend, "open_session", no_capacity)
+    args = ("evaluate", str(run_dir), "--compare-model", "openai/gpt-5.5", "--no-publish")
+    first = invoke(*args, "--confirm")
+    assert first.exit_code == 1
+    compare_json = run_dir / "eval" / "compare.json"
+    assert compare_json.exists()
+
+    revoked = CompareModel(
+        ProviderAuthError("the API key is not valid (HTTP 401)", source="openai")
+    )
+    serve_compare(monkeypatch, revoked)
+    monkeypatch.setattr(FakeBackend, "open_session", no_session)
+    again = invoke(*args, "--seed", "7", "--confirm")
+    assert again.exit_code == 1
+    assert "Error [provider_auth]" in again.stderr
+    assert len(revoked.calls) == 1
+    assert not compare_json.exists()
 
 
 def test_a_stored_compare_target_that_resolves_otherwise_now_is_refused(

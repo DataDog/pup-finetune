@@ -258,8 +258,8 @@ comparison. Added to a complete evaluation, it reuses the base and tuned results
 training session, so only the compare model's answers and their judgments are paid for. The
 compare model may write up to 16,000 tokens, thinking included, at its provider's lowest
 reasoning effort, and its answers are its own (no server-side fallback to another model).
-Before it is first attached, one short call checks that it answers, so a mistyped model or a
-missing key fails before anything is written. The evaluation directory keeps its compare
+Right before it is attached, one short call checks that it answers, so a mistyped model or a
+rejected key fails before the directory keeps it or any training session opens. The evaluation directory keeps its compare
 model: a rerun without the flag continues it, and another model needs a new `--out-dir`.
 
 ## Deploy

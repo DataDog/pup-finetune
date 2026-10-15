@@ -34,6 +34,7 @@ from pup_finetune.display import quoted
 from pup_finetune.errors import SettingsConflict, StateError, UsageError
 from pup_finetune.evaluation.cases import ReplayCase
 from pup_finetune.inference import ChatCompleter, JudgeConfig
+from pup_finetune.output import info
 from pup_finetune.providers.base import Generation, Sampler
 from pup_finetune.rendering.base import ChatMessage, ToolSpec
 from pup_finetune.runtime import Runtime
@@ -207,12 +208,14 @@ def compare_conflict(
     )
 
 
-def attach_compare(path: Path, identity: Mapping[str, Any] | None) -> None:
+def attach_compare(
+    path: Path, identity: Mapping[str, Any] | None, *, probe: Callable[[], None] | None = None
+) -> None:
     """Attach the compare target ``identity`` at ``path`` (an evaluation directory's
-    ``compare.json``) the first time; later, raise :func:`compare_conflict` unless it is the
-    one attached. ``None`` (an evaluation planned without one) raises when one is attached,
-    as another process may have done since it was planned. Call it under the directory's
-    lock.
+    ``compare.json``) the first time, once ``probe`` (when given) returned; later, raise
+    :func:`compare_conflict` unless it is the one attached. ``None`` (an evaluation planned
+    without one) raises when one is attached, as another process may have done since it was
+    planned. Call it under the directory's lock.
 
     A different compare target is a :class:`SettingsConflict` even before its first pair: an
     experiment may have been created for it already.
@@ -227,6 +230,8 @@ def attach_compare(path: Path, identity: Mapping[str, Any] | None) -> None:
             )
         return
     if stored is None:
+        if probe is not None:
+            probe()
         atomic_write_json(path, finite_json(dict(identity)))
         return
     conflict = compare_conflict(stored, identity, out_dir=path.parent)
@@ -361,11 +366,12 @@ def _prompt_key(messages: Sequence[Mapping[str, Any]], tools: Sequence[Mapping[s
     return canonical_json([list(messages), list(tools)])
 
 
-def probe(sampler: Sampler) -> None:
+def probe(sampler: Sampler, target: CompareTarget) -> None:
     """One cheap call to the compare model before it is attached, so a model that cannot
     answer (a mistyped name, a rejected key) fails the command before ``compare.json``
     freezes it. Any answer passes, one cut off at :data:`PROBE_MAX_TOKENS` included; a
     failure raises the provider's error."""
+    info(f"checking that the compare model {target.spec} answers")
     sampler.generate([{"role": "user", "content": PROBE_PROMPT}], [], max_tokens=PROBE_MAX_TOKENS)
 
 
