@@ -231,20 +231,24 @@ def recipient(config: JudgeConfig) -> str:
     return f"{name} {host}"
 
 
-def billing(config: JudgeConfig, calls: int, *, input_tokens: int | None = None) -> str:
-    """What ``calls`` calls to ``config``'s judge bill, in one sentence for a preview: the
+def billing(
+    config: JudgeConfig, calls: int, *, input_tokens: int | None = None, what: str = "judge"
+) -> str:
+    """What ``calls`` calls to ``config``'s model bill, in one sentence for a preview: the
     provider bills per token at its own rates, which pup-finetune does not know.
 
-    ``input_tokens`` is a rough estimate of the tokens the calls send, when known.
+    ``input_tokens`` is a rough estimate of the tokens the calls send, when known; ``what``
+    names the calls (``judge``, or ``compare-model`` for the compare target).
     """
     sent = f", about {input_tokens:,} input tokens in all (approximate)" if input_tokens else ""
-    what = f"{calls:,} calls{sent}, at most {config.max_tokens:,} output tokens each"
+    counted = f"{calls:,} calls{sent}, at most {config.max_tokens:,} output tokens each"
     if config.provider == "fake":
-        return f"the fake judge is offline and bills nothing: {what}"
+        model = "judge" if what == "judge" else "compare model"
+        return f"the fake {model} is offline and bills nothing: {counted}"
     name, _ = _name_and_host(config)
     return (
-        f"{name} bills each judge call per token at its own rates, which pup-finetune does "
-        f"not know: {what}"
+        f"{name} bills each {what} call per token at its own rates, which pup-finetune does "
+        f"not know: {counted}"
     )
 
 
@@ -275,21 +279,22 @@ def anthropic_client_class() -> type[AnthropicChatClient]:
 
 
 @contextmanager
-def open_client(config: JudgeConfig) -> Iterator[ChatCompleter]:
+def open_client(config: JudgeConfig, *, timeout_s: float | None = None) -> Iterator[ChatCompleter]:
     """The client for ``config``'s judge, with the key of its credential. Closed on exit.
 
     Fireworks and OpenAI judges get a :class:`~pup_finetune.inference.ChatClient` (with
     OpenAI's request policy for OpenAI), Anthropic judges an
-    :class:`~pup_finetune.anthropic_client.AnthropicChatClient`. Raises :class:`UsageError`
-    when no key is configured, or a package the judge needs is missing.
+    :class:`~pup_finetune.anthropic_client.AnthropicChatClient`; ``timeout_s`` replaces the
+    client's limit per attempt. Raises :class:`UsageError` when no key is configured, or a
+    package the judge needs is missing.
     """
     if config.provider == "anthropic":
-        with anthropic_client_class().for_judge(config) as client:
+        with anthropic_client_class().for_judge(config, timeout_s=timeout_s) as client:
             yield client
         return
     if config.provider not in ("fireworks", "openai"):
         raise UsageError(f"no client serves {config.provider} judges")
-    with ChatClient.for_judge(config) as chat:
+    with ChatClient.for_judge(config, timeout_s=timeout_s) as chat:
         yield chat
 
 
