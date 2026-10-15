@@ -473,7 +473,7 @@ def _evaluation_parts(result: Mapping[str, Any], *, compact: bool) -> Summary:
     )
     publication = _publication(result)
     if isinstance(headline_data.get("tuned_minus_compare"), Mapping):
-        return _compared_parts(result, headline, paired, publication)
+        return _compared_parts(result, headline, publication)
     agreement = f"judge agreement: base {base}, tuned {tuned}, tuned - base {difference}"
     if compact:
         lines = [headline, agreement, paired, CAVEAT]
@@ -492,9 +492,7 @@ def _evaluation_parts(result: Mapping[str, Any], *, compact: bool) -> Summary:
     return Summary(tuple(lines), "; ".join(parts))
 
 
-def _compared_parts(
-    result: Mapping[str, Any], headline: str, paired: str, publication: str | None
-) -> Summary:
+def _compared_parts(result: Mapping[str, Any], headline: str, publication: str | None) -> Summary:
     """An evaluation with a compare target: each target's judge agreement, then each
     comparison with its paired verdicts."""
     headline_data = result["headline"]
@@ -504,7 +502,8 @@ def _compared_parts(
     found = [
         headline,
         "judge agreement: " + ", ".join(f"{name} {_agreement(rates[name])}" for name in names),
-        f"tuned - base: {_difference(rates)}; {paired.removeprefix('paired: ')}",
+        f"tuned - base: {_difference(rates)}; "
+        + _verdicts(headline_data.get("paired") or {}, result.get("errors"), ("base", "tuned")),
         f"tuned - compare: {_difference(versus)}; "
         + _verdicts(versus, result.get("errors"), ("tuned", "compare")),
         CAVEAT,

@@ -353,17 +353,7 @@ class PublishSettings:
 
     def experiment_attributes(self, target: str, nonce: str) -> dict[str, Any]:
         """The body attributes of ``target``'s experiment create, marked with ``nonce``."""
-        model = self.base_model if target == "base" else f"{self.base_model}, tuned"
-        config: dict[str, Any] = {
-            "provider": self.provider,
-            "base_model": self.base_model,
-            "target": target,
-            "run_id": self.run_id,
-            "checkpoint": self.tuned_checkpoint if target == "tuned" else None,
-            "judge_model": self.judge_model,
-            "max_tokens": self.max_tokens,
-            "metrics_version": METRICS_VERSION,
-        }
+        config: dict[str, Any]
         if target == COMPARE:
             if self.compare is None:
                 raise ValueError("an evaluation without a compare model has no compare experiment")
@@ -375,6 +365,18 @@ class PublishSettings:
                 "run_id": self.run_id,
                 "judge_model": self.judge_model,
                 "max_tokens": self.compare.max_tokens,
+                "metrics_version": METRICS_VERSION,
+            }
+        else:
+            model = self.base_model if target == "base" else f"{self.base_model}, tuned"
+            config = {
+                "provider": self.provider,
+                "base_model": self.base_model,
+                "target": target,
+                "run_id": self.run_id,
+                "checkpoint": self.tuned_checkpoint if target == "tuned" else None,
+                "judge_model": self.judge_model,
+                "max_tokens": self.max_tokens,
                 "metrics_version": METRICS_VERSION,
             }
         attributes: dict[str, Any] = {

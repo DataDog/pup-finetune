@@ -23,10 +23,11 @@ holds, all ``0600``:
   wins.
 - ``summary.json`` - :func:`summarize`, rewritten at the end of every run, partial or not.
 - ``compare.json`` - with ``evaluate --compare-model``, the identity of the compare target
-  (:func:`~pup_finetune.evaluation.compare.attach_compare`): written before its first pair, and the same for every
-  later run, so a compare target is never changed or dropped once attached. Its pairs go
-  into the same files, under the target ``compare``; ``evaluation.json`` is unchanged, so a
-  compare target can be added to a complete evaluation without redoing base and tuned.
+  (:func:`~pup_finetune.evaluation.compare.attach_compare`): written before its first pair,
+  and the same for every later run, so a compare target is never changed or dropped once
+  attached. Its pairs go into the same files, under the target ``compare``;
+  ``evaluation.json`` is unchanged, so a compare target can be added to a complete
+  evaluation without redoing base and tuned.
 
 A rerun skips the pairs whose result is ``ok``, reuses a stored generation for a pair that
 still needs a judgment, and retries the pairs that failed. A generation that fails after the
@@ -635,8 +636,9 @@ def run_replay(
     (its link is the outcome's ``link``) and publishes finished rows as the pairs run.
     ``compare`` is the compare target's identity, given exactly when :data:`COMPARE` is one
     of ``targets``: checked against ``compare.json`` under the lock, before any pair or
-    publication (:func:`~pup_finetune.evaluation.compare.attach_compare`), and its ``model.max_tokens`` caps the
-    compare target's generations. Returns the summary also written to ``summary.json``.
+    publication (:func:`~pup_finetune.evaluation.compare.attach_compare`), and its
+    ``model.max_tokens`` caps the compare target's generations. Returns the summary also
+    written to ``summary.json``.
     """
     max_tokens, seed = identity.get("max_tokens"), identity.get("seed")
     if concurrency < 1:

@@ -119,8 +119,8 @@ DOC = CommandDoc(
         "effort, and adds tuned-minus-compare; added to a complete evaluation, it reuses the "
         "base and tuned results and opens no training session. The directory keeps its "
         "compare model: a rerun without the flag continues it, and another one needs a new "
-        "--out-dir. Tools are not executed, so the scores measure agreement with the recorded behavior, not task "
-        "success. With --confirm, the judge is calibrated first, then every case is "
+        "--out-dir. Tools are not executed, so the scores measure agreement with the "
+        "recorded behavior, not task success. With --confirm, the judge is calibrated first, then every case is "
         "replayed; rerun the same command to continue an evaluation that stopped. A changed "
         "--max-tokens, judge, seed or --max-cases needs a new --out-dir.",
     ),
