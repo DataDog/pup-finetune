@@ -46,6 +46,7 @@ __all__ = [
     "CompareTarget",
     "FakeCompareSampler",
     "open_compare_sampler",
+    "probe",
     "resolve_compare",
 ]
 
@@ -59,6 +60,8 @@ FAKE_COMPARE_MODEL: Final = "fake-compare"
 FAKE_COMPARE_AGREEMENT: Final = 0.9
 """The share of cases the fake compare model answers with the reference."""
 FAKE_COMPARE_ANSWER: Final = "I cannot decide from the recorded context."
+PROBE_PROMPT: Final = "Reply with the word OK."
+PROBE_MAX_TOKENS: Final = 16
 
 CompareSource = Literal["flag", "evaluation directory"]
 
@@ -285,6 +288,14 @@ class FakeCompareSampler:
 
 def _prompt_key(messages: Sequence[Mapping[str, Any]], tools: Sequence[Mapping[str, Any]]) -> str:
     return canonical_json([list(messages), list(tools)])
+
+
+def probe(sampler: Sampler) -> None:
+    """One cheap call to the compare model before it is attached, so a model that cannot
+    answer (a mistyped name, a rejected key) fails the command before ``compare.json``
+    freezes it. Any answer passes, one cut off at :data:`PROBE_MAX_TOKENS` included; a
+    failure raises the provider's error."""
+    sampler.generate([{"role": "user", "content": PROBE_PROMPT}], [], max_tokens=PROBE_MAX_TOKENS)
 
 
 @contextmanager

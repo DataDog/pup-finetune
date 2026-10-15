@@ -12,13 +12,18 @@ from __future__ import annotations
 import json
 import shlex
 from collections import Counter
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
 from typer.testing import CliRunner, Result
 
+from pup_finetune import judges
 from pup_finetune.cli import app
+from pup_finetune.inference import ChatCompletion, JudgeConfig
+from pup_finetune.providers.base import ProviderAuthError
 from pup_finetune.providers.fake import FakeBackend
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
@@ -65,6 +70,40 @@ def evaluated(run_dir: Path) -> Path:
     return run_dir
 
 
+class CompareModel:
+    """A compare model's chat client: it answers every call with text, and from call
+    ``fail_from`` on (counting from 1) raises ``fail`` instead."""
+
+    def __init__(self, fail: Exception | None = None, *, fail_from: int = 1) -> None:
+        self.fail, self.fail_from = fail, fail_from
+        self.calls: list[list[dict[str, Any]]] = []
+
+    def complete(self, messages: Any, **kwargs: Any) -> ChatCompletion:
+        self.calls.append([dict(message) for message in messages])
+        if self.fail is not None and len(self.calls) >= self.fail_from:
+            raise self.fail
+        content = "OK" if len(self.calls) == 1 else "I would explain the plan."
+        return ChatCompletion(
+            message={"role": "assistant", "content": content},
+            model=str(kwargs["model"]),
+            finish_reason="stop",
+        )
+
+
+def serve_compare(monkeypatch: pytest.MonkeyPatch, model: CompareModel) -> None:
+    """Make every remote compare model (and judge) ``model``."""
+
+    @contextmanager
+    def open_client(config: JudgeConfig, **kwargs: Any) -> Iterator[CompareModel]:
+        yield model
+
+    monkeypatch.setattr(judges, "open_client", open_client)
+
+
+def no_session(*args: Any, **kwargs: Any) -> Any:
+    raise AssertionError("no training session may open")
+
+
 def lines(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
@@ -105,9 +144,6 @@ def test_attaching_a_compare_model_redoes_neither_base_nor_tuned(
         "the offline fake compare model (compare; nothing is sent)" in shown["data_recipients"][0]
     )
     assert "--compare-model fake-compare" in preview["next_command"]
-
-    def no_session(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("no training session may open when base and tuned are done")
 
     monkeypatch.setattr(FakeBackend, "open_session", no_session)
     result = rerun(preview["next_command"])
@@ -218,3 +254,48 @@ def test_read_only_allows_an_offline_compare_and_refuses_a_paid_one(
     assert "read_only" in data["preview"]
     assert "OpenAI api.openai.com (compare model)" in data["preview"]["data_recipients"][0]
     assert "OpenAI bills each compare-model call" in data["preview"]["billing"]
+
+
+@pytest.mark.parametrize(
+    ("failure", "exit_code"),
+    [
+        ("no key", 2),
+        (ProviderAuthError("the API key is not valid (HTTP 401)", source="openai"), 1),
+    ],
+)
+def test_a_compare_model_that_cannot_answer_fails_before_anything_is_written(
+    run_dir: Path, monkeypatch: pytest.MonkeyPatch, failure: Any, exit_code: int
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    if not isinstance(failure, str):
+        serve_compare(monkeypatch, CompareModel(failure))
+    monkeypatch.setattr(FakeBackend, "open_session", no_session)
+    result = invoke(
+        "evaluate", str(run_dir), "--compare-model", "openai/gpt-5.5", "--no-publish", "--confirm"
+    )
+    assert result.exit_code == exit_code, result.stderr
+    assert not (run_dir / "eval").exists()
+    assert not (run_dir / "evaluation.json").exists()
+
+
+def test_the_probe_runs_once_when_the_compare_model_is_attached(
+    evaluated: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    eval_dir = evaluated / "eval"
+    cases = len(lines(eval_dir / "results.jsonl")) // 2
+    model = CompareModel()
+    serve_compare(monkeypatch, model)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-synthetic")
+    args = ("evaluate", str(evaluated), "--compare-model", "openai/gpt-5.5", "--no-publish")
+    attached = invoke(*args, "--confirm")
+    assert attached.exit_code == 0, attached.stderr
+    assert len(model.calls) == cases + 1
+    assert model.calls[0] == [{"role": "user", "content": "Reply with the word OK."}]
+    for name in ("generations.jsonl", "results.jsonl"):
+        path = eval_dir / name
+        kept = [line for line in path.read_text().splitlines() if '"target":"compare"' not in line]
+        path.write_text("".join(f"{line}\n" for line in kept))
+    model.calls.clear()
+    again = invoke(*args, "--confirm")
+    assert again.exit_code == 0, again.stderr
+    assert len(model.calls) == cases

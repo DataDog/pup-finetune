@@ -1648,14 +1648,16 @@ class StandaloneEvaluation:
         """
         plan = self.plan
         cancel = threading.Event()
-        with open_judge_client(plan.judge) as client:
+        with ExitStack() as stack:
+            client = stack.enter_context(open_judge_client(plan.judge))
+            compare = self._open_compare(stack)
             report = prepare_eval_dir(plan, self.training, client)
             if report is not None and not report.get("ok"):
                 return calibration_failed(plan, report)
             record_evaluation(plan, {"status": "running"})
             try:
                 with cancel_on_signals(cancel):
-                    result = self._replay(client, cancel, report)
+                    result = self._replay(client, compare, cancel, report)
                 record_evaluation(plan, result)
                 return result
             except KeyboardInterrupt:
@@ -1665,21 +1667,40 @@ class StandaloneEvaluation:
                     "its next_command continues it",
                 ) from None
 
+    def _open_compare(self, stack: ExitStack) -> Sampler | None:
+        """The compare model's sampler when it has cases left to generate, opened on
+        ``stack`` before anything is written or any training session opens. A compare model
+        not attached yet is probed first (:func:`~pup_finetune.evaluation.compare.probe`)."""
+        from pup_finetune.evaluation.compare import open_compare_sampler, probe
+        from pup_finetune.evaluation.replay import COMPARE, EvalDir, remaining_work
+
+        plan = self.plan
+        eval_dir = EvalDir(plan.out_dir)
+        if plan.compare is None or not remaining_work(eval_dir, plan.cases, (COMPARE,))["generate"]:
+            return None
+        sampler = stack.enter_context(
+            open_compare_sampler(plan.compare, plan.cases, seed=plan.settings.seed)
+        )
+        if not eval_dir.compare_path.exists():
+            info(f"checking that the compare model {plan.compare.spec} answers")
+            probe(sampler)
+        return sampler
+
     def _replay(
-        self, client: ChatCompleter, cancel: threading.Event, report: Mapping[str, Any] | None
+        self,
+        client: ChatCompleter,
+        compare: Sampler | None,
+        cancel: threading.Event,
+        report: Mapping[str, Any] | None,
     ) -> dict[str, Any]:
         """Replay with the samplers of the targets that have cases left to generate: a
-        training session only for base and tuned, the compare model's client only for it."""
-        from pup_finetune.evaluation.compare import open_compare_sampler
+        training session only for base and tuned, and ``compare``, already open, for the
+        compare model."""
         from pup_finetune.evaluation.replay import COMPARE, TARGETS, EvalDir, remaining_work
         from pup_finetune.evaluation.targets import run_samplers
 
         plan = self.plan
-        eval_dir = EvalDir(plan.out_dir)
-        trained = remaining_work(eval_dir, plan.cases, TARGETS)["generate"]
-        compared = 0
-        if plan.compare is not None:
-            compared = remaining_work(eval_dir, plan.cases, (COMPARE,))["generate"]
+        trained = remaining_work(EvalDir(plan.out_dir), plan.cases, TARGETS)["generate"]
         samplers: dict[str, Sampler] = {}
         tuned_sampler = None
         with ExitStack() as stack:
@@ -1687,10 +1708,8 @@ class StandaloneEvaluation:
                 targets = stack.enter_context(run_samplers(self.provider, self.run, self.result))
                 samplers |= targets.samplers
                 tuned_sampler = targets.tuned_checkpoint
-            if compared and plan.compare is not None:
-                samplers[COMPARE] = stack.enter_context(
-                    open_compare_sampler(plan.compare, plan.cases, seed=plan.settings.seed)
-                )
+            if compare is not None:
+                samplers[COMPARE] = compare
             if samplers:
                 info(
                     f"evaluating run {plan.run_id}: {len(plan.cases)} cases, "
