@@ -480,7 +480,7 @@ Source lives under `src/pup_finetune/`.
   Anthropic tools, assistant `tool_calls` as `tool_use` blocks and `tool` messages as merged
   `tool_result` user turns, `tool_use` answers back as OpenAI `tool_calls`, no sampling
   parameters, `output_config` format
-  and effort (the judge's), "prompt is too long" as `ContextLimitError`, `fallbacks="default"` through the beta API on the models that have it, `stop_reason`
+  and effort (the judge's), "prompt is too long" as `ContextLimitError`, `fallbacks="default"` through the beta API on the models that have it (never for a compare model: `fallbacks=False`), `stop_reason`
   mapped to `finish_reason`, typed SDK errors mapped to ours. Tests pass a fake SDK client.
 - `judge_credentials.py` - registers the `anthropic` and `openai` `CredentialSpec`s (imported
   by the providers package); `anthropic_sdk_login` detects the Anthropic SDK's own login,
@@ -689,11 +689,17 @@ Source lives under `src/pup_finetune/`.
   with a free `--out-dir`) instead of offering a `--confirm` that would be refused. With
   `--compare-model` (or a `compare.json` the directory has), `EvalPlan.targets` adds
   `compare`, and `StandaloneEvaluation` opens a training session only when base or tuned has
-  a case left to generate, and the compare model's client only when it has.
+  a case left to generate, and the compare model's client only when it has, next to the
+  judge's before anything is written; a compare model not attached yet answers one `probe`
+  first. The preview names only the targets that generate (their provider, billing and
+  recipients); the others' answers are reused.
   `compare.py` is the compare target: `resolve_compare` (the judge spec grammar,
-  `COMPARE_MAX_TOKENS` and the provider's lowest effort; the dev-only `fake-compare`),
-  `CompareTarget` (its identity, recipient and billing), `ChatSampler` (a `Sampler` over any
-  `ChatCompleter`) and `FakeCompareSampler`.
+  `COMPARE_MAX_TOKENS` and the provider's lowest effort; the dev-only `fake-compare`; a stored
+  spec is resolved as the flag is, never from the stored endpoint), `CompareTarget` (its
+  identity, recipient and billing), `probe`, `stored_compare`, `compare_conflict` (the one
+  check the preview and `attach_compare` share: what changed and a free `--out-dir`),
+  `attach_compare` (writes `compare.json` under the lock), `ChatSampler` (a `Sampler` over any
+  `ChatCompleter`, the prefix without `reasoning_content`) and `FakeCompareSampler`.
   `benchmark.py` is `benchmark`: `plan_benchmark` (the test split's cases, the judge and
   one `Candidate` per base model), `execute` (the judge calibrated once, then each model
   replayed in a session of its own into `OUT/<model>` through `run_replay` with the model as

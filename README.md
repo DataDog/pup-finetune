@@ -252,13 +252,15 @@ pup finetune evaluate ft-20261007183443-a8b181 --compare-model anthropic/claude-
 `--compare-model` replays the same cases with a third model, such as the one your app runs
 today, and the same judge grades it. It is named as `--judge-model` is (an alias,
 `anthropic/<model>`, `openai/<model>` or a Fireworks model id), and the judge must be another
-model. The result adds `headline.tuned_minus_compare`, with the same paired verdicts and
-interval, and publishing adds a third experiment to the same comparison. Added to a complete
-evaluation, it reuses the base and tuned results and opens no training session, so only the
-compare model's answers and their judgments are paid for. The compare model may write up to
-16,000 tokens, thinking included, at its provider's lowest reasoning effort. The evaluation
-directory keeps its compare model: a rerun without the flag continues it, and another model
-needs a new `--out-dir`.
+model. The result names it as `compare_model` and adds `headline.tuned_minus_compare`, with
+the same paired verdicts and interval, and publishing adds a third experiment to the same
+comparison. Added to a complete evaluation, it reuses the base and tuned results and opens no
+training session, so only the compare model's answers and their judgments are paid for. The
+compare model may write up to 16,000 tokens, thinking included, at its provider's lowest
+reasoning effort, and its answers are its own (no server-side fallback to another model).
+Before it is first attached, one short call checks that it answers, so a mistyped model or a
+missing key fails before anything is written. The evaluation directory keeps its compare
+model: a rerun without the flag continues it, and another model needs a new `--out-dir`.
 
 ## Deploy
 
