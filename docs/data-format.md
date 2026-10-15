@@ -224,10 +224,8 @@ appended; the last line of a pair wins), `calibration.json` and `summary.json`, 
 published, `experiments.json` and `published.json`.
 
 With `evaluate --compare-model`, `compare.json` records the compare target, written before
-its first call and never changed: `{"evaluation_sha256", "spec", "model": {"provider", "model",
-"base_url", "credential", "temperature", "max_tokens", "reasoning_effort"}}`, where
-`evaluation_sha256` is the sha256 of the `evaluation.json` it was attached to and `max_tokens`
-is 16000. Its pairs go into the same files with `"target": "compare"`; `evaluation.json` is
+its first call and never changed: `{"spec", "model": {"provider", "model", "base_url",
+"credential", "temperature", "max_tokens", "reasoning_effort"}}`, where `max_tokens` is 16000. Its pairs go into the same files with `"target": "compare"`; `evaluation.json` is
 unchanged.
 
 `summary.json` has, per target under `targets`, the judge pass rate, every metric, errors,

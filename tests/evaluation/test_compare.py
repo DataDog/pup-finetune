@@ -136,7 +136,7 @@ def test_a_compare_spec_resolves_like_a_judge_with_the_compare_token_limit() -> 
 def test_a_stored_compare_target_continues_without_the_flag() -> None:
     first = resolve_compare("openai/gpt-5.5", None, runtime=DEV)
     assert first is not None
-    stored = first.identity({"run_id": "ft"})
+    stored = first.identity()
     assert stored["spec"] == "openai/gpt-5.5"
     again = resolve_compare(None, stored, runtime=DEV)
     assert again is not None and again.source == "evaluation directory"

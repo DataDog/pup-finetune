@@ -169,6 +169,7 @@ def test_attaching_a_compare_model_redoes_neither_base_nor_tuned(
     summary = json.loads((eval_dir / "summary.json").read_text())
     assert summary["tuned_minus_compare"]["n_cases"] == cases
     compare = json.loads((eval_dir / "compare.json").read_text())
+    assert set(compare) == {"spec", "model"}
     assert compare["model"]["max_tokens"] == 16000
     assert compare["spec"] == "fake-compare"
 

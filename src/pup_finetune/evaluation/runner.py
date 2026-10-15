@@ -416,11 +416,10 @@ class EvalPlan:
 
         return (*TARGETS, COMPARE) if self.compare is not None else TARGETS
 
-    def compare_identity(self, tuned_checkpoint: CheckpointRef) -> dict[str, Any] | None:
+    @property
+    def compare_identity(self) -> dict[str, Any] | None:
         """``compare.json`` for this plan's compare target, ``None`` without one."""
-        if self.compare is None:
-            return None
-        return self.compare.identity(self.identity(tuned_checkpoint))
+        return None if self.compare is None else self.compare.identity()
 
     @property
     def out_dir(self) -> Path:
@@ -555,7 +554,7 @@ class EvalPlan:
         """Fail the preview, as ``--confirm`` would (:meth:`EvalDir.check_compare`), when the
         directory has attached another compare model, never offering that ``--confirm``."""
         stored = eval_dir.stored_compare()
-        wanted = self.compare_identity(tuned_checkpoint)
+        wanted = self.compare_identity
         if stored is None or wanted is None or finite_json(wanted) == stored:
             return
         raise SettingsConflict(
@@ -918,7 +917,7 @@ def prepare_eval_dir(
     eval_dir.create()
     with eval_dir.lock():
         eval_dir.check_identity(plan.identity(tuned_checkpoint))
-        eval_dir.check_compare(plan.compare_identity(tuned_checkpoint))
+        eval_dir.check_compare(plan.compare_identity)
         if plan.settings.skip_calibration:
             return None
         stored = eval_dir.read_calibration()
@@ -977,7 +976,7 @@ def replay(
         publisher=plan.publisher(tuned_checkpoint, cancel=cancel),
         on_progress=EvaluationProgress(),
         targets=plan.targets,
-        compare=plan.compare_identity(tuned_checkpoint),
+        compare=plan.compare_identity,
     )
 
 

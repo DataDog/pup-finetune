@@ -312,8 +312,6 @@ class EvalDir:
             return
         if canonical_json(stored) != canonical_json(wanted):
             changed = identity_changes(stored.get("model") or {}, wanted.get("model") or {})
-            if stored.get("evaluation_sha256") != wanted.get("evaluation_sha256"):
-                changed.append("evaluation")
             raise SettingsConflict(
                 f"{self.path} compares with {stored.get('spec')}, not {wanted.get('spec')} "
                 f"(changed: {', '.join(changed) or 'spec'}), and a compare target never "

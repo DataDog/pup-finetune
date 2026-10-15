@@ -839,7 +839,7 @@ def test_a_compare_target_adds_its_own_comparison_and_changes_no_other(tmp_path:
 
 def compare_identity(model: str = "compare/model", max_tokens: int = 100) -> dict[str, Any]:
     config = JudgeConfig(model=model, max_tokens=max_tokens)
-    return {"evaluation_sha256": "e", "spec": model, "model": config.identity()}
+    return {"spec": model, "model": config.identity()}
 
 
 def test_the_compare_target_is_frozen_when_attached(tmp_path: Path) -> None:

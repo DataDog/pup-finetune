@@ -21,7 +21,6 @@ compare model of development mode (:data:`FAKE_COMPARE_MODEL`).
 
 from __future__ import annotations
 
-import hashlib
 import json
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -36,7 +35,7 @@ from pup_finetune.inference import ChatCompleter, JudgeConfig
 from pup_finetune.providers.base import Generation, Sampler
 from pup_finetune.rendering.base import ChatMessage, ToolSpec
 from pup_finetune.runtime import Runtime
-from pup_finetune.storage import canonical_json, finite_json
+from pup_finetune.storage import canonical_json
 
 __all__ = [
     "COMPARE_MAX_TOKENS",
@@ -83,15 +82,9 @@ class CompareTarget:
     def offline(self) -> bool:
         return self.config.provider == "fake"
 
-    def identity(self, evaluation: Mapping[str, Any]) -> dict[str, Any]:
-        """``compare.json``: the model as it is called, and the sha256 of the evaluation
-        identity (``evaluation.json``) it was attached to."""
-        payload = canonical_json(finite_json(dict(evaluation))).encode("utf-8")
-        return {
-            "evaluation_sha256": hashlib.sha256(payload).hexdigest(),
-            "spec": self.spec,
-            "model": self.config.identity(),
-        }
+    def identity(self) -> dict[str, Any]:
+        """``compare.json``: the spec, and the model as it is called."""
+        return {"spec": self.spec, "model": self.config.identity()}
 
     def recipient(self) -> str:
         """The compare model as a ``data_recipients`` entry names it."""
