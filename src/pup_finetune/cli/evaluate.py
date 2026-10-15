@@ -16,7 +16,9 @@ any generation, with exit code 1 and the report), every case is replayed, and th
 evaluation is published as Agent Observability experiments on the pushed dataset (unless
 ``--no-publish``; without a push receipt it is not published, with a warning). Ctrl-C or
 SIGTERM stops it gracefully: the generations in flight finish, everything done is kept, and
-running the command again continues where it stopped.
+running the command again continues where it stopped. ``--compare-model`` adds a third
+target, another model replayed and judged alike; added to a complete evaluation, it reuses
+the base and tuned results.
 
 The planning, calibration, replay and publishing live in
 :mod:`pup_finetune.evaluation.runner`, shared with ``train --evaluate``; this module only
@@ -97,7 +99,7 @@ def _with_source(result: dict[str, Any], source: str) -> dict[str, Any]:
 
 
 CASES = "Cases"
-JUDGE = "Judge"
+MODELS = "Models"
 RUN = "Run"
 """``evaluate``'s option panels."""
 
@@ -108,11 +110,16 @@ DOC = CommandDoc(
         "Replay each held-out test conversation of a run, one recorded assistant turn at a "
         "time, with the base model and the run's best checkpoint, and score both with "
         "tool-call metrics and an LLM judge. Without --confirm, previews the calls and where "
-        "the data goes. A complete evaluation is published to Datadog as two experiments "
-        "when the dataset was pushed (--no-publish skips it).",
+        "the data goes. A complete evaluation is published to Datadog as two experiments, "
+        "three with --compare-model, when the dataset was pushed (--no-publish skips it).",
         "The result compares the two: pass rates, wins and regressions, and the "
-        "tuned-minus-base delta with a bootstrap confidence interval. Tools are not "
-        "executed, so the scores measure agreement with the recorded behavior, not task "
+        "tuned-minus-base delta with a bootstrap confidence interval. --compare-model, named "
+        "as --judge-model is, replays a third model on the same cases, judged alike, with its "
+        "own token limit (16000, thinking included) and the provider's lowest reasoning "
+        "effort, and adds tuned-minus-compare; added to a complete evaluation, it reuses the "
+        "base and tuned results and opens no training session. The directory keeps its "
+        "compare model: a rerun without the flag continues it, and another one needs a new "
+        "--out-dir. Tools are not executed, so the scores measure agreement with the recorded behavior, not task "
         "success. With --confirm, the judge is calibrated first, then every case is "
         "replayed; rerun the same command to continue an evaluation that stopped. A changed "
         "--max-tokens, judge, seed or --max-cases needs a new --out-dir.",
@@ -121,10 +128,12 @@ DOC = CommandDoc(
         "pup finetune evaluate run",
         "pup finetune evaluate run --judge-model glm-5p3-flash",
         "pup finetune evaluate run --max-cases 4 --out-dir run/eval-4",
+        "pup finetune evaluate run --compare-model anthropic/claude-opus-5-5",
     ),
     safety=Safety(
         data="sends test rows to the provider and the judge, results to Datadog",
-        recipients="the training provider, the judge's provider, Datadog (experiments)",
+        recipients="the training provider, the judge's provider, the compare model's provider "
+        "(with --compare-model), Datadog (experiments)",
         without="previews the calls",
         confirm="evaluates (paid) and publishes the experiments",
         paid=True,
@@ -174,7 +183,17 @@ def evaluate(
             help="An alias (glm-5p3-flash), anthropic/MODEL, openai/MODEL or a Fireworks id. "
             f"{default_note(alias_of(DEFAULT_JUDGE_MODEL))}",
             show_default=False,
-            rich_help_panel=JUDGE,
+            rich_help_panel=MODELS,
+        ),
+    ] = None,
+    compare_model: Annotated[
+        str | None,
+        typer.Option(
+            "--compare-model",
+            metavar="MODEL",
+            help="Also replay this model, named as --judge-model.",
+            show_default=False,
+            rich_help_panel=MODELS,
         ),
     ] = None,
     skip_calibration: Annotated[
@@ -182,7 +201,7 @@ def evaluate(
         typer.Option(
             "--skip-calibration",
             help="Do not check the judge on known answers first.",
-            rich_help_panel=JUDGE,
+            rich_help_panel=MODELS,
         ),
     ] = False,
     out_dir: Annotated[
@@ -238,6 +257,7 @@ def evaluate(
         seed=seed,
         skip_calibration=skip_calibration,
         publish=not no_publish,
+        compare_model=compare_model,
     )
     evaluation = runner.plan_standalone(runtime, run_dir, settings)
     # PUP_READ_ONLY refuses paid and remote runs, not one that never leaves the machine.

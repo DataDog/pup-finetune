@@ -233,7 +233,8 @@ def test_without_a_push_receipt_the_evaluation_is_not_published(
     # publish (push the dataset, with a name only the user can pick, then rerun the evaluation,
     # which reuses every result).
     assert data["next_command"] == f"pup finetune deploy {run_dir}"
-    push_step, rerun_step = data["next_steps"]
+    push_step, rerun_step, compare_step = data["next_steps"]
+    assert "--compare-model <MODEL>" in compare_step["command"]
     dataset = Path(str(json.loads((run_dir / "run.json").read_text())["dataset_dir"]))
     assert push_step["command"] == f"pup finetune dataset push {dataset} --name <NAME>"
     assert rerun_step["command"] == (
@@ -250,7 +251,9 @@ def test_without_a_push_receipt_the_evaluation_is_not_published(
     assert (run_dir / "eval" / "generations.jsonl").read_text() == generations
     # Complete and published: deploying is next (a free preview).
     assert published["next_command"] == f"pup finetune deploy {run_dir}"
-    assert published["next_steps"] == []
+    assert [step["command"] for step in published["next_steps"]] == [
+        f"pup finetune evaluate {run_dir} --judge-model fake-judge --compare-model <MODEL>"
+    ]
 
 
 def test_no_publish_skips_publishing_silently(
@@ -375,7 +378,7 @@ def test_a_test_row_changed_after_its_push_is_not_published(
     assert result.exit_code == 0, result.stderr
     assert output(result)["publication"]["status"] == "skipped"
     assert experiments_calls(fake) == 0
-    (step, _) = output(result)["next_steps"]
+    (step, _, _) = output(result)["next_steps"]
     assert step["command"] == f"pup finetune dataset push {dataset.resolve()} --name <NAME>"
     assert "push.json aside" in step["why"]
 
@@ -456,3 +459,47 @@ def test_a_cancel_while_publishing_is_continued_by_the_rerun(
     for experiment in experiments.experiments.values():
         span_ids = [span["span_id"] for span in experiment.spans]
         assert len(span_ids) == len(set(span_ids))
+
+
+def test_attaching_a_compare_model_publishes_one_more_experiment_in_the_same_comparison(
+    fake: FakePup,
+    datasets: FakeDatasetsApi,
+    experiments: FakeExperimentsApi,
+    dataset: Path,
+    run_dir: Path,
+) -> None:
+    fake.on("auth", "status", json={"authenticated": True, "site": "datadoghq.com"})
+    push(dataset)
+    first = invoke("evaluate", str(run_dir), "--confirm")
+    assert first.exit_code == 0, first.stderr
+    published = output(first)["publication"]["experiments"]
+    spans = {item.id: list(item.spans) for item in experiments.experiments.values()}
+    posts = events_posts(fake)
+
+    preview = output(invoke("evaluate", str(run_dir), "--compare-model", "fake-compare"))
+    run_id = json.loads((run_dir / "run.json").read_text())["run_id"]
+    assert preview["preview"]["publish"]["experiments"] == [
+        f"pup-finetune-{target}-{run_id}" for target in ("base", "tuned", "compare")
+    ]
+    assert "publish three experiments" in preview["preview"]["action"]
+    result = invoke(*shlex.split(preview["next_command"])[2:])
+    assert result.exit_code == 0, result.stderr
+    publication = output(result)["publication"]
+    assert publication["status"] == "published"
+    assert len(experiments.experiments) == 3
+    for target in ("base", "tuned"):
+        entry = publication["experiments"][target]
+        assert entry["experiment_id"] == published[target]["experiment_id"]
+        assert entry["submitted"] == 0
+        assert (
+            experiments.experiments[entry["experiment_id"]].spans == spans[entry["experiment_id"]]
+        )
+    compare = publication["experiments"]["compare"]
+    created = experiments.experiments[compare["experiment_id"]]
+    assert created.name == f"pup-finetune-compare-{run_id}"
+    assert created.attributes["config"]["compare_model"] == "fake-compare"
+    assert created.attributes["config"]["max_tokens"] == 16000
+    assert compare["submitted"] == compare["spans"] > 0
+    assert events_posts(fake) > posts
+    ids = [publication["experiments"][t]["experiment_id"] for t in ("base", "tuned", "compare")]
+    assert f"experimentIds={','.join(ids)}&" in publication["comparison_url"]

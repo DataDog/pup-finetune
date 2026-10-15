@@ -52,7 +52,8 @@ MEASUREMENTS: Final = frozenset(
         "val_losses",
         "best_val_loss",
         "last_train_loss",
-        # rates and their comparison (a metric's or the judge's ``base`` and ``tuned``)
+        # rates and their comparison (a metric's or the judge's ``base``, ``tuned`` and
+        # ``compare``)
         "rate",
         "kappa",
         "base",
@@ -60,6 +61,8 @@ MEASUREMENTS: Final = frozenset(
         "delta",
         "ci95",
         "tuned_minus_base",
+        "compare",
+        "tuned_minus_compare",
         # times, ages and spend
         "elapsed",
         "elapsed_s",

@@ -93,7 +93,7 @@ What each command does without and with `--confirm`, where its data goes, and wh
 | `pup finetune runs` | lists the runs | no `--confirm` | nowhere: local files | allowed |
 | `pup finetune resume` | previews where it resumes | resumes training (paid) | the training provider | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider and judge) |
 | `pup finetune cancel` | previews which process gets the signal | sends it SIGTERM | nowhere: a signal to a local process | allowed |
-| `pup finetune evaluate` | previews the calls | evaluates (paid) and publishes the experiments | the training provider, the judge's provider, Datadog (experiments) | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider and judge) |
+| `pup finetune evaluate` | previews the calls | evaluates (paid) and publishes the experiments | the training provider, the judge's provider, the compare model's provider (with --compare-model), Datadog (experiments) | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider and judge) |
 | `pup finetune deploy` | previews the deployment | creates it (billed while it runs) | the provider: a deployment of the model | preview allowed; `--confirm` refused |
 | `pup finetune undeploy` | previews the delete | deletes the deployment | the provider: the delete request | preview allowed; `--confirm` refused |
 
@@ -774,9 +774,9 @@ Safety: Free · signals the local training process · PUP_READ_ONLY: allowed.
 
 ## `pup finetune evaluate`
 
-Replay each held-out test conversation of a run, one recorded assistant turn at a time, with the base model and the run's best checkpoint, and score both with tool-call metrics and an LLM judge. Without --confirm, previews the calls and where the data goes. A complete evaluation is published to Datadog as two experiments when the dataset was pushed (--no-publish skips it).
+Replay each held-out test conversation of a run, one recorded assistant turn at a time, with the base model and the run's best checkpoint, and score both with tool-call metrics and an LLM judge. Without --confirm, previews the calls and where the data goes. A complete evaluation is published to Datadog as two experiments, three with --compare-model, when the dataset was pushed (--no-publish skips it).
 
-The result compares the two: pass rates, wins and regressions, and the tuned-minus-base delta with a bootstrap confidence interval. Tools are not executed, so the scores measure agreement with the recorded behavior, not task success. With --confirm, the judge is calibrated first, then every case is replayed; rerun the same command to continue an evaluation that stopped. A changed --max-tokens, judge, seed or --max-cases needs a new --out-dir.
+The result compares the two: pass rates, wins and regressions, and the tuned-minus-base delta with a bootstrap confidence interval. --compare-model, named as --judge-model is, replays a third model on the same cases, judged alike, with its own token limit (16000, thinking included) and the provider's lowest reasoning effort, and adds tuned-minus-compare; added to a complete evaluation, it reuses the base and tuned results and opens no training session. The directory keeps its compare model: a rerun without the flag continues it, and another one needs a new --out-dir. Tools are not executed, so the scores measure agreement with the recorded behavior, not task success. With --confirm, the judge is calibrated first, then every case is replayed; rerun the same command to continue an evaluation that stopped. A changed --max-tokens, judge, seed or --max-cases needs a new --out-dir.
 
 ```
 pup finetune evaluate [OPTIONS] RUN_DIR
@@ -792,8 +792,9 @@ pup finetune evaluate [OPTIONS] RUN_DIR
 | `--max-cases` | `N (x>=1)` | `2` | Turns replayed per conversation. |
 | `--max-tokens` | `N (x>=1)` | `4096` | Most tokens each generation may produce. |
 | `--seed` | `N (x>=0)` | `0` | Seed for picking cases and the bootstrap. |
-| **Judge** | | | |
+| **Models** | | | |
 | `--judge-model` | `MODEL` | deepseek-v4p1-flash | An alias (glm-5p3-flash), anthropic/MODEL, openai/MODEL or a Fireworks id. |
+| `--compare-model` | `MODEL` |  | Also replay this model, named as --judge-model. |
 | `--skip-calibration` |  |  | Do not check the judge on known answers first. |
 | **Run** | | | |
 | `--out-dir` | `DIR` | RUN_DIR/eval | Output directory. |
@@ -807,6 +808,7 @@ Examples:
 pup finetune evaluate run
 pup finetune evaluate run --judge-model glm-5p3-flash
 pup finetune evaluate run --max-cases 4 --out-dir run/eval-4
+pup finetune evaluate run --compare-model anthropic/claude-opus-5-5
 ```
 
 Safety: Paid with --confirm · sends test rows to the provider and the judge, results to Datadog · PUP_READ_ONLY: preview only unless offline.
