@@ -454,6 +454,34 @@ def test_each_comparison_counts_the_errors_of_its_own_two_targets() -> None:
     assert compare_line.endswith("3 ties, 6 errors")
 
 
+def test_a_published_comparison_lists_its_three_experiments_as_a_sentence() -> None:
+    result = {
+        "status": "complete",
+        "judge_model": "j",
+        "calibration": {"ok": True},
+        "headline": {
+            "judge_pass_rate": {"base": 0.5, "tuned": 0.75, "compare": 0.5, "delta": 0.25},
+            "paired": {"wins": 1, "regressions": 0, "ties": 3},
+            "tuned_minus_compare": {"delta": 0.25, "wins": 1, "regressions": 0, "ties": 3},
+            "cases": 4,
+            "trajectories": 2,
+        },
+        "publication": {
+            "status": "published",
+            "experiments": {
+                target: {"name": f"pup-finetune-{target}-r"}
+                for target in ("base", "tuned", "compare")
+            },
+        },
+    }
+    found = summarize("evaluate", result)
+    assert found is not None
+    assert found.lines[-1] == (
+        "published as experiments pup-finetune-base-r, pup-finetune-tuned-r and "
+        "pup-finetune-compare-r"
+    )
+
+
 def test_a_detached_train_names_its_worker_and_log() -> None:
     result = {
         "status": "started",

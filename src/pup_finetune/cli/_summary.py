@@ -24,7 +24,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
-from pup_finetune.display import loss_text
+from pup_finetune.display import joined, loss_text
 from pup_finetune.redaction import redact
 from pup_finetune.runtime import Runtime
 
@@ -418,7 +418,7 @@ def _publication(result: Mapping[str, Any]) -> str | None:
             for entry in experiments.values()
             if isinstance(entry, Mapping) and entry.get("name")
         ]
-        found = "published as experiments " + " and ".join(names) if names else "published"
+        found = "published as experiments " + joined(names) if names else "published"
         return found + compare
     line = {
         "skipped": "not published (see the warning above)",
@@ -468,12 +468,11 @@ def _evaluation_parts(result: Mapping[str, Any], *, compact: bool) -> Summary:
     )
     base, tuned = _agreement(rates.get("base")), _agreement(rates.get("tuned"))
     difference = _difference(rates)
-    paired = "paired: " + _verdicts(
-        headline_data.get("paired") or {}, result.get("errors"), ("base", "tuned")
-    )
+    verdicts = _verdicts(headline_data.get("paired") or {}, result.get("errors"), ("base", "tuned"))
+    paired = "paired: " + verdicts
     publication = _publication(result)
     if isinstance(headline_data.get("tuned_minus_compare"), Mapping):
-        return _compared_parts(result, headline, publication)
+        return _compared_parts(result, headline, verdicts, publication)
     agreement = f"judge agreement: base {base}, tuned {tuned}, tuned - base {difference}"
     if compact:
         lines = [headline, agreement, paired, CAVEAT]
@@ -485,16 +484,18 @@ def _evaluation_parts(result: Mapping[str, Any], *, compact: bool) -> Summary:
             paired,
             CAVEAT,
         ]
-    parts = [headline, agreement, paired.removeprefix("paired: "), CAVEAT]
+    parts = [headline, agreement, verdicts, CAVEAT]
     if publication is not None:
         lines.append(publication)
         parts.append(publication)
     return Summary(tuple(lines), "; ".join(parts))
 
 
-def _compared_parts(result: Mapping[str, Any], headline: str, publication: str | None) -> Summary:
+def _compared_parts(
+    result: Mapping[str, Any], headline: str, verdicts: str, publication: str | None
+) -> Summary:
     """An evaluation with a compare target: each target's judge agreement, then each
-    comparison with its paired verdicts."""
+    comparison with its paired verdicts (``verdicts`` is base against tuned)."""
     headline_data = result["headline"]
     rates: Mapping[str, Any] = headline_data["judge_pass_rate"]
     versus: Mapping[str, Any] = headline_data["tuned_minus_compare"]
@@ -502,8 +503,7 @@ def _compared_parts(result: Mapping[str, Any], headline: str, publication: str |
     found = [
         headline,
         "judge agreement: " + ", ".join(f"{name} {_agreement(rates[name])}" for name in names),
-        f"tuned - base: {_difference(rates)}; "
-        + _verdicts(headline_data.get("paired") or {}, result.get("errors"), ("base", "tuned")),
+        f"tuned - base: {_difference(rates)}; {verdicts}",
         f"tuned - compare: {_difference(versus)}; "
         + _verdicts(versus, result.get("errors"), ("tuned", "compare")),
         CAVEAT,

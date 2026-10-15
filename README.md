@@ -259,8 +259,9 @@ training session, so only the compare model's answers and their judgments are pa
 compare model may write up to 16,000 tokens, thinking included, at its provider's lowest
 reasoning effort, and its answers are its own (no server-side fallback to another model).
 Right before it is attached, one short call checks that it answers, so a mistyped model or a
-rejected key fails before the directory keeps it or any training session opens. The evaluation directory keeps its compare
-model: a rerun without the flag continues it, and another model needs a new `--out-dir`.
+rejected key fails before the directory keeps it or any training session opens. The
+evaluation directory keeps its compare model: a rerun without the flag continues it, and
+another model needs a new `--out-dir`.
 
 ## Deploy
 
