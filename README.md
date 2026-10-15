@@ -243,6 +243,23 @@ A generation cut off at `--max-tokens` fails, so the result counts them per mode
 while a tuned model that learned to answer directly does not: raise `--max-tokens` before
 you read the delta.
 
+### Compare with another model
+
+```sh
+pup finetune evaluate ft-20261007183443-a8b181 --compare-model anthropic/claude-opus-5-5
+```
+
+`--compare-model` replays the same cases with a third model, such as the one your app runs
+today, and the same judge grades it. It is named as `--judge-model` is (an alias,
+`anthropic/<model>`, `openai/<model>` or a Fireworks model id), and the judge must be another
+model. The result adds `headline.tuned_minus_compare`, with the same paired verdicts and
+interval, and publishing adds a third experiment to the same comparison. Added to a complete
+evaluation, it reuses the base and tuned results and opens no training session, so only the
+compare model's answers and their judgments are paid for. The compare model may write up to
+16,000 tokens, thinking included, at its provider's lowest reasoning effort. The evaluation
+directory keeps its compare model: a rerun without the flag continues it, and another model
+needs a new `--out-dir`.
+
 ## Deploy
 
 ```sh

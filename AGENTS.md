@@ -78,10 +78,14 @@ uv run pup-finetune deploy /tmp/run  # preview only (exit 2): what is created, h
 uv run pup-finetune deploy /tmp/run --confirm    # receipt in /tmp/run/deployment.json;
                                      # usage (base URL, model, example) and undeploy_command
 uv run pup-finetune undeploy /tmp/run --confirm  # deletes it; the model is kept
+uv run pup-finetune evaluate /tmp/run --compare-model fake-compare --confirm
+                                     # adds the offline compare target to the same
+                                     # directory: compare pairs only, no training session
 ```
 
 A complete evaluation is also published to Datadog as two Agent Observability experiments
-(`pup-finetune-base-<run id>` and `pup-finetune-tuned-<run id>`) on the dataset `dataset push`
+(`pup-finetune-base-<run id>` and `pup-finetune-tuned-<run id>`, plus
+`pup-finetune-compare-<run id>` with a compare target) on the dataset `dataset push`
 created, at the version it pushed: a root span per test conversation linked to its dataset
 record and a child span per replayed action, with the metrics and judge verdicts. It needs the
 dataset's push receipt (`push.json`): without one the preview and the result warn and the
@@ -470,9 +474,12 @@ Source lives under `src/pup_finetune/`.
   provider's defaults (`PROVIDERS`; the lowest reasoning effort each model takes,
   `FIREWORKS_REASONING` per Fireworks model), `check_available` refuses a missing extra up front,
   `open_client` and `open_clients` (one per provider) build the clients.
-- `anthropic_client.py` - `AnthropicChatClient`, the Anthropic judge client over the official
-  SDK (the `anthropic` extra), the only module that imports `anthropic` (and its `httpx2`):
-  `system` from the leading system message, no sampling parameters, `output_config` format
+- `anthropic_client.py` - `AnthropicChatClient`, the Anthropic judge (and compare model)
+  client over the official SDK (the `anthropic` extra), the only module that imports
+  `anthropic` (and its `httpx2`): `system` from the leading system message, OpenAI tools as
+  Anthropic tools, assistant `tool_calls` as `tool_use` blocks and `tool` messages as merged
+  `tool_result` user turns, `tool_use` answers back as OpenAI `tool_calls`, no sampling
+  parameters, `output_config` format
   and effort (the judge's), "prompt is too long" as `ContextLimitError`, `fallbacks="default"` through the beta API on the models that have it, `stop_reason`
   mapped to `finish_reason`, typed SDK errors mapped to ours. Tests pass a fake SDK client.
 - `judge_credentials.py` - registers the `anthropic` and `openai` `CredentialSpec`s (imported
@@ -655,7 +662,10 @@ Source lives under `src/pup_finetune/`.
   tuned model (`model_id_for_run`, and the promoted model once there is one).
   `fake_judge.py` is `FakeJudge`, an offline, deterministic judge for development mode and
   tests (same tools with consistent arguments, or mostly the same words). `replay.py` has
-  `run_replay`: every `(target, case)` pair (`base`, `tuned`) generated, scored and judged on
+  `run_replay`: every `(target, case)` pair (`base`, `tuned`, and `compare` with a compare
+  target, whose identity is `compare.json`, frozen when attached and checked under the lock
+  by `EvalDir.check_compare`; a run planned without an attached one is refused) generated,
+  scored and judged on
   a thread pool, each generation appended to `generations.jsonl` and each result to
   `results.jsonl` as it completes, so a rerun skips finished pairs; `evaluation.json` is the
   identity a rerun must match (`evaluation_identity`; a mismatch is a `SettingsConflict`, exit 2,
@@ -664,8 +674,8 @@ Source lives under `src/pup_finetune/`.
   pairs in flight, then propagates). `summarize` writes
   `summary.json`: per-target pass rates (judge and metrics), per-trajectory agreement, the
   paired wins, regressions and ties, and `tuned_minus_base` with a seeded paired bootstrap
-  95% CI over trajectories (`paired_bootstrap_ci`), plus the agreement-not-task-success
-  `CAVEAT`. A `Publisher` (default `NoopPublisher`) gets a complete evaluation and returns
+  95% CI over trajectories (`paired_bootstrap_ci`), `tuned_minus_compare` the same way (both
+  through `_paired`), plus the agreement-not-task-success `CAVEAT`. A `Publisher` (default `NoopPublisher`) gets a complete evaluation and returns
   what it reports, the outcome's `publication`. `runner.py` is what `evaluate` and `train
   --evaluate` run: `plan_evaluation` (an `EvalPlan`: cases, judge, settings and `Publishing`,
   whether the dataset's push receipt allows publishing), calibration (`prepare_eval_dir`
@@ -676,7 +686,14 @@ Source lives under `src/pup_finetune/`.
   the settings that differ from the defaults and the judge for `evaluate` (`standalone`), and
   pins every setting after `train --evaluate`, so its retry passes the identity check; a
   preview into an `--out-dir` that holds an evaluation with other settings fails (exit 2,
-  with a free `--out-dir`) instead of offering a `--confirm` that would be refused.
+  with a free `--out-dir`) instead of offering a `--confirm` that would be refused. With
+  `--compare-model` (or a `compare.json` the directory has), `EvalPlan.targets` adds
+  `compare`, and `StandaloneEvaluation` opens a training session only when base or tuned has
+  a case left to generate, and the compare model's client only when it has.
+  `compare.py` is the compare target: `resolve_compare` (the judge spec grammar,
+  `COMPARE_MAX_TOKENS` and the provider's lowest effort; the dev-only `fake-compare`),
+  `CompareTarget` (its identity, recipient and billing), `ChatSampler` (a `Sampler` over any
+  `ChatCompleter`) and `FakeCompareSampler`.
   `benchmark.py` is `benchmark`: `plan_benchmark` (the test split's cases, the judge and
   one `Candidate` per base model), `execute` (the judge calibrated once, then each model
   replayed in a session of its own into `OUT/<model>` through `run_replay` with the model as

@@ -193,10 +193,9 @@ pup finetune dataset triage datasets/my-agent --rubric datasets/rubric.md
 ```
 
 Start with `--agreement` against 20 or more labels you and the user agreed on; it labels
-nothing. Show `agreement.rate`, `agreement.kappa` and the disagreements. Sharpen the rubric
-and measure again (`--reset-triage`) until the user is satisfied. With the two default
-judges, a row is kept only when both vote keep; add a third with `--judges` for a true
-majority.
+nothing. Show `agreement.rate`, `agreement.kappa` and the disagreements. Sharpen the rubric and
+measure again (`--reset-triage`) until the user is satisfied. With the two default judges, a
+row is kept only when both vote keep; add a third with `--judges` for a true majority.
 
 Also check what no command does: answers that break the app's own output contract (invalid
 JSON, duplicate keys, two answers in one), and one request in two splits: group rows by their
@@ -277,7 +276,8 @@ The preview counts cases, generations and judge calls, and names the judge (Fire
 default; `anthropic/<MODEL>` or `openai/<MODEL>` needs that key and a new consent). After a
 yes, run its `next_command`: both models replay each test conversation into two experiments
 that fill in as it runs; share the link it prints (`publication.comparison_url`). Rerun to
-continue one that stopped. Report:
+continue one that stopped. `--compare-model anthropic/<MODEL>` (never the judge) adds the
+app's current model, reusing base and tuned: report `headline.tuned_minus_compare`. Report:
 
 - `headline.judge_pass_rate` (`base`, `tuned`, `delta`, `ci95`), `headline.paired`, and the
   `cases` and `trajectories` behind them. An interval that includes 0 is no clear difference.
