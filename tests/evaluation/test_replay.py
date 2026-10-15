@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from pup_finetune.errors import ExternalError, StateError
+from pup_finetune.errors import ExternalError, SettingsConflict, StateError
 from pup_finetune.evaluation.cases import ReplayCase
 from pup_finetune.evaluation.judge import Judgment
 from pup_finetune.evaluation.replay import (
@@ -793,3 +793,103 @@ def test_a_live_publisher_starts_before_the_first_pair_and_is_offered_results(
     assert live.offered and max(live.offered) <= 2 * len(CASES)
     assert live.published
     assert outcome.link == "https://example.invalid/compare"
+
+
+# --- a third target -----------------------------------------------------------------------
+
+
+def _three_target_store(tmp_path: Path) -> tuple[dict[PairKey, Any], dict[PairKey, Any]]:
+    samplers = {
+        "base": ScriptedSampler(knows=[q(CASES[0])]),
+        "tuned": ScriptedSampler(knows=[q(case) for case in CASES[:4]]),
+        "compare": ScriptedSampler(knows=[q(case) for case in CASES[1:6]]),
+    }
+    run_replay(
+        CASES,
+        samplers,
+        Judge(),
+        out_dir=tmp_path / "eval",
+        identity=identity(),
+        targets=("base", "tuned", "compare"),
+        compare=compare_identity(),
+    )
+    eval_dir = EvalDir(tmp_path / "eval")
+    return eval_dir.read_results(), eval_dir.read_generations()
+
+
+def test_a_compare_target_adds_its_own_comparison_and_changes_no_other(tmp_path: Path) -> None:
+    results, generations = _three_target_store(tmp_path)
+    two = summarize(CASES, results, generations, seed=0)
+    three = summarize(CASES, results, generations, seed=0, targets=("base", "tuned", "compare"))
+    assert three["paired"] == two["paired"]
+    assert three["tuned_minus_base"] == two["tuned_minus_base"]
+    assert "tuned_minus_compare" not in two
+    # The compare target in place of base gives the same comparison.
+    as_base = {
+        ("base", case_id): result for (target, case_id), result in results.items()
+        if target == "compare"
+    } | {key: result for key, result in results.items() if key[0] == "tuned"}  # fmt: skip
+    swapped = summarize(CASES, as_base, generations, seed=0)
+    assert three["tuned_minus_compare"] == {
+        **swapped["tuned_minus_base"],
+        "paired": swapped["paired"],
+    }
+    assert three["tuned_minus_compare"]["paired"]["regressions"] == 2
+
+
+def compare_identity(model: str = "compare/model", max_tokens: int = 100) -> dict[str, Any]:
+    config = JudgeConfig(model=model, max_tokens=max_tokens)
+    return {"evaluation_sha256": "e", "spec": model, "model": config.identity()}
+
+
+def test_the_compare_target_is_frozen_when_attached(tmp_path: Path) -> None:
+    eval_dir = EvalDir(tmp_path / "eval")
+    eval_dir.create()
+    eval_dir.check_compare(None)
+    assert eval_dir.stored_compare() is None
+    eval_dir.check_compare(compare_identity())
+    eval_dir.check_compare(compare_identity())
+    assert eval_dir.stored_compare() == compare_identity()
+    # Another model is refused with no compare pair at all.
+    with pytest.raises(SettingsConflict, match="compares with compare/model, not other/model"):
+        eval_dir.check_compare(compare_identity("other/model"))
+
+
+def test_a_plan_without_the_attached_compare_target_is_refused(tmp_path: Path) -> None:
+    samplers = {"base": ScriptedSampler(), "tuned": ScriptedSampler(), "compare": ScriptedSampler()}
+    out = tmp_path / "eval"
+    run_replay(CASES, samplers, Judge(), out_dir=out, identity=identity(),
+               targets=("base", "tuned", "compare"), compare=compare_identity())  # fmt: skip
+    summary_before = EvalDir(out).summary_path.read_bytes()
+    with pytest.raises(SettingsConflict, match="planned without"):
+        run_replay(CASES, {}, Judge(), out_dir=out, identity=identity())
+    assert EvalDir(out).summary_path.read_bytes() == summary_before
+
+
+def test_the_compare_target_samples_with_its_own_token_limit(tmp_path: Path) -> None:
+    seen: dict[str, set[int]] = {}
+
+    class Limits(ScriptedSampler):
+        def __init__(self, name: str) -> None:
+            super().__init__()
+            self.name = name
+
+        def generate(
+            self, messages: list[ChatMessage], tools: list[ToolSpec], *, max_tokens: int
+        ) -> Generation:
+            seen.setdefault(self.name, set()).add(max_tokens)
+            return super().generate(messages, tools, max_tokens=max_tokens)
+
+    samplers = {name: Limits(name) for name in ("base", "tuned", "compare")}
+    run_replay(CASES, samplers, Judge(), out_dir=tmp_path / "eval", identity=identity(max_tokens=64),
+               targets=("base", "tuned", "compare"), compare=compare_identity(max_tokens=16000))  # fmt: skip
+    assert seen == {"base": {64}, "tuned": {64}, "compare": {16000}}
+
+
+def test_a_new_identity_without_work_retires_the_compare_target(tmp_path: Path) -> None:
+    eval_dir = EvalDir(tmp_path / "eval")
+    eval_dir.create()
+    eval_dir.check_identity(identity())
+    eval_dir.check_compare(compare_identity())
+    eval_dir.check_identity(identity(seed=5))
+    assert eval_dir.stored_compare() is None
