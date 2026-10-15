@@ -394,11 +394,11 @@ def _difference(rates: Mapping[str, Any]) -> str:
     return text
 
 
-def _paired(headline: Mapping[str, Any], errors: object) -> str:
-    paired = headline.get("paired") or {}
-    failed = sum(int(count) for count in errors.values()) if isinstance(errors, Mapping) else 0
+def _verdicts(paired: Mapping[str, Any], errors: object, targets: Sequence[str]) -> str:
+    """One comparison's paired verdicts, and the errors of the two ``targets`` it compares."""
+    failed = sum(int(errors.get(name, 0)) for name in targets) if isinstance(errors, Mapping) else 0
     return (
-        f"paired: {_n(paired.get('wins', 0), 'win')}, "
+        f"{_n(paired.get('wins', 0), 'win')}, "
         f"{_n(paired.get('regressions', 0), 'regression')}, "
         f"{_n(paired.get('ties', 0), 'tie')}, {_n(failed, 'error')}"
     )
@@ -468,7 +468,9 @@ def _evaluation_parts(result: Mapping[str, Any], *, compact: bool) -> Summary:
     )
     base, tuned = _agreement(rates.get("base")), _agreement(rates.get("tuned"))
     difference = _difference(rates)
-    paired = _paired(headline_data, result.get("errors"))
+    paired = "paired: " + _verdicts(
+        headline_data.get("paired") or {}, result.get("errors"), ("base", "tuned")
+    )
     publication = _publication(result)
     if isinstance(headline_data.get("tuned_minus_compare"), Mapping):
         return _compared_parts(result, headline, paired, publication)
@@ -503,8 +505,8 @@ def _compared_parts(
         headline,
         "judge agreement: " + ", ".join(f"{name} {_agreement(rates[name])}" for name in names),
         f"tuned - base: {_difference(rates)}; {paired.removeprefix('paired: ')}",
-        f"tuned - compare: {_difference(versus)}; {_n(versus.get('wins', 0), 'win')}, "
-        f"{_n(versus.get('regressions', 0), 'regression')}, {_n(versus.get('ties', 0), 'tie')}",
+        f"tuned - compare: {_difference(versus)}; "
+        + _verdicts(versus, result.get("errors"), ("tuned", "compare")),
         CAVEAT,
         *([publication] if publication is not None else []),
     ]

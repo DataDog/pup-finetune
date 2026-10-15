@@ -497,8 +497,12 @@ def test_attaching_a_compare_model_publishes_one_more_experiment_in_the_same_com
     compare = publication["experiments"]["compare"]
     created = experiments.experiments[compare["experiment_id"]]
     assert created.name == f"pup-finetune-compare-{run_id}"
-    assert created.attributes["config"]["compare_model"] == "fake-compare"
-    assert created.attributes["config"]["max_tokens"] == 16000
+    config = created.attributes["config"]
+    assert config["compare_model"] == "fake-compare"
+    assert config["provider"] == "fake"
+    assert config["max_tokens"] == 16000
+    assert "base_model" not in config and "checkpoint" not in config
+    assert "the compare model (fake-compare)" in created.attributes["description"]
     assert compare["submitted"] == compare["spans"] > 0
     assert events_posts(fake) > posts
     ids = [publication["experiments"][t]["experiment_id"] for t in ("base", "tuned", "compare")]

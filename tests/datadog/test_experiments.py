@@ -1090,3 +1090,27 @@ def test_without_a_site_there_is_no_link(
     fake.on("auth", "status", json={"authenticated": True})
     assert publisher(fake, Evaluation(), tmp_path / "eval", clock).start() is None
     assert len(api.create_bodies) == 2
+
+
+def test_the_compare_experiment_records_the_compare_model_and_leaves_base_and_tuned_alone() -> None:
+    from pup_finetune.judges import parse_judge
+
+    plain = Evaluation().settings()
+    compare = parse_judge("openai/gpt-5.5")
+    settings = dataclasses.replace(plain, provider="fireworks", compare=compare)
+    assert settings.targets == ("base", "tuned", "compare")
+    for target in TARGETS:
+        assert settings.experiment_attributes(target, "n") == dataclasses.replace(
+            plain, provider="fireworks"
+        ).experiment_attributes(target, "n")
+    attributes = settings.experiment_attributes("compare", "n")
+    assert attributes["config"] == {
+        "provider": "openai",
+        "compare_model": "openai/gpt-5.5",
+        "target": "compare",
+        "run_id": RUN_ID,
+        "judge_model": "fake-judge",
+        "max_tokens": compare.max_tokens,
+        "metrics_version": METRICS_VERSION,
+    }
+    assert "the compare model (openai/gpt-5.5)" in attributes["description"]

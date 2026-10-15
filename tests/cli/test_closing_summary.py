@@ -432,6 +432,28 @@ def test_a_calibration_failure_says_nothing_was_evaluated() -> None:
         )
 
 
+def test_each_comparison_counts_the_errors_of_its_own_two_targets() -> None:
+    result = {
+        "status": "complete_with_errors",
+        "judge_model": "j",
+        "calibration": {"ok": True},
+        "errors": {"base": 1, "tuned": 2, "compare": 4},
+        "headline": {
+            "judge_pass_rate": {"base": 0.5, "tuned": 0.75, "compare": 0.5, "delta": 0.25},
+            "paired": {"wins": 1, "regressions": 0, "ties": 3},
+            "tuned_minus_compare": {"delta": 0.25, "wins": 1, "regressions": 0, "ties": 3},
+            "cases": 4,
+            "trajectories": 2,
+        },
+    }
+    found = summarize("evaluate", result)
+    assert found is not None
+    (base_line,) = [line for line in found.lines if line.startswith("tuned - base")]
+    (compare_line,) = [line for line in found.lines if line.startswith("tuned - compare")]
+    assert base_line.endswith("3 ties, 3 errors")
+    assert compare_line.endswith("3 ties, 6 errors")
+
+
 def test_a_detached_train_names_its_worker_and_log() -> None:
     result = {
         "status": "started",

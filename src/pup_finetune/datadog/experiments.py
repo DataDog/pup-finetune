@@ -84,6 +84,7 @@ from pup_finetune.datadog.pup import DEFAULT_TIMEOUT_SECONDS, Pup
 from pup_finetune.errors import ExternalError, StateError, require_writable
 from pup_finetune.evaluation.cases import ReplayCase
 from pup_finetune.evaluation.replay import COMPARE, METRICS_VERSION, TARGETS, PairKey
+from pup_finetune.inference import JudgeConfig
 from pup_finetune.redaction import redact
 from pup_finetune.runtime import Runtime
 from pup_finetune.storage import atomic_write_json, canonical_json, finite_json, read_json
@@ -312,9 +313,9 @@ class PublishSettings:
     evaluation into another directory has the same ``eval_key`` but its own nonces, so a
     lookup for one directory's create never finds another's experiment. ``records`` maps
     each test row id to its dataset record (``input``, ``expected_output``, ``metadata``),
-    as pushed. ``targets`` are the experiments' targets in order, ``compare`` last when the
-    evaluation has a compare target, ``compare_model`` its spec and ``compare_max_tokens``
-    its limit; base and tuned are described the same way with or without it.
+    as pushed. ``compare`` is the compare model, when the evaluation has one: its experiment
+    comes last (:attr:`targets`) and records that model; base and tuned are described the
+    same way with or without it.
     """
 
     eval_key: str
@@ -326,9 +327,12 @@ class PublishSettings:
     max_tokens: int
     push: PushState
     records: Mapping[str, Mapping[str, Any]]
-    targets: tuple[str, ...] = TARGETS
-    compare_model: str | None = None
-    compare_max_tokens: int | None = None
+    compare: JudgeConfig | None = None
+
+    @property
+    def targets(self) -> tuple[str, ...]:
+        """The experiments' targets in order: base, tuned, then compare when there is one."""
+        return (*TARGETS, COMPARE) if self.compare is not None else TARGETS
 
     @property
     def dataset_id(self) -> str:
@@ -361,8 +365,18 @@ class PublishSettings:
             "metrics_version": METRICS_VERSION,
         }
         if target == COMPARE:
-            model = str(self.compare_model)
-            config |= {"compare_model": self.compare_model, "max_tokens": self.compare_max_tokens}
+            if self.compare is None:
+                raise ValueError("an evaluation without a compare model has no compare experiment")
+            model = self.compare.spec
+            config = {
+                "provider": self.compare.provider,
+                "compare_model": self.compare.spec,
+                "target": target,
+                "run_id": self.run_id,
+                "judge_model": self.judge_model,
+                "max_tokens": self.compare.max_tokens,
+                "metrics_version": METRICS_VERSION,
+            }
         attributes: dict[str, Any] = {
             "name": experiment_name(target, self.run_id),
             "description": (

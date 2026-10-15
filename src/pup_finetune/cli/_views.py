@@ -323,6 +323,7 @@ def evaluation_view(result: Mapping[str, Any]) -> dict[str, Any]:
         "status": result.get("status"),
         "run_id": result.get("run_id"),
         "judge_model": result.get("judge_model"),
+        "compare_model": result.get("compare_model"),
         "headline": headline(summary),
         "metrics": {
             name: {

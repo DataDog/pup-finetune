@@ -849,7 +849,7 @@ def _target_summary(
 ) -> dict[str, Any]:
     ok: list[Mapping[str, Any]] = []
     errors: Counter[str] = Counter()
-    too_long = 0
+    too_long: Counter[str] = Counter()
     pending = 0
     for case in cases:
         result = results.get((target, case.id))
@@ -862,7 +862,7 @@ def _target_summary(
             stage = error.get("stage") if isinstance(error, Mapping) else None
             errors[str(stage or "unknown")] += 1
             if isinstance(error, Mapping) and error.get("type") == "ContextLimitError":
-                too_long += 1
+                too_long[str(stage or "unknown")] += 1
     unanswered: Counter[str] = Counter()
     for result in ok:
         judgment = result.get("judgment")
@@ -887,7 +887,8 @@ def _target_summary(
         "completed": len(ok),
         "errors": sum(errors.values()),
         "errors_by_stage": dict(sorted(errors.items())),
-        "errors_too_long": too_long,
+        "errors_too_long": sum(too_long.values()),
+        "errors_too_long_by_stage": dict(sorted(too_long.items())),
         "pending": pending,
         "judge_pass": _rate(sum(_passed(result) for result in ok), len(ok)),
         "judge_no_verdict": sum(unanswered.values()),

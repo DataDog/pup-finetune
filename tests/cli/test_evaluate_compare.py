@@ -22,7 +22,7 @@ from typer.testing import CliRunner, Result
 
 from pup_finetune import judges
 from pup_finetune.cli import app
-from pup_finetune.inference import ChatCompletion, JudgeConfig
+from pup_finetune.inference import ChatCompletion, ContextLimitError, JudgeConfig
 from pup_finetune.providers.base import ProviderAuthError
 from pup_finetune.providers.fake import FakeBackend
 
@@ -114,6 +114,7 @@ def by_target(path: Path) -> Counter[str]:
 
 def test_a_complete_evaluation_offers_a_compare_step(evaluated: Path) -> None:
     data = output(invoke("evaluate", str(evaluated), "--confirm", "--no-publish"))
+    assert data["compare_model"] is None
     (compare_step,) = [s for s in data["next_steps"] if "--compare-model" in s["command"]]
     assert compare_step["command"] == (
         f"pup finetune evaluate {evaluated} --judge-model fake-judge --compare-model <MODEL> "
@@ -157,6 +158,7 @@ def test_attaching_a_compare_model_redoes_neither_base_nor_tuned(
     assert result.exit_code == 0, result.stderr
     data = output(result)
     assert data["status"] == "complete"
+    assert data["compare_model"] == "fake-compare"
     assert data["errors"] == {"base": 0, "tuned": 0, "compare": 0}
     assert data["headline"]["judge_pass_rate"]["compare"] is not None
     assert set(data["headline"]["tuned_minus_compare"]) == {
@@ -330,3 +332,19 @@ def test_a_stored_compare_target_that_resolves_otherwise_now_is_refused(
         assert "Error [settings_conflict]" in result.stderr
         assert "changed: base_url" in result.stderr
     assert model.calls == []
+
+
+def test_cases_too_long_for_the_compare_model_point_to_another_compare_model(
+    evaluated: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    too_long = ContextLimitError("the request is longer than the context window", source="openai")
+    serve_compare(monkeypatch, CompareModel(too_long, fail_from=2))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-synthetic")
+    result = invoke(
+        "evaluate", str(evaluated), "--compare-model", "openai/gpt-5.5", "--no-publish", "--confirm"
+    )
+    data = output(result)
+    assert data["status"] == "complete_with_errors"
+    assert "longer than the compare model's context window" in data["hint"]
+    assert "another --compare-model" in data["hint"]
+    assert "--judge-model" not in data["hint"]

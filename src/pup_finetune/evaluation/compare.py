@@ -169,7 +169,8 @@ def resolve_compare(
         return CompareTarget(config=config, source=source)
     from pup_finetune.judges import check_available, parse_judge
 
-    config = parse_judge(spec).model_copy(update={"max_tokens": COMPARE_MAX_TOKENS})
+    parsed = parse_judge(spec, what="compare model")
+    config = parsed.model_copy(update={"max_tokens": COMPARE_MAX_TOKENS})
     check_available(config)
     return CompareTarget(config=config, source=source)
 
@@ -239,9 +240,10 @@ def attach_compare(eval_dir: EvalDir, identity: Mapping[str, Any] | None) -> Non
 class ChatSampler:
     """A :class:`~pup_finetune.providers.base.Sampler` over a chat completions client.
 
-    The prefix and tools go as they are (OpenAI form), with the config's temperature and
-    reasoning effort. The answer keeps its text and tool calls. ``stop_reason`` is the
-    completion's ``finish_reason``; ``length`` (cut off at ``max_tokens``) and a tool call
+    The prefix (without its recorded ``reasoning_content``, which the compare model never
+    wrote) and tools go in OpenAI form, with the config's temperature and reasoning effort.
+    The answer keeps its text and tool calls. ``stop_reason`` is the completion's
+    ``finish_reason``; ``length`` (cut off at ``max_tokens``) and a tool call
     whose arguments are not a JSON object make it not ``format_valid``. A refusal is an
     answer like any other, judged as one. A failed call raises, which replay records as the
     pair's generation error.
@@ -263,7 +265,10 @@ class ChatSampler:
     ) -> Generation:
         start = self.clock()
         completion = self.client.complete(
-            messages,
+            [
+                {k: v for k, v in message.items() if k != "reasoning_content"}
+                for message in messages
+            ],
             model=self.config.model,
             tools=tools or None,
             temperature=self.config.temperature,

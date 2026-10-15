@@ -159,7 +159,7 @@ _PREFIXED_PROVIDERS: Final[frozenset[str]] = frozenset({"anthropic", "openai"})
 """The providers a judge spec names by prefix; any other spec is a Fireworks model id."""
 
 
-def parse_judge(spec: str) -> JudgeConfig:
+def parse_judge(spec: str, *, what: str = "judge") -> JudgeConfig:
     """The judge ``spec`` names (see the module docstring), with its provider's defaults.
 
     ``anthropic/<model>`` and ``openai/<model>`` name those providers (the prefix in any
@@ -167,21 +167,22 @@ def parse_judge(spec: str) -> JudgeConfig:
     be an alias of one (:data:`JUDGE_SHORT_NAMES`), resolved to the id, so a mistyped alias is
     never sent to a paid run. The reasoning effort is the lowest the model takes (see the
     module docstring). Raises :class:`UsageError` for an empty spec, an empty model after a
-    provider prefix, or an unknown alias (with the closest known one).
+    provider prefix, or an unknown alias (with the closest known one), naming the spec as
+    ``what`` (``judge``, or ``compare model`` for ``--compare-model``).
     """
     text = spec.strip()
     if not text:
-        raise UsageError("the judge model is empty", hint=f"name it as {SPEC_FORMS}")
+        raise UsageError(f"the {what} is empty", hint=f"name it as {SPEC_FORMS}")
     prefix, slash, rest = text.partition("/")
     provider: RemoteProvider
     if slash and prefix.lower() in _PREFIXED_PROVIDERS:
         provider, model = cast(RemoteProvider, prefix.lower()), rest.strip()
         if not model:
-            raise UsageError(f"the judge model {text!r} has no model after {prefix}/")
+            raise UsageError(f"the {what} {text!r} has no model after {prefix}/")
     elif slash:
         provider, model = "fireworks", text
     else:
-        provider, model = "fireworks", _known_alias(text)
+        provider, model = "fireworks", _known_alias(text, what)
     defaults = PROVIDERS[provider]
     effort = defaults.reasoning_effort
     if provider == "fireworks":
@@ -199,16 +200,16 @@ def parse_judge(spec: str) -> JudgeConfig:
     )
 
 
-def _known_alias(text: str) -> str:
+def _known_alias(text: str, what: str) -> str:
     """The Fireworks model id the alias ``text`` stands for; raises :class:`UsageError`
-    naming the closest alias when it is none."""
+    naming the closest alias when it is none (and the spec as ``what``)."""
     if text in JUDGE_SHORT_NAMES:
         return resolve_alias(text)
     close = difflib.get_close_matches(text, list(JUDGE_SHORT_NAMES), n=1)
     mean = f"did you mean {close[0]}? " if close else ""
     raise UsageError(
-        f"unknown judge {text!r}: a judge without a '/' must be one of the aliases",
-        hint=f"{mean}name the judge as {UNKNOWN_JUDGE_FORMS}",
+        f"unknown {what} {text!r}: a {what} without a '/' must be one of the aliases",
+        hint=f"{mean}name the {what} as {UNKNOWN_JUDGE_FORMS}",
     )
 
 

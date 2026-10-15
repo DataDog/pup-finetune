@@ -511,9 +511,7 @@ class EvalPlan:
             max_tokens=self.settings.max_tokens,
             push=publishing.push,
             records=publishing.records,
-            targets=self.targets,
-            compare_model=None if self.compare is None else self.compare.spec,
-            compare_max_tokens=None if self.compare is None else self.compare.config.max_tokens,
+            compare=None if self.compare is None else self.compare.config,
         )
         return ExperimentsPublisher(
             Pup(),
@@ -1032,14 +1030,22 @@ def replay_result(
             f"{errors} case(s) ended in an error, left out of every rate (see the file "
             "files.results names); run next_command to retry them"
         )
-        too_long = sum(
-            int(target.get("errors_too_long", 0)) for target in summary["targets"].values()
-        )
-        if too_long:
+        too_long = [
+            target.get("errors_too_long_by_stage") or {} for target in summary["targets"].values()
+        ]
+        judged = sum(int(stages.get("judge", 0)) for stages in too_long)
+        compared = sum(int(stages.get("generation", 0)) for stages in too_long)
+        if judged:
             hint += (
-                f". {too_long} of them are longer than the judge's context window (or the "
-                "compare model's), which a retry cannot fix: evaluate into a new --out-dir "
-                "with a --judge-model that has a larger context window"
+                f". {judged} of them are longer than the judge's context window, which a "
+                "retry cannot fix: evaluate into a new --out-dir with a --judge-model that has "
+                "a larger context window"
+            )
+        if compared:
+            hint += (
+                f". {compared} of them are longer than the compare model's context window, "
+                "which a retry cannot fix: compare with another --compare-model in a new "
+                "--out-dir"
             )
         if publication["status"] in _SENT:
             hint += (
@@ -1095,6 +1101,7 @@ def replay_result(
             "run_id": plan.run_id,
             "out_dir": display_path(outcome.out_dir),
             "judge_model": plan.judge.spec,
+            "compare_model": None if plan.compare is None else plan.compare.spec,
             "summary": summary,
             "pending": outcome.pending,
             "cancelled": outcome.cancelled,

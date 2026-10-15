@@ -221,3 +221,20 @@ def test_a_stored_compare_target_is_resolved_from_its_spec(tmp_path: Path) -> No
     fake = identity_of("fake-compare")
     with pytest.raises(UsageError, match="development only"):
         resolve_compare(None, fake, runtime=Runtime())
+
+
+def test_the_chat_sampler_sends_no_recorded_reasoning() -> None:
+    api = FakeChatApi()
+    api.script.append(completion("done"))
+    thought = {"role": "assistant", "content": "Looking.", "reasoning_content": "hmm"}
+    sampler(api).generate([*PREFIX, thought, {"role": "user", "content": "go"}], [], max_tokens=10)
+    (body,) = api.bodies
+    assert body["messages"][2] == {"role": "assistant", "content": "Looking."}
+
+
+def test_a_compare_model_spec_error_names_the_compare_model() -> None:
+    with pytest.raises(UsageError, match=r"^unknown compare model 'deepseek-flsh'") as info:
+        resolve_compare("deepseek-flsh", None, runtime=DEV)
+    assert info.value.hint is not None and "did you mean deepseek-v4p1-flash?" in info.value.hint
+    with pytest.raises(UsageError, match=r"^the compare model 'openai/' has no model"):
+        resolve_compare("openai/", None, runtime=DEV)
