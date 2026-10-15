@@ -400,5 +400,7 @@ def open_compare_sampler(
         return
     from pup_finetune.judges import open_client
 
-    with open_client(target.config, timeout_s=COMPARE_TIMEOUT_S, fallbacks=False) as client:
+    with open_client(
+        target.config, timeout_s=COMPARE_TIMEOUT_S, fallbacks=False, what="compare model"
+    ) as client:
         yield ChatSampler(client, target.config)

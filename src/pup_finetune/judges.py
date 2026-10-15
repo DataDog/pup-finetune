@@ -268,21 +268,26 @@ def _anthropic_missing(what: str = "judge") -> UsageError:
     )
 
 
-def anthropic_client_class() -> type[AnthropicChatClient]:
+def anthropic_client_class(*, what: str = "judge") -> type[AnthropicChatClient]:
     """:class:`~pup_finetune.anthropic_client.AnthropicChatClient`, imported now; a
-    :class:`UsageError` with an install hint when the ``anthropic`` extra is missing."""
+    :class:`UsageError` with an install hint naming the model as ``what`` when the
+    ``anthropic`` extra is missing."""
     try:
         from pup_finetune.anthropic_client import AnthropicChatClient
     except ModuleNotFoundError as exc:
         if exc.name is not None and exc.name.split(".", 1)[0] in ("anthropic", "httpx2"):
-            raise _anthropic_missing() from exc
+            raise _anthropic_missing(what) from exc
         raise
     return AnthropicChatClient
 
 
 @contextmanager
 def open_client(
-    config: JudgeConfig, *, timeout_s: float | None = None, fallbacks: bool = True
+    config: JudgeConfig,
+    *,
+    timeout_s: float | None = None,
+    fallbacks: bool = True,
+    what: str = "judge",
 ) -> Iterator[ChatCompleter]:
     """The client for ``config``'s judge, with the key of its credential. Closed on exit.
 
@@ -291,10 +296,11 @@ def open_client(
     :class:`~pup_finetune.anthropic_client.AnthropicChatClient`; ``timeout_s`` replaces the
     client's limit per attempt, and ``fallbacks`` ``False`` turns off Anthropic's
     server-side refusal fallbacks, which answer with another model. Raises
-    :class:`UsageError` when no key is configured, or a package the judge needs is missing.
+    :class:`UsageError` when no key is configured, or a package the judge needs is missing
+    (naming the model as ``what``).
     """
     if config.provider == "anthropic":
-        opened = anthropic_client_class().for_judge(
+        opened = anthropic_client_class(what=what).for_judge(
             config, timeout_s=timeout_s, fallbacks=fallbacks
         )
         with opened as client:

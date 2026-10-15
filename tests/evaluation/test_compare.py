@@ -27,6 +27,7 @@ from pup_finetune.evaluation.compare import (
     FakeCompareSampler,
     attach_compare,
     compare_conflict,
+    open_compare_sampler,
     resolve_compare,
 )
 from pup_finetune.evaluation.judge import check_judge_differs
@@ -257,3 +258,16 @@ def test_a_missing_anthropic_extra_names_the_compare_model(
     monkeypatch.setitem(sys.modules, "anthropic", None)
     with pytest.raises(UsageError, match=r"^Anthropic compare models need the 'anthropic' package"):
         resolve_compare("anthropic/claude-opus-5-5", None, runtime=DEV)
+
+
+def test_a_broken_anthropic_install_names_the_compare_model_when_it_opens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = resolve_compare("anthropic/claude-opus-5-5", None, runtime=DEV)
+    monkeypatch.setitem(sys.modules, "anthropic", None)
+    monkeypatch.delitem(sys.modules, "pup_finetune.anthropic_client", raising=False)
+    with (
+        pytest.raises(UsageError, match=r"^Anthropic compare models need the 'anthropic' package"),
+        open_compare_sampler(target, [], seed=0),
+    ):
+        pass
