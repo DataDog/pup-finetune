@@ -656,13 +656,14 @@ class EvalPlan:
         steps = [f"reuse the {_and(reused)} answers already generated"] if reused else []
         if models:
             steps.append(f"generate each with {' and with '.join(models)}")
-        action = (
-            f"evaluate {_cases(len(self.cases))} from {trajectories} test conversations: "
-            f"{', '.join(steps)}, and judge each answer with {judge_name}"
-            if models or judge_calls
-            else f"summarize {_cases(len(self.cases))} from {trajectories} test conversations: "
-            "every answer is already generated and judged"
-        )
+        cases = f"{_cases(len(self.cases))} from {trajectories} test conversations"
+        if models or remaining["judge"]:
+            action = (
+                f"evaluate {cases}: {', '.join(steps)}, and judge each answer with {judge_name}"
+            )
+        else:
+            calibrate = f"calibrate {judge_name} first, then " if calibration else ""
+            action = f"{calibrate}summarize {cases}: every answer is already generated and judged"
         if publish["status"] == "planned":
             action += f", then publish {_COUNTS[len(targets)]} experiments to Datadog"
         target_names: dict[str, str] = {"base": self.profile.base_model, "tuned": tuned}

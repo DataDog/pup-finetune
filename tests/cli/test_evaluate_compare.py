@@ -477,3 +477,13 @@ def test_the_action_names_what_is_reused_and_what_is_left(evaluated: Path) -> No
         "reuse the base, tuned and compare answers already generated, and judge each answer"
         in judging["action"]
     )
+
+
+def test_the_action_says_the_judge_is_calibrated_first_when_that_is_all_left(
+    evaluated: Path,
+) -> None:
+    (evaluated / "eval" / "calibration.json").unlink()
+    preview = output(invoke("evaluate", str(evaluated), "--no-publish"))["preview"]
+    assert preview["judge_calls"] == preview["calibration_calls"] > 0
+    assert preview["action"].startswith("calibrate the fake judge first, then summarize")
+    assert "judge each answer" not in preview["action"]
