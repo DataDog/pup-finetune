@@ -23,7 +23,7 @@ holds, all ``0600``:
   wins.
 - ``summary.json`` - :func:`summarize`, rewritten at the end of every run, partial or not.
 - ``compare.json`` - with ``evaluate --compare-model``, the identity of the compare target
-  (:meth:`EvalDir.check_compare`): written before its first pair, and the same for every
+  (:func:`~pup_finetune.evaluation.compare.attach_compare`): written before its first pair, and the same for every
   later run, so a compare target is never changed or dropped once attached. Its pairs go
   into the same files, under the target ``compare``; ``evaluation.json`` is unchanged, so a
   compare target can be added to a complete evaluation without redoing base and tuned.
@@ -65,6 +65,7 @@ from typing import Any, Final, Literal, Protocol, runtime_checkable
 from pup_finetune.concurrency import DaemonPool
 from pup_finetune.errors import SettingsConflict, StateError
 from pup_finetune.evaluation.cases import ReplayCase
+from pup_finetune.evaluation.compare import attach_compare
 from pup_finetune.evaluation.judge import Judgment
 from pup_finetune.evaluation.metrics import aggregate, score_case
 from pup_finetune.inference import JudgeConfig
@@ -279,46 +280,6 @@ class EvalDir:
             f"(changed: {', '.join(changed)}), so its results cannot be reused",
             hint="pass a new --out-dir to evaluate with these settings",
         )
-
-    def stored_compare(self) -> dict[str, Any] | None:
-        """``compare.json``, or ``None`` when no compare target is attached."""
-        if not self.compare_path.exists():
-            return None
-        stored = read_json(self.compare_path)
-        if not isinstance(stored, dict):
-            raise StateError(f"{self.compare_path}: expected a JSON object")
-        return stored
-
-    def check_compare(self, identity: Mapping[str, Any] | None) -> None:
-        """Attach the compare target ``identity`` (``compare.json``) the first time; later,
-        raise unless it is the one attached. ``None`` (an evaluation planned without one)
-        raises when one is attached, as another process may have done since it was planned.
-
-        A different compare target is a :class:`SettingsConflict` even before its first
-        pair: an experiment may have been created for it already.
-        """
-        stored = self.stored_compare()
-        if identity is None:
-            if stored is not None:
-                raise SettingsConflict(
-                    f"{self.path} has a compare target ({stored.get('spec')}) this evaluation "
-                    "was planned without",
-                    hint="run the command again: it continues the compare target too",
-                )
-            return
-        wanted = finite_json(dict(identity))
-        if stored is None:
-            atomic_write_json(self.compare_path, wanted)
-            return
-        if canonical_json(stored) != canonical_json(wanted):
-            changed = identity_changes(stored.get("model") or {}, wanted.get("model") or {})
-            raise SettingsConflict(
-                f"{self.path} compares with {stored.get('spec')}, not {wanted.get('spec')} "
-                f"(changed: {', '.join(changed) or 'spec'}), and a compare target never "
-                "changes once attached",
-                hint="leave --compare-model out to continue the attached one, or pass a new "
-                "--out-dir to compare with another model",
-            )
 
     def stored_identity(self) -> dict[str, Any] | None:
         """``evaluation.json``, or ``None`` before the first evaluation in the directory."""
@@ -673,7 +634,7 @@ def run_replay(
     (its link is the outcome's ``link``) and publishes finished rows as the pairs run.
     ``compare`` is the compare target's identity, given exactly when :data:`COMPARE` is one
     of ``targets``: checked against ``compare.json`` under the lock, before any pair or
-    publication (:meth:`EvalDir.check_compare`), and its ``model.max_tokens`` caps the
+    publication (:func:`~pup_finetune.evaluation.compare.attach_compare`), and its ``model.max_tokens`` caps the
     compare target's generations. Returns the summary also written to ``summary.json``.
     """
     max_tokens, seed = identity.get("max_tokens"), identity.get("seed")
@@ -697,7 +658,7 @@ def run_replay(
     eval_dir.create()
     with eval_dir.lock():
         eval_dir.check_identity(identity)
-        eval_dir.check_compare(compare)
+        attach_compare(eval_dir, compare)
         replay = _Replay(eval_dir, samplers, judge_fn, max_tokens=limits, cancel=cancel)
         todo = replay.todo(cases, targets)
         missing = sorted(

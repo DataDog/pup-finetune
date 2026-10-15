@@ -9,21 +9,25 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 from pydantic import SecretStr
 
-from pup_finetune.errors import UsageError
+from pup_finetune.errors import SettingsConflict, UsageError
 from pup_finetune.evaluation.cases import ReplayCase
 from pup_finetune.evaluation.compare import (
     COMPARE_MAX_TOKENS,
     FAKE_COMPARE_ANSWER,
     ChatSampler,
     FakeCompareSampler,
+    attach_compare,
+    compare_conflict,
     resolve_compare,
 )
 from pup_finetune.evaluation.judge import check_judge_differs
+from pup_finetune.evaluation.replay import EvalDir
 from pup_finetune.inference import ChatClient, JudgeConfig
 from pup_finetune.judges import parse_judge
 from pup_finetune.runtime import Runtime
@@ -171,3 +175,35 @@ def test_the_compare_billing_names_its_calls() -> None:
     fake = resolve_compare("fake-compare", None, runtime=DEV)
     assert fake is not None
     assert fake.billing(2).startswith("the fake compare model is offline and bills nothing")
+
+
+def identity_of(spec: str) -> dict[str, Any]:
+    target = resolve_compare(spec, None, runtime=DEV)
+    assert target is not None
+    return target.identity()
+
+
+def test_a_compare_conflict_names_what_changed_and_a_free_out_dir(tmp_path: Path) -> None:
+    out = tmp_path / "eval"
+    (tmp_path / "eval-2").mkdir()
+    (tmp_path / "eval-2" / "evaluation.json").write_text("{}")
+    stored = identity_of("openai/gpt-5.5")
+    assert compare_conflict(None, stored, out_dir=out) is None
+    assert compare_conflict(stored, identity_of("openai/gpt-5.5"), out_dir=out) is None
+    conflict = compare_conflict(stored, identity_of("openai/gpt-5.4"), out_dir=out)
+    assert conflict is not None
+    assert "compares with openai/gpt-5.5, not openai/gpt-5.4 (changed: model)" in str(conflict)
+    assert conflict.hint is not None
+    assert conflict.hint.endswith(f"pass --out-dir {tmp_path / 'eval-3'}")
+
+
+def test_attaching_another_compare_model_raises_the_same_conflict(tmp_path: Path) -> None:
+    eval_dir = EvalDir(tmp_path / "eval")
+    eval_dir.create()
+    attach_compare(eval_dir, identity_of("openai/gpt-5.5"))
+    wanted = identity_of("anthropic/claude-opus-5-5")
+    expected = compare_conflict(identity_of("openai/gpt-5.5"), wanted, out_dir=eval_dir.path)
+    assert expected is not None
+    with pytest.raises(SettingsConflict) as raised:
+        attach_compare(eval_dir, wanted)
+    assert (str(raised.value), raised.value.hint) == (str(expected), expected.hint)

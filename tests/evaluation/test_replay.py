@@ -22,6 +22,7 @@ import pytest
 
 from pup_finetune.errors import ExternalError, SettingsConflict, StateError
 from pup_finetune.evaluation.cases import ReplayCase
+from pup_finetune.evaluation.compare import attach_compare, stored_compare
 from pup_finetune.evaluation.judge import Judgment
 from pup_finetune.evaluation.replay import (
     CAVEAT,
@@ -845,14 +846,14 @@ def compare_identity(model: str = "compare/model", max_tokens: int = 100) -> dic
 def test_the_compare_target_is_frozen_when_attached(tmp_path: Path) -> None:
     eval_dir = EvalDir(tmp_path / "eval")
     eval_dir.create()
-    eval_dir.check_compare(None)
-    assert eval_dir.stored_compare() is None
-    eval_dir.check_compare(compare_identity())
-    eval_dir.check_compare(compare_identity())
-    assert eval_dir.stored_compare() == compare_identity()
+    attach_compare(eval_dir, None)
+    assert stored_compare(eval_dir) is None
+    attach_compare(eval_dir, compare_identity())
+    attach_compare(eval_dir, compare_identity())
+    assert stored_compare(eval_dir) == compare_identity()
     # Another model is refused with no compare pair at all.
     with pytest.raises(SettingsConflict, match="compares with compare/model, not other/model"):
-        eval_dir.check_compare(compare_identity("other/model"))
+        attach_compare(eval_dir, compare_identity("other/model"))
 
 
 def test_a_plan_without_the_attached_compare_target_is_refused(tmp_path: Path) -> None:
@@ -890,6 +891,6 @@ def test_a_new_identity_without_work_retires_the_compare_target(tmp_path: Path) 
     eval_dir = EvalDir(tmp_path / "eval")
     eval_dir.create()
     eval_dir.check_identity(identity())
-    eval_dir.check_compare(compare_identity())
+    attach_compare(eval_dir, compare_identity())
     eval_dir.check_identity(identity(seed=5))
-    assert eval_dir.stored_compare() is None
+    assert stored_compare(eval_dir) is None

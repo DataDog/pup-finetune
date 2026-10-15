@@ -304,6 +304,16 @@ class DirectoryLock:
                 os.close(fd)
 
 
+def free_sibling(path: Path) -> Path:
+    """``path`` with ``-2``, ``-3``, ... added: the first that does not exist or is empty."""
+    n = 2
+    while True:
+        candidate = path.with_name(f"{path.name}-{n}")
+        if not candidate.exists() or (candidate.is_dir() and not any(candidate.iterdir())):
+            return candidate
+        n += 1
+
+
 def canonical_json(value: Any, *, ensure_ascii: bool = False) -> str:
     """Serialize ``value`` deterministically: sorted keys, no whitespace.
 

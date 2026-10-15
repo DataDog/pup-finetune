@@ -664,7 +664,7 @@ Source lives under `src/pup_finetune/`.
   tests (same tools with consistent arguments, or mostly the same words). `replay.py` has
   `run_replay`: every `(target, case)` pair (`base`, `tuned`, and `compare` with a compare
   target, whose identity is `compare.json`, frozen when attached and checked under the lock
-  by `EvalDir.check_compare`; a run planned without an attached one is refused) generated,
+  by `compare.attach_compare`; a run planned without an attached one is refused) generated,
   scored and judged on
   a thread pool, each generation appended to `generations.jsonl` and each result to
   `results.jsonl` as it completes, so a rerun skips finished pairs; `evaluation.json` is the

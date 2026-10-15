@@ -26,16 +26,27 @@ import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Final, Literal
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 from pup_finetune.data.split import split_position
-from pup_finetune.errors import StateError, UsageError
+from pup_finetune.display import quoted
+from pup_finetune.errors import SettingsConflict, StateError, UsageError
 from pup_finetune.evaluation.cases import ReplayCase
 from pup_finetune.inference import ChatCompleter, JudgeConfig
 from pup_finetune.providers.base import Generation, Sampler
 from pup_finetune.rendering.base import ChatMessage, ToolSpec
 from pup_finetune.runtime import Runtime
-from pup_finetune.storage import canonical_json
+from pup_finetune.storage import (
+    atomic_write_json,
+    canonical_json,
+    finite_json,
+    free_sibling,
+    read_json,
+)
+
+if TYPE_CHECKING:
+    from pup_finetune.evaluation.replay import EvalDir
 
 __all__ = [
     "COMPARE_MAX_TOKENS",
@@ -44,9 +55,12 @@ __all__ = [
     "ChatSampler",
     "CompareTarget",
     "FakeCompareSampler",
+    "attach_compare",
+    "compare_conflict",
     "open_compare_sampler",
     "probe",
     "resolve_compare",
+    "stored_compare",
 ]
 
 COMPARE_MAX_TOKENS: Final = 16000
@@ -158,6 +172,68 @@ def resolve_compare(
     config = parsed.model_copy(update={"max_tokens": COMPARE_MAX_TOKENS})
     check_available(config)
     return CompareTarget(config=config, source="flag")
+
+
+def stored_compare(eval_dir: EvalDir) -> dict[str, Any] | None:
+    """``compare.json`` in ``eval_dir``, or ``None`` when no compare target is attached."""
+    path = eval_dir.compare_path
+    if not path.exists():
+        return None
+    stored = read_json(path)
+    if not isinstance(stored, dict):
+        raise StateError(f"{path}: expected a JSON object")
+    return stored
+
+
+def compare_conflict(
+    stored: Mapping[str, Any] | None, wanted: Mapping[str, Any], *, out_dir: Path
+) -> SettingsConflict | None:
+    """Why the compare target ``wanted`` cannot replay into ``out_dir``, which has
+    ``stored`` attached (both :meth:`CompareTarget.identity`), naming what changed and a
+    free ``--out-dir``; ``None`` when it can (none attached yet, or the same one)."""
+    from pup_finetune.evaluation.replay import identity_changes
+
+    wanted = finite_json(dict(wanted))
+    if stored is None or canonical_json(stored) == canonical_json(wanted):
+        return None
+    changed = identity_changes(stored.get("model") or {}, wanted.get("model") or {})
+    attached, spec = stored.get("spec"), wanted.get("spec")
+    other = f"not {spec}" if attached != spec else "called as it was then"
+    fresh = quoted(free_sibling(out_dir))
+    return SettingsConflict(
+        f"{out_dir} compares with {attached}, {other} (changed: {', '.join(changed) or 'spec'}), "
+        "and a compare target never changes once attached",
+        hint=f"leave --compare-model out to continue the attached one, or compare with {spec} "
+        f"in a new directory: pass --out-dir {fresh}"
+        if attached != spec
+        else f"compare with {spec} as it is called now in a new directory: pass --out-dir {fresh}",
+    )
+
+
+def attach_compare(eval_dir: EvalDir, identity: Mapping[str, Any] | None) -> None:
+    """Attach the compare target ``identity`` to ``eval_dir`` (``compare.json``) the first
+    time; later, raise :func:`compare_conflict` unless it is the one attached. ``None`` (an
+    evaluation planned without one) raises when one is attached, as another process may have
+    done since it was planned. Call it under the directory's lock.
+
+    A different compare target is a :class:`SettingsConflict` even before its first pair: an
+    experiment may have been created for it already.
+    """
+    stored = stored_compare(eval_dir)
+    if identity is None:
+        if stored is not None:
+            raise SettingsConflict(
+                f"{eval_dir.path} has a compare target ({stored.get('spec')}) this evaluation "
+                "was planned without",
+                hint="run the command again: it continues the compare target too",
+            )
+        return
+    if stored is None:
+        atomic_write_json(eval_dir.compare_path, finite_json(dict(identity)))
+        return
+    conflict = compare_conflict(stored, identity, out_dir=eval_dir.path)
+    if conflict is not None:
+        raise conflict
 
 
 class ChatSampler:

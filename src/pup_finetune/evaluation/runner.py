@@ -87,7 +87,7 @@ from pup_finetune.runs import (
 )
 from pup_finetune.runs import cancel_on_signals as _cancel_on_signals
 from pup_finetune.runtime import Runtime
-from pup_finetune.storage import LOCK_FILE_NAME, canonical_json, finite_json
+from pup_finetune.storage import LOCK_FILE_NAME, canonical_json, finite_json, free_sibling
 from pup_finetune.training.records import StoppedReason, TrainResult
 
 if TYPE_CHECKING:
@@ -170,16 +170,6 @@ _CANCEL_NOTICE: Final = (
 
 def _q(value: object) -> str:
     return quoted(value)
-
-
-def _free_dir(path: Path) -> Path:
-    """``path`` with ``-2``, ``-3``, ... added: the first that does not exist or is empty."""
-    n = 2
-    while True:
-        candidate = path.with_name(f"{path.name}-{n}")
-        if not candidate.exists() or (candidate.is_dir() and not any(candidate.iterdir())):
-            return candidate
-        n += 1
 
 
 # --- publishing ---------------------------------------------------------------------------
@@ -550,24 +540,11 @@ class EvalPlan:
             found.append("test cases, generated answers and scores -> Datadog (experiments)")
         return found
 
-    def _check_compare(self, eval_dir: Any, tuned_checkpoint: CheckpointRef) -> None:
-        """Fail the preview, as ``--confirm`` would (:meth:`EvalDir.check_compare`), when the
-        directory has attached another compare model, never offering that ``--confirm``."""
-        stored = eval_dir.stored_compare()
-        wanted = self.compare_identity
-        if stored is None or wanted is None or finite_json(wanted) == stored:
-            return
-        raise SettingsConflict(
-            f"{self.out_dir} compares with {stored.get('spec')}, not {wanted['spec']}, and a "
-            "compare target never changes once attached",
-            hint="leave --compare-model out to continue the attached one, or compare with "
-            f"another model in a new directory: pass --out-dir {_q(_free_dir(self.out_dir))}",
-        )
-
     def preview(self, *, tuned: str, tuned_checkpoint: CheckpointRef | None) -> dict[str, Any]:
         """The calls the evaluation makes. With ``tuned_checkpoint`` (a standalone run), what
         ``--out-dir`` already holds under the same settings is left out of the counts."""
         from pup_finetune.datadog.experiments import experiment_name
+        from pup_finetune.evaluation.compare import compare_conflict, stored_compare
         from pup_finetune.evaluation.replay import (
             CAVEAT,
             COMPARE,
@@ -589,7 +566,13 @@ class EvalPlan:
         if tuned_checkpoint is not None and stored is not None:
             wanted = finite_json(self.identity(tuned_checkpoint))
             if wanted == stored:
-                self._check_compare(eval_dir, tuned_checkpoint)
+                # --confirm would refuse another compare model: fail now, never offer it.
+                if self.compare_identity is not None:
+                    conflict = compare_conflict(
+                        stored_compare(eval_dir), self.compare_identity, out_dir=self.out_dir
+                    )
+                    if conflict is not None:
+                        raise conflict
                 by_target = {
                     target: remaining_work(eval_dir, self.cases, (target,)) for target in targets
                 }
@@ -602,7 +585,7 @@ class EvalPlan:
                     f"{', '.join(identity_changes(stored, wanted))}), so its results cannot be "
                     "reused",
                     hint="evaluate into a new directory: pass --out-dir "
-                    f"{_q(_free_dir(self.out_dir))}",
+                    f"{_q(free_sibling(self.out_dir))}",
                 )
         from pup_finetune.judges import destination as judge_destination
 
@@ -753,13 +736,13 @@ def plan_evaluation(
     (:func:`~pup_finetune.runs.model_id_for_run`) or, once known, the ``promoted`` model.
     """
     from pup_finetune.evaluation.cases import cases_from_dataset
-    from pup_finetune.evaluation.compare import resolve_compare
+    from pup_finetune.evaluation.compare import resolve_compare, stored_compare
     from pup_finetune.evaluation.judge import check_judge_differs
     from pup_finetune.evaluation.replay import EvalDir
 
     judge_config = resolve_judge(settings.judge_model, provider=provider, runtime=runtime)
     compare = resolve_compare(
-        settings.compare_model, EvalDir(settings.out_dir).stored_compare(), runtime=runtime
+        settings.compare_model, stored_compare(EvalDir(settings.out_dir)), runtime=runtime
     )
     tuned = [model_id_for_run(run_id)]
     if promoted is not None:
@@ -911,13 +894,14 @@ def prepare_eval_dir(
     one is stored or given in ``calibration``, the judge is calibrated now (see
     :func:`run_calibration`). ``None`` with ``--skip-calibration``.
     """
+    from pup_finetune.evaluation.compare import attach_compare
     from pup_finetune.evaluation.replay import EvalDir
 
     eval_dir = EvalDir(plan.out_dir)
     eval_dir.create()
     with eval_dir.lock():
         eval_dir.check_identity(plan.identity(tuned_checkpoint))
-        eval_dir.check_compare(plan.compare_identity)
+        attach_compare(eval_dir, plan.compare_identity)
         if plan.settings.skip_calibration:
             return None
         stored = eval_dir.read_calibration()
