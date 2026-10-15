@@ -77,9 +77,11 @@ class CompareModel:
     def __init__(self, fail: Exception | None = None, *, fail_from: int = 1) -> None:
         self.fail, self.fail_from = fail, fail_from
         self.calls: list[list[dict[str, Any]]] = []
+        self.options: list[dict[str, Any]] = []
 
     def complete(self, messages: Any, **kwargs: Any) -> ChatCompletion:
         self.calls.append([dict(message) for message in messages])
+        self.options.append(kwargs)
         if self.fail is not None and len(self.calls) >= self.fail_from:
             raise self.fail
         content = "OK" if len(self.calls) == 1 else "I would explain the plan."
@@ -302,6 +304,10 @@ def test_the_probe_runs_once_when_the_compare_model_is_attached(
     assert attached.exit_code == 0, attached.stderr
     assert len(model.calls) == cases + 1
     assert model.calls[0] == [{"role": "user", "content": "Reply with the word OK."}]
+    probed, replayed = model.options[0], model.options[1]
+    assert probed["max_tokens"] == replayed["max_tokens"] == 16000
+    assert probed["reasoning_effort"] == replayed["reasoning_effort"]
+    assert [tool["type"] for tool in probed["tools"]] == ["function"]
     for name in ("generations.jsonl", "results.jsonl"):
         path = eval_dir / name
         kept = [line for line in path.read_text().splitlines() if '"target":"compare"' not in line]

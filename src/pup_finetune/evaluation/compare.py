@@ -73,7 +73,14 @@ FAKE_COMPARE_AGREEMENT: Final = 0.9
 """The share of cases the fake compare model answers with the reference."""
 FAKE_COMPARE_ANSWER: Final = "I cannot decide from the recorded context."
 PROBE_PROMPT: Final = "Reply with the word OK."
-PROBE_MAX_TOKENS: Final = 16
+PROBE_TOOL: Final[ToolSpec] = {
+    "type": "function",
+    "function": {
+        "name": "noop",
+        "description": "Does nothing.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
 
 CompareSource = Literal["flag", "evaluation directory"]
 
@@ -367,12 +374,17 @@ def _prompt_key(messages: Sequence[Mapping[str, Any]], tools: Sequence[Mapping[s
 
 
 def probe(sampler: Sampler, target: CompareTarget) -> None:
-    """One cheap call to the compare model before it is attached, so a model that cannot
+    """One short call to the compare model before it is attached, so a model that cannot
     answer (a mistyped name, a rejected key) fails the command before ``compare.json``
-    freezes it. Any answer passes, one cut off at :data:`PROBE_MAX_TOKENS` included; a
-    failure raises the provider's error."""
+    freezes it. It is sent as replay calls it, with the target's ``max_tokens`` and reasoning
+    effort and a tool (:data:`PROBE_TOOL`), so a model that refuses those fails here too.
+    Any answer passes, a cut-off one included; a failure raises the provider's error."""
     info(f"checking that the compare model {target.spec} answers")
-    sampler.generate([{"role": "user", "content": PROBE_PROMPT}], [], max_tokens=PROBE_MAX_TOKENS)
+    sampler.generate(
+        [{"role": "user", "content": PROBE_PROMPT}],
+        [PROBE_TOOL],
+        max_tokens=target.config.max_tokens,
+    )
 
 
 @contextmanager
