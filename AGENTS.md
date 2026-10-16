@@ -521,7 +521,11 @@ Source lives under `src/pup_finetune/`.
   `jsonl.py` reads and writes rows and converts them to the provider form; `exclusions.py`
   records why a row was left out (`excluded.jsonl`), with `ExclusionCode`s for reasons the
   schema cannot see (conversion problems, dataset-level rules);
-  `split.py` assigns deterministic, persisted train/validation/test splits per trace;
+  `split.py` assigns deterministic, persisted train/validation/test splits per trace, one per
+  group of traces asking copies of one request (`request_key`: the user messages lowercased,
+  quoted strings as `?`, numbers as `0`, whitespace collapsed, hashed; `split_groups`, a
+  union-find; `assign_splits`, which never moves a recorded trace and counts a new trace that
+  links copies already split two ways as a `split_conflicts`);
   `dataset_dir.py` is the dataset directory (`settings.json`, `rows.jsonl`, `excluded.jsonl`,
   `splits.json`, `summary.json`, `raw/`, a pull's page cache, and `push.json`, the receipt
   `dataset push` writes) behind `dataset import`, `dataset pull` and `dataset show`;

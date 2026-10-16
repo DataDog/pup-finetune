@@ -198,10 +198,9 @@ per line) narrows either mode to those rows. With the two default judges, a row 
 when both vote keep; add a third with `--judges` for a true majority.
 
 Also check what no command does: answers that break the app's own output contract (invalid
-JSON, duplicate keys, two answers in one), and one request in two splits: group rows by their
-normalized user request, and when a group spans splits drop its train and validation copies,
-so test and early stopping stay clean. Drop with labels, or fix the records in Datadog and
-fetch the dataset (step 4). Show the user what you found.
+JSON, duplicate keys, two answers in one). Drop them with labels, or fix the records in
+Datadog and fetch the dataset (step 4). Show the user what you found. Copies of one request
+share a split already; a `split_conflicts` warning names the few that could not.
 
 Check:
 

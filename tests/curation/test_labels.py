@@ -32,8 +32,12 @@ MIXED = DatasetSettings("import", SplitParams(7, 0.3, 0.3))
 AT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 
 
+DIGITS_AS_LETTERS = str.maketrans("0123456789", "abcdefghij")
+"""Requests that differ only in a number are copies of one, which share a split."""
+
+
 def make_row(row_id: str, text: str | None = None) -> TrainingRow:
-    question = text if text is not None else f"question {row_id}"
+    question = text if text is not None else f"question {row_id.translate(DIGITS_AS_LETTERS)}"
     return validate_row(
         {
             "id": row_id,

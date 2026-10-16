@@ -26,7 +26,7 @@ ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.
 ROW_IDS = [json.loads(line)["id"] for line in ROWS.read_text().splitlines()]
 SKEW = (
     "validation has 5 of 14 rows (36%, 4 of 13 traces) though --validation-fraction is 0.1: "
-    "splits are assigned per trace, so small datasets vary; import more rows"
+    "splits are assigned per trace and request, so small datasets vary; import more rows"
 )
 
 runner = CliRunner()

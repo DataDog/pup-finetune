@@ -22,9 +22,11 @@ from pup_finetune.data.split import (
     SplitName,
     SplitParams,
     assign_split,
+    assign_splits,
     check_isolation,
+    request_key,
     skew_warnings,
-    split_counts,
+    split_groups,
     split_position,
     split_warnings,
 )
@@ -261,13 +263,85 @@ def test_split_warnings_flag_empty_splits_and_few_train_rows() -> None:
     assert "test split is empty" in warnings[2]
 
 
-def test_split_counts_follow_the_params_by_trace() -> None:
-    rows = [make_row(f"row-{i}", f"Q{i}", trace_id=KEYS[i // 2]) for i in range(40)]
-    counts = split_counts(rows, SplitParams())
-    assert sum(counts.values()) == 40
-    assert set(counts) == set(SPLITS)
-    assert all(count % 2 == 0 for count in counts.values())  # two rows per trace
-    assert split_counts(rows, SplitParams(1, 0.0, 0.0)) == {"train": 40, "validation": 0, "test": 0}
+# --- copies of one request ------------------------------------------------------------------
+
+
+def test_a_request_key_ignores_quoted_strings_numbers_case_and_whitespace() -> None:
+    first = make_row("a", 'Book "Port Alder" for 2 nights,  starting 2026-03-01')
+    second = make_row("b", "book 'Eastbrook' for 14 nights, starting 2025-12-24")
+    assert request_key(first) == request_key(second)
+    assert request_key(make_row("c", "Book Port Alder for 2 nights")) != request_key(first)
+    # An apostrophe inside a word is not a quote.
+    assert request_key(make_row("d", "don't stop at it's end")) != request_key(
+        make_row("e", "don't stop at its end")
+    )
+
+
+def test_a_row_without_user_text_has_no_request_key() -> None:
+    row = validate_row({"id": "a", "messages": [{"role": "assistant", "content": "Hi."}]})
+    assert request_key(row) is None
+    assert request_key(make_row("b", "   ")) is None
+
+
+def test_rows_sharing_a_trace_or_a_request_form_one_group() -> None:
+    rows = [
+        make_row("a", "Weather in Port Alder?", trace_id="t1"),
+        make_row("b", "Weather in Port Alder?", trace_id="t2"),  # the request of a
+        make_row("c", "Something else", trace_id="t2"),  # the trace of b
+        make_row("d", "Unrelated", trace_id="t3"),
+        make_row("e", "No user text", trace_id="t4"),
+        make_row("f", "No user text", trace_id="t5"),  # the request of e
+    ]
+    groups = [[row.id for row in group] for group in split_groups(rows)]
+    assert groups == [["a", "b", "c"], ["d"], ["e", "f"]]
+
+
+def copies(count: int) -> list[TrainingRow]:
+    """``count`` copies of one request, each in a trace of its own."""
+    return [make_row(f"row-{n}", f"Order {n} please", trace_id=KEYS[n]) for n in range(count)]
+
+
+def test_copies_of_one_request_in_new_traces_share_one_split() -> None:
+    splits = SplitAssignments(SplitParams())
+    assert assign_splits(copies(40), splits) == 0
+    assert set(splits.assignments) == set(KEYS[:40])
+    assert len(set(splits.assignments.values())) == 1
+    # By the first key in sorted order, whatever the order of the rows.
+    again = SplitAssignments(SplitParams())
+    assign_splits(list(reversed(copies(40))), again)
+    assert (
+        again.assignments
+        == splits.assignments
+        == dict.fromkeys(KEYS[:40], SplitParams().assign(KEYS[0]))
+    )
+
+
+def test_a_new_copy_takes_the_split_its_request_already_has() -> None:
+    splits = SplitAssignments(SplitParams(), {KEYS[0]: "test"})
+    assert assign_splits(copies(3), splits) == 0
+    assert splits.assignments == dict.fromkeys(KEYS[:3], "test")
+
+
+def test_a_new_trace_linking_copies_already_apart_takes_the_larger_side_and_is_counted() -> None:
+    # Recorded before copies were grouped: two traces of one request in two splits.
+    rows = [
+        make_row("a", "Order 1", trace_id="t1"),
+        make_row("b", "Order 2", trace_id="t2"),
+        make_row("c", "Refund 3", trace_id="t2"),
+        make_row("d", "Order 4", trace_id="t3"),  # new: it links t1 and t2
+    ]
+    splits = SplitAssignments(SplitParams(), {"t1": "test", "t2": "train"})
+    assert assign_splits(rows, splits) == 1
+    # t2 holds two of the group's three recorded rows; recorded keys never move.
+    assert splits.assignments == {"t1": "test", "t2": "train", "t3": "train"}
+
+
+def test_a_tie_between_the_sides_goes_to_the_first_split() -> None:
+    rows = [make_row("a", "Order 1", trace_id="t1"), make_row("b", "Order 2", trace_id="t2")]
+    rows.append(make_row("c", "Order 3", trace_id="t3"))
+    splits = SplitAssignments(SplitParams(), {"t1": "test", "t2": "validation"})
+    assert assign_splits(rows, splits) == 1
+    assert splits.assignments["t3"] == "validation"
 
 
 # --- skew -----------------------------------------------------------------------------------
@@ -290,7 +364,7 @@ def test_a_small_skewed_split_is_warned_about_without_suggesting_the_seed() -> N
     (warning,) = skew_warnings(by_split, SplitParams(), more="pull more rows")
     assert warning == (
         "validation has 5 of 14 rows (36%, 4 of 13 traces) though --validation-fraction is "
-        "0.1: splits are assigned per trace, so small datasets vary; pull more rows"
+        "0.1: splits are assigned per trace and request, so small datasets vary; pull more rows"
     )
     assert "seed" not in warning
 

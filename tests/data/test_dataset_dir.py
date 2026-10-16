@@ -531,6 +531,8 @@ def test_summary_counts(tmp_path: Path, fixture_rows: list[TrainingRow]) -> None
         "dropped": 0,
         "drop_reasons": [],
         "splits": split_counts,
+        "traces": len({split_key(row) for row in fixture_rows}),
+        "split_groups": summary["split_groups"],
         "warnings": summary["warnings"],
     }
     assert sum(split_counts.values()) == len(fixture_rows)

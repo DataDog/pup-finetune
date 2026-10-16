@@ -329,7 +329,11 @@ def test_the_probe_sends_no_tool_when_no_test_case_has_tools(
                 {
                     "id": f"row-plain-{index:03d}",
                     "messages": [
-                        {"role": "user", "content": f"Say the number {index} in words."},
+                        # Requests apart in more than a number, so they spread over splits.
+                        {
+                            "role": "user",
+                            "content": f"Say {chr(97 + index % 26) * (1 + index // 26)}.",
+                        },
                         {"role": "assistant", "content": f"The number is {index}."},
                     ],
                 }

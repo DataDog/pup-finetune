@@ -100,10 +100,15 @@ API. Each span becomes one conversation: its input messages followed by its outp
 A content list is joined when every part is text. An assistant message with neither content
 nor tool calls is dropped. Within a trace, a conversation that is a prefix or a duplicate of
 another is dropped, so each sub-agent keeps its own row. A row's split comes from its trace,
-so every row of a trace lands in the same split. In a dataset of fewer than 50 traces, a
+so every row of a trace lands in the same split, and copies of one request share it too: rows
+whose user messages are the same once lowercased, with quoted strings as `?`, numbers as `0`
+and whitespace collapsed, join their traces into one group, and a group gets one split. A
+trace keeps its split once assigned; a new trace joining a request whose copies are already in
+two splits takes the split holding most of them and is counted as a `split_conflicts` (with a
+warning). `split_groups` in a dataset's summary is how many groups its traces form. In a dataset of fewer than 50 traces, a
 validation or test split more than twice its fraction, or 10 or more points off it, is
 warned about (`validation has 5 of 14 rows (36%, 4 of 13 traces) though
---validation-fraction is 0.1 ...`): splits are assigned per trace, so small datasets vary,
+--validation-fraction is 0.1 ...`): splits are assigned per trace and request, so small datasets vary,
 and pulling more rows evens them out (the seed of a dataset is frozen).
 
 `--from` and `--to` take ISO 8601, epoch milliseconds (a bare number is milliseconds, while
@@ -161,7 +166,7 @@ content. Keep it out of version control.
 | `rows.jsonl` | The accepted rows, one canonical row per line. Never rewritten by labeling. |
 | `excluded.jsonl` | One `{"code", "detail", "row_id", "trace_id", "span_id", "line_sha256"}` per excluded row (fields that do not apply are left out). |
 | `labels.jsonl` | Keep/drop decisions appended by `dataset label` and `dataset triage`: `{"id", "keep", "reason", "by", "at"}`, where `by` is `manual` (recorded with `dataset label`) or `judge` (decided by the `dataset triage` council; triage never relabels a manual row). Older files that say `agent` or `human` read as `manual`. The last label of an id wins, a reason is required to drop, and a dropped row never trains and is never pushed. |
-| `splits.json` | The split of every trace and the frozen seed and fractions. A trace never changes split once assigned. |
+| `splits.json` | The split of every trace (one per group of traces and copies of one request) and the frozen seed and fractions. A trace never changes split once assigned. |
 | `summary.json` | Counts, splits and warnings, rewritten after every change. |
 | `raw/` | For a Datadog pull, the Export API pages it read, so a rerun resumes without fetching them again. |
 | `pull_limits.json` | For a Datadog pull, the last pull's `--target-count` and `--max-candidates`, which a rerun without them continues toward. Not frozen. |

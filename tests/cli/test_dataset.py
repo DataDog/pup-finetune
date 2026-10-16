@@ -75,6 +75,7 @@ def test_import_emits_counts_and_next_command(tmp_path: Path) -> None:
         "added": TOOL_USE_COUNT,
         "unchanged": 0,
         "excluded": 0,
+        "split_conflicts": 0,
     }
     # Nothing is labeled yet: review a sample; labeling is a step, with a file to write first.
     quoted = shlex.quote(str(target))
@@ -281,3 +282,47 @@ def test_dataset_without_a_subcommand_shows_help() -> None:
     output = _ANSI.sub("", invoke().output)
     assert "import" in output
     assert "show" in output
+
+
+# --- copies of one request ------------------------------------------------------------------
+
+
+def copies_file(path: Path, *, first: int, count: int) -> Path:
+    """``count`` rows, each in a trace of its own, asking one request with another city and
+    number of nights, and one unrelated row per trace."""
+    lines = []
+    for n in range(first, first + count):
+        trace = {"trace_id": f"synthetic-copy-trace-{n:03d}"}
+        for kind, text in (
+            ("copy", f'Book "City {n}" for {n % 5 + 1} nights'),
+            ("other", f"Tell me about item {chr(97 + n % 26) * (1 + n // 26)}"),
+        ):
+            row = {
+                "id": f"synthetic-{kind}-{n:03d}",
+                "messages": [
+                    {"role": "user", "content": text},
+                    {"role": "assistant", "content": f"Done for {kind} {n}."},
+                ],
+                "source": trace,
+            }
+            lines.append(json.dumps(row) + "\n")
+    path.write_text("".join(lines))
+    return path
+
+
+def test_copies_of_one_request_share_one_split_with_their_traces(tmp_path: Path) -> None:
+    target = tmp_path / "ds"
+    result = import_rows(target, copies_file(tmp_path / "a.jsonl", first=0, count=30))
+    assert result.exit_code == 0, result.stderr
+    data = output_json(result)
+    # 30 traces joined by the one request: one group, so one split holds all 60 rows.
+    assert data["split_groups"] == 1
+    assert sorted(data["splits"].values()) == [0, 0, 60]
+    assert data["import"]["split_conflicts"] == 0
+    # A later trace asking it again takes the same split.
+    again = import_rows(target, copies_file(tmp_path / "b.jsonl", first=30, count=1))
+    assert output_json(again)["splits"] == {
+        split: count + (2 if count else 0) for split, count in data["splits"].items()
+    }
+    show = output_json(invoke("show", str(target)))
+    assert (show["summary"]["traces"], show["summary"]["split_groups"]) == (31, 1)

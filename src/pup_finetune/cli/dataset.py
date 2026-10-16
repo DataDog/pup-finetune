@@ -38,7 +38,12 @@ from pup_finetune.curation.samples import (
     sample_rows,
 )
 from pup_finetune.data.convert import ReasoningMode
-from pup_finetune.data.dataset_dir import DatasetDir, DatasetSettings, read_import_file
+from pup_finetune.data.dataset_dir import (
+    AddResult,
+    DatasetDir,
+    DatasetSettings,
+    read_import_file,
+)
 from pup_finetune.data.exclusions import explain
 from pup_finetune.data.pull import (
     DEFAULT_MAX_CANDIDATES,
@@ -100,7 +105,8 @@ dataset_app = group(
     description=describe(
         "Build a dataset directory from your traces or a JSONL file, review and label its "
         "rows, and push the kept rows to Datadog. Rows are split into train, validation and "
-        "test sets by trace, the same way every time.",
+        "test sets by trace, the same way every time, and copies of one request (the same "
+        "user messages but for quoted strings and numbers) share a split.",
         "Dataset files hold conversation content, so directories are created 0700 and files 0600.",
     ),
 )
@@ -259,7 +265,7 @@ FETCH_DOC = CommandDoc(
         "curated in Datadog (records edited, added or removed in the product or through "
         "pup) is what trains. Each record becomes a canonical row: its input messages and "
         "expected output, its tools, and the split it names (records without one are "
-        "assigned by trace). A record that is not a conversation is excluded.",
+        "assigned by trace and request). A record that is not a conversation is excluded.",
         "DIR freezes the dataset and its version: fetch a later version into a new DIR. "
         "The fetch writes the dataset's push receipt, so `evaluate` publishes its "
         "experiments onto the same dataset. Nothing is written to Datadog.",
@@ -559,6 +565,19 @@ def _push_steps(state: Pipeline, directory: Path) -> list[dict[str, str]]:
     return []
 
 
+def _conflict_warnings(added: AddResult) -> list[str]:
+    """A warning when new traces joined copies of one request that were already split two
+    ways (see :func:`~pup_finetune.data.split.assign_splits`)."""
+    if not added.split_conflicts:
+        return []
+    return [
+        f"{added.split_conflicts} new traces repeat a request whose copies were already in "
+        "two splits; each took the split holding most of those copies, and the copies "
+        "already split stay where they are (drop the train or validation ones with "
+        "`dataset label` to keep the test split clean)"
+    ]
+
+
 def _ignore_note(directory: Path) -> ParentSetup:
     """Create ``./datasets`` with a ``.gitignore`` when ``directory`` is the first dataset
     in it (see :func:`~pup_finetune.workspace.ignore_new_parent`); the note saying so, or
@@ -600,13 +619,15 @@ def import_rows(
             "excluded": summary["excluded"],
             "excluded_by_code": summary["excluded_by_code"],
             "splits": summary["splits"],
+            "split_groups": summary["split_groups"],
             "notes": notes.notes,
-            "warnings": [*notes.warnings, *summary["warnings"]],
+            "warnings": [*notes.warnings, *summary["warnings"], *_conflict_warnings(result)],
             "import": {
                 "file": str(file),
                 "added": result.added,
                 "unchanged": result.unchanged,
                 "excluded": result.excluded,
+                "split_conflicts": result.split_conflicts,
             },
         },
         dataset_next(dataset, directory, summary=summary),
@@ -656,8 +677,9 @@ def fetch(
             "excluded": summary["excluded"],
             "excluded_by_code": summary["excluded_by_code"],
             "splits": summary["splits"],
+            "split_groups": summary["split_groups"],
             "notes": notes.notes,
-            "warnings": [*notes.warnings, *summary["warnings"]],
+            "warnings": [*notes.warnings, *summary["warnings"], *_conflict_warnings(fetched.added)],
             "fetch": {
                 "project": project,
                 "dataset_name": name,
@@ -667,6 +689,7 @@ def fetch(
                 "added": fetched.added.added,
                 "unchanged": fetched.added.unchanged,
                 "excluded": fetched.added.excluded,
+                "split_conflicts": fetched.added.split_conflicts,
             },
         },
         dataset_next(dataset, directory, summary=summary),
@@ -927,11 +950,13 @@ def pull_rows(
         "excluded_by_code": summary["excluded_by_code"],
         "exclusion_explanations": _explanations(summary["excluded_by_code"]),
         "splits": summary["splits"],
+        "split_groups": summary["split_groups"],
         "notes": notes.notes,
         "warnings": [
             *notes.warnings,
             *_collection_warnings(collection, options),
             *summary["warnings"],
+            *_conflict_warnings(added),
             *pipeline_warnings,
         ],
         "window": window,
@@ -945,6 +970,7 @@ def pull_rows(
             "excluded": added.excluded,
             "retired": added.retired,
             "updated": added.updated,
+            "split_conflicts": added.split_conflicts,
             **collection.stats(),
         },
         **following,

@@ -499,7 +499,7 @@ Safety: Free · --confirm writes the kept rows to Datadog · PUP_READ_ONLY: prev
 
 ## `pup finetune dataset fetch`
 
-Read the current records of the dataset --name in --project into DIR, so what was curated in Datadog (records edited, added or removed in the product or through pup) is what trains. Each record becomes a canonical row: its input messages and expected output, its tools, and the split it names (records without one are assigned by trace). A record that is not a conversation is excluded.
+Read the current records of the dataset --name in --project into DIR, so what was curated in Datadog (records edited, added or removed in the product or through pup) is what trains. Each record becomes a canonical row: its input messages and expected output, its tools, and the split it names (records without one are assigned by trace and request). A record that is not a conversation is excluded.
 
 DIR freezes the dataset and its version: fetch a later version into a new DIR. The fetch writes the dataset's push receipt, so `evaluate` publishes its experiments onto the same dataset. Nothing is written to Datadog.
 

@@ -6,16 +6,21 @@
 # Copyright 2026-present Datadog, Inc.
 """Deterministic train / validation / test splits that stay stable as rows are added.
 
-A row's split comes from its split key (its trace id; see
+A row's split is recorded per split key (its trace id; see
 :func:`~pup_finetune.data.schema.split_key`), so every row of a trace lands in the same split.
-Assignments are persisted in ``splits.json``: once a key is assigned it never moves, and new
-keys are assigned with the fractions frozen there.
+Copies of one request share a split too: rows whose user messages differ only in quoted
+strings, numbers, case or whitespace (:func:`request_key`) and the rows of their traces form
+one group (:func:`split_groups`), and :func:`assign_splits` gives a group one split, so a
+test answer is not also trained on. Assignments are persisted in ``splits.json``: once a key
+is assigned it never moves, and new keys are assigned with the fractions frozen there.
 """
 
 from __future__ import annotations
 
 import hashlib
 import math
+import re
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -182,12 +187,83 @@ def check_isolation(rows_by_split: Mapping[SplitName, Iterable[TrainingRow]]) ->
                 )
 
 
-def split_counts(rows: Iterable[TrainingRow], params: SplitParams) -> dict[SplitName, int]:
-    """How many of ``rows`` each split would get under ``params``, by split key, unpersisted."""
-    counts: dict[SplitName, int] = dict.fromkeys(SPLITS, 0)
-    for row in rows:
-        counts[params.assign(split_key(row))] += 1
-    return counts
+_QUOTED = re.compile(r""""(?:[^"\\]|\\.)*"|(?<!\w)'(?:[^'\\]|\\.)*'(?!\w)""")
+"""A quoted string literal: double-quoted, or single-quoted where the quotes are not
+apostrophes inside a word."""
+_NUMBER = re.compile(r"\d+(?:\.\d+)?")
+_SPACE = re.compile(r"\s+")
+
+
+def request_key(row: TrainingRow) -> str | None:
+    """A hash of what ``row`` asks: every user message's text, lowercased, with quoted string
+    literals as ``?``, numbers as ``0`` and whitespace collapsed. ``None`` when the row has
+    no user text, so such rows are grouped by trace alone."""
+    texts = []
+    for message in row.messages:
+        if message.role != "user":
+            continue
+        text = _NUMBER.sub("0", _QUOTED.sub("?", message.content.lower()))
+        texts.append(_SPACE.sub(" ", text).strip())
+    if not any(texts):
+        return None
+    return hashlib.sha256("\x1f".join(texts).encode()).hexdigest()
+
+
+def split_groups(rows: Iterable[TrainingRow]) -> list[list[TrainingRow]]:
+    """``rows`` in groups that share a split: the rows of one trace, joined with every row
+    asking the same request (:func:`request_key`), transitively. Groups and the rows in each
+    keep the order of ``rows``."""
+    parent: dict[str, str] = {}
+
+    def find(node: str) -> str:
+        parent.setdefault(node, node)
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    listed = list(rows)
+    for row in listed:
+        trace = find(f"trace:{split_key(row)}")
+        request = request_key(row)
+        if request is not None:
+            parent[find(f"request:{request}")] = trace
+    groups: dict[str, list[TrainingRow]] = {}
+    for row in listed:
+        groups.setdefault(find(f"trace:{split_key(row)}"), []).append(row)
+    return list(groups.values())
+
+
+def assign_splits(rows: Iterable[TrainingRow], splits: SplitAssignments) -> int:
+    """Assign each split key of ``rows`` that ``splits`` does not hold yet, by group
+    (:func:`split_groups`); returns the number of new keys that joined groups already split
+    two ways (``split_conflicts``).
+
+    A recorded key never moves. A group with no key recorded takes the split of its first
+    key in sorted order, so the result does not depend on the order of ``rows``. A new key
+    joining a group whose recorded keys share one split takes it. One joining recorded keys
+    of several splits (copies already apart, now linked by the new trace) takes the split
+    holding most of the group's rows, the first of :data:`SPLITS` on a tie, and is counted.
+    """
+    conflicts = 0
+    for group in split_groups(rows):
+        keys = sorted({split_key(row) for row in group})
+        new = [key for key in keys if splits.get(key) is None]
+        if not new:
+            continue
+        recorded = Counter(
+            held for row in group if (held := splits.get(split_key(row))) is not None
+        )
+        split: SplitName
+        if not recorded:
+            split = splits.params.assign(keys[0])
+        else:
+            split = max(SPLITS, key=lambda name: (recorded[name], -SPLITS.index(name)))
+            if len(recorded) > 1:
+                conflicts += len(new)
+        for key in new:
+            splits.assignments[key] = split
+    return conflicts
 
 
 def split_warnings(counts: Mapping[SplitName, int]) -> list[str]:
@@ -214,7 +290,7 @@ def skew_warnings(
     than :data:`SKEW_MAX_TRACES` traces.
 
     ``keys_by_split`` holds the split key of every row, per split. ``more`` is what to do
-    about it (``pull more rows``). Splits are assigned per trace, so a small dataset varies
+    about it (``pull more rows``). Splits are assigned per group of traces, so a small dataset varies
     by chance; the seed of a frozen directory cannot change, so the warning never suggests
     it. An empty split is left to :func:`split_warnings`.
     """
@@ -237,6 +313,6 @@ def skew_warnings(
             warnings.append(
                 f"{split} has {count} of {rows} rows ({share:.0%}, {traces[split]} of "
                 f"{total_traces} traces) though --{split}-fraction is {fraction:g}: splits "
-                f"are assigned per trace, so small datasets vary; {more}"
+                f"are assigned per trace and request, so small datasets vary; {more}"
             )
     return warnings

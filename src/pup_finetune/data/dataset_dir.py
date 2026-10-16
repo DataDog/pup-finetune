@@ -49,8 +49,10 @@ from pup_finetune.data.split import (
     SplitAssignments,
     SplitName,
     SplitParams,
+    assign_splits,
     check_isolation,
     skew_warnings,
+    split_groups,
     split_warnings,
 )
 from pup_finetune.display import display_path
@@ -114,6 +116,9 @@ class AddResult:
     """Stored rows taken out and recorded as excluded."""
     updated: int = 0
     """Stored rows replaced by a version with more reasoning."""
+    split_conflicts: int = 0
+    """New traces that joined copies of one request already in two splits (see
+    :func:`~pup_finetune.data.split.assign_splits`)."""
 
 
 class DatasetDir:
@@ -238,6 +243,8 @@ class DatasetDir:
             "kept": len(kept),
             **label_counts(labels, (row.id for row in rows)),
             "splits": counts,
+            "traces": len({split_key(row) for row in rows}),
+            "split_groups": len(split_groups(rows)),
             "warnings": [
                 *split_warnings(counts),
                 *skew_warnings(
@@ -369,8 +376,7 @@ class DatasetDir:
                         f"{self.splits_path} assigns {key!r} to {splits.get(key)}, not {split}"
                     )
                 splits.assignments[key] = split
-            for row in all_rows:
-                splits.assign(split_key(row))
+            conflicts = assign_splits(all_rows, splits)
             check_isolation(_group_by_split(all_rows, splits, where=self.splits_path))
             records = _reconcile(
                 self.excluded(), excluded, accepted_ids={row.id for row in all_rows}
@@ -393,7 +399,9 @@ class DatasetDir:
             self._write_excluded(records)
             summary = self._write_summary()
         retired_rows = len(stored) - len(existing)
-        return AddResult(len(new_rows), unchanged, len(excluded), summary, retired_rows, changed)
+        return AddResult(
+            len(new_rows), unchanged, len(excluded), summary, retired_rows, changed, conflicts
+        )
 
     def _write_excluded(self, records: Iterable[dict[str, Any]]) -> None:
         lines = "".join(canonical_json(record) + "\n" for record in records)
