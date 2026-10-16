@@ -1098,7 +1098,7 @@ def _evaluate_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
         headline += f", comparing with {compare.get('model')}"
     detail = (
         f"at most {_count(settings.get('max_tokens'))} tokens per generation, "
-        f"{settings.get('max_cases')} turns per conversation, seed "
+        f"{_n(settings.get('max_cases'), 'turn')} per conversation, seed "
         f"{settings.get('seed')}"
     )
     if isinstance(compare, Mapping):
@@ -1124,7 +1124,7 @@ def _benchmark_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
     headline = f"benchmark {models} with judge {settings.get('judge_model')}"
     detail = (
         f"at most {_count(settings.get('max_tokens'))} tokens per generation, "
-        f"{settings.get('max_cases')} turns per conversation, target pass rate "
+        f"{_n(settings.get('max_cases'), 'turn')} per conversation, target pass rate "
         f"{_percent(settings.get('target_pass_rate'))}"
     )
     rows = [
