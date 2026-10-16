@@ -1123,6 +1123,9 @@ def _benchmark_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
         f"{_n(settings.get('max_cases'), 'turn')} per conversation, target pass rate "
         f"{_percent(settings.get('target_pass_rate'))}"
     )
+    tested = preview.get("rows") or {}
+    if tested.get("test_total", 0) > tested.get("test", 0):
+        detail += f", --max-rows {tested['test']} of {tested['test_total']} conversations"
     rows = [
         _row("data", _evaluation_calls(preview)),
         _row("settings", detail),

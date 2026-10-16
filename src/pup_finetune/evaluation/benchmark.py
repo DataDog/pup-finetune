@@ -30,7 +30,7 @@ import threading
 from collections import defaultdict
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
@@ -49,7 +49,7 @@ from pup_finetune.evaluation.runner import (
     resolve_judge,
     stored_judge,
 )
-from pup_finetune.next_steps import PROGRAM, command, step
+from pup_finetune.next_steps import PROGRAM, command, step, template
 from pup_finetune.output import info
 from pup_finetune.progress import EvaluationProgress
 from pup_finetune.providers import get_provider, provider_info, require_packages
@@ -184,8 +184,8 @@ class BenchmarkPlan:
             "metrics_version": METRICS_VERSION,
             "seed": self.settings.seed,
             "max_cases_per_trajectory": self.settings.max_cases_per_trajectory,
-            # Only when given, so a benchmark made before --max-rows existed still resumes.
-            **({} if self.settings.max_rows is None else {"max_rows": self.settings.max_rows}),
+            # Only when it sampled, so one that cut nothing resumes without --max-rows.
+            **({} if self.sampled_from is None else {"max_rows": self.settings.max_rows}),
         }
 
     def remaining(self, candidate: Candidate) -> dict[str, int]:
@@ -335,7 +335,10 @@ class BenchmarkPlan:
             "billing": "; ".join(billing),
             "dataset": display_path(self.dataset_dir),
             "out_dir": display_path(self.out_dir),
-            "rows": {"test": self.trajectories},
+            "rows": {
+                "test": self.trajectories,
+                "test_total": self.sampled_from or self.trajectories,
+            },
             "cases": len(self.cases),
             "trajectories": self.trajectories,
             "models": models,
@@ -878,15 +881,21 @@ def _result(
                 "result": display_path(plan.out_dir / RESULT_FILE),
                 "models": {entry["model"]: entry["out_dir"] for entry in board},
             },
-            **_next(plan, status, recommendation),
+            **_next(plan, status, recommendation, board),
         }
     )
 
 
-def _next(plan: BenchmarkPlan, status: str, recommendation: Mapping[str, Any]) -> dict[str, Any]:
+def _next(
+    plan: BenchmarkPlan,
+    status: str,
+    recommendation: Mapping[str, Any],
+    board: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
     """An unfinished benchmark is continued (a free preview first). A finished one leads to
     the training preview of the recommended model, which is a step instead when the base
-    model already meets the target."""
+    model already meets the target or most of its failures were cut off at ``--max-tokens``.
+    Answers cut off add a step that benchmarks again with twice the ``--max-tokens``."""
     rerun = shlex.join(plan.command())
     model = recommendation.get("model")
     train = (
@@ -894,18 +903,33 @@ def _next(plan: BenchmarkPlan, status: str, recommendation: Mapping[str, Any]) -
         if isinstance(model, str)
         else None
     )
+    steps = []
+    if any(entry["truncated"] for entry in board):
+        longer = replace(
+            plan.settings,
+            out_dir=plan.dataset_dir / DEFAULT_OUT_DIR_NAME,
+            max_tokens=2 * plan.settings.max_tokens,
+        )
+        words = replace(plan, settings=longer).command()[len(PROGRAM) :]
+        steps.append(
+            step(
+                template(*words, "--out-dir", "<NEW_DIR>"),
+                "compare the models on their answers, not their length (free preview; "
+                "benchmarking is paid)",
+            )
+        )
     if status != "complete":
-        return {"next_command": rerun, "next_steps": []}
+        return {"next_command": rerun, "next_steps": steps}
     if train is None:
-        return {"next_command": None, "next_steps": []}
-    if recommendation.get("verdict") == "fine_tune":
-        return {"next_command": train, "next_steps": []}
-    return {
-        "next_command": None,
-        "next_steps": [
-            step(train, "fine-tune the best base model anyway (free preview; training is paid)")
-        ],
-    }
+        return {"next_command": None, "next_steps": steps}
+    best = board[0]
+    failed = best["cases"] - round(best["judge_pass_rate"] * best["cases"])
+    if recommendation.get("verdict") == "fine_tune" and 2 * best["truncated"] <= failed:
+        return {"next_command": train, "next_steps": steps}
+    steps.append(
+        step(train, "fine-tune the best base model anyway (free preview; training is paid)")
+    )
+    return {"next_command": None, "next_steps": steps}
 
 
 def exit_code(result: Mapping[str, Any]) -> int:

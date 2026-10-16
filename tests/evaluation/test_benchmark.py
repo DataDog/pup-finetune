@@ -154,12 +154,14 @@ def test_max_rows_keeps_whole_conversations_picked_by_the_seed(plan: BenchmarkPl
     assert sample_conversations(plan.cases, len(rows), seed=0) == plan.cases
 
 
-def test_max_rows_is_in_a_models_identity_only_when_given(plan: BenchmarkPlan) -> None:
+def test_max_rows_is_in_a_models_identity_only_when_it_sampled(plan: BenchmarkPlan) -> None:
     candidate = plan.candidates[0]
     capped = dataclasses.replace(plan, settings=dataclasses.replace(plan.settings, max_rows=1))
+    sampled = dataclasses.replace(capped, sampled_from=plan.trajectories)
 
     assert "max_rows" not in plan.identity(candidate)
-    assert capped.identity(candidate)["max_rows"] == 1
+    assert "max_rows" not in capped.identity(candidate)
+    assert sampled.identity(candidate)["max_rows"] == 1
 
 
 def test_a_small_sample_asks_for_a_larger_max_rows(plan: BenchmarkPlan) -> None:
@@ -175,6 +177,21 @@ def test_a_small_sample_asks_for_a_larger_max_rows(plan: BenchmarkPlan) -> None:
 
     assert warning.startswith(f"--max-rows 1 replays only 1 of the {rows} test conversations")
     assert "raise --max-rows" in warning
+
+
+@pytest.mark.parametrize(("truncated", "trains"), [(1, True), (2, False)])
+def test_cut_off_answers_ask_for_a_higher_max_tokens(
+    plan: BenchmarkPlan, truncated: int, trains: bool
+) -> None:
+    done = {"status": "complete", "cases": 4, "unparseable": 0, "out_dir": "bench/fake-model"}
+    board = [{**entry("fake-model", 0.5), **done, "truncated": truncated}]
+
+    found = benchmark_module._result(plan, board, calibration=None, cancelled=False)
+
+    train = f"pup finetune train --dataset {plan.dataset_dir} --model fake-model"
+    assert found["next_command"] == (train if trains else None)
+    assert found["next_steps"][0]["command"].endswith("--max-tokens 8192 --out-dir <NEW_DIR>")
+    assert "not their length" in found["next_steps"][0]["why"]
 
 
 def entry(model: str, rate: float | None, *, close: bool | None = None) -> dict[str, Any]:
