@@ -405,6 +405,25 @@ class EvalPlan:
     differ from the defaults, and the judge (see :meth:`evaluate_command`)."""
     compare: CompareTarget | None = None
     """The compare model: ``--compare-model``'s, else the one the directory has attached."""
+    compare_skips: Mapping[str, str] = field(init=False)
+    """The cases the compare model's API refuses, by case id, with the reason; none
+    without a compare model (:func:`~pup_finetune.evaluation.compare.compare_skips`)."""
+    replays: dict[str, list[ReplayCase]] = field(init=False)
+    """The cases each target replays: every one for base and tuned, and for the compare
+    model those its API takes (:attr:`compare_skips`)."""
+
+    def __post_init__(self) -> None:
+        from pup_finetune.evaluation.compare import compare_skips
+        from pup_finetune.evaluation.replay import COMPARE
+
+        skips = (
+            {} if self.compare is None else compare_skips(self.cases, self.compare.config.provider)
+        )
+        replays = dict.fromkeys(self.targets, self.cases)
+        if self.compare is not None:
+            replays[COMPARE] = [case for case in self.cases if case.id not in skips]
+        object.__setattr__(self, "compare_skips", skips)
+        object.__setattr__(self, "replays", replays)
 
     @property
     def targets(self) -> tuple[str, ...]:
@@ -412,28 +431,6 @@ class EvalPlan:
         from pup_finetune.evaluation.replay import COMPARE, TARGETS
 
         return (*TARGETS, COMPARE) if self.compare is not None else TARGETS
-
-    @property
-    def compare_skips(self) -> Mapping[str, str]:
-        """The cases the compare model's API refuses, by case id, with the reason; none
-        without a compare model (:func:`~pup_finetune.evaluation.compare.compare_skips`)."""
-        from pup_finetune.evaluation.compare import compare_skips
-
-        if self.compare is None:
-            return {}
-        return compare_skips(self.cases, self.compare.config.provider)
-
-    @property
-    def replays(self) -> dict[str, list[ReplayCase]]:
-        """The cases each target replays: every one for base and tuned, and for the compare
-        model those its API takes (:attr:`compare_skips`)."""
-        from pup_finetune.evaluation.replay import COMPARE
-
-        found = dict.fromkeys(self.targets, self.cases)
-        if self.compare is not None:
-            skips = self.compare_skips
-            found[COMPARE] = [case for case in self.cases if case.id not in skips]
-        return found
 
     @property
     def compare_identity(self) -> dict[str, Any] | None:
@@ -627,10 +624,7 @@ class EvalPlan:
             )
         if reusing:
             self._refuse_another_compare(eval_dir)
-            by_target = {
-                target: remaining_work(eval_dir, cases, (target,))
-                for target, cases in replays.items()
-            }
+            by_target = remaining_work(eval_dir, replays)
             if (eval_dir.read_calibration() or {}).get("ok"):
                 calibration = 0
         from pup_finetune.judges import destination as judge_destination
@@ -1803,7 +1797,7 @@ class StandaloneEvaluation:
         eval_dir = EvalDir(plan.out_dir)
         if (
             plan.compare is None
-            or not remaining_work(eval_dir, plan.replays[COMPARE], (COMPARE,))["generate"]
+            or not remaining_work(eval_dir, {COMPARE: plan.replays[COMPARE]})[COMPARE]["generate"]
         ):
             return None
         return stack.enter_context(
@@ -1824,7 +1818,8 @@ class StandaloneEvaluation:
         from pup_finetune.evaluation.targets import run_samplers
 
         plan = self.plan
-        trained = remaining_work(EvalDir(plan.out_dir), plan.cases, TARGETS)["generate"]
+        left = remaining_work(EvalDir(plan.out_dir), {target: plan.cases for target in TARGETS})
+        trained = sum(counts["generate"] for counts in left.values())
         samplers: dict[str, Sampler] = {}
         tuned_sampler = None
         with ExitStack() as stack:

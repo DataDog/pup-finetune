@@ -197,7 +197,7 @@ class BenchmarkPlan:
                     hint="benchmark into a new directory: pass a new --out-dir",
                 )
             return {"done": 0, "generate": len(self.cases), "judge": len(self.cases)}
-        return remaining_work(eval_dir, self.cases, (candidate.target,))
+        return remaining_work(eval_dir, {candidate.target: self.cases})[candidate.target]
 
     def split_warnings(self) -> list[str]:
         """A warning when the test split is too small for the intervals to separate models."""

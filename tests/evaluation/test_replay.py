@@ -200,7 +200,8 @@ def test_a_rerun_skips_the_completed_pairs(tmp_path: Path) -> None:
     assert again.complete
     assert base.calls == tuned.calls == []
     assert judge.calls == 0
-    assert remaining_work(EvalDir(out), CASES) == {"done": 12, "generate": 0, "judge": 0}
+    left = remaining_work(EvalDir(out), {"base": CASES, "tuned": CASES})
+    assert left == {target: {"done": 6, "generate": 0, "judge": 0} for target in ("base", "tuned")}
     # Nothing left to generate: no sampler is needed at all.
     assert replay(out, {}, Judge()).complete
 
@@ -212,7 +213,10 @@ def test_a_rerun_does_only_what_is_missing(tmp_path: Path) -> None:
     outcome = replay(out, {"base": ScriptedSampler(), "tuned": first}, judge)
     assert outcome.complete  # every pair has a result, two of them errors
     assert outcome.summary["errors"] == {"base": 1, "tuned": 2}
-    assert remaining_work(EvalDir(out), CASES) == {"done": 9, "generate": 1, "judge": 3}
+    assert remaining_work(EvalDir(out), {"base": CASES, "tuned": CASES}) == {
+        "base": {"done": 5, "generate": 0, "judge": 1},
+        "tuned": {"done": 4, "generate": 1, "judge": 2},
+    }
 
     base, tuned, judge = ScriptedSampler(), ScriptedSampler(), Judge()
     again = replay(out, {"base": base, "tuned": tuned}, judge)
