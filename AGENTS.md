@@ -483,12 +483,16 @@ Source lives under `src/pup_finetune/`.
   `open_clients` (one per provider) build the clients.
 - `anthropic_client.py` - `AnthropicChatClient`, the Anthropic judge (and compare model)
   client over the official SDK (the `anthropic` extra), the only module that imports
-  `anthropic` (and its `httpx2`): `system` from the leading system message, OpenAI tools as
-  Anthropic tools, assistant `tool_calls` as `tool_use` blocks and `tool` messages as merged
-  `tool_result` user turns, `tool_use` answers back as OpenAI `tool_calls`, no sampling
+  `anthropic` (and its `httpx2`): the messages as `anthropic_messages.py` converts them,
+  OpenAI tools as Anthropic tools, `tool_use` answers back as OpenAI `tool_calls`, no sampling
   parameters, `output_config` format
   and effort (the judge's), "prompt is too long" as `ContextLimitError`, `fallbacks="default"` through the beta API on the models that have it (never for a compare model: `fallbacks=False`), `stop_reason`
   mapped to `finish_reason`, typed SDK errors mapped to ours. Tests pass a fake SDK client.
+- `anthropic_messages.py` - the one OpenAI-to-Anthropic message conversion, with no SDK
+  import: every system message joined into `system`, assistant `tool_calls` as `tool_use`
+  blocks, `tool` messages as `tool_result` blocks of user turns, empty messages dropped and
+  consecutive turns of one role merged. `anthropic_client.py` sends it, and the compare skip
+  rule checks it.
 - `judge_credentials.py` - registers the `anthropic` and `openai` `CredentialSpec`s (imported
   by the providers package); `anthropic_sdk_login` detects the Anthropic SDK's own login,
   reported as the source `anthropic-sdk`.
@@ -671,7 +675,9 @@ Source lives under `src/pup_finetune/`.
   tests (same tools with consistent arguments, or mostly the same words). `replay.py` has
   `run_replay`: every `(target, case)` pair (`base`, `tuned`, and `compare` with a compare
   target, whose identity is `compare.json`, frozen when attached and checked under the lock
-  by `compare.attach_compare`; a run planned without an attached one is refused) generated,
+  by `compare.attach_compare`; a run planned without an attached one is refused), each
+  target on its own cases (`replays`, `Replays`: every case unless the caller gives fewer),
+  generated,
   scored and judged on
   a thread pool, each generation appended to `generations.jsonl` and each result to
   `results.jsonl` as it completes, so a rerun skips finished pairs; `evaluation.json` is the
@@ -681,8 +687,9 @@ Source lives under `src/pup_finetune/`.
   pairs in flight, then propagates). `summarize` writes
   `summary.json`: per-target pass rates (judge and metrics), per-trajectory agreement, the
   paired wins, regressions and ties, and `tuned_minus_base` with a seeded paired bootstrap
-  95% CI over trajectories (`paired_bootstrap_ci`), `tuned_minus_compare` the same way (both
-  through `_paired`), plus the agreement-not-task-success `CAVEAT`. A `Publisher` (default `NoopPublisher`) gets a complete evaluation and returns
+  95% CI over trajectories (`bootstrap.py`'s `paired_bootstrap_ci`), `tuned_minus_compare`
+  the same way over the compare target's cases (both through `_paired`; each target counts
+  the cases it does not replay as `skipped`), plus the agreement-not-task-success `CAVEAT`. A `Publisher` (default `NoopPublisher`) gets a complete evaluation and returns
   what it reports, the outcome's `publication`. `runner.py` is what `evaluate` and `train
   --evaluate` run: `plan_evaluation` (an `EvalPlan`: cases, judge, settings and `Publishing`,
   whether the dataset's push receipt allows publishing), calibration (`prepare_eval_dir`
@@ -702,14 +709,25 @@ Source lives under `src/pup_finetune/`.
   dropped the one attached. The preview names only the targets that generate (their provider, billing and
   recipients); the others' answers are reused. It counts the probe as one more compare call
   when the run will make it: no `compare.json`, or one `check_identity` drops
-  (`EvalDir.replaces`, which `check_identity` itself decides by).
+  (`EvalDir.replaces`, which `check_identity` itself decides by). `EvalPlan.replays`, the
+  one place the skip rule is applied, are the cases each target replays (the compare model
+  skips `EvalPlan.compare_skips`), passed to `run_replay` and to the publisher's
+  `PublishSettings`; the preview's `compare` block counts the skipped (`skipped`,
+  `skipped_by_reason`), the preview and the result warn about them, and a compare model that
+  would be sent no case at all fails the preview (`compare.require_sent`, exit 2).
   `compare.py` is the compare target: `resolve_compare` (the judge spec grammar,
   `COMPARE_MAX_TOKENS` and the provider's lowest effort; the dev-only `fake-compare`; a stored
   spec is resolved as the flag is, never from the stored endpoint), `CompareTarget` (its
   identity, recipient and billing), `probe`, `stored_compare`, `compare_conflict` (the one
   check the preview and `attach_compare` share: what changed and a free `--out-dir`),
   `attach_compare` (writes `compare.json` under the lock), `ChatSampler` (a `Sampler` over any
-  `ChatCompleter`, the prefix without `reasoning_content`) and `FakeCompareSampler`; it takes
+  `ChatCompleter`, the prefix without `reasoning_content`), `FakeCompareSampler`, and
+  `refused_prefix`, the pure check of whether a provider's chat API can carry a case's prefix
+  (`REFUSED_SHAPES`: OpenAI and Anthropic refuse no messages, a tool call whose results do
+  not open the turn right after it, and a tool result that answers no call of the turn
+  before it; Anthropic also a prefix that ends on an assistant turn; Anthropic is judged on
+  the turns its client sends, `anthropic_messages.py`'s conversion; Fireworks and the fake
+  take any), with `compare_skips` over cases; it takes
   the `compare.json` path and imports nothing from `replay.py`, which imports it.
   `benchmark.py` is `benchmark`: `plan_benchmark` (the test split's cases, the judge and
   one `Candidate` per base model), `execute` (the judge calibrated once, then each model

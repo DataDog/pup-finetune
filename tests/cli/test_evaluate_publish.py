@@ -163,6 +163,8 @@ def test_evaluate_publishes_two_experiments_and_a_rerun_sends_nothing_new(
     assert publish["dataset_id"] == receipt["dataset_id"]
     run_id = json.loads((run_dir / "run.json").read_text())["run_id"]
     assert publish["experiments"] == [f"pup-finetune-{t}-{run_id}" for t in ("base", "tuned")]
+    spans = preview["preview"]["trajectories"] + preview["preview"]["cases"]
+    assert publish["spans_per_experiment"] == {"base": spans, "tuned": spans}
     assert "Datadog" in preview["preview"]["data_destination"]
     assert preview["preview"]["data_recipients"][-1] == (
         "test cases, generated answers and scores -> Datadog (experiments)"

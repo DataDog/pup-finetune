@@ -513,7 +513,9 @@ reads each one's error answer), which no retry fixes.
   is complete.
 - **Anthropic** uses the official SDK (the `anthropic` extra) in
   [`anthropic_client.py`](../src/pup_finetune/anthropic_client.py), the only module that
-  imports it: the leading system message becomes `system`, no sampling parameter is sent,
+  imports it: the messages become `system` and alternating turns through
+  [`anthropic_messages.py`](../src/pup_finetune/anthropic_messages.py) (every system message
+  joins `system`), which the compare model's skip rule checks too, no sampling parameter is sent,
   `output_config.format` carries the verdict's JSON schema on models with structured outputs,
   `output_config.effort` is the judge's effort on models with effort levels, and the models with
   server-side refusal fallbacks are called through the beta API with `fallbacks="default"`.

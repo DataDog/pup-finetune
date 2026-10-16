@@ -38,6 +38,7 @@ import hashlib
 import os
 import shlex
 import threading
+from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
@@ -413,6 +414,28 @@ class EvalPlan:
         return (*TARGETS, COMPARE) if self.compare is not None else TARGETS
 
     @property
+    def compare_skips(self) -> Mapping[str, str]:
+        """The cases the compare model's API refuses, by case id, with the reason; none
+        without a compare model (:func:`~pup_finetune.evaluation.compare.compare_skips`)."""
+        from pup_finetune.evaluation.compare import compare_skips
+
+        if self.compare is None:
+            return {}
+        return compare_skips(self.cases, self.compare.config.provider)
+
+    @property
+    def replays(self) -> dict[str, list[ReplayCase]]:
+        """The cases each target replays: every one for base and tuned, and for the compare
+        model those its API takes (:attr:`compare_skips`)."""
+        from pup_finetune.evaluation.replay import COMPARE
+
+        found = dict.fromkeys(self.targets, self.cases)
+        if self.compare is not None:
+            skips = self.compare_skips
+            found[COMPARE] = [case for case in self.cases if case.id not in skips]
+        return found
+
+    @property
     def compare_identity(self) -> dict[str, Any] | None:
         """``compare.json`` for this plan's compare target, ``None`` without one."""
         return None if self.compare is None else self.compare.identity()
@@ -518,6 +541,7 @@ class EvalPlan:
             push=publishing.push,
             records=publishing.records,
             compare=None if self.compare is None else self.compare.config,
+            replays=self.replays,
         )
         return ExperimentsPublisher(
             Pup(),
@@ -552,15 +576,27 @@ class EvalPlan:
         """The calls the evaluation makes. With ``tuned_checkpoint`` (a standalone run), what
         ``--out-dir`` already holds under the same settings is left out of the counts."""
         from pup_finetune.datadog.experiments import experiment_name
-        from pup_finetune.evaluation.compare import compare_conflict, stored_compare
+        from pup_finetune.evaluation.compare import (
+            compare_conflict,
+            require_sent,
+            skipped_warning,
+            stored_compare,
+        )
         from pup_finetune.evaluation.replay import CAVEAT, COMPARE, EvalDir, remaining_work
 
         settings = self.settings
         warnings: list[str] = []
         targets = self.targets
+        replays = self.replays
+        skips = Counter(self.compare_skips.values())
+        if self.compare is not None:
+            # --confirm would attach a model that answers nothing: fail now, never offer it.
+            require_sent(skips, spec=self.compare.spec, cases=len(self.cases))
+            if skipped := skipped_warning(skips, spec=self.compare.spec, cases=len(self.cases)):
+                warnings.append(skipped)
         by_target = {
-            target: {"done": 0, "generate": len(self.cases), "judge": len(self.cases)}
-            for target in targets
+            target: {"done": 0, "generate": len(cases), "judge": len(cases)}
+            for target, cases in replays.items()
         }
         calibration = self.calibration_calls()
         eval_dir = EvalDir(self.out_dir)
@@ -583,7 +619,8 @@ class EvalPlan:
                     if conflict is not None:
                         raise conflict
                 by_target = {
-                    target: remaining_work(eval_dir, self.cases, (target,)) for target in targets
+                    target: remaining_work(eval_dir, cases, (target,))
+                    for target, cases in replays.items()
                 }
                 if (eval_dir.read_calibration() or {}).get("ok"):
                     calibration = 0
@@ -622,7 +659,10 @@ class EvalPlan:
             warnings.append(f"the evaluation will not be published: {publish['reason']}")
         elif publish["status"] == "planned":
             publish["experiments"] = [experiment_name(t, self.run_id) for t in targets]
-            publish["spans_per_experiment"] = trajectories + len(self.cases)
+            publish["spans_per_experiment"] = {
+                target: len({case.row_id for case in cases}) + len(cases)
+                for target, cases in replays.items()
+            }
             destination += (
                 ", and the cases with the generated answers and their scores are published to "
                 "Datadog as experiments on the pushed dataset"
@@ -685,7 +725,17 @@ class EvalPlan:
             "cases": len(self.cases),
             "trajectories": trajectories,
             "targets": target_names,
-            **({"compare": self.compare.describe()} if self.compare is not None else {}),
+            **(
+                {
+                    "compare": {
+                        **self.compare.describe(),
+                        "skipped": sum(skips.values()),
+                        "skipped_by_reason": dict(sorted(skips.items())),
+                    }
+                }
+                if self.compare is not None
+                else {}
+            ),
             "judge_model": self.judge.spec,
             "judge_provider": self.judge.provider,
             "judge_endpoint": self.judge.base_url,
@@ -1000,7 +1050,7 @@ def replay(
         cancel=cancel,
         publisher=plan.publisher(tuned_checkpoint, cancel=cancel),
         on_progress=EvaluationProgress(),
-        targets=plan.targets,
+        replays=plan.replays,
         compare=plan.compare_identity,
     )
 
@@ -1044,6 +1094,7 @@ def replay_result(
     ``disabled``). Spans already published keep the results they were sent with, so after
     a retry of the errors the experiments still show them as errors.
     """
+    from pup_finetune.evaluation.compare import skipped_warning
     from pup_finetune.evaluation.replay import COMPARE
 
     summary = outcome.summary
@@ -1083,6 +1134,11 @@ def replay_result(
                 "included: a retry updates the local results only, so evaluate into a new "
                 "--out-dir to publish experiments with every result"
             )
+    if plan.compare is not None:
+        skips = Counter(plan.compare_skips.values())
+        skipped = skipped_warning(skips, spec=plan.compare.spec, cases=len(plan.cases))
+        if skipped is not None:
+            warnings.append(skipped)
     for name, target in summary["targets"].items():
         truncated = int(target.get("truncated") or 0)
         if truncated and plan.compare is not None and name == COMPARE:
@@ -1222,8 +1278,8 @@ def deploy_command(run_dir: Path) -> str | None:
 
 def evaluation_exit_code(result: Mapping[str, Any]) -> int:
     """1 when an evaluation's result says it failed: it raised (``failed``), its judge failed
-    calibration, its publishing failed, or every pair of a target ended in an error, so there
-    is nothing to compare; otherwise 0."""
+    calibration, its publishing failed, or every pair of a target ended in an error (its
+    skipped cases aside), so there is nothing to compare; otherwise 0."""
     if result.get("status") in {"failed", "calibration_failed"}:
         return 1
     publication = result.get("publication")
@@ -1232,7 +1288,7 @@ def evaluation_exit_code(result: Mapping[str, Any]) -> int:
     if result.get("status") != "complete_with_errors":
         return 0
     targets = result["summary"]["targets"].values()
-    return 1 if any(int(target["completed"]) == 0 for target in targets) else 0
+    return 1 if any(not target["completed"] and target["errors"] for target in targets) else 0
 
 
 # --- the run's record of its evaluations --------------------------------------------------
@@ -1281,6 +1337,7 @@ def headline(summary: Mapping[str, Any]) -> dict[str, Any]:
             "delta": versus.get("judge_pass_rate"),
             "ci95": _ci(versus.get("ci95")),
             **{key: against.get(key, 0) for key in verdicts},
+            "skipped": int((targets.get(COMPARE) or {}).get("skipped") or 0),
         }
     found |= {"cases": summary.get("n_cases"), "trajectories": summary.get("n_trajectories")}
     truncated = {
@@ -1720,7 +1777,10 @@ class StandaloneEvaluation:
 
         plan = self.plan
         eval_dir = EvalDir(plan.out_dir)
-        if plan.compare is None or not remaining_work(eval_dir, plan.cases, (COMPARE,))["generate"]:
+        if (
+            plan.compare is None
+            or not remaining_work(eval_dir, plan.replays[COMPARE], (COMPARE,))["generate"]
+        ):
             return None
         return stack.enter_context(
             open_compare_sampler(plan.compare, plan.cases, seed=plan.settings.seed)
