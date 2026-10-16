@@ -34,6 +34,7 @@ from pup_finetune.anthropic_client import (  # noqa: E402
 from pup_finetune.errors import ExternalError, FinetuneError, UsageError  # noqa: E402
 from pup_finetune.evaluation.judge import VERDICT_SCHEMA  # noqa: E402
 from pup_finetune.inference import ChatCompletion, ContextLimitError  # noqa: E402
+from pup_finetune.judge_models import ANTHROPIC_FAST, ANTHROPIC_STRONG  # noqa: E402
 from pup_finetune.judges import parse_judge  # noqa: E402
 from pup_finetune.providers.base import (  # noqa: E402
     ProviderAuthError,
@@ -350,6 +351,15 @@ def test_models_with_effort_only_get_low_effort_and_no_fallbacks(model: str) -> 
     (params,) = sdk.messages.calls
     assert "fallbacks" not in params
     assert "betas" not in params
+    assert params["output_config"]["effort"] == "low"
+    assert params["output_config"]["format"]["schema"] == VERDICT_SCHEMA
+
+
+@pytest.mark.parametrize("spec", [ANTHROPIC_FAST, ANTHROPIC_STRONG])
+def test_the_default_anthropic_judges_get_low_effort_and_the_verdict_schema(spec: str) -> None:
+    sdk = FakeSdk()
+    chat(sdk).complete(MESSAGES, model=parse_judge(spec).model, response_schema=VERDICT_SCHEMA)
+    (params,) = sdk.beta.messages.calls or sdk.messages.calls
     assert params["output_config"]["effort"] == "low"
     assert params["output_config"]["format"]["schema"] == VERDICT_SCHEMA
 
