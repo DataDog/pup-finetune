@@ -52,7 +52,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 from pup_finetune import credentials, providers
-from pup_finetune.errors import ExternalError, FinetuneError, UsageError, install_hint
+from pup_finetune.errors import ExternalError, UsageError, install_hint
 from pup_finetune.inference import (
     DEFAULT_JUDGE_BASE_URL,
     ChatClient,
@@ -382,17 +382,15 @@ def require_key(
     if config.provider == "fake":
         return
     found = credentials.key_source(config.credential)
-    error: FinetuneError
     if isinstance(found, credentials.KeyUnreadable):
-        error = ExternalError(found.detail, hint=found.fix, source="the OS keychain")
-    elif found is None:
-        error = credentials.missing_key_error(
-            config.credential,
-            hint=login_hint(config.credential),
-            needed_by=f"the {what} {config.spec}",
-        )
-    else:
+        raise ExternalError(found.detail, hint=found.fix, source="the OS keychain")
+    if found is not None:
         return
+    error = credentials.missing_key_error(
+        config.credential,
+        hint=login_hint(config.credential),
+        needed_by=f"the {what} {config.spec}",
+    )
     if warnings is None:
         raise error
     warnings.append(f"{error.message}: {error.hint}")
