@@ -41,6 +41,12 @@ MAX_SYSTEM_PROMPT_CHARS = 800
 MAX_TOOL_RESULT_LINES = 40
 MAX_TOOL_RESULT_CHARS = 2000
 """Longest tool result a review file shows; a longer one is cut, its length noted."""
+REVIEW_HEADING = "# Review: "
+"""How a review file starts, so ``sample --markdown`` replaces only a file it wrote."""
+JUDGE_LINE_NOTE = (
+    "Labeled by the judge council: copy this line only to override it; a copied line becomes "
+    "your manual label, which triage never revisits and --agreement counts as a reference."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,18 +174,20 @@ def review_markdown(
     where = "every split" if split == "all" else f"the {split} split"
     steps = (
         "1. Read each row and decide whether to train on it.",
-        "2. Copy each row's labels line into a new JSON Lines file, `<LABELS_FILE>`.",
+        "2. Copy the labels line of each row you decided into a new JSON Lines file, "
+        "`<LABELS_FILE>`.",
         '3. To drop a row, set `"keep": false` and say why in `"reason"`: a drop needs one.',
         "4. Record the decisions:",
     )
     parts = [
-        f"# Review: {len(sample.picked)} of {sample.eligible} rows of {_code(dataset_dir)}",
+        f"{REVIEW_HEADING}{len(sample.picked)} of {sample.eligible} rows of {_code(dataset_dir)}",
         f"Sampled from {where} with seed {seed}. This file holds trace content: it is private "
         "(mode 0600), so keep it out of git and do not share it.",
         "## How to record decisions",
         "\n".join(steps),
         _fenced(label_command, "sh"),
-        "A row's last label wins; a row left out of the file stays unlabeled.",
+        "A row's last label wins; a row left out of the file keeps its current label "
+        "(unlabeled rows stay unlabeled).",
     ]
     for index, (row, row_split) in enumerate(sample.picked, start=1):
         parts += _review_row(index, row, row_split, sample.labels.get(row.id))
@@ -202,14 +210,16 @@ def _review_row(
     names = {call.id: call.function.name for m in row.messages for call in m.tool_calls or ()}
     for position, message in enumerate(row.messages):
         parts += _review_message(message, final=position == len(row.messages) - 1, names=names)
+    judged = label is not None and label.by == "judge"
     line = {
         "id": row.id,
         "keep": True if label is None else label.keep,
-        "reason": "" if label is None else label.reason,
+        "reason": "" if label is None or judged else label.reason,
     }
     return [
         *parts,
         "### Labels line",
+        *([JUDGE_LINE_NOTE] if judged else []),
         _fenced(json.dumps(line, ensure_ascii=False), "json"),
         'To drop this row, set `"keep": false` and give a `"reason"`.',
     ]
@@ -228,7 +238,10 @@ def _review_message(message: Message, *, final: bool, names: Mapping[str, str]) 
         return [heading, *_text_block(message.content, cut=True)]
     if message.role == "user":
         return ["### User", *_text_block(message.content)]
-    parts = ["### Final answer" if final else "### Assistant"]
+    heading = "### Final answer" if final else "### Assistant"
+    parts = [f"{heading} (not trained: weight 0)" if message.weight == 0 else heading]
+    if message.reasoning_content and message.reasoning_content.strip():
+        parts += ["Reasoning:", *_text_block(message.reasoning_content, cut=True)]
     if message.content.strip() or not message.tool_calls:
         parts += _text_block(message.content)
     for call in message.tool_calls or ():
@@ -272,7 +285,7 @@ def _label_text(label: Label | None) -> str:
         return "none"
     text = f"{'keep' if label.keep else 'drop'} ({label.by})"
     reason = " ".join(label.reason.split())
-    return f"{text}: {reason}" if reason else text
+    return f"{text}: {_code(reason)}" if reason else text
 
 
 _BACKTICKS = re.compile(r"`+")

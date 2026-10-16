@@ -34,6 +34,7 @@ from pup_finetune.curation.pipeline import Pipeline, pipeline_state
 from pup_finetune.curation.samples import (
     DEFAULT_SAMPLE_SEED,
     DEFAULT_SAMPLE_SIZE,
+    REVIEW_HEADING,
     SampleSplit,
     pick_sample,
     review_markdown,
@@ -394,12 +395,15 @@ SAMPLE_DOC = CommandDoc(
         "calls as name(args). The full rows stay in rows.jsonl. The Markdown file has the "
         "`dataset label` command to run, then per row its split and label and the "
         "conversation in reading order: the system prompt's first lines, the user messages, "
-        "the assistant messages with their tool calls, the tool results (cut when long, "
-        "their length noted) and the final answer.",
+        "the assistant messages with their reasoning and tool calls (a turn of weight 0 marked "
+        "not trained), the tool results and the final answer; long reasoning and tool results "
+        "are cut, their length noted. An existing FILE is replaced only when it is a review "
+        "file.",
     ),
     examples=(
         "pup finetune dataset sample datasets/my-agent -n 20",
-        "pup finetune dataset sample datasets/my-agent -n 20 --markdown review.md",
+        "pup finetune dataset sample datasets/my-agent -n 20 "
+        "--markdown datasets/my-agent-review.md",
         "pup finetune dataset sample datasets/my-agent --split test --include-dropped",
     ),
     safety=local("shows rows; --markdown writes them to FILE"),
@@ -477,7 +481,7 @@ def _next_by_state(
         'record keep/drop decisions: write <LABELS_FILE> first, one {"id", "keep", '
         '"reason"} object per line (a reason is required to drop)'
         if review is None
-        else f"record keep/drop decisions: copy each row's labels line from "
+        else f"record keep/drop decisions: copy the labels line of each row you decided from "
         f'{display_path(review)} into <LABELS_FILE>, with "keep": false and a reason on the '
         "rows to drop",
     )
@@ -1177,6 +1181,11 @@ def sample(
     # The suffix keeps a typo from replacing a dataset's .json or .jsonl files.
     if markdown is not None and markdown.suffix.lower() != ".md":
         raise UsageError(f"--markdown must name a .md file, not {markdown}")
+    if markdown is not None and markdown.exists() and not _is_review_file(markdown):
+        raise UsageError(
+            f"{markdown} exists and is not a review file `dataset sample` wrote",
+            hint="choose another --markdown path, or remove the file first",
+        )
     require_dataset_dir(directory)
     dataset = DatasetDir(directory)
     dataset.settings()  # A UsageError when this is not a dataset directory.
@@ -1195,7 +1204,12 @@ def sample(
             '{"id": ..., "keep": true|false, "reason": ...}; a reason is required to drop'
         ),
     }
-    if markdown is not None:
+    review = markdown if markdown is not None and picked.picked else None
+    if markdown is not None and review is None:
+        result["notes"] = [
+            f"no row matched the sample, so {display_path(markdown)} was not written"
+        ]
+    if review is not None:
         label_command = template("dataset", "label", directory, "--file", "<LABELS_FILE>")
         text = review_markdown(
             picked,
@@ -1204,18 +1218,28 @@ def sample(
             seed=seed,
             label_command=label_command,
         )
-        atomic_write_text(ensure_private_dir(markdown.parent) / markdown.name, text)
-        shown = display_path(markdown)
+        replacing = review.exists()
+        atomic_write_text(ensure_private_dir(review.parent) / review.name, text)
+        shown = display_path(review)
         result["markdown_file"] = shown
+        wrote = f"replaced the earlier review file {shown}" if replacing else f"wrote {shown}"
         result["notes"] = [
-            f"wrote {shown} (0600): it holds trace content, so keep it out of git and do not "
-            "share it"
+            f"{wrote} (0600): it holds trace content, so keep it out of git and do not share it"
         ]
         result["hint"] = (
-            f"review these rows with the user in {shown}, then copy each row's labels line "
-            'into a labels file, with "keep": false and a reason on the rows to drop'
+            f"review these rows with the user in {shown}, then copy the labels line of each "
+            'row you decided into a labels file, with "keep": false and a reason on the rows '
+            "to drop"
         )
-    return merge_next(result, dataset_next(dataset, directory, sampled=True, review=markdown))
+    return merge_next(result, dataset_next(dataset, directory, sampled=True, review=review))
+
+
+def _is_review_file(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            return handle.readline().startswith(REVIEW_HEADING.encode())
+    except OSError:
+        return False
 
 
 def _push_brief(dataset: DatasetDir) -> dict[str, Any] | None:

@@ -19,6 +19,8 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from pup_finetune.cli import app
+from pup_finetune.curation.labels import Label, apply_labels
+from pup_finetune.curation.samples import JUDGE_LINE_NOTE
 from pup_finetune.data.dataset_dir import DatasetDir
 
 ROWS_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "rows"
@@ -359,6 +361,8 @@ def test_a_review_file_renders_tool_calls_and_results_and_notes_what_it_cuts(
             {
                 "role": "assistant",
                 "content": "",
+                "reasoning_content": "check k1 first",
+                "weight": 0,
                 "tool_calls": [
                     {"id": "c1", "function": {"name": "lookup", "arguments": '{"key": "k1"}'}}
                 ],
@@ -377,7 +381,10 @@ def test_a_review_file_renders_tool_calls_and_results_and_notes_what_it_cuts(
     assert f"_{len(system):,} characters, 30 lines; the first 34 characters are shown._" in text
     assert "rule 4\n```" in text and "rule 5" not in text
     assert "````text\nlook up ```k1```\n````" in text
-    assert 'Tool call `lookup` (`c1`):\n\n```json\n{\n  "key": "k1"\n}\n```' in text
+    assert (
+        "### Assistant (not trained: weight 0)\n\nReasoning:\n\n```text\ncheck k1 first\n```\n\n"
+        'Tool call `lookup` (`c1`):\n\n```json\n{\n  "key": "k1"\n}\n```'
+    ) in text
     assert "### Tool result: `lookup` (`c1`)\n\n```text\n" + "x" * 2000 + "\n```" in text
     assert "_Cut: 5,000 characters, 1 line in all; the first 2,000 characters are shown" in text
     assert "### Final answer\n\n```text\nk1 is set.\n```" in text
@@ -396,14 +403,56 @@ def test_a_review_file_holds_the_rows_split_and_count_pick(dataset: Path, tmp_pa
 
 
 def test_a_review_file_copies_a_rows_current_label(dataset: Path, tmp_path: Path) -> None:
-    dropped = FIXTURE_IDS[0]
-    file = label_file(tmp_path, {"id": dropped, "keep": False, "reason": "off topic"})
+    dropped, reason = FIXTURE_IDS[0], "off topic ![x](http://attacker.example/p.png)"
+    file = label_file(tmp_path, {"id": dropped, "keep": False, "reason": reason})
     output_json(label(dataset, file))
     review = tmp_path / "review.md"
     sample(dataset, "--count", "100", "--include-dropped", "--markdown", str(review))
     text = review.read_text()
-    assert "- Label: drop (manual): off topic" in text
-    assert json.dumps({"id": dropped, "keep": False, "reason": "off topic"}) in text
+    assert f"- Label: drop (manual): `{reason}`\n" in text
+    assert json.dumps({"id": dropped, "keep": False, "reason": reason}) in text
+
+
+def test_a_review_file_does_not_copy_a_judge_label_into_its_labels_line(
+    dataset: Path, tmp_path: Path
+) -> None:
+    judged = FIXTURE_IDS[0]
+    apply_labels(DatasetDir(dataset), [Label(id=judged, keep=True, reason="on task", by="judge")])
+    review = tmp_path / "review.md"
+    sample(dataset, "--count", "100", "--markdown", str(review))
+    text = review.read_text()
+    section = text[text.index(f". `{judged}`\n") :].split("\n---\n")[0]
+    assert "- Label: keep (judge): `on task`" in section
+    assert f"### Labels line\n\n{JUDGE_LINE_NOTE}\n\n```json\n" in section
+    assert json.dumps({"id": judged, "keep": True, "reason": ""}) in section
+    assert text.count(JUDGE_LINE_NOTE) == 1
+    assert "keeps its current label (unlabeled rows stay unlabeled)" in text
+
+
+def test_sample_replaces_only_a_review_file_it_wrote(dataset: Path, tmp_path: Path) -> None:
+    rubric = tmp_path / "rubric.md"
+    rubric.write_text("# Task\n\nKeep rows that answer the question.\n")
+    before = rubric.read_bytes()
+    result = invoke("sample", str(dataset), "--markdown", str(rubric))
+    assert (result.exit_code, result.stdout) == (2, "")
+    assert "exists and is not a review file" in _ANSI.sub("", result.stderr)
+    assert rubric.read_bytes() == before
+    review = tmp_path / "review.md"
+    sample(dataset, "--count", "1", "--markdown", str(review))
+    data = sample(dataset, "--count", "2", "--markdown", str(review))
+    assert data["notes"][0].startswith(f"replaced the earlier review file {review.resolve()} ")
+    assert review.read_text().startswith("# Review: 2 of ")
+
+
+def test_sample_writes_no_review_file_when_no_row_matches(tmp_path: Path) -> None:
+    target, review = tmp_path / "ds", tmp_path / "review.md"
+    result = invoke("import", str(target), "--file", str(TOOL_USE), "--test-fraction", "0")
+    assert result.exit_code == 0, result.stderr
+    data = sample(target, "--split", "test", "--markdown", str(review))
+    assert (data["rows"], data["markdown_file"]) == ([], None)
+    assert not review.exists()
+    assert data["notes"] == [f"no row matched the sample, so {review.resolve()} was not written"]
+    assert data["hint"].startswith("review these rows with the user, then record")
 
 
 def test_sample_refuses_a_markdown_path_that_is_a_directory_or_not_markdown(

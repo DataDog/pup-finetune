@@ -372,7 +372,7 @@ Safety: Free · local files only · PUP_READ_ONLY: allowed.
 
 Show up to --count rows of DIR in brief, to review them before labeling: id, split, label, turns, tools, and the first user and final assistant messages cut to 300 characters. --markdown FILE also writes those rows in full to a private (0600) Markdown file, each with a labels line to copy. Rows labeled drop are left out unless --include-dropped is passed.
 
-The same --seed picks the same rows. A final message without text shows its tool calls as name(args). The full rows stay in rows.jsonl. The Markdown file has the `dataset label` command to run, then per row its split and label and the conversation in reading order: the system prompt's first lines, the user messages, the assistant messages with their tool calls, the tool results (cut when long, their length noted) and the final answer.
+The same --seed picks the same rows. A final message without text shows its tool calls as name(args). The full rows stay in rows.jsonl. The Markdown file has the `dataset label` command to run, then per row its split and label and the conversation in reading order: the system prompt's first lines, the user messages, the assistant messages with their reasoning and tool calls (a turn of weight 0 marked not trained), the tool results and the final answer; long reasoning and tool results are cut, their length noted. An existing FILE is replaced only when it is a review file.
 
 ```
 pup finetune dataset sample [OPTIONS] DIR
@@ -394,7 +394,7 @@ Examples:
 
 ```sh
 pup finetune dataset sample datasets/my-agent -n 20
-pup finetune dataset sample datasets/my-agent -n 20 --markdown review.md
+pup finetune dataset sample datasets/my-agent -n 20 --markdown datasets/my-agent-review.md
 pup finetune dataset sample datasets/my-agent --split test --include-dropped
 ```
 
