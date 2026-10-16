@@ -282,9 +282,11 @@ class BenchmarkPlan:
                 }
             )
         calibration = self.calibration_calls()
+        warnings = self.split_warnings()
         if judge_calls + calibration:
-            # --confirm would fail on a key nothing provides: fail now, never offer it.
-            require_key(self.judge)
+            # --confirm would fail on a key nothing provides: fail now, never offer it. A
+            # read-only preview offers none, so it only warns.
+            require_key(self.judge, warnings=warnings if self.runtime.read_only else None)
         billing = [
             get_provider(name, self.runtime).sampling_billing(
                 SamplingUsage(calls=calls, max_tokens_per_call=settings.max_tokens)
@@ -333,7 +335,7 @@ class BenchmarkPlan:
             f"{', '.join(sorted(calls_by_provider))} to generate and to {judged_at} to judge",
             "data_recipients": self.recipients(),
             "caveat": CAVEAT,
-            "warnings": self.split_warnings(),
+            "warnings": warnings,
         }
 
 

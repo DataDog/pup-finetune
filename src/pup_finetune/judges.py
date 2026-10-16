@@ -277,19 +277,25 @@ def login_hint(credential: str) -> str:
     return f"{hint}, or sign in with `ant auth login`" if credential == "anthropic" else hint
 
 
-def require_key(config: JudgeConfig, *, what: str = "judge") -> None:
+def require_key(
+    config: JudgeConfig, *, what: str = "judge", warnings: list[str] | None = None
+) -> None:
     """Raise the missing key's :class:`UsageError`, with its login hint, when nothing would
     sign ``config``'s model in: no key in the environment or the keychain and, for Anthropic,
     no login of the SDK's own. Offline: no call is made. The fake judge and compare model
-    need no key; ``what`` names the model in the message."""
+    need no key; ``what`` names the model in the message. With ``warnings`` (a read-only
+    preview, which offers no ``--confirm`` to fail), the error is appended there instead."""
     if config.provider == "fake":
         return
     if credentials.key_source(config.credential) is None:
-        raise credentials.missing_key_error(
+        error = credentials.missing_key_error(
             config.credential,
             hint=login_hint(config.credential),
             needed_by=f"the {what} {config.spec}",
         )
+        if warnings is None:
+            raise error
+        warnings.append(f"{error.message}: {error.hint}")
 
 
 def _anthropic_missing(what: str = "judge") -> UsageError:

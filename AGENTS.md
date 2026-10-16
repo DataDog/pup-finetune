@@ -479,7 +479,9 @@ Source lives under `src/pup_finetune/`.
   `require_key` a missing key (offline: the environment, the keychain, or the Anthropic SDK's
   own login; the fake judge and compare model need none), which the `evaluate`, `train
   --evaluate`, `benchmark` and `dataset triage` previews call for every model they would
-  call, so they never offer a `--confirm` that would fail on it, and `open_client` builds a
+  call, so they never offer a `--confirm` that would fail on it (a read-only `evaluate`,
+  `train --evaluate` or `benchmark` preview, which offers none, warns instead: `warnings`),
+  and `open_client` builds a
   client. `open_lazily` (what `evaluate`, `train --evaluate` and `benchmark` judge with) and
   `open_clients` (one per provider, for a triage council) open it on its first call
   (`OnFirstCall`), so a run calls for exactly the keys its preview checked: a complete
@@ -887,7 +889,9 @@ secrets, training projects, jobs and job logs `train --remote` reads, whose `rou
 into `FakeLoops.transport()`. `tests/fakes/baseten_cli.py` has `FakeBasetenCli`, the `baseten`
 CLI as a `CliRunner` that records each call with its upload tree and answers as scripted.
 `tests/fakes/keyring.py` has in-memory, failing and locked keyring backends; every test starts
-on the failing one, so none touches the real keychain. The conftest's `judge_keys` fixture
+on the failing one, so none touches the real keychain, and with every registered provider
+key variable cleared (`live` tests keep them), so no key in the developer's shell passes a
+test that fails in CI. The conftest's `judge_keys` fixture
 puts a key for every judge provider in the environment, for tests that preview a paid judge
 or compare model whose client they fake.
 `tests/providers/contract/` has the `RendererContract`, `BackendContract` and

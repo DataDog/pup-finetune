@@ -315,7 +315,8 @@ Anthropic judges need the `anthropic` extra. Without an API key, they sign in th
 Anthropic SDK does on its own (`ANTHROPIC_AUTH_TOKEN`, or `ant auth login`), which
 `auth status` reports as `anthropic-sdk`. A preview whose judge or compare model nothing
 would sign in fails, naming the key and how to log in, rather than offer a `--confirm` that
-would fail.
+would fail; with `PUP_READ_ONLY` set, when it offers no `--confirm` anyway, it warns instead.
+A rerun with nothing left to judge needs no judge key.
 
 ## Data handling
 

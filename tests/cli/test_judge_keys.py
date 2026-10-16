@@ -227,3 +227,23 @@ def test_a_resumed_council_opens_only_the_judges_with_votes_left(
     assert resumed.exit_code == 0, resumed.stderr
     assert output(resumed)["status"] == "complete"
     assert opened == ["openai"]
+
+
+def test_a_read_only_preview_warns_of_the_missing_key(
+    run_dir: Path, dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A read-only preview offers no --confirm, so the key it would need is only a warning.
+    monkeypatch.setenv("PUP_READ_ONLY", "1")
+    previews = (
+        ["evaluate", str(run_dir), "--judge-model", PAID],
+        ["benchmark", str(dataset), "--models", "fake-model", "--judge-model", PAID],
+    )
+    for args in previews:
+        result = invoke(*args)
+        assert result.exit_code == 2, result.stderr
+        data = output(result)
+        assert data["next_command"] is None
+        assert "read_only" in data["preview"]
+        missing = f"no openai API key found for the judge {PAID}: "
+        (warning,) = (text for text in data["preview"]["warnings"] if text.startswith(missing))
+        assert "pup finetune auth login openai" in warning

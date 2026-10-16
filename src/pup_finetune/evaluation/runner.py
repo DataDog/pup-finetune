@@ -672,11 +672,13 @@ class EvalPlan:
         from pup_finetune.providers.base import SamplingUsage
 
         judge_calls = remaining["judge"] + calibration
-        # --confirm would fail on a key nothing provides: fail now, never offer it.
+        # --confirm would fail on a key nothing provides: fail now, never offer it. A
+        # read-only preview offers none, so it only warns.
+        soft = warnings if self.runtime.read_only else None
         if judge_calls:
-            require_key(self.judge)
+            require_key(self.judge, warnings=soft)
         if self.compare is not None and compared:
-            require_key(self.compare.config, what="compare model")
+            require_key(self.compare.config, what="compare model", warnings=soft)
         judge_name = "the fake judge" if self.judge.provider == "fake" else self.judge.spec
         # Only what generates bills or is named: base and tuned answers already stored are
         # reused, so attaching a compare model never mentions the training provider.
