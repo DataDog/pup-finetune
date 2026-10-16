@@ -75,11 +75,8 @@ class Pipeline:
     push: PushStatus
     pending: int | None
     """Kept rows not pushed yet; ``None`` when ``push.json`` cannot be read."""
-    changed: int | None = 0
-    """Kept rows whose record changed since it was pushed; ``None`` when ``push.json``
-    cannot be read."""
     changed_ids: tuple[str, ...] = ()
-    """The ids of those rows, sorted."""
+    """The ids, sorted, of kept rows whose record changed since it was pushed."""
     stale_ids: tuple[str, ...] = ()
     """The ids, sorted, of rows ``push.json`` lists a record for that are no longer kept
     (dropped or retired since the push), which the dataset still holds."""
@@ -93,6 +90,12 @@ class Pipeline:
     @property
     def labeled(self) -> int:
         return self.accepted - self.unlabeled
+
+    @property
+    def changed(self) -> int | None:
+        """How many kept rows changed since the push; ``None`` when ``push.json`` cannot be
+        read."""
+        return None if self.push == "unreadable" else len(self.changed_ids)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -219,24 +222,23 @@ def pipeline_state(
     except StateError as exc:
         push: PushStatus = "unreadable"
         pending: int | None = None
-        changed: int | None = None
         warnings.append(
             f"the push receipt cannot be read ({exc.message}), so which kept rows were "
             "pushed is unknown; fix the file, or move it aside and push to a new --name"
         )
     else:
         if state is None:
-            push, pending, changed = "not_pushed", kept, 0
+            push, pending = "not_pushed", kept
         else:
             name, project = state.dataset_name, state.project
             rows = by_split if by_split is not None else dataset.rows_by_split()
             comparison = compare_receipt(state, rows)
-            pending, changed = len(comparison.pending), len(comparison.changed)
+            pending = len(comparison.pending)
             changed_ids = tuple(sorted(comparison.changed))
             stale_ids = tuple(sorted(comparison.stale))
             push = (
                 "pushed_with_changed_rows"
-                if changed
+                if changed_ids
                 else "pushed_with_new_rows"
                 if pending or state.in_flight
                 else "pushed"
@@ -252,7 +254,6 @@ def pipeline_state(
         triage=triage,
         push=push,
         pending=pending,
-        changed=changed,
         changed_ids=changed_ids,
         stale_ids=stale_ids,
         dataset_name=name,
