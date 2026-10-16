@@ -193,8 +193,9 @@ pup finetune dataset triage datasets/my-agent --rubric datasets/rubric.md
 
 Start with `--agreement` against 20 or more labels you and the user agreed on; it labels
 nothing. Show `agreement.rate`, `agreement.kappa` and the disagreements. Sharpen the rubric and
-measure again (`--reset-triage`) until the user is satisfied. With the two default judges, a
-row is kept only when both vote keep; add a third with `--judges` for a true majority.
+measure again (`--reset-triage`) until the user is satisfied. `--rows <ROWS_FILE>` (one row id
+per line) narrows either mode to those rows. With the two default judges, a row is kept only
+when both vote keep; add a third with `--judges` for a true majority.
 
 Also check what no command does: answers that break the app's own output contract (invalid
 JSON, duplicate keys, two answers in one), and one request in two splits: group rows by their
@@ -217,9 +218,8 @@ pup finetune dataset push datasets/my-agent --name <DATASET_NAME> --project <PRO
 Ask which project: everyone with access to it can read the records. It previews; run its
 `next_command` after a yes. The push writes one record per kept row and saves `push.json`.
 `train` and `benchmark` read only a dataset whose kept rows are all pushed, and an evaluation
-publishes onto it. The dataset in Datadog can then be
-curated there (records edited, added or removed); to train on it as it is now, fetch it into
-a new directory, which gets its push receipt (the project and name are the ones `push.json` names):
+publishes onto it. The dataset can then be curated in Datadog (records edited, added or
+removed); to train on it as it is now, fetch it into a new directory with its push receipt:
 
 ```sh
 pup finetune dataset fetch datasets/my-agent-v2 --project <PROJECT> --name <DATASET_NAME>

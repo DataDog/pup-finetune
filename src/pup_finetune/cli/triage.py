@@ -91,7 +91,8 @@ DOC = CommandDoc(
         "judge's provider: Fireworks serverless (the default judges), Anthropic or OpenAI, "
         "with that provider's API key; the "
         "preview names every one. --agreement measures the council against rows you "
-        "labeled first; --print-template prints a rubric to start from.",
+        "labeled first; --rows FILE (one row id per line) reviews only those rows in either "
+        "mode, and is not frozen; --print-template prints a rubric to start from.",
     ),
     examples=(
         "pup finetune dataset triage --print-template > rubric.md",
@@ -182,6 +183,19 @@ def triage_rows(
             rich_help_panel=RUN,
         ),
     ] = None,
+    rows: Annotated[
+        Path | None,
+        typer.Option(
+            "--rows",
+            metavar="FILE",
+            help="Review only these row ids, one per line.",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            show_default=False,
+            rich_help_panel=RUN,
+        ),
+    ] = None,
     agreement: Annotated[
         bool,
         typer.Option(
@@ -232,7 +246,13 @@ def triage_rows(
     require_dataset_dir(directory)
     dataset = DatasetDir(directory)
     plan = triage.plan_triage(
-        dataset, criteria, council, max_rows=max_rows, reset=reset_triage, agreement=agreement
+        dataset,
+        criteria,
+        council,
+        max_rows=max_rows,
+        only=_row_ids(rows) if rows is not None else None,
+        reset=reset_triage,
+        agreement=agreement,
     )
     args = [*PROGRAM, "dataset", "triage", str(directory)]
     if rubric is not None:
@@ -248,10 +268,17 @@ def triage_rows(
     if allow_template_rubric and template_task is not None:
         args.append("--allow-template-rubric")
     every_row = list(args)
+    if rows is not None:
+        args += ["--rows", str(rows)]
     if max_rows is not None:
         args += ["--max-rows", str(max_rows)]
     rerun = [*args, "--reset-triage"] if reset_triage else args
-    settings = {"max_rows": max_rows, "concurrency": concurrency, "reset_triage": reset_triage}
+    settings = {
+        "rows_file": str(rows) if rows is not None else None,
+        "max_rows": max_rows,
+        "concurrency": concurrency,
+        "reset_triage": reset_triage,
+    }
     ctx = current_context()
     defaults_used = [
         name
@@ -337,12 +364,13 @@ def triage_rows(
         )
     sampled = {row.id for row in plan.rows}
     if any(row_id not in sampled for row_id in report.stale_labels):
-        # Rows outside the --max-rows sample are judged only by a run over every row.
+        # Rows outside the --max-rows sample or --rows subset are judged only by a run over
+        # every row.
         args = every_row
     if report.stale_labels:
         hints.append(
             f"{len(report.stale_labels)} rows keep a judge label the current votes do not "
-            "back (from a discarded rubric, outside --max-rows, or left undecided); run "
+            "back (from a discarded rubric, outside --max-rows or --rows, or left undecided); run "
             "the next command to judge them again, or relabel them with `dataset label`"
         )
     state = pipeline_state(dataset, summary)
@@ -352,6 +380,13 @@ def triage_rows(
     data["next_command"] = shlex.join([*args, "--confirm"])
     data["hint"] = "; ".join(hints)
     return CommandResult(data, exit_code=1) if report.failures else data
+
+
+def _row_ids(path: Path) -> frozenset[str]:
+    """The row ids in ``path``, one per line; blank lines are ignored."""
+    return frozenset(
+        line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+    )
 
 
 def _agreement_result(
@@ -382,6 +417,10 @@ def _agreement_result(
     if (noisy := triage.noisy_agreement(len(plan.rows))) is not None:
         data["warnings"] = [noisy]
     without = [word for word in args if word != "--agreement"]
+    if "--rows" in without:
+        # The subset was rows the user labeled, which a labeling run skips: label the rest.
+        at = without.index("--rows")
+        del without[at : at + 2]
     if report.failures:
         data["next_command"] = shlex.join([*args, "--confirm"])
         data["hint"] = (

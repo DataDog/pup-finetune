@@ -180,7 +180,9 @@ so rerunning the same command resumes and retries only failed calls; the rubric 
 judges are frozen in `triage.json` once votes exist (`--reset-triage` discards them). Decided
 rows are labeled `by: judge`; rows the agent or a person labeled are skipped. A row a judge
 refuses as longer than its context window is dropped (`too_long`), never truncated, and its
-other calls are skipped. `--agreement` reviews the agent's and people's labeled rows instead,
+other calls are skipped. `--rows FILE` (row ids, one per line, blank lines ignored; not frozen)
+restricts the rows reviewed, before `--max-rows`, in both modes (`plan_triage`'s `only`); an id
+that is no accepted row is a usage error. `--agreement` reviews the agent's and people's labeled rows instead,
 labels nothing, and reports the council's agreement with those labels (rate, Cohen's kappa,
 confusion counts, per judge, the disagreements), to check a rubric before labeling the rest. A label cannot be
 withdrawn, so judge labels the current votes do not back (after a reset with `--max-rows`, or
@@ -576,7 +578,7 @@ Source lives under `src/pup_finetune/`.
   `judgments.jsonl` (counted only for the row content, rubric and judge they were cast for),
   `decide` (strict majority keeps, a tie drops, a missing vote is undecided, a `too_long`
   vote drops), `plan_triage` (rows not labeled by the agent or a person, or with
-  `agreement` only those, in a fixed pseudo-random order for `--max-rows`; settings frozen in
+  `agreement` only those, narrowed to `only`, in a fixed pseudo-random order for `--max-rows`; settings frozen in
   `triage.json` once votes exist) and `run_triage` (a thread pool, votes appended as they
   arrive, failed calls reported and retried next run, a row's calls skipped once a judge
   found it too long, labels `by: judge` for decided rows, judge labels the votes do not back

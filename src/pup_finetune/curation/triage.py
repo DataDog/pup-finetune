@@ -50,7 +50,7 @@ from the agent or a person are not reviewed, and the labels are read again just 
 judge labels are recorded, so one written after planning is never overwritten either: that
 row is skipped. A label cannot be withdrawn, so a judge label
 that the current votes do not back (cast under a rubric ``reset`` discarded, on a row outside
-this ``max_rows`` sample, or on a row left undecided) is reported as stale
+this ``max_rows`` sample or ``only`` subset, or on a row left undecided) is reported as stale
 (:meth:`TriagePlan.stale_labels`), and the triage is not complete while any remains.
 
 **Agreement.** With ``agreement``, the council reviews the rows the agent or a person
@@ -615,7 +615,7 @@ class TriagePlan:
             preview["stale_judge_labels"] = stale
             preview["stale_judge_labels_note"] = (
                 f"{stale} rows outside this review keep a judge label the current votes do "
-                "not back; review every row (no --max-rows) to replace them"
+                "not back; review every row (no --max-rows or --rows) to replace them"
             )
         if self.reset:
             preview["reset"] = {
@@ -696,16 +696,19 @@ def plan_triage(
     judges: Sequence[str],
     *,
     max_rows: int | None = None,
+    only: frozenset[str] | None = None,
     reset: bool = False,
     agreement: bool = False,
 ) -> TriagePlan:
     """Plan a triage of ``dataset``'s accepted rows; reads only local files.
 
     The rows reviewed are those without a label by the agent or a person, or with
-    ``agreement`` exactly those (see the module docstring); ``max_rows`` caps them. Raises
+    ``agreement`` exactly those (see the module docstring); ``only`` (row ids, not frozen)
+    restricts them to a subset, and ``max_rows`` then caps them. Raises
     :class:`StateError` when votes exist under another rubric or other judges (see the module
     docstring) and ``reset`` is false, and :class:`UsageError` for a judge spec with an empty
-    model after its provider prefix, or with ``agreement`` when no row carries such a label.
+    model after its provider prefix, for an id in ``only`` that is not an accepted row, or
+    with ``agreement`` when no row (of ``only``) carries such a label.
     """
     for spec in judges:
         judge_config(spec)
@@ -726,12 +729,18 @@ def plan_triage(
         _check_frozen(dataset, settings, len(stored_votes))
     labels = dataset.labels()
     stored_rows = dataset.rows()
+    if only is not None:
+        _check_subset(dataset, only, {row.id for row in stored_rows})
     reviewable: list[TrainingRow] = []
     references: dict[str, Label] = {}
     judge_labels: dict[str, Label] = {}
     skipped = 0
     for row in stored_rows:
         label = labels.get(row.id)
+        if only is not None and row.id not in only:
+            if label is not None and label.by == "judge":
+                judge_labels[row.id] = label
+            continue
         if label is not None and label.by != "judge":
             references[row.id] = label
             if agreement:
@@ -744,9 +753,10 @@ def plan_triage(
         if not agreement:
             reviewable.append(row)
     if agreement and not reviewable:
+        among = " that --rows names" if only is not None else ""
         raise UsageError(
-            f"no row of {dataset.path} carries a label by you or the agent to compare the "
-            "council with",
+            f"no row of {dataset.path}{among} carries a label by you or the agent to compare "
+            "the council with",
             hint="label a sample first (`dataset sample`, then `dataset label --file`)",
         )
     reviewable.sort(key=_review_order)
@@ -776,6 +786,25 @@ def plan_triage(
         votes_sha256=votes_sha256,
         references={row.id: references[row.id] for row in rows} if agreement else None,
     )
+
+
+ROW_IDS_SHOWN = 3
+"""How many unknown ``--rows`` ids an error names."""
+
+
+def _check_subset(dataset: DatasetDir, only: frozenset[str], accepted: set[str]) -> None:
+    """A :class:`UsageError` naming a few ids of ``only`` that are not accepted rows."""
+    if not only:
+        raise UsageError("--rows names no row id", hint="list one accepted row id per line")
+    unknown = sorted(only - accepted)
+    if unknown:
+        shown = ", ".join(repr(row_id) for row_id in unknown[:ROW_IDS_SHOWN])
+        more = f" and {len(unknown) - ROW_IDS_SHOWN} more" if len(unknown) > ROW_IDS_SHOWN else ""
+        raise UsageError(
+            f"--rows names {len(unknown)} ids that are not accepted rows of {dataset.path}: "
+            f"{shown}{more}",
+            hint="list row ids as rows.jsonl (or `dataset sample`) shows them, one per line",
+        )
 
 
 def triage_status(dataset: DatasetDir) -> tuple[TriageStatus, str | None]:
