@@ -353,6 +353,7 @@ def test_a_review_file_renders_tool_calls_and_results_and_notes_what_it_cuts(
     tmp_path: Path,
 ) -> None:
     system = "\n".join(f"rule {index}" for index in range(30))
+    arguments = json.dumps({"key": "k1", "note": "y" * 3000})
     row = {
         "id": "long-row",
         "messages": [
@@ -364,7 +365,7 @@ def test_a_review_file_renders_tool_calls_and_results_and_notes_what_it_cuts(
                 "reasoning_content": "check k1 first",
                 "weight": 0,
                 "tool_calls": [
-                    {"id": "c1", "function": {"name": "lookup", "arguments": '{"key": "k1"}'}}
+                    {"id": "c1", "function": {"name": "lookup", "arguments": arguments}}
                 ],
             },
             {"role": "tool", "tool_call_id": "c1", "content": "x" * 5000},
@@ -381,9 +382,11 @@ def test_a_review_file_renders_tool_calls_and_results_and_notes_what_it_cuts(
     assert f"_{len(system):,} characters, 30 lines; the first 34 characters are shown._" in text
     assert "rule 4\n```" in text and "rule 5" not in text
     assert "````text\nlook up ```k1```\n````" in text
+    pretty = json.dumps(json.loads(arguments), indent=2)
     assert (
         "### Assistant (not trained: weight 0)\n\nReasoning:\n\n```text\ncheck k1 first\n```\n\n"
-        'Tool call `lookup` (`c1`):\n\n```json\n{\n  "key": "k1"\n}\n```'
+        f"Tool call `lookup` (`c1`):\n\n```json\n{pretty[:2000]}\n```\n\n"
+        f"_Cut: {len(pretty):,} characters, 4 lines in all; the first 2,000 characters are shown"
     ) in text
     assert "### Tool result: `lookup` (`c1`)\n\n```text\n" + "x" * 2000 + "\n```" in text
     assert "_Cut: 5,000 characters, 1 line in all; the first 2,000 characters are shown" in text
@@ -429,14 +432,31 @@ def test_a_review_file_does_not_copy_a_judge_label_into_its_labels_line(
     assert "keeps its current label (unlabeled rows stay unlabeled)" in text
 
 
+def test_every_labels_line_of_a_review_file_with_a_judge_drop_is_a_valid_label(
+    dataset: Path, tmp_path: Path
+) -> None:
+    judged = FIXTURE_IDS[0]
+    apply_labels(DatasetDir(dataset), [Label(id=judged, keep=False, reason="off task", by="judge")])
+    review = tmp_path / "review.md"
+    sample(dataset, "--count", "100", "--include-dropped", "--markdown", str(review))
+    lines = re.findall(r'^\{"id": .*\}$', review.read_text(), re.MULTILINE)
+    assert len(lines) == len(FIXTURE_IDS)
+    assert json.dumps({"id": judged, "keep": True, "reason": ""}) in lines
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text("\n".join(lines) + "\n")
+    assert output_json(label(dataset, labels))["label"]["dropped"] == 0
+
+
 def test_sample_replaces_only_a_review_file_it_wrote(dataset: Path, tmp_path: Path) -> None:
-    rubric = tmp_path / "rubric.md"
+    rubric, notes = tmp_path / "rubric.md", tmp_path / "notes.md"
     rubric.write_text("# Task\n\nKeep rows that answer the question.\n")
-    before = rubric.read_bytes()
-    result = invoke("sample", str(dataset), "--markdown", str(rubric))
-    assert (result.exit_code, result.stdout) == (2, "")
-    assert "exists and is not a review file" in _ANSI.sub("", result.stderr)
-    assert rubric.read_bytes() == before
+    notes.write_text("# Review: Q3 planning notes\n")
+    for path in (rubric, notes):
+        before = path.read_bytes()
+        result = invoke("sample", str(dataset), "--markdown", str(path))
+        assert (result.exit_code, result.stdout) == (2, "")
+        assert "exists and is not a review file" in _ANSI.sub("", result.stderr)
+        assert path.read_bytes() == before
     review = tmp_path / "review.md"
     sample(dataset, "--count", "1", "--markdown", str(review))
     data = sample(dataset, "--count", "2", "--markdown", str(review))

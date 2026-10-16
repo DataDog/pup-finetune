@@ -333,7 +333,8 @@ A rerun with nothing left to judge needs no judge key.
 Dataset and run directories hold trace content: conversations, tool calls and tool results.
 `pup-finetune` creates them with `0700` permissions and their files with `0600`. When it
 creates `runs/` or `datasets/` in the working directory, it adds a `.gitignore` there so they
-stay out of version control.
+stay out of version control. `dataset sample --markdown FILE` writes the sampled conversations
+to `FILE` (`0600`); keep it under `datasets/` so git ignores it.
 
 Training, `evaluate` and `dataset triage` send conversation content to the providers you
 choose, and every preview lists each recipient in `data_recipients`. `PUP_READ_ONLY=true` (or

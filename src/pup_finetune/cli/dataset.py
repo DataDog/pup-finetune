@@ -34,7 +34,7 @@ from pup_finetune.curation.pipeline import Pipeline, pipeline_state
 from pup_finetune.curation.samples import (
     DEFAULT_SAMPLE_SEED,
     DEFAULT_SAMPLE_SIZE,
-    REVIEW_HEADING,
+    REVIEW_FIRST_LINE,
     SampleSplit,
     pick_sample,
     review_markdown,
@@ -396,9 +396,9 @@ SAMPLE_DOC = CommandDoc(
         "`dataset label` command to run, then per row its split and label and the "
         "conversation in reading order: the system prompt's first lines, the user messages, "
         "the assistant messages with their reasoning and tool calls (a turn of weight 0 marked "
-        "not trained), the tool results and the final answer; long reasoning and tool results "
-        "are cut, their length noted. An existing FILE is replaced only when it is a review "
-        "file.",
+        "not trained), the tool results and the final answer; long reasoning, tool calls and "
+        "tool results are cut, their length noted. An existing FILE is replaced only when it "
+        "is a review file.",
     ),
     examples=(
         "pup finetune dataset sample datasets/my-agent -n 20",
@@ -1219,7 +1219,13 @@ def sample(
             label_command=label_command,
         )
         replacing = review.exists()
-        atomic_write_text(ensure_private_dir(review.parent) / review.name, text)
+        try:
+            atomic_write_text(ensure_private_dir(review.parent) / review.name, text)
+        except OSError as exc:
+            raise UsageError(
+                f"cannot write --markdown {markdown}: {exc.strerror or exc}",
+                hint="choose a writable --markdown path",
+            ) from exc
         shown = display_path(review)
         result["markdown_file"] = shown
         wrote = f"replaced the earlier review file {shown}" if replacing else f"wrote {shown}"
@@ -1236,8 +1242,8 @@ def sample(
 
 def _is_review_file(path: Path) -> bool:
     try:
-        with path.open("rb") as handle:
-            return handle.readline().startswith(REVIEW_HEADING.encode())
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            return REVIEW_FIRST_LINE.match(handle.readline()) is not None
     except OSError:
         return False
 

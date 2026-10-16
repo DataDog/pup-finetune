@@ -40,8 +40,9 @@ SYSTEM_PROMPT_LINES = 5
 MAX_SYSTEM_PROMPT_CHARS = 800
 MAX_TOOL_RESULT_LINES = 40
 MAX_TOOL_RESULT_CHARS = 2000
-"""Longest tool result a review file shows; a longer one is cut, its length noted."""
+"""Longest reasoning, tool call or result a review file shows; longer is cut, length noted."""
 REVIEW_HEADING = "# Review: "
+REVIEW_FIRST_LINE = re.compile(rf"{re.escape(REVIEW_HEADING)}\d+ of \d+ rows of `")
 """How a review file starts, so ``sample --markdown`` replaces only a file it wrote."""
 JUDGE_LINE_NOTE = (
     "Labeled by the judge council: copy this line only to override it; a copied line becomes "
@@ -213,7 +214,7 @@ def _review_row(
     judged = label is not None and label.by == "judge"
     line = {
         "id": row.id,
-        "keep": True if label is None else label.keep,
+        "keep": True if label is None or judged else label.keep,
         "reason": "" if label is None or judged else label.reason,
     }
     return [
@@ -248,19 +249,19 @@ def _review_message(message: Message, *, final: bool, names: Mapping[str, str]) 
         arguments = json.dumps(json.loads(call.function.arguments), indent=2, ensure_ascii=False)
         parts += [
             f"Tool call {_code(call.function.name)} ({_code(call.id)}):",
-            _fenced(arguments, "json"),
+            *_text_block(arguments, cut=True, info="json"),
         ]
     return parts
 
 
-def _text_block(text: str, *, cut: bool = False) -> list[str]:
+def _text_block(text: str, *, cut: bool = False, info: str = "text") -> list[str]:
     if not text.strip():
         return ["_(empty)_"]
     head = _head(text, MAX_TOOL_RESULT_LINES, MAX_TOOL_RESULT_CHARS) if cut else None
     if head is None:
-        return [_fenced(text, "text")]
+        return [_fenced(text, info)]
     return [
-        _fenced(head, "text"),
+        _fenced(head, info),
         f"_Cut: {_size(text)} in all; the first {len(head):,} characters are shown (the full "
         "row is in rows.jsonl)._",
     ]
