@@ -1151,14 +1151,16 @@ def _replay_next(
 
     One that stopped, has errors or whose publishing failed is continued by the evaluate
     command (a free preview first). A complete one is deployed (a free preview), unless the
-    run has a deployment already, whether or not it was published: publishing is optional.
-    One that could not be published also gets the steps to publish it: push the dataset,
-    then rerun the evaluation; a complete evaluation's rerun reuses every result, so it
-    makes no new model calls.
+    run has a deployment already. One that could not be published for want of a push has no
+    next command: its steps push the dataset, then rerun the evaluation (a complete
+    evaluation's rerun reuses every result, so it makes no new model calls), or deploy it
+    unpublished.
     """
     steps: list[dict[str, str]] = []
     rerun = plan.evaluate_command()
-    if publication["status"] == "skipped" and (push := plan.publishing.push_step()) is not None:
+    deploy = deploy_command(plan.run_dir)
+    push = plan.publishing.push_step() if publication["status"] == "skipped" else None
+    if push is not None:
         steps.append(push)
         if status == "complete":
             why = (
@@ -1171,6 +1173,8 @@ def _replay_next(
                 "(paid: ask the user)"
             )
         steps.append(step(shlex.join([*rerun, "--confirm"]), why))
+        if status == "complete" and deploy is not None:
+            steps.append(step(deploy, "or deploy the tuned model unpublished (a free preview)"))
     if status == "complete" and plan.compare is None:
         compared = evaluate_words(
             plan.run_dir,
@@ -1191,7 +1195,7 @@ def _replay_next(
     if retry:
         next_command: str | None = shlex.join(rerun)
     else:
-        next_command = deploy_command(plan.run_dir)
+        next_command = None if push is not None else deploy
     return {"next_command": next_command, "next_steps": steps}
 
 

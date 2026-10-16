@@ -91,9 +91,10 @@ record and a child span per replayed action, with the metrics and judge verdicts
 dataset's push receipt (`push.json`): without one the preview and the result warn and the
 evaluation is not published (the local results are complete either way); the result's
 `next_command` is then `null`, and its `next_steps` push the dataset and rerun the evaluation,
-which reuses every finished result (no new model calls when it is complete) and publishes it.
-A complete evaluation's `next_command` is the `deploy` preview. `--no-publish`
-(`--eval-no-publish` for `train --evaluate`) skips it without a warning. Publishing resumes:
+which reuses every finished result (no new model calls when it is complete) and publishes it,
+or deploy it unpublished. A complete evaluation that was published, or run with `--no-publish`
+(`--eval-no-publish` for `train --evaluate`, which skips publishing without a warning), has the
+`deploy` preview as its `next_command`. Publishing resumes:
 `experiments.json` and `published.json` in the evaluation directory record the experiments
 created and the spans sent, so a rerun creates and sends nothing twice, and a failed publish
 exits 1 with a `next_command` that publishes the rest (a Ctrl-C while publishing leaves a

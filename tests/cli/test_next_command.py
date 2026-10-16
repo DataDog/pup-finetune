@@ -251,10 +251,13 @@ def test_following_next_command_from_a_dataset_to_a_deployment(
     evaluate = output(follow(trained["next_command"], raised))  # a free preview
     evaluated = output(follow(evaluate["next_command"], raised))
     assert evaluated["status"] == "complete"
-    # Not published (nothing was pushed): deploying goes on; the steps say how to publish.
-    assert evaluated["next_command"].startswith("pup finetune deploy ")
-    assert evaluated["next_steps"][0]["command"].endswith("--name <NAME>")
-    deploy = output(follow(evaluated["next_command"], raised))
+    # Not published (nothing was pushed): no next command; the steps push the dataset and
+    # rerun, or deploy unpublished.
+    assert evaluated["next_command"] is None
+    push_step, _, deploy_step, *_ = evaluated["next_steps"]
+    assert push_step["command"].endswith("--name <NAME>")
+    assert deploy_step["command"].startswith("pup finetune deploy ")
+    deploy = output(follow(deploy_step["command"], raised))
     deployed = output(follow(deploy["next_command"], raised))
     assert deployed["next_command"] is None
     receipt = RunDir(tmp_path / "run").read_deployment() or {}

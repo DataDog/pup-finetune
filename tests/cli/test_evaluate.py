@@ -434,8 +434,9 @@ def test_evaluate_writes_a_summary_where_the_tuned_model_wins(run_dir: Path) -> 
     data = output(result)
     assert data["status"] == "complete"
     assert data["calibration"]["ok"] is True
-    # Publishing is optional: a complete evaluation goes on to the deploy preview.
-    assert data["next_command"] == f"pup finetune deploy {run_dir}"
+    # Not published for want of a push: no next command, and deploying is a step.
+    assert data["next_command"] is None
+    assert f"pup finetune deploy {run_dir}" in [step["command"] for step in data["next_steps"]]
     out = run_dir / "eval"
     assert data["files"] == {
         "summary": str(out / "summary.json"),

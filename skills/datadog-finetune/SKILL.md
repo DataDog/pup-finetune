@@ -394,7 +394,7 @@ Errors read `Error [<code>]: <message>`, then `Hint: ...`. The codes, with their
 | `worker.state` `stale` or `exited` while `training` | The worker died or hangs | Read `worker.log`. Cancel a stale worker, then preview `resume` and ask. |
 | `Error [wrong_phase]` | The run is still training, or already finished | Check `status`. Resume only `interrupted`, `failed` or `cancelled` runs. |
 | The judge fails calibration, answers `refused`, or triage reports `too_long` rows | The judge cannot grade these | None is a pass or a keep. Pick another `--judge-model` or `--judges` with the user. |
-| The evaluation was not published | No `push.json`, or the push missed the test split | Publishing is optional; `next_command` goes on to deploy. To publish, follow `next_steps`: push with a yes, then rerun; finished results are reused. |
+| The evaluation was not published | No `push.json`, or the push missed the test split | `next_command` is null. To publish, follow `next_steps`: push with a yes, then rerun; finished results are reused. Its deploy step skips publishing. |
 | `deploy` times out, or the smoke test fails | It did not serve in time | It may still bill: preview `undeploy` at once, tell the user, confirm on their yes. Redeploy only after a yes. |
 | `undeploy` refuses: not the requested deployment | The deployment id holds another deployment | Nothing was deleted; never delete it. With an OK, follow the error's steps. |
 | `could not deactivate Baseten run <id> (...)`, or a hint that a run or sampler `may remain` | Baseten cleanup failed or was interrupted; it may still bill | Tell the user at once: they deactivate it in the Baseten UI (or with the hinted `curl` command). |

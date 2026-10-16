@@ -229,11 +229,11 @@ def test_without_a_push_receipt_the_evaluation_is_not_published(
     assert any("dataset push" in warning for warning in data["warnings"])
     assert fake.calls == []
     assert (run_dir / "eval" / "summary.json").is_file()
-    # Publishing is optional: the next command is the deploy preview, and the steps say how to
-    # publish (push the dataset, with a name only the user can pick, then rerun the evaluation,
-    # which reuses every result).
-    assert data["next_command"] == f"pup finetune deploy {run_dir}"
-    push_step, rerun_step, compare_step = data["next_steps"]
+    # Not published: no next command; the steps push the dataset (with a name only the user
+    # can pick) and rerun the evaluation, which reuses every result, or deploy unpublished.
+    assert data["next_command"] is None
+    push_step, rerun_step, deploy_step, compare_step = data["next_steps"]
+    assert deploy_step["command"] == f"pup finetune deploy {run_dir}"
     assert "--compare-model <MODEL>" in compare_step["command"]
     dataset = Path(str(json.loads((run_dir / "run.json").read_text())["dataset_dir"]))
     assert push_step["command"] == f"pup finetune dataset push {dataset} --name <NAME>"
@@ -342,8 +342,8 @@ def test_an_unfinished_push_is_not_published(
     assert reason in data["publication"]["reason"]
     assert experiments_calls(fake) == 0
     assert experiments.experiments == {}
-    # The push to finish is known: the same dataset and project. Deploying needs none of it.
-    assert data["next_command"] == f"pup finetune deploy {run_dir}"
+    # The push to finish is known: the same dataset and project.
+    assert data["next_command"] is None
     assert data["next_steps"][0]["command"] == (
         f"pup finetune dataset push {dataset.resolve()} --name synthetic-replay "
         "--project pup-finetune"
@@ -378,7 +378,7 @@ def test_a_test_row_changed_after_its_push_is_not_published(
     assert result.exit_code == 0, result.stderr
     assert output(result)["publication"]["status"] == "skipped"
     assert experiments_calls(fake) == 0
-    (step, _, _) = output(result)["next_steps"]
+    (step, _, _, _) = output(result)["next_steps"]
     assert step["command"] == f"pup finetune dataset push {dataset.resolve()} --name <NAME>"
     assert "push.json aside" in step["why"]
 
