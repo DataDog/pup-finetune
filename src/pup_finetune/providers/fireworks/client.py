@@ -1168,7 +1168,9 @@ class FireworksDeployments(Protocol):
         ...
 
     def delete_deployment(self, deployment_id: str) -> bool:
-        """Delete the deployment; ``False`` when it was already gone (HTTP 404)."""
+        """Delete the deployment; ``False`` when it was already gone (HTTP 404). It is deleted
+        even when it served a request in the last hour, which Fireworks otherwise refuses: the
+        smoke test always has, and undeploy is the user's decision to delete it."""
         ...
 
     def close(self) -> None:
@@ -1181,7 +1183,7 @@ class _SdkDeploymentsResource(Protocol):
 
     def get(self, deployment_id: str) -> Any: ...
 
-    def delete(self, deployment_id: str) -> Any: ...
+    def delete(self, deployment_id: str, *, ignore_checks: bool) -> Any: ...
 
 
 class _SdkShapeVersionsResource(Protocol):
@@ -1446,7 +1448,7 @@ class FireworksDeploymentsClient:
     def delete_deployment(self, deployment_id: str) -> bool:
         client = self._sdk()
         try:
-            client.deployments.delete(deployment_id)
+            client.deployments.delete(deployment_id, ignore_checks=True)
         except FinetuneError:
             raise
         except Exception as exc:
