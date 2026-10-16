@@ -193,7 +193,7 @@ login), `openai/<model>` (`OPENAI_API_KEY`), or otherwise a Fireworks model id s
 full id, which previews print and `triage.json` and `evaluation.json` freeze. A judge on a
 reasoning model asks for the lowest reasoning effort the model takes (`low` on Anthropic and
 OpenAI; per model on Fireworks, `judges.FIREWORKS_REASONING`). A preview whose judge or
-compare model has no key fails with the key's login hint (`usage`, exit 2). Anthropic
+compare model has no key, or a malformed one, fails with the key's login hint (`usage`, exit 2). Anthropic
 judges need the `anthropic` extra (`uv sync --all-extras`; `uv sync` is exact, so a bare
 `uv sync --extra anthropic` removes the other extras):
 

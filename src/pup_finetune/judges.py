@@ -50,6 +50,7 @@ from typing import TYPE_CHECKING, Final, Literal, cast
 
 from pup_finetune import credentials
 from pup_finetune.errors import UsageError, install_hint
+from pup_finetune.http_common import bearer_key
 from pup_finetune.inference import (
     DEFAULT_JUDGE_BASE_URL,
     ChatClient,
@@ -277,19 +278,28 @@ def require_key(
     """Raise the missing key's :class:`UsageError`, with its login hint, when nothing would
     sign ``config``'s model in: no key in the environment or the keychain and, for Anthropic,
     no login of the SDK's own. Offline: no call is made. The fake judge and compare model
-    need no key; ``what`` names the model in the message. With ``warnings`` (a read-only
-    preview, which offers no ``--confirm`` to fail), the error is appended there instead."""
+    need no key; ``what`` names the model in the message. A key that is there but malformed
+    is refused the same way, as opening its client would refuse it. With ``warnings`` (a
+    read-only preview, which offers no ``--confirm`` to fail), the error is appended there
+    instead."""
     if config.provider == "fake":
         return
+    hint = login_hint(config.credential)
+    error: UsageError | None = None
     if credentials.key_source(config.credential) is None:
         error = credentials.missing_key_error(
-            config.credential,
-            hint=login_hint(config.credential),
-            needed_by=f"the {what} {config.spec}",
+            config.credential, hint=hint, needed_by=f"the {what} {config.spec}"
         )
-        if warnings is None:
-            raise error
-        warnings.append(f"{error.message}: {error.hint}")
+    elif (found := credentials.lookup(config.credential)) is not None:
+        try:
+            bearer_key(found.value, label=f"the {config.credential} API key", hint=hint)
+        except UsageError as malformed:
+            error = malformed
+    if error is None:
+        return
+    if warnings is None:
+        raise error
+    warnings.append(f"{error.message}: {error.hint}")
 
 
 def _anthropic_missing(what: str = "judge") -> UsageError:
