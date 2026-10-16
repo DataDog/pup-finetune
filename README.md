@@ -117,11 +117,13 @@ block (rows kept, dropped and unlabeled, triage, push), and its `next_command` f
 
 ### Review the rows
 
-Read a sample and record which rows to keep. `labels.jsonl` holds one
-`{"id": "<row id>", "keep": true, "reason": "..."}` per line; dropping a row needs a reason:
+Read a sample and record which rows to keep. `--markdown` also writes the sampled
+conversations in full to a private file, each with its labels line to copy. `labels.jsonl`
+holds one `{"id": "<row id>", "keep": true, "reason": "..."}` per line; dropping a row needs
+a reason:
 
 ```sh
-pup finetune dataset sample datasets/my-agent --count 20
+pup finetune dataset sample datasets/my-agent --count 20 --markdown datasets/review.md
 pup finetune dataset label datasets/my-agent --file labels.jsonl
 ```
 

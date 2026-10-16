@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -295,6 +296,132 @@ def test_sample_needs_a_dataset_directory(tmp_path: Path) -> None:
     result = invoke("sample", str(tmp_path / "missing"))
     assert result.exit_code == 2
     assert "is not a dataset directory" in result.stderr
+
+
+# --- sample --markdown -------------------------------------------------------------------
+
+
+def test_sample_writes_a_private_review_file_whose_labels_lines_label_the_rows(
+    dataset: Path, tmp_path: Path
+) -> None:
+    from pup_finetune.cli._summary import summarize
+
+    review = tmp_path / "review" / "sample.md"
+    result = invoke("sample", str(dataset), "--count", "3", "--markdown", str(review))
+    data = output_json(result)
+    assert stat.S_IMODE(review.stat().st_mode) == 0o600
+    assert stat.S_IMODE(review.parent.stat().st_mode) == 0o700
+    assert data["markdown_file"] == str(review.resolve())
+    assert data["rows_file"] == str((dataset / "rows.jsonl").resolve())
+    assert "0600" in data["notes"][0] and "trace content" in data["notes"][0]
+    assert f"note: {data['notes'][0]}" in result.stderr
+    found = summarize("dataset sample", data)
+    assert found is not None and any(data["markdown_file"] in line for line in found.lines)
+    label_step = data["next_steps"][0]
+    assert label_step["command"].endswith("--file <LABELS_FILE>")
+    assert data["markdown_file"] in label_step["why"]
+    text = review.read_text()
+    assert text.index("## How to record decisions") < text.index(
+        f"```sh\n{label_step['command']}\n```"
+    )
+    assert "trace content" in text.split("---")[0]
+    for heading in ("### System prompt", "### User", "### Assistant", "### Final answer"):
+        assert heading in text
+    ids = [row["id"] for row in data["rows"]]
+    assert re.findall(r"^## \d+\. `([^`]+)`$", text, re.MULTILINE) == ids
+    assert text.count("- Label: none") == 3
+    lines = re.findall(r'^\{"id": .*\}$', text, re.MULTILINE)
+    assert lines == [json.dumps({"id": row_id, "keep": True, "reason": ""}) for row_id in ids]
+
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(
+        "\n".join([lines[0].replace('true, "reason": ""', 'false, "reason": "x"'), *lines[1:]])
+    )
+    assert output_json(label(dataset, labels))["label"] == {
+        "file": str(labels),
+        "labels": 3,
+        "applied": 3,
+        "unchanged": 0,
+        "kept": 2,
+        "dropped": 1,
+    }
+
+
+def test_a_review_file_renders_tool_calls_and_results_and_notes_what_it_cuts(
+    tmp_path: Path,
+) -> None:
+    system = "\n".join(f"rule {index}" for index in range(30))
+    row = {
+        "id": "long-row",
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": "look up ```k1```"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "c1", "function": {"name": "lookup", "arguments": '{"key": "k1"}'}}
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "x" * 5000},
+            {"role": "assistant", "content": "k1 is set."},
+        ],
+        "tools": [{"type": "function", "function": {"name": "lookup"}}],
+    }
+    rows = tmp_path / "rows.jsonl"
+    rows.write_text(json.dumps(row) + "\n")
+    target, review = tmp_path / "ds", tmp_path / "review.md"
+    assert invoke("import", str(target), "--file", str(rows)).exit_code == 0
+    sample(target, "--markdown", str(review))
+    text = review.read_text()
+    assert f"_{len(system):,} characters, 30 lines; the first 34 characters are shown._" in text
+    assert "rule 4\n```" in text and "rule 5" not in text
+    assert "````text\nlook up ```k1```\n````" in text
+    assert 'Tool call `lookup` (`c1`):\n\n```json\n{\n  "key": "k1"\n}\n```' in text
+    assert "### Tool result: `lookup` (`c1`)\n\n```text\n" + "x" * 2000 + "\n```" in text
+    assert "_Cut: 5,000 characters, 1 line in all; the first 2,000 characters are shown" in text
+    assert "### Final answer\n\n```text\nk1 is set.\n```" in text
+
+
+def test_a_review_file_holds_the_rows_split_and_count_pick(dataset: Path, tmp_path: Path) -> None:
+    review = tmp_path / "train.md"
+    data = sample(
+        dataset, "--split", "train", "--count", "2", "--seed", "7", "--markdown", str(review)
+    )
+    text = review.read_text()
+    ids = re.findall(r"^## \d+\. `([^`]+)`$", text, re.MULTILINE)
+    assert ids == [row["id"] for row in data["rows"]] and len(ids) == 2
+    assert re.findall(r"^- Split: (\S+)$", text, re.MULTILINE) == ["train", "train"]
+    assert "Sampled from the train split with seed 7." in text
+
+
+def test_a_review_file_copies_a_rows_current_label(dataset: Path, tmp_path: Path) -> None:
+    dropped = FIXTURE_IDS[0]
+    file = label_file(tmp_path, {"id": dropped, "keep": False, "reason": "off topic"})
+    output_json(label(dataset, file))
+    review = tmp_path / "review.md"
+    sample(dataset, "--count", "100", "--include-dropped", "--markdown", str(review))
+    text = review.read_text()
+    assert "- Label: drop (manual): off topic" in text
+    assert json.dumps({"id": dropped, "keep": False, "reason": "off topic"}) in text
+
+
+def test_sample_refuses_a_markdown_path_that_is_a_directory_or_not_markdown(
+    dataset: Path, tmp_path: Path
+) -> None:
+    folder = tmp_path / "review.md"
+    folder.mkdir()
+    rows = (dataset / "rows.jsonl").read_bytes()
+    for path, error in (
+        (folder, "is a directory"),
+        (dataset / "rows.jsonl", "--markdown must name a .md file"),
+    ):
+        result = invoke("sample", str(dataset), "--markdown", str(path))
+        assert result.exit_code == 2
+        assert result.stdout == ""
+        assert error in _ANSI.sub("", result.stderr)
+    assert (dataset / "rows.jsonl").read_bytes() == rows
+    assert list(folder.iterdir()) == []
 
 
 # --- read-only mode ---------------------------------------------------------------------

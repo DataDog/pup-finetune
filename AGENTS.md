@@ -141,6 +141,7 @@ uv run pup-finetune dataset pull /tmp/ds   # rerun to resume: the frozen setting
                                      # the flags (pages cached in /tmp/ds/raw)
 uv run pup-finetune dataset show /tmp/ds
 uv run pup-finetune dataset sample /tmp/ds -n 20              # rows in brief, to review
+uv run pup-finetune dataset sample /tmp/ds --markdown /tmp/review.md  # and in full (0600)
 uv run pup-finetune dataset label /tmp/ds --file labels.jsonl  # {id, keep, reason} per line
 uv run pup-finetune dataset triage --print-template > rubric.md  # Task / Keep / Drop / Examples
 uv run pup-finetune dataset triage /tmp/ds --rubric rubric.md --max-rows 20
@@ -623,7 +624,8 @@ Source lives under `src/pup_finetune/`.
 - `curation/` - deciding which accepted rows to train on. `labels.py` has `apply_labels`
   (every id an accepted row, last label per id wins, repeats skipped, appended through
   `DatasetDir.append_labels`); `samples.py` picks a seeded, readable sample of rows for
-  review (`row_summary` is a row's brief form); `pipeline.py`
+  review (`row_summary` is a row's brief form; `review_markdown` is `sample --markdown`'s
+  file, message text fenced); `pipeline.py`
   has `pipeline_state`, the `pipeline` block of every dataset result. `triage.py` is the judge council behind `dataset triage`: `Criteria` (rubric and/or
   rules, hashed), `build_messages` (the untrusted-data system prompt with the rubric, the
   whole row JSON-encoded in blocks), `parse_vote` (strict `{"keep", "reason"}`), `Vote`s in
