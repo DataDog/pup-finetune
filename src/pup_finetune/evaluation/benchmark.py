@@ -7,8 +7,9 @@
 """Benchmark base models on a dataset's test split, to choose the one to fine-tune.
 
 :func:`plan_benchmark` turns a dataset and the models to compare into a
-:class:`BenchmarkPlan`: the same replay cases ``evaluate`` uses, the judge and the output
-directory. :func:`execute` calibrates the judge once, then replays the cases with each base
+:class:`BenchmarkPlan`: the same replay cases ``evaluate`` uses (with ``--max-rows``, those of
+a seeded sample of the test conversations), the judge and the output directory.
+:func:`execute` calibrates the judge once, then replays the cases with each base
 model in turn (:func:`~pup_finetune.evaluation.replay.run_replay`, with the model alias as
 its one target), in a session of its own that ends before the next model starts, into
 ``OUT/<model>``; a rerun resumes every model where it stopped. A model whose session cannot
@@ -22,6 +23,7 @@ fine-tune, or says the best base model already reaches ``--target-pass-rate``. L
 
 from __future__ import annotations
 
+import hashlib
 import shlex
 import statistics
 import threading
@@ -86,6 +88,7 @@ __all__ = [
     "leaderboard",
     "plan_benchmark",
     "recommend",
+    "sample_conversations",
 ]
 
 DEFAULT_OUT_DIR_NAME: Final = "benchmark"
@@ -103,6 +106,7 @@ class BenchmarkSettings:
 
     out_dir: Path
     max_cases_per_trajectory: int = DEFAULT_MAX_CASES_PER_TRAJECTORY
+    max_rows: int | None = None
     judge_model: str | None = None
     concurrency: int = DEFAULT_CONCURRENCY
     max_tokens: int = DEFAULT_MAX_TOKENS
@@ -136,6 +140,8 @@ class BenchmarkPlan:
     """Where the judge came from (see :func:`~pup_finetune.evaluation.runner.resolve_judge`)."""
     settings: BenchmarkSettings
     runtime: Runtime
+    sampled_from: int | None = None
+    """How many test conversations ``--max-rows`` sampled from; ``None`` when it cut none."""
 
     @property
     def out_dir(self) -> Path:
@@ -178,6 +184,8 @@ class BenchmarkPlan:
             "metrics_version": METRICS_VERSION,
             "seed": self.settings.seed,
             "max_cases_per_trajectory": self.settings.max_cases_per_trajectory,
+            # Only when given, so a benchmark made before --max-rows existed still resumes.
+            **({} if self.settings.max_rows is None else {"max_rows": self.settings.max_rows}),
         }
 
     def remaining(self, candidate: Candidate) -> dict[str, int]:
@@ -206,6 +214,12 @@ class BenchmarkPlan:
         """A warning when the test split is too small for the intervals to separate models."""
         if self.trajectories >= MIN_TRAJECTORIES:
             return []
+        if self.sampled_from is not None:
+            return [
+                f"--max-rows {self.settings.max_rows} replays only {self.trajectories} of the "
+                f"{self.sampled_from} test conversations, so the confidence intervals are wide: "
+                "raise --max-rows for a firmer choice"
+            ]
         return [
             f"the test split holds only {self.trajectories} conversations, so the confidence "
             "intervals are wide: pull more rows for a firmer choice"
@@ -241,6 +255,8 @@ class BenchmarkPlan:
             words += ["--out-dir", display_path(settings.out_dir)]
         if settings.max_cases_per_trajectory != defaults.max_cases_per_trajectory:
             words += ["--max-cases", str(settings.max_cases_per_trajectory)]
+        if settings.max_rows is not None:
+            words += ["--max-rows", str(settings.max_rows)]
         words += ["--judge-model", self.judge.spec]
         if settings.concurrency != defaults.concurrency:
             words += ["--concurrency", str(settings.concurrency)]
@@ -310,11 +326,12 @@ class BenchmarkPlan:
             else destination(self.judge)
         )
         names = ", ".join(candidate.target for candidate in self.candidates)
+        sampled = "" if self.sampled_from is None else f" (of {self.sampled_from}, --max-rows)"
         return {
             "action": f"benchmark {_models(len(self.candidates))} ({names}) on "
-            f"{len(self.cases)} cases from {self.trajectories} test conversations: generate "
-            "each with every model, one model at a time in a session of its own, and judge "
-            f"each answer with {judge_name}",
+            f"{len(self.cases)} cases from {self.trajectories} test conversations{sampled}: "
+            "generate each with every model, one model at a time in a session of its own, and "
+            f"judge each answer with {judge_name}",
             "billing": "; ".join(billing),
             "dataset": display_path(self.dataset_dir),
             "out_dir": display_path(self.out_dir),
@@ -335,6 +352,7 @@ class BenchmarkPlan:
                 "models": [candidate.target for candidate in self.candidates],
                 "judge_model": self.judge.spec,
                 "max_cases": settings.max_cases_per_trajectory,
+                "max_rows": settings.max_rows,
                 "max_tokens": settings.max_tokens,
                 "concurrency": settings.concurrency,
                 "seed": settings.seed,
@@ -353,6 +371,22 @@ def _models(count: int) -> str:
     return f"{count} base model{'' if count == 1 else 's'}"
 
 
+def sample_conversations(
+    cases: Sequence[ReplayCase], max_rows: int, *, seed: int
+) -> list[ReplayCase]:
+    """The cases of at most ``max_rows`` of the conversations ``cases`` come from, in order.
+
+    The conversations are ranked by a seeded hash of their row ids, so a seed always picks
+    the same ones, and a larger ``max_rows`` keeps those it picked before.
+    """
+
+    def rank(row_id: str) -> str:
+        return hashlib.sha256(f"benchmark:{seed}:{row_id}".encode()).hexdigest()
+
+    kept = set(sorted({case.row_id for case in cases}, key=rank)[:max_rows])
+    return [case for case in cases if case.row_id in kept]
+
+
 def plan_benchmark(
     runtime: Runtime,
     dataset_dir: Path,
@@ -363,7 +397,8 @@ def plan_benchmark(
     dataset in ``dataset_dir``.
 
     Raises :class:`UsageError` for fewer than one model, a model given twice, a missing
-    package, a judge that is one of the models, or a test split with no case.
+    package, a judge that is one of the models, or a test split with no case. With
+    ``max_rows``, the cases are those of :func:`sample_conversations`.
     """
     from pup_finetune.curation.pipeline import require_in_datadog
     from pup_finetune.evaluation.cases import build_cases
@@ -409,6 +444,11 @@ def plan_benchmark(
             "kept rows and no assistant turn to replay",
             hint="import more rows so the test split holds some conversations",
         )
+    conversations = len({case.row_id for case in cases})
+    sampled_from = None
+    if settings.max_rows is not None and settings.max_rows < conversations:
+        cases = sample_conversations(cases, settings.max_rows, seed=settings.seed)
+        sampled_from = conversations
     return BenchmarkPlan(
         dataset_dir=dataset_dir,
         candidates=tuple(candidates),
@@ -417,6 +457,7 @@ def plan_benchmark(
         judge_source=judge_source,
         settings=settings,
         runtime=runtime,
+        sampled_from=sampled_from,
     )
 
 
@@ -637,6 +678,11 @@ def _entry(
         for (name, _), record in generations.items()
         if name == candidate.target and isinstance(record.get("latency_s"), int | float)
     ]
+    unparseable = 0
+    for case in plan.cases:
+        record = generations.get((candidate.target, case.id))
+        if record is not None and record.get("stop_reason") != "length":
+            unparseable += record.get("format_valid") is False
     if error is not None:
         status = "error"
     elif target["pending"]:
@@ -653,6 +699,8 @@ def _entry(
         "cases": target["completed"],
         "errors": target["errors"],
         "pending": target["pending"],
+        "truncated": target["truncated"],
+        "unparseable": unparseable,
         "latency_p50_s": statistics.median(latencies) if latencies else None,
         "gap_to_best": None,
         "within_noise_of_best": None,
@@ -792,6 +840,20 @@ def _result(
             "fine-tuning may not close a gap this wide, so add rows or try a larger base "
             "model too"
         )
+    for entry in board:
+        if entry["truncated"]:
+            warnings.append(
+                f"{entry['truncated']} of {entry['model']}'s generations reached "
+                f"--max-tokens ({plan.settings.max_tokens}) and were cut off; they count as "
+                "failures, so benchmark into a new --out-dir with a higher --max-tokens to "
+                "compare the models on their answers rather than their length"
+            )
+        if entry["unparseable"]:
+            warnings.append(
+                f"{entry['unparseable']} of {entry['model']}'s answers could not be "
+                "parsed (format_valid false in the generations.jsonl of "
+                f"{entry['out_dir']}) and count as failures"
+            )
     warnings += plan.split_warnings()
     return finite_json(
         {

@@ -203,6 +203,9 @@ The result ranks the models by judge pass rate with a confidence interval and re
 to fine-tune. A base model at or above `--target-pass-rate` (90% by default) may need no
 training, and models within noise of the best are named, so the cheapest to serve can win.
 Results go in `datasets/my-agent/benchmark`; rerun the command to continue one that stopped.
+`--max-rows 20` replays a seeded sample of 20 test conversations, for a quicker, cheaper
+first comparison. Each failed case says why on stderr: cut off at `--max-tokens`, an answer
+that could not be parsed, or the judge's reason.
 
 ### A cheap first run
 

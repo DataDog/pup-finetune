@@ -757,6 +757,23 @@ def test_generations_cut_off_at_max_tokens_are_counted(tmp_path: Path) -> None:
     assert outcome.summary["targets"]["tuned"]["truncated"] == 0
 
 
+def test_each_progress_event_carries_why_its_pair_failed(tmp_path: Path) -> None:
+    class Unparsed(ScriptedSampler):
+        def generate(
+            self, messages: list[ChatMessage], tools: list[ToolSpec], *, max_tokens: int
+        ) -> Generation:
+            found = super().generate(messages, tools, max_tokens=max_tokens)
+            return dataclasses.replace(found, format_valid=False)
+
+    events: list[dict[str, Any]] = []
+    samplers = {"base": Unparsed(), "tuned": ScriptedSampler()}
+    replay(tmp_path / "eval", samplers, Judge(), on_progress=events.append)
+    base = next(event for event in events if event["target"] == "base")
+    tuned = next(event for event in events if event["target"] == "tuned")
+    assert (base["format_valid"], base["stop_reason"], base["max_tokens"]) == (False, "stop", 64)
+    assert (tuned["format_valid"], tuned["reason"]) == (True, "different")
+
+
 class LiveRecorder:
     """A live publisher that records when it was started and offered results."""
 

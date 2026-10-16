@@ -533,7 +533,7 @@ Safety: Free · reads Datadog · PUP_READ_ONLY: allowed.
 
 Replay each held-out test conversation of a dataset with several base models, one recorded assistant turn at a time, and score each with the tool-call metrics and the LLM judge evaluate uses. Without --confirm, previews the calls and where the data goes. The result ranks the models and recommends the one to fine-tune.
 
-The dataset must be in Datadog, as for `train`. Each model runs in a session of its own, one after another, into OUT/&lt;model&gt;; rerun the same command to continue a benchmark that stopped. A model below --target-pass-rate is worth fine-tuning; one at or above it may need no training. Models within noise of the best are named, so the cheapest to serve can be chosen. Tools are not executed, so the scores measure agreement with the recorded behavior, not task success.
+The dataset must be in Datadog, as for `train`. Each model runs in a session of its own, one after another, into OUT/&lt;model&gt;; rerun the same command to continue a benchmark that stopped. A model below --target-pass-rate is worth fine-tuning; one at or above it may need no training. Models within noise of the best are named, so the cheapest to serve can be chosen. --max-rows replays a seeded sample of the test conversations instead, for a quicker, cheaper comparison. Tools are not executed, so the scores measure agreement with the recorded behavior, not task success.
 
 ```
 pup finetune benchmark [OPTIONS] DATASET
@@ -550,6 +550,7 @@ pup finetune benchmark [OPTIONS] DATASET
 | `--target-pass-rate` | `RATE (0.0<=x<=1.0)` | `0.9` | Judge pass rate at which a base model needs no fine-tuning. |
 | **Cases** | | | |
 | `--max-cases` | `N (x>=1)` | `2` | Turns replayed per conversation. |
+| `--max-rows` | `N (x>=1)` | all | Test conversations to sample and replay. |
 | `--max-tokens` | `N (x>=1)` | `4096` | Most tokens each generation may produce. |
 | `--seed` | `N (x>=0)` | `0` | Seed for picking cases and the bootstrap. |
 | **Judge** | | | |
@@ -564,7 +565,7 @@ Examples:
 
 ```sh
 pup finetune benchmark ds --models qwen3p5-9b,glm-5p3-flash
-pup finetune benchmark ds --models qwen3p5-9b,glm-5p3-flash --max-cases 1
+pup finetune benchmark ds --models qwen3p5-9b,glm-5p3-flash --max-cases 1 --max-rows 20
 ```
 
 Safety: Paid with --confirm · sends test rows to each model's provider and to the judge · PUP_READ_ONLY: preview only unless offline.

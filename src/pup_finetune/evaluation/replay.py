@@ -630,8 +630,10 @@ def run_replay(
     is needed only while one of its pairs still needs a generation, so a rerun with nothing
     left to generate may pass fewer. Holds the directory's lock throughout. ``on_progress``
     receives ``{"done", "total", "target", "case_id", "status", "passed", "no_verdict",
-    "error"}`` per finished pair (``no_verdict`` the judge's answer's flaw, if it held no
-    verdict; ``error`` the error result's ``{"stage", "type", "message"}``).
+    "reason", "error", "format_valid", "stop_reason", "max_tokens"}`` per finished pair
+    (``no_verdict`` the judge's answer's flaw, if it held no verdict; ``reason`` the
+    judgment's; ``error`` the error result's ``{"stage", "type", "message"}``;
+    ``format_valid`` and ``stop_reason`` the generation's, ``None`` without one).
     ``publisher`` gets the evaluation once every pair has a result, and what it reports is
     the outcome's ``publication``; a :class:`LivePublisher` also starts before the first pair
     (its link is the outcome's ``link``) and publishes finished rows as the pairs run.
@@ -753,6 +755,7 @@ def _run_pool(
             if on_progress is not None:
                 judgment = outcome.get("judgment")
                 judgment = judgment if isinstance(judgment, Mapping) else {}
+                generation = replay.generations.get((target, case.id)) or {}
                 on_progress(
                     {
                         "done": done_count,
@@ -762,7 +765,11 @@ def _run_pool(
                         "status": outcome["status"],
                         "passed": bool(judgment.get("passed")),
                         "no_verdict": judgment.get("error"),
+                        "reason": judgment.get("reason"),
                         "error": outcome.get("error"),
+                        "format_valid": generation.get("format_valid"),
+                        "stop_reason": generation.get("stop_reason"),
+                        "max_tokens": replay.max_tokens[target],
                     }
                 )
 

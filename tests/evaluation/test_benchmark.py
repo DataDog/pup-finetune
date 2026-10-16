@@ -24,6 +24,7 @@ from pup_finetune.evaluation.benchmark import (
     Candidate,
     leaderboard,
     recommend,
+    sample_conversations,
 )
 from pup_finetune.evaluation.cases import ReplayCase, cases_from_dataset
 from pup_finetune.evaluation.fake_judge import fake_judge_config
@@ -113,6 +114,67 @@ def test_a_model_without_results_is_last_and_pending(plan: BenchmarkPlan) -> Non
     assert board[1]["status"] == "error"
     assert board[1]["judge_pass_rate"] is None
     assert board[1]["gap_to_best"] is None
+
+
+def test_the_board_counts_answers_cut_off_or_unparseable(plan: BenchmarkPlan) -> None:
+    candidate = plan.candidates[0]
+    write_results(plan, candidate, {case.id: False for case in plan.cases})
+    eval_dir = EvalDir(plan.model_dir(candidate))
+    endings = [("length", False), ("stop", False), ("stop", True)]
+    for case, (stop_reason, format_valid) in zip(plan.cases[:3], endings, strict=True):
+        eval_dir.append_generation(
+            {
+                "target": candidate.target,
+                "case_id": case.id,
+                "message": {"role": "assistant", "content": "hm"},
+                "format_valid": format_valid,
+                "stop_reason": stop_reason,
+            }
+        )
+
+    board = leaderboard(plan)
+    [found] = [entry for entry in board if entry["model"] == candidate.target]
+    result = benchmark_module._result(plan, board, calibration=None, cancelled=False)
+
+    assert (found["truncated"], found["unparseable"]) == (1, 1)
+    assert any(
+        "1 of fake-model's generations reached --max-tokens" in w for w in result["warnings"]
+    )
+    assert any("1 of fake-model's answers could not be parsed" in w for w in result["warnings"])
+
+
+def test_max_rows_keeps_whole_conversations_picked_by_the_seed(plan: BenchmarkPlan) -> None:
+    rows = {case.row_id for case in plan.cases}
+    picked = {seed: sample_conversations(plan.cases, 1, seed=seed) for seed in range(10)}
+
+    for seed, cases in picked.items():
+        assert cases == [case for case in plan.cases if case.row_id == cases[0].row_id]
+        assert sample_conversations(plan.cases, 1, seed=seed) == cases
+    assert {cases[0].row_id for cases in picked.values()} == rows
+    assert sample_conversations(plan.cases, len(rows), seed=0) == plan.cases
+
+
+def test_max_rows_is_in_a_models_identity_only_when_given(plan: BenchmarkPlan) -> None:
+    candidate = plan.candidates[0]
+    capped = dataclasses.replace(plan, settings=dataclasses.replace(plan.settings, max_rows=1))
+
+    assert "max_rows" not in plan.identity(candidate)
+    assert capped.identity(candidate)["max_rows"] == 1
+
+
+def test_a_small_sample_asks_for_a_larger_max_rows(plan: BenchmarkPlan) -> None:
+    rows = len({case.row_id for case in plan.cases})
+    sampled = dataclasses.replace(
+        plan,
+        cases=sample_conversations(plan.cases, 1, seed=0),
+        settings=dataclasses.replace(plan.settings, max_rows=1),
+        sampled_from=rows,
+    )
+
+    [warning] = sampled.split_warnings()
+
+    assert warning.startswith(f"--max-rows 1 replays only 1 of the {rows} test conversations")
+    assert "raise --max-rows" in warning
 
 
 def entry(model: str, rate: float | None, *, close: bool | None = None) -> dict[str, Any]:

@@ -129,6 +129,64 @@ def test_other_settings_in_the_same_out_dir_are_refused_at_preview(dataset: Path
     assert "--out-dir" in result.stderr
 
 
+def test_max_rows_replays_a_seeded_sample_and_needs_a_new_out_dir_to_change(
+    dataset: Path,
+) -> None:
+    full = output(invoke("benchmark", str(dataset), "--models", "fake-model"))["preview"]
+    preview = output(invoke("benchmark", str(dataset), "--models", "fake-model", "--max-rows", "1"))
+
+    shown = preview["preview"]
+    assert shown["trajectories"] == shown["rows"]["test"] == 1 < full["trajectories"]
+    assert shown["cases"] == shown["generation_calls"] < full["cases"]
+    assert f"(of {full['trajectories']}, --max-rows)" in shown["action"]
+    assert shown["settings"]["max_rows"] == 1
+    assert "max_rows" not in shown["defaults_used"]
+    assert "--max-rows 1 --judge-model fake-judge --confirm" in preview["next_command"]
+    result = rerun(preview["next_command"])
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["leaderboard"][0]["cases"] == shown["cases"]
+    assert any("raise --max-rows" in warning for warning in data["warnings"])
+    stored = (dataset / "benchmark" / "fake-model" / "generations.jsonl").read_text().splitlines()
+    assert len({json.loads(line)["case_id"].rsplit(":", 1)[0] for line in stored}) == 1
+
+    changed = invoke("benchmark", str(dataset), "--models", "fake-model", "--max-rows", "2")
+
+    assert changed.exit_code == 2
+    assert "settings_conflict" in changed.stderr
+    assert "max_rows" in changed.stderr
+
+
+def test_answers_cut_off_at_max_tokens_are_explained_while_and_after_it_runs(
+    dataset: Path,
+) -> None:
+    result = invoke(
+        "benchmark", str(dataset), "--models", "fake-model", "--max-tokens", "2", "--confirm"
+    )
+
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    [entry] = data["leaderboard"]
+    assert entry["truncated"] == entry["cases"] > 0
+    assert any("reached --max-tokens (2)" in warning for warning in data["warnings"])
+    assert "judged fail: cut off at --max-tokens 2; raise --max-tokens" in result.stderr
+    assert f"({entry['cases']} cut off)" in result.stderr
+    assert f"{entry['cases']} cut off at --max-tokens" in result.stderr.splitlines()[-1]
+
+
+def test_every_failed_pair_shows_the_judges_reason_with_progress_steps(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PUP_FINETUNE_PROGRESS", "steps")
+
+    result = invoke("benchmark", str(dataset), "--models", "fake-model", "--confirm")
+
+    assert result.exit_code == 0, result.stderr
+    failed = [line for line in result.stderr.splitlines() if "(judged fail): " in line]
+    assert len(failed) == output(result)["cases"]
+    assert "the reference calls a tool and the candidate does not" in result.stderr
+
+
 @pytest.mark.parametrize(
     ("models", "message"),
     [("fake-model,fake-model", "twice"), ("no-such-model", "unknown model"), (",", "no model")],

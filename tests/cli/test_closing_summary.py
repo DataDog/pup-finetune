@@ -211,9 +211,9 @@ def test_steps_progress_restores_a_line_per_step_and_per_pair(
     evaluated = invoke(
         "evaluate", str(tmp_path / "run"), "--judge-model", "fake-judge", "--confirm"
     )
-    # One line per pair; which pair finishes when depends on the thread pool.
+    # One line per pair, a fail with its cause; which pair finishes when depends on the pool.
     pairs = re.findall(
-        r"^18:03:16 evaluated (\d)/8: (?:base|tuned) \S+ \(judged (?:pass|fail)\)$",
+        r"^18:03:16 evaluated (\d)/8: (?:base|tuned) \S+ \(judged (?:pass\)|fail\): .+)$",
         evaluated.stderr,
         re.MULTILINE,
     )
