@@ -814,7 +814,7 @@ def _result(
     calibration: Mapping[str, Any] | None,
     cancelled: bool,
 ) -> dict[str, Any]:
-    from pup_finetune.evaluation.replay import CAVEAT
+    from pup_finetune.evaluation.replay import CAVEAT, truncation_warning
 
     recommendation = recommend(board, target_pass_rate=plan.settings.target_pass_rate)
     statuses = {entry["status"] for entry in board}
@@ -843,10 +843,12 @@ def _result(
     for entry in board:
         if entry["truncated"]:
             warnings.append(
-                f"{entry['truncated']} of {entry['model']}'s generations reached "
-                f"--max-tokens ({plan.settings.max_tokens}) and were cut off; they count as "
-                "failures, so benchmark into a new --out-dir with a higher --max-tokens to "
-                "compare the models on their answers rather than their length"
+                truncation_warning(
+                    entry["truncated"],
+                    f"{entry['model']}'s",
+                    plan.settings.max_tokens,
+                    "benchmark",
+                )
             )
         if entry["unparseable"]:
             warnings.append(

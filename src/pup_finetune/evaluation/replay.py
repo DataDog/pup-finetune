@@ -104,6 +104,7 @@ __all__ = [
     "remaining_work",
     "run_replay",
     "summarize",
+    "truncation_warning",
 ]
 
 Target = Literal["base", "tuned", "compare"]
@@ -878,6 +879,16 @@ def _target_summary(
         },
         "tokens": tokens,
     }
+
+
+def truncation_warning(count: int, whose: str, max_tokens: int, command: str) -> str:
+    """The warning for ``count`` of ``whose`` generations cut off at ``max_tokens`` (a
+    summary's ``truncated``), telling the user to rerun ``command`` with a higher limit."""
+    return (
+        f"{count} of {whose} generations reached --max-tokens ({max_tokens}) and were cut "
+        f"off; they count as failures, so {command} into a new --out-dir with a higher "
+        "--max-tokens to compare the models on their answers rather than their length"
+    )
 
 
 def summarize(
