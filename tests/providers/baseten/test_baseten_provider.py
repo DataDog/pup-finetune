@@ -210,7 +210,7 @@ def test_an_unknown_model_lists_the_known_aliases() -> None:
     provider, _ = provider_for()
     with pytest.raises(UsageError, match="unknown baseten model 'no-such-model'") as caught:
         provider.resolve_model("no-such-model")
-    assert caught.value.hint == "known models: qwen3p5-9b, glm-5p3-flash"
+    assert caught.value.hint.startswith("known models: qwen3p5-9b, glm-5p3-flash;")
 
 
 # --- preflight ---------------------------------------------------------------------------

@@ -70,6 +70,7 @@ from pup_finetune.providers.base import (
     SmokeTest,
     StepMetrics,
     TrainingUsage,
+    find_profile,
     sampling_usage_text,
     training_usage_text,
 )
@@ -1103,11 +1104,7 @@ class FakeProvider:
         return [FAKE_PROFILE]
 
     def resolve_model(self, alias_or_id: str) -> ModelProfile:
-        for profile in self.models():
-            if alias_or_id in (profile.alias, profile.base_model):
-                return profile
-        known = ", ".join(profile.alias for profile in self.models())
-        raise UsageError(f"unknown fake model {alias_or_id!r}", hint=f"known models: {known}")
+        return find_profile(self.models(), alias_or_id, provider=PROVIDER_NAME)
 
     def preflight(self, profile: ModelProfile) -> None:
         """Nothing to check offline; only refuses another provider's profile."""

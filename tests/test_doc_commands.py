@@ -25,7 +25,7 @@ import typer.main
 
 from pup_finetune.cli import app
 from pup_finetune.datadog.pup import MIN_PUP_VERSION
-from pup_finetune.providers import get_provider, known_models
+from pup_finetune.providers import get_provider, providers_for_model
 from pup_finetune.runtime import Runtime
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -174,18 +174,17 @@ def test_every_flag_mentioned_belongs_to_a_command(doc: Path) -> None:
 
 @pytest.mark.parametrize("doc", DOCS, ids=lambda path: path.name)
 def test_every_provider_and_model_passed_exists(doc: Path) -> None:
-    # A --model without --provider names its provider, as train infers it.
-    offered_by = {
-        alias: name for name, aliases in known_models(Runtime()).items() for alias in aliases
-    }
     providers: set[str] = set()
     for snippet in code_snippets(doc.read_text(encoding="utf-8")):
         for words in invocations(snippet):
             values = dict(itertools.pairwise(words))
             name, model = values.get("--provider"), values.get("--model")
             if model is not None and not model.startswith("<"):
-                name = name or offered_by.get(model)
-                assert name is not None, f"{doc.name}: no provider offers --model {model}"
+                offered_by = providers_for_model(model, Runtime())
+                assert name is not None or len(offered_by) == 1, (
+                    f"{doc.name}: --model {model} needs --provider (offered by {offered_by})"
+                )
+                name = name or offered_by[0]
                 get_provider(name, Runtime()).resolve_model(model)
                 providers.add(name)
             elif name is not None:

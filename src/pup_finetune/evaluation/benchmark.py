@@ -50,7 +50,12 @@ from pup_finetune.evaluation.runner import (
 from pup_finetune.next_steps import PROGRAM, command, step
 from pup_finetune.output import info
 from pup_finetune.progress import EvaluationProgress
-from pup_finetune.providers import get_provider, provider_info, require_packages
+from pup_finetune.providers import (
+    get_provider,
+    provider_info,
+    providers_for_model,
+    require_packages,
+)
 from pup_finetune.providers.base import (
     Generation,
     LoraConfig,
@@ -230,13 +235,20 @@ class BenchmarkPlan:
             finite_json(self.judge.identity())
         )
 
+    def _entry(self, candidate: Candidate) -> str:
+        """How ``--models`` names ``candidate``: its alias, ``PROVIDER/ALIAS`` when another
+        provider offers that alias too."""
+        if providers_for_model(candidate.target, self.runtime) == [candidate.provider]:
+            return candidate.target
+        return f"{candidate.provider}/{candidate.target}"
+
     def command(self) -> list[str]:
         """The ``benchmark`` command for this plan, without ``--confirm``: the models and the
         judge always, the other settings when they differ from the defaults."""
         settings = self.settings
         defaults = BenchmarkSettings(out_dir=self.dataset_dir / DEFAULT_OUT_DIR_NAME)
         words = [*PROGRAM, "benchmark", display_path(self.dataset_dir)]
-        words += ["--models", ",".join(candidate.target for candidate in self.candidates)]
+        words += ["--models", ",".join(self._entry(candidate) for candidate in self.candidates)]
         if settings.out_dir != defaults.out_dir:
             words += ["--out-dir", display_path(settings.out_dir)]
         if settings.max_cases_per_trajectory != defaults.max_cases_per_trajectory:
@@ -825,9 +837,12 @@ def _next(plan: BenchmarkPlan, status: str, recommendation: Mapping[str, Any]) -
     model already meets the target."""
     rerun = shlex.join(plan.command())
     model = recommendation.get("model")
+    provider = next(
+        (candidate.provider for candidate in plan.candidates if candidate.target == model), None
+    )
     train = (
-        command("train", "--dataset", plan.dataset_dir, "--model", model)
-        if isinstance(model, str)
+        command("train", "--provider", provider, "--dataset", plan.dataset_dir, "--model", model)
+        if isinstance(model, str) and provider is not None
         else None
     )
     if status != "complete":

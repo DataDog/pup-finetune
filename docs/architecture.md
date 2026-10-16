@@ -96,7 +96,8 @@ an assistant message. `transformers` comes from the optional `hf` extra and load
   versions. A run records it, and a mismatch on resume means "prepare a new run".
 
 **Providers** (`Provider`) own everything outside the loop: the model profiles they support
-(`models`, `resolve_model`), a live `preflight` (which `doctor --provider NAME --check` and
+(`models`, and `resolve_model`, which takes any of a profile's names through
+`find_profile`), a live `preflight` (which `doctor --provider NAME --check` and
 `models list --check` run), their
 credentials, validation of provider-specific `provider_options`, `training_profile` (the
 profile as those options train it, e.g. with a shorter context: rows are rendered against
@@ -610,12 +611,14 @@ Using Baseten as the example:
    gate them behind `--confirm` and `PUP_READ_ONLY`.
 7. **Registration and install.** Call `register_provider("baseten",
    "pup_finetune.providers.baseten.provider:BasetenProvider", options=("max_seq_len",),
-   models=("qwen3p5-9b", "glm-5p3-flash"))` in the registry (the implementation lives in
-   `provider.py`, so the package `__init__.py` stays light; `options` names the
-   `--provider-option` keys, which `train --help` lists, and a provider that takes
-   `max_seq_len` gets `train --max-seq-len` too; `models` names the profiles' aliases, which
-   `train` infers `--provider` from, and an alias another provider offers too makes
-   `--provider` required for it; `label`, `credential`, `packages`, `refuses` and `deploys`
+   models={"qwen3p5-9b": ("qwen3p5-9b", "Qwen/Qwen3.5-9B"), ...})` in the registry (the
+   implementation lives in `provider.py`, so the package `__init__.py` stays light; `options`
+   names the `--provider-option` keys, which `train --help` lists, and a provider that takes
+   `max_seq_len` gets `train --max-seq-len` too; `models` holds each profile's alias with
+   every name that selects it, alias first (`ModelProfile.names`: the alias, the provider's
+   model id and the tokenizer), which `train` infers `--provider` from, and a name another
+   provider offers too makes `--provider` required for it; a test holds the table to the
+   profiles; `label`, `credential`, `packages`, `refuses` and `deploys`
    say what it needs, which `doctor` and the previews check), and add a `baseten`
    extra to `pyproject.toml` for the SDK (with its rows in `LICENSE-3rdparty.csv`).
 8. **Tests.** Subclass the contract suites in `tests/providers/contract/`

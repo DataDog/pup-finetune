@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner, Result
 
+from pup_finetune import providers
 from pup_finetune.cli import app
 from pup_finetune.errors import ExternalError
 from pup_finetune.evaluation import benchmark as benchmark_module
@@ -86,7 +87,9 @@ def test_confirm_ranks_recommends_and_leads_to_training(dataset: Path) -> None:
     assert entry["cases"] == preview["preview"]["cases"]
     assert data["recommendation"]["verdict"] == "fine_tune"
     assert data["recommendation"]["model"] == "fake-model"
-    assert data["next_command"] == f"pup finetune train --dataset {dataset} --model fake-model"
+    assert data["next_command"] == (
+        f"pup finetune train --provider fake --dataset {dataset} --model fake-model"
+    )
     assert (dataset / "benchmark" / "benchmark.json").is_file()
     assert (dataset / "benchmark" / "fake-model" / "results.jsonl").is_file()
     assert "recommended: fine-tune fake-model" in result.stderr
@@ -116,7 +119,7 @@ def test_a_target_the_base_model_meets_needs_no_training(dataset: Path) -> None:
     data = output(result)
     assert data["recommendation"]["verdict"] == "base_meets_target"
     assert data["next_command"] is None
-    assert data["next_steps"][0]["command"].startswith("pup finetune train --dataset")
+    assert data["next_steps"][0]["command"].startswith("pup finetune train --provider fake")
 
 
 def test_other_settings_in_the_same_out_dir_are_refused_at_preview(dataset: Path) -> None:
@@ -138,6 +141,27 @@ def test_bad_models_are_usage_errors(dataset: Path, models: str, message: str) -
 
     assert result.exit_code == 2
     assert message in result.stderr
+
+
+def test_a_model_several_providers_offer_needs_its_provider_named(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(providers, "_REGISTRY", dict(providers._REGISTRY))
+    providers.register_provider(
+        "other", "pkg.other:Provider", models={"fake-model": ("fake-model",)}
+    )
+
+    ambiguous = invoke("benchmark", str(dataset), "--models", "fake-model")
+    assert ambiguous.exit_code == 2
+    assert "fake-model is offered by fake and other" in ambiguous.stderr
+    assert "name one of fake/fake-model, other/fake-model" in ambiguous.stderr
+
+    named = output(invoke("benchmark", str(dataset), "--models", "fake/fake-model"))
+    assert named["preview"]["models"][0]["model"] == "fake-model"
+    assert "--models fake/fake-model " in named["next_command"]
+    result = rerun(named["next_command"])
+    assert result.exit_code == 0, result.stderr
+    assert output(result)["status"] == "complete"
 
 
 def test_a_model_whose_session_fails_is_an_error_and_exits_1(

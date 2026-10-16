@@ -155,23 +155,39 @@ def test_a_detached_run_notes_the_gitignore_too(dataset: Path) -> None:
     assert output(watched)["phase"] == "completed", watched.stderr
 
 
-def test_an_alias_offered_by_two_providers_needs_provider(
-    dataset: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("name", ["fake-model", "fake/tokenizer"])
+def test_a_name_offered_by_two_providers_needs_provider(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
     monkeypatch.setattr(providers, "_REGISTRY", dict(providers._REGISTRY))
-    providers.register_provider("other", "pkg.other:Provider", models=("fake-model",))
-    result = invoke("train", "--dataset", str(dataset), "--model", "fake-model")
+    providers.register_provider(
+        "other", "pkg.other:Provider", models={"fake-model": ("fake-model", "fake/tokenizer")}
+    )
+    result = invoke("train", "--dataset", str(dataset), "--model", name)
     assert result.exit_code == 2
     assert result.stdout == ""
-    assert "Error [usage]: fake-model is offered by fake and other; pass --provider" in (
-        result.stderr
-    )
+    assert f"Error [usage]: {name} is offered by fake and other; pass --provider" in (result.stderr)
     # Naming the provider settles it.
-    named = invoke(
-        "train", "--dataset", str(dataset), "--model", "fake-model", "--provider", "fake"
-    )
+    named = invoke("train", "--dataset", str(dataset), "--model", name, "--provider", "fake")
     assert named.exit_code == 2
     assert output(named)["status"] == "confirmation_required"
+
+
+@pytest.mark.parametrize("name", ["fake/fake-model", "fake/tokenizer"])
+def test_the_provider_id_or_tokenizer_selects_a_model_and_the_rerun_pins_its_alias(
+    dataset: Path, name: str
+) -> None:
+    preview = output(invoke("train", "--dataset", str(dataset), "--model", name))
+    assert preview["preview"]["provider_source"] == f"inferred from --model {name}"
+    words = shlex.split(preview["next_command"])
+    assert words[words.index("--model") + 1] == "fake-model"
+    assert name not in words
+    started = follow(preview["next_command"])
+    assert started.exit_code == 0, started.stderr
+    assert (
+        json.loads(Path(output(started)["run_dir"], "run.json").read_text())["profile"]["alias"]
+        == "fake-model"
+    )
 
 
 def test_an_unknown_model_lists_the_known_aliases(dataset: Path) -> None:

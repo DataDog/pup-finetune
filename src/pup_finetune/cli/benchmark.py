@@ -26,9 +26,12 @@ from pup_finetune.cli._dirs import require_dataset_dir
 from pup_finetune.cli._flags import given
 from pup_finetune.cli._presentation import TRAIN, CommandDoc, Safety, default_note, describe
 from pup_finetune.cli.train import provider_for_model
+from pup_finetune.display import joined
 from pup_finetune.errors import PAID_RUN, UsageError, require_confirm, require_writable
 from pup_finetune.evaluation import benchmark, runner
 from pup_finetune.judge_models import BY_KEY
+from pup_finetune.providers import known_providers, providers_for_model
+from pup_finetune.runtime import Runtime
 
 SETTING_PARAMS: dict[str, tuple[str, ...]] = {
     "judge_model": ("judge_model",),
@@ -80,6 +83,20 @@ DOC = CommandDoc(
 )
 
 
+def model_and_provider(entry: str, runtime: Runtime) -> tuple[str, str]:
+    """One ``--models`` entry as ``(model, provider)``: ``PROVIDER/MODEL``, or a model that
+    one provider offers (:func:`~pup_finetune.cli.train.provider_for_model`). A model several
+    providers offer is a usage error naming the entries that pick one."""
+    head, slash, rest = entry.partition("/")
+    if slash and head in known_providers(runtime):
+        return rest, head
+    found = providers_for_model(entry, runtime)
+    if len(found) > 1:
+        choices = ", ".join(f"{name}/{entry}" for name in found)
+        raise UsageError(f"{entry} is offered by {joined(found)}", hint=f"name one of {choices}")
+    return entry, provider_for_model(entry, None, runtime)[0]
+
+
 def _with_defaults_used(preview: dict[str, Any], ctx: Any) -> dict[str, Any]:
     """``preview`` with ``defaults_used`` (the settings no flag set) after its ``settings``."""
     used = [
@@ -110,7 +127,8 @@ def benchmark_command(
         typer.Option(
             "--models",
             metavar="M1,M2",
-            help="Base models to compare, comma-separated (see models list).",
+            help="Base models to compare, comma-separated (see models list); "
+            "PROVIDER/MODEL names the provider of a model several offer.",
             show_default=False,
             rich_help_panel=MODELS,
         ),
@@ -205,7 +223,7 @@ def benchmark_command(
     aliases = [alias.strip() for alias in models.split(",") if alias.strip()]
     if not aliases:
         raise UsageError("--models names no model", hint="pass --models MODEL,MODEL")
-    resolved = [(alias, provider_for_model(alias, None, runtime)[0]) for alias in aliases]
+    resolved = [model_and_provider(alias, runtime) for alias in aliases]
     settings = benchmark.BenchmarkSettings(
         out_dir=out_dir if out_dir is not None else dataset_dir / benchmark.DEFAULT_OUT_DIR_NAME,
         max_cases_per_trajectory=max_cases,

@@ -362,7 +362,8 @@ Source lives under `src/pup_finetune/`.
   command and steps a dataset directory's state calls for (unlabeled: `dataset sample`;
   labeled: training steps, since the model is the user's to choose; the provider follows from
   it and the run directory defaults); `train.py` has `train` (`provider_for_model` infers
-  `--provider` from the registry's aliases, failing on an alias several providers offer),
+  `--provider` from any of a model's names in the registry, failing on a name several
+  providers offer; the rerun pins the alias),
   `resume`,
   `status`, `cancel` and the hidden `_worker` a detached run executes (and `train
   --evaluate`), and `run_next`, the next command a run's phase calls for; `models.py` has `models list` (every provider's
@@ -372,7 +373,8 @@ Source lives under `src/pup_finetune/`.
   `workspace.list_runs`;
   `evaluate.py` has `evaluate`, which only parses its flags and emits what
   `evaluation/runner.py` returns; `benchmark.py` has `benchmark`, which does the same for
-  `evaluation/benchmark.py`; `deploy.py` has `deploy` and `undeploy` (over
+  `evaluation/benchmark.py` (a `--models` entry may be `PROVIDER/MODEL`, which the rerun
+  writes for a model several providers offer); `deploy.py` has `deploy` and `undeploy` (over
   `deployment.py`); `triage.py` has `dataset triage` (over `curation/triage.py`; its
   `open_clients` builds one chat client per judge provider); `skill.py` has `skill show` and `skill
   install` (its `find_npx` and `run_npx` are what tests replace); `help.py` has `help
@@ -802,9 +804,11 @@ Source lives under `src/pup_finetune/`.
   `TrainingSession` and `Sampler` protocols; `__init__.py` is the lazy registry
   (`register_provider`, `get_provider`, `known_providers`), which imports a provider only on
   first use; each entry names its `--provider-option` keys (`registered_option_keys`, which
-  `train --help` lists; a test holds them to the option models) and its model aliases
-  (`known_models`, `providers_for_model`, which `train` infers `--provider` from without
-  importing a provider; a test holds them to the profiles), and what it needs
+  `train --help` lists; a test holds them to the option models) and its model table, each
+  alias with every name that selects the profile (`ModelProfile.names`: alias, provider
+  model id, tokenizer; `known_models`, `providers_for_model`, which `train` infers
+  `--provider` from without importing a provider; a test holds it to the profiles, and
+  every `resolve_model` goes through `base.find_profile`), and what it needs
   (`ProviderInfo`: its `label`, the `credential` it signs in with, the `packages` each step
   needs, the training flags it `refuses`, whether it `deploys`, whether it is `offline`,
   whether it trains in a job of its own (`remote`, for `train --remote`: `require_remote`);

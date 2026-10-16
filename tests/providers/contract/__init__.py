@@ -690,10 +690,10 @@ class ProviderContract:
         assert len({profile.alias for profile in profiles}) == len(profiles)
         assert all(len(profile.tokenizer_revision) == 40 for profile in profiles)
 
-    def test_resolve_model_by_alias_or_id(self, provider: Provider) -> None:
+    def test_resolve_model_by_alias_id_or_tokenizer(self, provider: Provider) -> None:
         for profile in provider.models():
-            assert provider.resolve_model(profile.alias) == profile
-            assert provider.resolve_model(profile.base_model) == profile
+            for name in (profile.alias, profile.base_model, profile.tokenizer_model):
+                assert provider.resolve_model(name) == profile
         with pytest.raises(UsageError):
             provider.resolve_model("no-such-model-pft-contract")
 

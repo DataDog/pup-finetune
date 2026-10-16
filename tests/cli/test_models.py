@@ -34,6 +34,7 @@ runner = CliRunner()
 
 QWEN = {
     "alias": "qwen3p8-27b",
+    "names": ["qwen3p8-27b", "accounts/fireworks/models/qwen3p8-27b", "Qwen/Qwen3.8-27B"],
     "provider": "fireworks",
     "base_model": "accounts/fireworks/models/qwen3p8-27b",
     "max_seq_len": 131072,

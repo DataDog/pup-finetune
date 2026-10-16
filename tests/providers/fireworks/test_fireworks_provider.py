@@ -194,16 +194,17 @@ def test_models_are_the_profile_table() -> None:
     assert provider_for().models() == list(PROFILES)
 
 
-def test_resolve_by_alias_or_base_model() -> None:
+def test_resolve_by_alias_base_model_or_tokenizer() -> None:
     provider = provider_for()
     assert provider.resolve_model("qwen3p8-27b") is PROFILE
     assert provider.resolve_model("accounts/fireworks/models/qwen3p8-27b") is PROFILE
+    assert provider.resolve_model("Qwen/Qwen3.8-27B") is PROFILE
 
 
 def test_an_unknown_model_lists_the_known_aliases() -> None:
     with pytest.raises(UsageError, match="unknown fireworks model 'gpt-x'") as caught:
         provider_for().resolve_model("gpt-x")
-    assert caught.value.hint == "known models: qwen3p8-27b"
+    assert caught.value.hint.startswith("known models: qwen3p8-27b;")
 
 
 # --- preflight ---------------------------------------------------------------------------

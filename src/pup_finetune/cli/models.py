@@ -29,11 +29,11 @@ LIST_DOC = CommandDoc(
     path="models list",
     short="List the model profiles each provider can fine-tune.",
     description=(
-        "List the model profiles of every provider, or of --provider: alias, provider, "
-        "provider model, context length, reasoning support, default LoRA rank and the "
-        "provider's --provider-option keys; this needs no API key. With --check, also shows "
-        "each profile's renderer and pinned tokenizer, asks the provider whether each model "
-        "can be fine-tuned now, and exits 1 when any cannot."
+        "List the model profiles of every provider, or of --provider: alias, the names "
+        "--model accepts for it, provider, provider model, context length, reasoning "
+        "support, default LoRA rank and the provider's --provider-option keys; this needs no "
+        "API key. With --check, also shows each profile's renderer and pinned tokenizer, asks "
+        "the provider whether each model can be fine-tuned now, and exits 1 when any cannot."
     ),
     examples=(
         "pup finetune models list",
@@ -53,6 +53,7 @@ def profile_entry(
     """The JSON for one profile; the renderer and tokenizer only with ``internals``."""
     entry: dict[str, Any] = {
         "alias": profile.alias,
+        "names": list(profile.names),
         "provider": profile.provider,
         "base_model": profile.base_model,
         "max_seq_len": profile.max_seq_len,
