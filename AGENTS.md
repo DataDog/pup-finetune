@@ -636,8 +636,11 @@ Source lives under `src/pup_finetune/`.
   every setting, how it stands and its headline, written by
   `evaluation/runner.py`'s `record_evaluation`; `status` names the pinned command that
   continues one, or `deploy` once one is complete, unless the missing push kept it
-  unpublished: then, as after the evaluation (`_push_first`), no next command and the steps
-  it recorded under `awaits_push`),
+  unpublished (its `publication` is `skipped`): then the steps are built from the run as it
+  is now, by the same `_push_first` as after the evaluation (the dataset's current
+  `push.json`, the evaluation's pinned command, `deploy` unless the run is deployed, paths
+  from the current directory), with no next command while a push is needed, and once one
+  was made the evaluation's command, whose preview publishes it),
   `RunState`, which the loop reports into, and `execute_run`, which holds the directory lock
   while training and always writes `result.json`, also on Ctrl-C or SIGTERM (reported as
   `TrainingTerminated`, a `FinetuneError`). Any error during training leaves the run

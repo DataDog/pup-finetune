@@ -258,6 +258,46 @@ def test_without_a_push_receipt_the_evaluation_is_not_published(
     ]
 
 
+def test_status_gives_the_push_first_steps_as_the_run_stands_now(
+    fake: FakePup,
+    experiments: FakeExperimentsApi,
+    dataset: Path,
+    run_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    evaluated = output(invoke("evaluate", str(run_dir), "--confirm"))
+    assert evaluated["publication"]["status"] == "skipped"
+    assert shlex.split(evaluated["next_steps"][0]["command"])[4] == "ds"
+
+    def steps() -> list[list[str]]:
+        status = output(invoke("status", str(run_dir)))
+        assert status["next_command"] is None
+        return [shlex.split(step["command"]) for step in status["next_steps"]]
+
+    # From another directory, every path is the run's and the dataset's from there.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    pushing, again, deploy = steps()
+    assert pushing == ["pup", "finetune", "dataset", "push", str(dataset), "--name", "<NAME>"]
+    assert again[:4] == ["pup", "finetune", "evaluate", str(run_dir)]
+    assert again[-1] == "--confirm"
+    assert deploy == ["pup", "finetune", "deploy", str(run_dir)]
+    # Deployed: no deploy step.
+    deployed = invoke("deploy", str(run_dir), "--confirm")
+    assert deployed.exit_code == 0, deployed.stderr
+    assert steps() == [pushing, again]
+    # Pushed later: the evaluation's own command is next, and its preview publishes it.
+    push(dataset)
+    status = output(invoke("status", str(run_dir)))
+    assert status["next_steps"] == []
+    preview = invoke(*shlex.split(status["next_command"])[2:])
+    assert preview.exit_code == 2, preview.stderr
+    assert output(preview)["preview"]["publish"]["status"] == "planned"
+
+
 def test_no_publish_skips_publishing_silently(
     fake: FakePup, experiments: FakeExperimentsApi, dataset: Path, run_dir: Path
 ) -> None:

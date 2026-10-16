@@ -949,15 +949,15 @@ def test_status_after_train_evaluate_with_settings_continues_that_evaluation(
     evaluated = output(result)["evaluation"]
     assert evaluated["next_command"] is None
     assert status["next_command"] is None
-    assert status["next_steps"] == evaluated["next_steps"]
-    push, again, deploy = (item["command"] for item in status["next_steps"][:3])
+    assert status["next_steps"] == evaluated["next_steps"][:3]
+    push, again, deploy = (item["command"] for item in status["next_steps"])
     assert shlex.split(push)[2:4] == ["dataset", "push"]
     assert again.endswith(" --confirm") and "--seed 7" in again
     assert deploy == f"pup finetune deploy {shlex.quote(display(run))}"
     assert "evaluation complete in" in invoke("status", str(run)).stderr
     # Unpublished on request, it goes on to deploy.
     record = json.loads((run / "evaluation.json").read_text())
-    del record["evaluations"]["eval"]["awaits_push"]
+    record["evaluations"]["eval"]["publication"] = "disabled"
     (run / "evaluation.json").write_text(json.dumps(record))
     following = output(invoke("status", str(run)))["next_command"]
     assert following == f"pup finetune deploy {shlex.quote(display(run))}"
