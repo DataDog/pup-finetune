@@ -20,7 +20,7 @@ Step 0 doctor -> 1 explore spans -> 2 test the filter, pull -> 3 review (sample 
 | The user has | Start at |
 | --- | --- |
 | An ml_app that sends LLM spans | Step 0, then step 1 |
-| A dataset directory | Step 0, then `dataset show` and step 3 (or step 5 if it is reviewed) |
+| A dataset directory | Step 0, then `dataset show` and step 3 (or step 4 if it is reviewed) |
 | A dataset in Agent Observability | Step 0, then `dataset fetch` (step 4) and step 5 |
 | A run (its id or directory) | `status`, then step 6 or step 7 |
 
@@ -88,7 +88,6 @@ row-weather-002 (train, 2 turns, tools: get_weather)
 | evaluate `status` `complete_with_errors` | Its `next_command` retries the errors; it is paid, so ask first. |
 | evaluate `status` `partial` | Rerun the same command to continue. |
 | evaluate `status` `calibration_failed` | The judge failed its check. Pick another judge with the user. |
-| `publication.status` `skipped` | No push receipt. Follow `next_steps`: step 4, then rerun the evaluation. |
 | `publication.status` `failed` or `cancelled` | Its `next_command` publishes the rest. |
 
 ## Step 0: check the setup
@@ -216,8 +215,9 @@ pup finetune dataset push datasets/my-agent --name <DATASET_NAME> --project <PRO
 ```
 
 Ask which project: everyone with access to it can read the records. It previews; run its
-`next_command` after a yes. The push writes one record per kept row and saves `push.json`;
-publishing an evaluation needs it. The dataset in Datadog can then be
+`next_command` after a yes. The push writes one record per kept row and saves `push.json`.
+`train` and `benchmark` read only a dataset whose kept rows are all pushed, and an evaluation
+publishes onto it. The dataset in Datadog can then be
 curated there (records edited, added or removed); to train on it as it is now, fetch it into
 a new directory, which gets its push receipt (the project and name are the ones `push.json` names):
 
@@ -394,7 +394,7 @@ Errors read `Error [<code>]: <message>`, then `Hint: ...`. The codes, with their
 | `worker.state` `stale` or `exited` while `training` | The worker died or hangs | Read `worker.log`. Cancel a stale worker, then preview `resume` and ask. |
 | `Error [wrong_phase]` | The run is still training, or already finished | Check `status`. Resume only `interrupted`, `failed` or `cancelled` runs. |
 | The judge fails calibration, answers `refused`, or triage reports `too_long` rows | The judge cannot grade these | None is a pass or a keep. Pick another `--judge-model` or `--judges` with the user. |
-| The evaluation was not published | No `push.json`, or the push missed the test split | Publishing is optional; `next_command` goes on to deploy. To publish, follow `next_steps`: push with a yes, then rerun; finished results are reused. |
+| `train` or `benchmark` says it `reads a dataset that is in Datadog` | No `push.json`, or kept rows not pushed yet | Step 4: push with a yes (the hint names the command), or fetch the dataset; then preview again. |
 | `deploy` times out, or the smoke test fails | It did not serve in time | It may still bill: preview `undeploy` at once, tell the user, confirm on their yes. Redeploy only after a yes. |
 | `undeploy` refuses: not the requested deployment | The deployment id holds another deployment | Nothing was deleted; never delete it. With an OK, follow the error's steps. |
 | `could not deactivate Baseten run <id> (...)`, or a hint that a run or sampler `may remain` | Baseten cleanup failed or was interrupted; it may still bill | Tell the user at once: they deactivate it in the Baseten UI (or with the hinted `curl` command). |

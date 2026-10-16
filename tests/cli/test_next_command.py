@@ -223,7 +223,7 @@ def test_following_next_command_from_a_dataset_to_a_deployment(
     monkeypatch.setattr(runner_module, "open_judge_client", fake_judge)
     shown = output(follow(f"pup finetune dataset show {dataset}", raised))
     sampled = output(follow(shown["next_command"], raised))
-    # Labeling needs a file, and training a model the user picks: both are steps.
+    # Labeling needs a file, and the push a name the user picks: both are steps.
     assert sampled["next_command"] is None
     labels = tmp_path / "labels.jsonl"
     labels.write_text(
@@ -231,8 +231,11 @@ def test_following_next_command_from_a_dataset_to_a_deployment(
     )
     labeled = output(invoke("dataset", "label", str(dataset), "--file", str(labels)))
     assert labeled["next_command"] is None
-    assert any(step["command"].split()[2] == "train" for step in labeled["next_steps"])
+    assert any(
+        step["command"].split()[2:4] == ["dataset", "push"] for step in labeled["next_steps"]
+    )
 
+    # The offline fake provider trains on a dataset that is not in Datadog.
     preview = previewed(train_args(dataset, tmp_path / "run"))
     trained = output(follow(preview["next_command"], raised))
     evaluate = output(follow(trained["next_command"], raised))  # a free preview

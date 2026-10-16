@@ -37,6 +37,7 @@ from pup_finetune.training import inputs as inputs_module
 from tests.fakes.fireworks import FakeFireworksTrainingClient
 from tests.fakes.fireworks_api import API_KEY, FakeFireworksApi
 from tests.fakes.pup import FakePup
+from tests.fakes.pushed import mark_pushed
 from tests.fakes.tokenizer import FakeChatTokenizer
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
@@ -93,7 +94,7 @@ def template(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[Path, P
         assert trained.exit_code == 0, trained.stderr
         evaluated = _invoke("evaluate", str(run), "--no-publish", "--confirm")
         assert evaluated.exit_code == 0, evaluated.stderr
-    yield dataset, run
+    yield mark_pushed(dataset), run
 
 
 @pytest.fixture

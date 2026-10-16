@@ -37,6 +37,7 @@ from pup_finetune.runtime import Runtime
 from pup_finetune.training import inputs as inputs_module
 from tests.fakes.baseten import FakeDeployment, FakeLoops
 from tests.fakes.fireworks_deploy import FakeClock
+from tests.fakes.pushed import mark_pushed
 from tests.fakes.tokenizer import FakeChatTokenizer
 from tests.providers.baseten.test_baseten_provider import KEY, provider_on
 
@@ -85,7 +86,7 @@ def dataset(tmp_path: Path) -> Path:
     path = tmp_path / "ds"
     result = invoke("dataset", "import", str(path), "--file", str(ROWS))
     assert result.exit_code == 0, result.stderr
-    return path
+    return mark_pushed(path)
 
 
 def train(dataset: Path, run_dir: Path, *extra: str) -> Result:

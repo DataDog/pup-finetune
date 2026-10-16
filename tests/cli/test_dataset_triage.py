@@ -201,12 +201,10 @@ def test_triage_labels_rows_and_is_allowed_read_only(
     assert data["dropped"] > 0
     assert data["top_drop_reasons"] == [{"reason": "off topic", "count": data["dropped"]}]
     assert data["calls_made"] == rows * 3
-    # Every row is labeled now: training (and a push) are the steps; no command is guessed.
+    # Every row is labeled now: the push, which training needs, is the step.
     assert data["next_command"] is None
     assert [step["command"] for step in data["next_steps"]] == [
         "pup finetune models list",
-        f"pup finetune benchmark {dataset} --models <MODELS>",
-        f"pup finetune train --dataset {dataset} --model <MODEL>",
         f"pup finetune dataset push {dataset} --name <NAME>",
     ]
     assert data["stale_judge_labels"] == 0

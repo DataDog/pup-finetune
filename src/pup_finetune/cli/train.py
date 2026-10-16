@@ -56,6 +56,7 @@ from pup_finetune.cli._dirs import (
     RUN_DIR_BY_ID,
     RUN_DIR_NEWEST,
     require_dataset_dir,
+    require_in_datadog,
     require_new_run_dir,
     resolve_run_ref,
 )
@@ -89,6 +90,7 @@ from pup_finetune.progress import TrainingProgress
 from pup_finetune.providers import (
     get_provider,
     known_models,
+    provider_info,
     provider_infos,
     providers_for_model,
     registered_option_keys,
@@ -943,6 +945,9 @@ def train(
     RunDir(run_dir).require_empty(default=default_dir)
     require_dataset_dir(dataset_dir)
     provider_name, provider_source = provider_for_model(model, provider_name, runtime)
+    # An offline provider never leaves the machine, so it trains on any dataset directory.
+    if not provider_info(provider_name, runtime).offline:
+        require_in_datadog(dataset_dir, "train")
     # What the preview can know fails here, not after --confirm: a package the provider needs
     # (its SDK, the renderer), or a flag it cannot honor.
     if remote:
@@ -1788,6 +1793,8 @@ TRAIN_DOC = CommandDoc(
         "Fine-tune --model with LoRA SFT on --dataset's train split, keeping the best epoch "
         "by validation loss. Without --confirm, previews the run and prints the command that "
         "starts it. With --confirm, trains (Ctrl-C cancels gracefully).",
+        "--dataset must be in Datadog: every kept row pushed with `dataset push`, or the "
+        "directory made by `dataset fetch` (the offline fake provider trains on any). "
         "The run goes in runs/RUN_ID unless --run-dir names another directory (a runs/ this "
         "creates gets a .gitignore, since runs hold trace-derived rows), and --provider is "
         "inferred from the --model alias when it is offered by one provider only; the "

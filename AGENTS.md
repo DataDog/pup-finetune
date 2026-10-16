@@ -56,7 +56,12 @@ decide its `status` (and exit 1), unless `--provider` makes that provider's key 
 required; `--check` adds its live, read-only preflight per model. Everything else is offline.
 The top-level `ok` and each check's `ok` stay for one release.
 
-The offline dev loop trains end to end on the `fake` provider, with no network or credentials:
+The offline dev loop trains end to end on the `fake` provider, with no network or credentials.
+`train` and `benchmark` on a real provider read only a dataset that is in Datadog (every kept
+row pushed and no push in flight, `cli/_dirs.py`'s `require_in_datadog`, which reads the
+`pipeline` block's push state; a `dataset fetch` directory passes); an offline provider
+(`ProviderInfo.offline`, the fake) is exempt, so this loop and the default tests train on an
+imported directory that was never pushed:
 
 ```sh
 export PUP_FINETUNE_DEV=1
@@ -164,7 +169,8 @@ its fraction in a dataset of fewer than 50 traces is a warning (`split.skew_warn
 
 `dataset push` is a remote write: with `PUP_READ_ONLY` set its `--confirm` is refused (the
 preview, built from local files, still runs). Push test data to the `pup-finetune-dev`
-project, never to a shared one.
+project, never to a shared one. A dataset's `next_steps` name `train` and `benchmark` only
+once every kept row is pushed; until then they name the push.
 
 `dataset triage` (`--rubric FILE` and/or `--rule TEXT`, repeated) has each judge model
 (`--judges m1,m2`; by default two Fireworks serverless models, with the Fireworks key) review
@@ -219,7 +225,7 @@ uv run pup-finetune models list --provider fireworks --check  # plus the tokeniz
 
 Training on Fireworks is paid: it needs the API key and the Training SDK, which comes with the
 `fireworks` extra (`uv sync --all-extras`). Train only on synthetic
-rows while developing:
+rows, pushed to `pup-finetune-dev`, while developing:
 
 ```sh
 uv run pup-finetune train --provider fireworks --model qwen3p8-27b --dataset /tmp/ds \
@@ -361,7 +367,8 @@ Source lives under `src/pup_finetune/`.
   hidden option, with a warning (`--max-cases-per-trajectory`, `--eval-max-cases-per-trajectory`,
   `dataset sample --n`; remove them in the next release). `_dirs.py` names the wrong kind of
   directory: a dataset given to a run command, a run given to a dataset command or as `train
-  --dataset`, a dataset as `train --run-dir`; its `resolve_run_dir`, which every run command
+  --dataset`, a dataset as `train --run-dir`, and a dataset not in Datadog to `train` or
+  `benchmark` on a real provider (`require_in_datadog`); its `resolve_run_dir`, which every run command
   calls first, reads a bare run id as `runs/<id>` and says so on stderr. `_presentation.py` is how commands show in
   `--help`: every command has a `CommandDoc` (a short help of 12 words or fewer naming its
   gate, a description of at most three sentences, the rest after `\f` for the generated docs,
@@ -821,6 +828,8 @@ argument prefix (or computes the answer with a `handler`) and records every call
 `tests/fakes/llmobs.py` has `FakeExportApi`, the Export API search route served by cursor.
 `tests/fakes/datasets.py` has `FakeDatasetsApi`, in-memory projects, datasets and records
 behind the pup calls `LLMObsDatasets` makes, with failures to inject.
+`tests/fakes/pushed.py` has `mark_pushed`, which writes the push receipt a complete push of
+every kept row would leave, so a real-provider `train` test runs on an imported dataset.
 `tests/fakes/experiments.py` has `FakeExperimentsApi`, in-memory experiments and their events
 behind the pup calls `LLMObsExperiments` makes (failed and lost creates and event posts,
 delayed or capped indexing); it chains to the `api` handler installed before it, so it serves

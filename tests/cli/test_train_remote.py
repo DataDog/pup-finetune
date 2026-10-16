@@ -46,6 +46,7 @@ from tests.fakes.baseten_cli import (
     interrupted_answer,
 )
 from tests.fakes.fireworks_deploy import FakeClock
+from tests.fakes.pushed import mark_pushed
 from tests.fakes.tokenizer import FakeChatTokenizer
 from tests.providers.baseten.test_baseten_provider import KEY, provider_on
 
@@ -96,6 +97,7 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[World]:
         monkeypatch.delenv(name, raising=False)
     dataset = tmp_path / "ds"
     assert invoke("dataset", "import", str(dataset), "--file", str(ROWS)).exit_code == 0
+    mark_pushed(dataset)
     loops, jobs, clock = FakeLoops(), FakeTrainingJobs(), FakeClock()
     found = World(
         tmp_path, loops, jobs, FakeBasetenCli(), dataset, tmp_path / "run", tmp_path / "job"

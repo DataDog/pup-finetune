@@ -30,13 +30,14 @@ pup finetune doctor                  # what you can run now, and what to fix
 The agent shows you every paid or remote step before it runs, and waits for your yes.
 
 **By hand:** `dataset pull` → review (`dataset sample` and `dataset label`, or `dataset
-triage`) → `train` → `status` → `evaluate` → `deploy` → `undeploy`.
+triage`) → `dataset push` → `train` → `status` → `evaluate` → `deploy` → `undeploy`.
 
 ```sh
 pup llm-obs spans search --ml-app my-agent --span-kind llm --from 7d --limit 50 --summary
 pup finetune dataset pull datasets/my-agent --ml-app my-agent --from 7d
 pup finetune dataset sample datasets/my-agent --count 20
 pup finetune dataset label datasets/my-agent --file labels.jsonl
+pup finetune dataset push datasets/my-agent --name my-agent-sft
 pup finetune train --dataset datasets/my-agent --model qwen3p8-27b --detach
 pup finetune status --watch
 pup finetune evaluate ft-20261007183443-a8b181
@@ -57,8 +58,9 @@ what bills, then exit `2`. The preview's `next_command` runs it, with `--confirm
 | You have | Start at |
 | --- | --- |
 | An `ml_app` that sends LLM spans to Agent Observability | [Build a dataset](#build-a-dataset) |
-| Conversations as JSONL rows ([format](docs/data-format.md)) | `pup finetune dataset import datasets/my-agent --file rows.jsonl`, then [Train](#train) |
-| A dataset directory | [Train](#train) |
+| Conversations as JSONL rows ([format](docs/data-format.md)) | `pup finetune dataset import datasets/my-agent --file rows.jsonl`, then [Push the dataset](#push-the-dataset) |
+| A dataset directory | [Push the dataset](#push-the-dataset), then [Train](#train) |
+| A dataset in Agent Observability | `pup finetune dataset fetch`, then [Train](#train) |
 | A finished run | [Evaluate](#evaluate) or [Deploy](#deploy) |
 
 ### What each step needs
@@ -140,9 +142,10 @@ call does not leave it undecided.
 
 ### Push the dataset
 
-Pushing creates an Agent Observability dataset with one record per kept row. Training does not
-need it; publishing an evaluation as experiments does. The receipt, `push.json`, names the
-dataset, so a later push of new rows needs no flag.
+Pushing creates an Agent Observability dataset with one record per kept row. `train` and
+`benchmark` read only a dataset whose kept rows are all pushed, and an evaluation publishes
+its experiments on it. The receipt, `push.json`, names the dataset, so a later push of new
+rows needs no flag.
 
 ```sh
 pup finetune dataset push datasets/my-agent --name my-agent-sft

@@ -195,7 +195,7 @@ def test_the_top_level_help_groups_commands_under_the_flow() -> None:
         "undeploy": EVALUATE_AND_SHIP,
     }
     text = " ".join(rendered(()).split())
-    assert "Flow: dataset pull -> review -> benchmark -> train -> evaluate -> deploy" in text
+    assert "Flow: dataset pull -> review -> dataset push -> train -> evaluate -> deploy" in text
 
 
 def test_train_groups_its_options_in_panels() -> None:

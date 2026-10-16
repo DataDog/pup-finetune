@@ -20,6 +20,7 @@ from pup_finetune.cli import app
 from pup_finetune.curation.pipeline import pipeline_state
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.push import PUSH_FILE
+from tests.fakes.pushed import mark_pushed
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
 ROW_IDS = [json.loads(line)["id"] for line in ROWS.read_text().splitlines()]
@@ -76,7 +77,7 @@ def test_show_reports_the_same_pipeline_and_the_warning() -> None:
 
 
 @pytest.mark.usefixtures("imported")
-def test_labels_move_the_pipeline_on_to_training_and_a_first_push(tmp_path: Path) -> None:
+def test_labels_move_the_pipeline_on_to_a_first_push_then_training(tmp_path: Path) -> None:
     labels = tmp_path / "labels.jsonl"
     labels.write_text(
         json.dumps({"id": ROW_IDS[0], "keep": False, "reason": "synthetic drop"})
@@ -95,9 +96,15 @@ def test_labels_move_the_pipeline_on_to_training_and_a_first_push(tmp_path: Path
     assert data["next_command"] is None
     assert [step["command"] for step in data["next_steps"]] == [
         "pup finetune models list",
+        "pup finetune dataset push ds --name <NAME>",
+    ]
+    # Once every kept row is in Datadog, training is the step.
+    mark_pushed(Path("ds"))
+    shown = output(invoke("show", "ds"))
+    assert [step["command"] for step in shown["next_steps"]] == [
+        "pup finetune models list",
         "pup finetune benchmark ds --models <MODELS>",
         "pup finetune train --dataset ds --model <MODEL>",
-        "pup finetune dataset push ds --name <NAME>",
     ]
 
 

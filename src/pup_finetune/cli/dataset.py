@@ -411,10 +411,11 @@ def dataset_next(
     review (``None`` right after one, ``sampled``), and labeling them, by hand or with a
     judge council, are the steps; a fetched dataset (``dataset fetch``) was curated in
     Datadog, so its rows go straight to training. A triage that is not complete gets a step to finish it.
-    Once rows are labeled, training is: its preview needs a model that cannot be chosen
-    without guessing, so it is a step. So is the push: with ``--name`` while the dataset
-    was never pushed, and without any flag (the receipt names the dataset) while kept rows
-    are not pushed yet. ``directory`` is the directory as the user typed it; ``summary`` is
+    Once rows are labeled, the push is a step: with ``--name`` while the dataset was never
+    pushed, and without any flag (the receipt names the dataset) while kept rows are not
+    pushed yet. Training (and benchmarking) is a step only once every kept row is pushed,
+    since it reads a dataset that is in Datadog; its preview needs a model that cannot be
+    chosen without guessing. ``directory`` is the directory as the user typed it; ``summary`` is
     the dataset's summary when the caller has it already. A pipeline file that cannot be
     read adds ``warnings`` (see :func:`merge_next`).
     """
@@ -481,28 +482,27 @@ def dataset_next(
     steps = [label_step] if sampled else []
     steps += _pull_more_steps(dataset, directory, state)
     steps += triage_steps
-    steps += [
-        step(
-            command("models", "list"),
-            "see the models a provider can fine-tune",
-        ),
-        step(
-            template("benchmark", directory, "--models", "<MODELS>"),
-            "compare base models on the test split to choose the one to fine-tune (paid; it "
-            "previews first)",
-        ),
-        step(
-            template("train", "--dataset", directory, "--model", "<MODEL>"),
-            "preview a training run on the kept rows (free); choose the model with the user "
-            "(its provider is inferred, and the run goes in runs/RUN_ID)",
-        ),
-    ]
-    if state.push == "not_pushed":
+    steps.append(step(command("models", "list"), "see the models a provider can fine-tune"))
+    if state.push == "pushed":
+        steps += [
+            step(
+                template("benchmark", directory, "--models", "<MODELS>"),
+                "compare base models on the test split to choose the one to fine-tune (paid; "
+                "it previews first)",
+            ),
+            step(
+                template("train", "--dataset", directory, "--model", "<MODEL>"),
+                "preview a training run on the kept rows (free); choose the model with the "
+                "user (its provider is inferred, and the run goes in runs/RUN_ID)",
+            ),
+        ]
+    elif state.push == "not_pushed":
         steps.append(
             step(
                 template("dataset", "push", directory, "--name", "<NAME>"),
-                "push the kept rows to Datadog so an evaluation can be published as "
-                "experiments (a remote write; it previews first)",
+                "push the kept rows to Datadog before training: train and benchmark read a "
+                "dataset that is in Datadog, and an evaluation publishes its experiments on "
+                "it (a remote write; it previews first)",
             )
         )
     steps += _push_steps(state, directory)
@@ -544,8 +544,8 @@ def _push_steps(state: Pipeline, directory: Path) -> list[dict[str, str]]:
             step(
                 command("dataset", "push", directory),
                 f"push the {state.pending} kept rows not pushed yet to dataset "
-                f"{state.dataset_name!r}, which {PUSH_FILE} names (a remote write; it "
-                "previews first)",
+                f"{state.dataset_name!r}, which {PUSH_FILE} names, before training on it (a "
+                "remote write; it previews first)",
             )
         ]
     if state.push == "unreadable":

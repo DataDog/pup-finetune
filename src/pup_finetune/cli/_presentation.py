@@ -95,7 +95,7 @@ TRAIN: Final = "Train"
 EVALUATE_AND_SHIP: Final = "Evaluate and ship"
 """The panels of the top-level help."""
 
-FLOW: Final = "dataset pull -> review -> benchmark -> train -> evaluate -> deploy"
+FLOW: Final = "dataset pull -> review -> dataset push -> train -> evaluate -> deploy"
 """The workflow, in one line under the top-level description."""
 
 EXAMPLE_WIDTH: Final = 74
