@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Final, Literal
 
 from pydantic import SecretStr
 
-from pup_finetune.errors import ExternalError, UsageError
+from pup_finetune.errors import ExternalError, FinetuneError, UsageError
 from pup_finetune.redaction import RedactingFilter, install_log_redaction, redact, register_secret
 
 if TYPE_CHECKING:
@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 __all__ = [
     "KEYCHAIN_SERVICE",
     "CredentialSpec",
+    "KeyUnreadable",
     "RedactingFilter",
     "ResolvedCredential",
     "Source",
@@ -419,13 +420,34 @@ def delete(provider: str, *, keyring_backend: KeyringBackend | None = None) -> b
     return deleted
 
 
-def key_source(provider: str, *, env: Mapping[str, str] = os.environ) -> str | None:
-    """Where ``provider``'s key would come from (:data:`Source`), ``<provider>-sdk`` when only
-    its SDK can sign in on its own, or ``None`` when nothing would. Never returns the key.
+@dataclass(frozen=True, slots=True)
+class KeyUnreadable:
+    """Why a key could not be looked up (a locked or failing keychain), never what was read,
+    and what to do about it: signing in again would not help."""
 
-    Raises :class:`ExternalError` when the keychain cannot be read (e.g. it is locked).
+    detail: str
+    fix: str
+
+
+def key_source(provider: str, *, env: Mapping[str, str] = os.environ) -> str | KeyUnreadable | None:
+    """Where ``provider``'s key would come from (:data:`Source`), ``<provider>-sdk`` when only
+    its SDK can sign in on its own, ``None`` when nothing would, or :class:`KeyUnreadable`
+    when looking failed. Never returns the key and never raises: ``doctor`` and the judge
+    defaults both read a key this way, so a failure means the same to both.
     """
-    found = lookup(provider, env=env)
-    if found is not None:
-        return found.source
-    return sdk_login_source(provider, env=env)
+    spec = get_spec(provider)
+    try:
+        found = lookup(provider, env=env)
+        return found.source if found is not None else sdk_login_source(provider, env=env)
+    except FinetuneError as exc:
+        detail = f"{exc.message}; {exc.hint}" if exc.hint else exc.message
+        fix = exc.hint or f"unlock the OS keychain and retry, or set {spec.env_var}"
+        return KeyUnreadable(redact(detail), redact(fix))
+    except Exception as exc:
+        # Never the error's message: a keychain backend's error may hold what it read.
+        fix = f"check that the OS keychain works and retry, or set {spec.env_var}"
+        return KeyUnreadable(
+            f"could not read the {spec.provider} key from the OS keychain "
+            f"({type(exc).__name__}); {fix}",
+            fix,
+        )

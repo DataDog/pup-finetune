@@ -13,8 +13,8 @@ next from it. A file it cannot read makes that part ``unreadable``, with a warni
 the file and the problem (:attr:`Pipeline.warnings`), rather than a guess.
 
 :func:`require_in_datadog` is the gate of ``train`` and ``benchmark``: they read a dataset
-whose every kept row is in Datadog as it is now, and :meth:`Pipeline.push_step` is the one
-advice on how to get there, for the gate and for ``next_steps`` alike.
+whose every kept row is in Datadog as it is now, and :meth:`Pipeline.push_gap` is the one
+account of what is missing and how to get there, for the gate and for ``next_steps`` alike.
 """
 
 from __future__ import annotations
@@ -29,11 +29,11 @@ from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.push import PUSH_FILE, compare_receipt, read_push_state
 from pup_finetune.data.schema import TrainingRow
 from pup_finetune.data.split import SplitName
-from pup_finetune.display import display_path
+from pup_finetune.display import counted, display_path
 from pup_finetune.errors import DirectoryUsageError, StateError
 from pup_finetune.next_steps import command, step, template
 
-__all__ = ["Pipeline", "PushStatus", "pipeline_state", "require_in_datadog"]
+__all__ = ["Pipeline", "PushGap", "PushStatus", "pipeline_state", "require_in_datadog"]
 
 PushStatus = Literal[
     "not_pushed", "pushed", "pushed_with_new_rows", "pushed_with_changed_rows", "unreadable"
@@ -43,6 +43,20 @@ now; ``pushed_with_new_rows`` when kept rows are not pushed yet (``dataset push 
 them); ``pushed_with_changed_rows`` when kept rows changed after they were pushed (a push
 only adds records, so only a push to a new dataset holds them as they are); ``unreadable``
 when ``push.json`` cannot be read."""
+
+SHOWN_CHANGED_IDS = 5
+"""How many ids of rows changed after the push the gate names."""
+
+
+@dataclass(frozen=True, slots=True)
+class PushGap:
+    """Why a dataset's kept rows are not all in Datadog as they are now, and the step that
+    gets them there (:meth:`Pipeline.push_gap`)."""
+
+    reason: str
+    """What is missing, as it reads after ``train reads a dataset that is in Datadog, and``."""
+    step: dict[str, str]
+    """The ``next_steps`` entry that fixes it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,8 +74,12 @@ class Pipeline:
     changed: int | None = 0
     """Kept rows whose record changed since it was pushed; ``None`` when ``push.json``
     cannot be read."""
+    changed_ids: tuple[str, ...] = ()
+    """The ids of those rows, sorted."""
     dataset_name: str | None = None
     """The dataset ``push.json`` names, when there is one."""
+    project: str | None = None
+    """The project of that dataset."""
     warnings: tuple[str, ...] = ()
     """Why a part is ``unreadable``: the file and the problem, and what to do about it."""
 
@@ -81,42 +99,83 @@ class Pipeline:
             "push": {"status": self.push, "pending": self.pending, "changed": self.changed},
         }
 
-    def push_step(self, directory: Path) -> dict[str, str] | None:
-        """The step that puts every kept row in Datadog as it is now, or ``None`` when they
-        all are. ``directory`` is the dataset directory as the user typed it."""
-        if self.push == "not_pushed":
-            return step(
-                template("dataset", "push", directory, "--name", "<NAME>"),
-                f"push the {self.kept} kept rows to Datadog: train and benchmark read a "
-                "dataset that is in Datadog, and an evaluation publishes its experiments on "
-                "it (a remote write; it previews first)",
-            )
-        if self.push == "pushed_with_new_rows":
-            what = (
-                f"push the {self.pending} kept rows not pushed yet to"
-                if self.pending
-                else "finish the interrupted push to"
-            )
-            return step(
-                command("dataset", "push", directory),
-                f"{what} dataset {self.dataset_name!r}, which {PUSH_FILE} names (a remote "
-                "write; it previews first)",
-            )
-        if self.push == "pushed_with_changed_rows":
-            return step(
-                template("dataset", "push", directory, "--name", "<NEW_NAME>"),
-                f"{self.changed} kept rows changed after they were pushed, and a push only "
-                f"adds records, so dataset {self.dataset_name!r} holds them as they were: "
-                f"move {PUSH_FILE} aside, then push every kept row to a new dataset (a remote "
-                "write; it previews first)",
-            )
-        if self.push == "unreadable":
-            return step(
-                command("dataset", "show", directory),
-                f"{PUSH_FILE} cannot be read, so whether the dataset was pushed is unknown; "
-                "show reports why",
-            )
-        return None
+    def push_gap(self, directory: Path) -> PushGap | None:
+        """What keeps the kept rows from all being in Datadog as they are now, and the step
+        that fixes it; ``None`` when they all are, or there are none. ``directory`` is the
+        dataset directory as the user typed it."""
+        name = self.dataset_name
+        match self.push:
+            case "pushed":
+                return None
+            case "not_pushed" if not self.kept:
+                return None
+            case "not_pushed":
+                return PushGap(
+                    f"{display_path(directory)} was never pushed",
+                    step(
+                        template("dataset", "push", directory, "--name", "<NAME>"),
+                        f"push the {counted(self.kept, 'kept row')} to Datadog: train and "
+                        "benchmark read a dataset that is in Datadog, and an evaluation "
+                        "publishes its experiments on it (a remote write; it previews first)",
+                    ),
+                )
+            case "pushed_with_new_rows" if self.pending:
+                pending = self.pending
+                return PushGap(
+                    f"{pending} of its kept rows {'is' if pending == 1 else 'are'} not in "
+                    f"dataset {name!r} yet",
+                    step(
+                        command("dataset", "push", directory),
+                        f"push the {counted(pending, 'kept row')} not pushed yet to dataset "
+                        f"{name!r}, which {PUSH_FILE} names (a remote write; it previews first)",
+                    ),
+                )
+            case "pushed_with_new_rows":
+                return PushGap(
+                    f"its last push to dataset {name!r} did not finish",
+                    step(
+                        command("dataset", "push", directory),
+                        f"finish the interrupted push to dataset {name!r}, which {PUSH_FILE} "
+                        "names (a remote write; it previews first)",
+                    ),
+                )
+            case "pushed_with_changed_rows":
+                ids = list(self.changed_ids)
+                shown = ", ".join(ids[:SHOWN_CHANGED_IDS])
+                more = (
+                    f" and {len(ids) - SHOWN_CHANGED_IDS} more"
+                    if len(ids) > SHOWN_CHANGED_IDS
+                    else ""
+                )
+                return PushGap(
+                    f"{self.changed} of its kept rows changed after the push to dataset "
+                    f"{name!r} ({'row' if len(ids) == 1 else 'rows'} {shown}{more})",
+                    step(
+                        template(
+                            "dataset",
+                            "fetch",
+                            "<NEW_DIR>",
+                            "--project",
+                            self.project,
+                            "--name",
+                            name,
+                        ),
+                        f"a push only adds records, so dataset {name!r} holds those rows as "
+                        "they were pushed: fetch it into a new directory to train on what "
+                        "Datadog holds (to train on the rows as they are now, move "
+                        f"{PUSH_FILE} aside and push them to a new --name)",
+                    ),
+                )
+            case "unreadable":
+                return PushGap(
+                    f"whether {display_path(directory)} was pushed is unknown: {PUSH_FILE} "
+                    "cannot be read",
+                    step(
+                        command("dataset", "show", directory),
+                        f"{PUSH_FILE} cannot be read, so whether the dataset was pushed is "
+                        "unknown; show reports why",
+                    ),
+                )
 
 
 def pipeline_state(
@@ -131,26 +190,27 @@ def pipeline_state(
     accepted = int(counts["accepted"])
     kept = int(counts["kept"])
     warnings: list[str] = []
+    changed_ids: tuple[str, ...] = ()
+    name = project = None
     try:
         state = read_push_state(dataset)
     except StateError as exc:
         push: PushStatus = "unreadable"
         pending: int | None = None
         changed: int | None = None
-        name = None
         warnings.append(
             f"the push receipt cannot be read ({exc.message}), so which kept rows were "
             "pushed is unknown; fix the file, or move it aside and push to a new --name"
         )
     else:
         if state is None:
-            push, pending, changed, name = "not_pushed", kept, 0, None
+            push, pending, changed = "not_pushed", kept, 0
         else:
-            name = state.dataset_name
+            name, project = state.dataset_name, state.project
             unpushed, edited = compare_receipt(
                 state, by_split if by_split is not None else dataset.rows_by_split()
             )
-            pending, changed = len(unpushed), len(edited)
+            pending, changed, changed_ids = len(unpushed), len(edited), tuple(sorted(edited))
             push = (
                 "pushed_with_changed_rows"
                 if changed
@@ -170,7 +230,9 @@ def pipeline_state(
         push=push,
         pending=pending,
         changed=changed,
+        changed_ids=changed_ids,
         dataset_name=name,
+        project=project,
         warnings=tuple(warnings),
     )
 
@@ -196,22 +258,15 @@ def require_in_datadog(
     if offline:
         return
     state = pipeline_state(dataset, by_split=by_split)
-    advice = state.push_step(directory)
-    if advice is None:
+    gap = state.push_gap(directory)
+    if gap is None:
         return
-    why = {
-        "not_pushed": f"{display_path(dataset.path)} was never pushed",
-        "pushed_with_new_rows": f"{state.pending} of its kept rows are not in dataset "
-        f"{state.dataset_name!r} yet"
-        if state.pending
-        else f"its last push to dataset {state.dataset_name!r} did not finish",
-        "pushed_with_changed_rows": f"{state.changed} of its kept rows changed after they "
-        f"were pushed to dataset {state.dataset_name!r}",
-        "unreadable": f"whether {display_path(dataset.path)} was pushed is unknown: "
-        f"{PUSH_FILE} cannot be read",
-    }[state.push]
+    hint = f"{gap.step['why']}: `{gap.step['command']}`"
+    if state.push != "pushed_with_changed_rows":  # whose step is the fetch already
+        hint += (
+            f"; or {command_name} on a dataset already in Datadog: "
+            "`pup finetune dataset fetch <DIR> --project <PROJECT> --name <NAME>`"
+        )
     raise DirectoryUsageError(
-        f"{command_name} reads a dataset that is in Datadog, and {why}",
-        hint=f"{advice['why']}: `{advice['command']}`; or train on a dataset already in "
-        "Datadog: `pup finetune dataset fetch <DIR> --project <PROJECT> --name <NAME>`",
+        f"{command_name} reads a dataset that is in Datadog, and {gap.reason}", hint=hint
     )

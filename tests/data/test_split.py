@@ -279,9 +279,17 @@ def booking(row_id: str, n: int, *, trace_id: str) -> TrainingRow:
     return make_row(row_id, BOOKING.format(n=n, d=n % 28 + 1), trace_id=trace_id)
 
 
+def letters(n: int) -> str:
+    """``n`` in letters, so texts told apart by it are not copies (numbers fold to ``0``)."""
+    return "".join(chr(ord("a") + int(digit)) for digit in str(n))
+
+
 def filler(count: int) -> list[TrainingRow]:
     """``count`` unrelated rows, a trace each, so a dataset has room for groups."""
-    return [make_row(f"filler-{n}", f"Unrelated {n}", trace_id=f"filler-{n}") for n in range(count)]
+    return [
+        make_row(f"filler-{n}", f"Unrelated {letters(n)}", trace_id=f"filler-{n}")
+        for n in range(count)
+    ]
 
 
 def test_a_request_key_ignores_numbers_case_and_whitespace_only() -> None:
@@ -309,17 +317,49 @@ def test_json_user_turns_with_other_values_are_other_requests() -> None:
     assert request_key(turn("c", "Port Alder", 9)) == request_key(turn("a", "Port Alder", 2))
 
 
-def test_a_short_request_joins_nothing() -> None:
-    assert request_key(make_row("a", "Summarize the above")) is None
-    assert request_key(make_row("b", "   ")) is None
-    row = validate_row({"id": "c", "messages": [{"role": "assistant", "content": "Hi."}]})
+def test_a_row_without_user_text_joins_nothing() -> None:
+    assert request_key(make_row("a", "   ")) is None
+    row = validate_row({"id": "b", "messages": [{"role": "assistant", "content": "Hi."}]})
     assert request_key(row) is None
-    rows = [make_row(f"r{n}", "Summarize the above", trace_id=f"t{n}") for n in range(3)]
-    assert [[row.id for row in group] for group in split_groups(rows).groups] == [
-        ["r0"],
-        ["r1"],
-        ["r2"],
+
+
+def test_short_copies_that_differ_only_in_numbers_share_a_split() -> None:
+    rows = [
+        make_row("a", "Look up support ticket 100.", trace_id="t1"),
+        make_row("b", "Look up support ticket 101.", trace_id="t2"),
+        *filler(18),
     ]
+    grouped = split_groups(rows)
+    assert [row.id for row in grouped.groups[0]] == ["a", "b"]
+    splits = SplitAssignments(SplitParams())
+    assign_splits(rows, splits)
+    assert splits.assignments["t1"] == splits.assignments["t2"]
+
+
+def test_two_traces_asking_one_request_join_however_many_rows_they_hold() -> None:
+    # Each trace is a request and two sub-agent turns of its own: 6 of 46 rows.
+    rows = [
+        row
+        for trace in ("t1", "t2")
+        for row in (
+            booking(f"{trace}-main", len(trace), trace_id=trace),
+            make_row(f"{trace}-search", f"Search hotels for {trace}", trace_id=trace),
+            make_row(f"{trace}-rank", f"Rank the hotels of {trace}", trace_id=trace),
+        )
+    ]
+    grouped = split_groups([*rows, *filler(40)])
+    assert grouped.cap == 2
+    assert [row.id for row in grouped.groups[0]] == [row.id for row in rows]
+    assert grouped.ungrouped == []
+
+
+def test_the_share_cap_applies_from_the_third_trace() -> None:
+    three = [booking(f"copy-{n}", n, trace_id=f"t{n}") for n in range(3)]
+    small = split_groups([*three, *filler(40)])  # 43 traces: 5% is 2
+    assert (small.cap, small.ungrouped) == (2, [["copy-0", "copy-1", "copy-2"]])
+    large = split_groups([*three, *filler(57)])  # 60 traces: 5% is 3
+    assert (large.cap, large.ungrouped) == (3, [])
+    assert [row.id for row in large.groups[0]] == ["copy-0", "copy-1", "copy-2"]
 
 
 def test_rows_sharing_a_trace_or_a_request_form_one_group() -> None:
@@ -349,12 +389,12 @@ def test_a_fixed_sub_agent_turn_shared_by_traces_does_not_pull_them_together() -
         row
         for n in range(30)
         for row in (
-            make_row(f"main-{n}", f"Plan trip {n}", trace_id=f"t{n}"),
+            make_row(f"main-{n}", f"Plan trip {letters(n)}", trace_id=f"t{n}"),
             make_row(f"sub-{n}", SUBAGENT, trace_id=f"t{n}"),
         )
     ]
     grouped = split_groups(rows)
-    # Grouping its 30 traces would put 60 of 60 rows in one split: over the cap of 4.
+    # Grouping its 30 traces would put every row in one split: over the cap of 2 traces.
     assert len(grouped.groups) == 30
     assert grouped.ungrouped == [[f"sub-{n}" for n in range(30)]]
     splits = SplitAssignments(SplitParams())
@@ -380,10 +420,11 @@ def test_copies_of_one_request_in_new_traces_share_one_split() -> None:
 
 
 def test_a_new_copy_takes_the_split_its_request_already_has() -> None:
+    rows = [*copies(3), *filler(57)]  # 60 traces: a request may gather 3
     splits = SplitAssignments(SplitParams(), {KEYS[0]: "test"})
-    assign_splits(copies(3), splits)
-    assert splits.assignments == dict.fromkeys(KEYS[:3], "test")
-    assert split_conflicts(split_groups(copies(3)), splits) == []
+    assign_splits(rows, splits)
+    assert [splits.assignments[key] for key in KEYS[:3]] == ["test"] * 3
+    assert split_conflicts(split_groups(rows), splits) == []
 
 
 def test_a_new_trace_linking_copies_already_apart_takes_the_larger_side() -> None:
@@ -393,17 +434,22 @@ def test_a_new_trace_linking_copies_already_apart_takes_the_larger_side() -> Non
         booking("b", 2, trace_id="t2"),
         make_row("c", "Refund 3", trace_id="t2"),
         booking("d", 4, trace_id="t3"),  # new: it links t1 and t2
+        *filler(57),
     ]
     splits = SplitAssignments(SplitParams(), {"t1": "test", "t2": "train"})
     assign_splits(rows, splits)
     # t2 holds two of the group's three recorded rows; recorded keys never move.
-    assert splits.assignments == {"t1": "test", "t2": "train", "t3": "train"}
+    assert {key: splits.assignments[key] for key in ("t1", "t2", "t3")} == {
+        "t1": "test",
+        "t2": "train",
+        "t3": "train",
+    }
     assert split_conflicts(split_groups(rows), splits) == [SplitConflict("train", {"test": ["a"]})]
 
 
 def test_a_tie_between_the_sides_goes_to_the_first_split() -> None:
     rows = [booking("a", 1, trace_id="t1"), booking("b", 2, trace_id="t2")]
-    rows.append(booking("c", 3, trace_id="t3"))
+    rows += [booking("c", 3, trace_id="t3"), *filler(57)]
     splits = SplitAssignments(SplitParams(), {"t1": "test", "t2": "validation"})
     assign_splits(rows, splits)
     assert splits.assignments["t3"] == "validation"

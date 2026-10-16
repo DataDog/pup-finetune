@@ -32,7 +32,7 @@ from pup_finetune.providers.base import Provider
 from pup_finetune.providers.fireworks.provider import FireworksProvider
 from pup_finetune.runtime import Runtime
 from tests.fakes.fireworks_api import API_KEY, FakeFireworksApi
-from tests.fakes.keyring import LockedKeyring, MemoryKeyring
+from tests.fakes.keyring import CRASHED_HOLDING, CrashingKeyring, LockedKeyring
 from tests.fakes.pup import FAKE_BINARY, FakePup
 from tests.fakes.setup import ALL_PACKAGES, healthy_pup, installed_packages, no_provider_keys
 
@@ -715,17 +715,10 @@ def test_a_locked_keychain_says_to_unlock_it_not_to_sign_in(
     assert result.stderr.splitlines()[-1] == f"Next: {key['fix']}"
 
 
-class _CrashingKeyring(MemoryKeyring):
-    """A keychain backend that fails with an error keyring does not define, quoting a key."""
-
-    def get_password(self, service: str, username: str) -> str | None:
-        raise RuntimeError(f"backend crashed holding {API_KEY}")
-
-
 def test_a_crashing_keychain_backend_does_not_crash_doctor(
     use_pup: UsePup, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(keyring.core, "_keyring_backend", _CrashingKeyring())
+    monkeypatch.setattr(keyring.core, "_keyring_backend", CrashingKeyring())
     use_pup(healthy_pup().client())
     result = invoke()
     assert result.exit_code == 0, result.stderr
@@ -739,7 +732,7 @@ def test_a_crashing_keychain_backend_does_not_crash_doctor(
     assert key["detail"] == (
         f"could not read the fireworks key from the OS keychain (RuntimeError); {fix}"
     )
-    assert API_KEY not in result.stdout + result.stderr
+    assert CRASHED_HOLDING not in result.stdout + result.stderr
     assert "pup finetune auth login fireworks" not in [
         s["command"] for s in report_of(result)["next_steps"]
     ]

@@ -79,7 +79,7 @@ from pup_finetune.datadog.spans import (
     TimeBound,
     parse_time_bound,
 )
-from pup_finetune.display import display_path
+from pup_finetune.display import counted, display_path
 from pup_finetune.errors import SettingsConflict, UsageError, require_confirm, require_writable
 from pup_finetune.next_steps import command, step, template
 from pup_finetune.output import info
@@ -417,7 +417,7 @@ def dataset_next(
     judge council, are the steps; a fetched dataset (``dataset fetch``) was curated in
     Datadog, so its rows go straight to training. A triage that is not complete gets a step to finish it.
     Once rows are labeled, the push is a step (:meth:`~pup_finetune.curation.pipeline.
-    Pipeline.push_step`). Training (and benchmarking) is a step only once every kept row is
+    Pipeline.push_gap`). Training (and benchmarking) is a step only once every kept row is
     pushed as it is now, since it reads a dataset that is in Datadog; its preview needs a
     model that cannot be chosen without guessing. Kept copies of a request outside their
     group's split come first: a ``dataset label`` step with the drop labels the summary wrote
@@ -427,7 +427,8 @@ def dataset_next(
     """
     summary = summary if summary is not None else dataset.summary()
     state = pipeline_state(dataset, summary)
-    push_step = state.push_step(directory)
+    gap = state.push_gap(directory)
+    push_step = gap.step if gap is not None else None
     shown: dict[str, Any] = {"pipeline": state.to_json()}
     if state.warnings:
         shown["warnings"] = list(state.warnings)
@@ -442,9 +443,9 @@ def dataset_next(
                 command(
                     "dataset", "label", directory, "--file", directory / conflicts["labels_file"]
                 ),
-                f"drop the {conflicts['rows']} kept rows outside their group's split (see "
-                "split_conflicts), so no copy of a test request is trained on; the file holds "
-                "a drop label for each, to review first (a label is never withdrawn)",
+                f"drop the {counted(conflicts['rows'], 'kept row')} outside their group's "
+                "split (see split_conflicts), so no copy of a test request is trained on; the "
+                "file holds a drop label for each, to review first (a label is never withdrawn)",
             ),
         )
     return {**shown, **following}
@@ -518,6 +519,8 @@ def _next_by_state(
     steps = [label_step] if sampled else []
     steps += _pull_more_steps(dataset, directory, state)
     steps += triage_steps
+    if not state.kept:
+        return {"next_command": None, "next_steps": steps}  # nothing to push or train on
     steps.append(step(command("models", "list"), "see the models a provider can fine-tune"))
     if push_step is None:
         steps += [
@@ -843,9 +846,10 @@ def _receipt_warnings(stale: Mapping[str, str], changed: Mapping[str, str]) -> l
         )
     if changed:
         warnings.append(
-            f"{len(changed)} kept rows changed after they were pushed (see changed_records); "
-            "a push only adds records, so their remote records were not updated. To push "
-            f"the rows as they are now, move {PUSH_FILE} aside and push to a new --name"
+            f"{counted(len(changed), 'kept row')} changed after the push (see "
+            "changed_records); a push only adds records, so their remote records were not "
+            f"updated. To push the rows as they are now, move {PUSH_FILE} aside and push to a "
+            "new --name"
         )
     return warnings
 

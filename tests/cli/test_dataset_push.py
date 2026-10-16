@@ -267,7 +267,7 @@ def test_rows_changed_after_a_push_are_reported_with_a_warning(
     assert invoke("import", str(dataset), "--file", str(more)).exit_code == 0
     preview = output_json(push(dataset))["preview"]
     assert preview["changed_records"] == data["changed_records"]
-    assert any("changed after they were pushed" in w for w in preview["warnings"])
+    assert any("1 kept row changed after the push" in w for w in preview["warnings"])
 
 
 def test_the_preview_after_more_rows_were_added_shows_only_those(

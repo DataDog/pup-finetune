@@ -72,7 +72,7 @@ from pup_finetune.cli._views import (
 )
 from pup_finetune.curation.pipeline import require_in_datadog
 from pup_finetune.data.dataset_dir import DatasetDir
-from pup_finetune.display import display_path, joined, quoted
+from pup_finetune.display import counted, display_path, joined, quoted
 from pup_finetune.errors import (
     PAID_RUN,
     FinetuneError,
@@ -393,16 +393,12 @@ def _usage(
     )
 
 
-def _plural(count: int, noun: str) -> str:
-    return f"{count} {noun}{'' if count == 1 else 's'}"
-
-
 def _action(profile: ModelProfile, spec: TrainSpec, rows: Mapping[str, int]) -> str:
     """What ``train --confirm`` does, in one sentence."""
     lora = spec.lora_config(profile)
     text = (
         f"fine-tune {profile.alias} with LoRA rank {lora.rank} for up to "
-        f"{_plural(spec.max_epochs, 'epoch')} on {_plural(rows['train'], 'row')}"
+        f"{counted(spec.max_epochs, 'epoch')} on {counted(rows['train'], 'row')}"
     )
     if rows["validation"]:
         return f"{text}, validating on {rows['validation']}"

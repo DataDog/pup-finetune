@@ -315,8 +315,13 @@ def copy_rows(first: int, count: int) -> list[dict[str, Any]]:
 
 
 def other_rows(count: int) -> list[dict[str, Any]]:
+    """``count`` unrelated requests, a trace each (told apart by letters: numbers fold)."""
     return [
-        synthetic_row(f"synthetic-other-{n:03d}", f"Tell me about item {n}", f"other-{n:03d}")
+        synthetic_row(
+            f"synthetic-other-{n:03d}",
+            "Tell me about item " + "".join(chr(ord("a") + int(d)) for d in str(n)),
+            f"other-{n:03d}",
+        )
         for n in range(count)
     ]
 
@@ -334,6 +339,18 @@ def test_copies_of_one_request_share_one_split(tmp_path: Path) -> None:
     assert again.exit_code == 0, again.stderr
     splits = json.loads((target / "splits.json").read_text())["assignments"]
     assert splits["copy-003"] == splits["copy-000"]
+
+
+def test_a_fixed_prompt_in_many_traces_keeps_a_split_per_trace_and_is_warned_about(
+    tmp_path: Path,
+) -> None:
+    fixed = [synthetic_row(f"sum-{n}", "Summarize the above", f"t{n}") for n in range(3)]
+    data = output_json(import_rows(tmp_path / "ds", rows_file(tmp_path / "a.jsonl", fixed)))
+    assert data["split_groups"] == 3
+    assert any(
+        w.startswith("1 request repeats in more than 2 traces") and "sum-0, sum-1, sum-2" in w
+        for w in data["warnings"]
+    )
 
 
 def test_copies_recorded_apart_are_named_with_labels_to_drop_them(tmp_path: Path) -> None:
@@ -356,7 +373,7 @@ def test_copies_recorded_apart_are_named_with_labels_to_drop_them(tmp_path: Path
         "row_ids": {"test": ["a"]},
         "labels_file": "split_conflicts.jsonl",
     }
-    assert any("1 kept rows are copies of a request" in w for w in data["warnings"])
+    assert any("1 kept row is a copy of a request" in w for w in data["warnings"])
     labels_file = target / "split_conflicts.jsonl"
     assert [json.loads(line) for line in labels_file.read_text().splitlines()] == [
         {

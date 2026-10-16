@@ -309,13 +309,17 @@ def triage_rows(
             # In the result too, not only on stderr: an agent reads why and what to change.
             preview["refused"] = refused
             preview["refused_hint"] = template_hint
-    require_confirm(
-        confirm,
-        preview,
-        shlex.join([*rerun, "--confirm"]),
-        refused=refused,
-        hint=template_hint if refused is not None else None,
-    )
+    hint = template_hint if refused is not None else None
+    if refused is None and not plan.rows:
+        # A --confirm would review nothing, so none is offered.
+        among = "row --rows names" if rows is not None else "accepted row"
+        refused = "there is no row to review: " + (
+            f"every {among} is labeled by you or the agent"
+            if plan.skipped_labeled
+            else "the dataset has no accepted rows"
+        )
+        preview["refused"] = refused
+    require_confirm(confirm, preview, shlex.join([*rerun, "--confirm"]), refused=refused, hint=hint)
     info(
         f"triage: {len(plan.pending)} judge calls for {len(plan.rows)} rows "
         f"({plan.votes_reused} votes reused)"

@@ -32,7 +32,6 @@ from pup_finetune.runtime import Runtime
 
 __all__ = [
     "DATADOG_CHECKS",
-    "JUDGE_PACKAGES",
     "KEY_NOT_SET",
     "READ_ONLY",
     "judge_checks",
@@ -51,18 +50,6 @@ DATADOG_CHECKS: Final = ("pup", "datadog_auth")
 READ_ONLY: Final = "read_only"
 """What a step ``PUP_READ_ONLY`` refuses is blocked by, in :func:`ready_map`."""
 
-JUDGE_PACKAGES: Final[dict[str, Package]] = {
-    "anthropic": Package(
-        key="sdk",
-        label="Anthropic SDK",
-        modules=("anthropic",),
-        extra="anthropic",
-        steps=(),
-        needed_for="anthropic/... judges",
-    ),
-}
-"""The optional package each judge-only provider needs, by credential name."""
-
 
 def judge_credential(spec: str) -> str:
     """The credential a judge spec signs in with, by its prefix (see :mod:`pup_finetune.
@@ -77,7 +64,7 @@ def _default_judges(
     """The judges a command defaults to by the checks that passed: a provider's key, and
     the package its judges need (see :func:`pup_finetune.judges.default_judges`, which
     resolves the same credentials and packages)."""
-    from pup_finetune.judges import pick_default
+    from pup_finetune.judges import JUDGE_PACKAGES, pick_default
 
     def source(name: str) -> str | None:
         needed = [f"{name}:key"]
@@ -102,33 +89,15 @@ def key_check(spec: credentials.CredentialSpec, *, required: bool) -> CheckResul
     name = f"{spec.provider}:key"
     fix = credentials.login_hint(spec)
     needed_for = spec.needed_for or None
-    unreadable = f"{spec.label} key unreadable"
-    try:
-        source = credentials.key_source(spec.provider)
-    except FinetuneError as exc:
-        keychain_fix = f"unlock the OS keychain and retry, or set {spec.env_var}"
+    source = credentials.key_source(spec.provider)
+    if isinstance(source, credentials.KeyUnreadable):
         return CheckResult(
             name=name,
             status=status_of(False, required=required),
-            detail=redact(error_detail(exc)),
-            label=unreadable,
+            detail=source.detail,
+            label=f"{spec.label} key unreadable",
             needed_for=needed_for,
-            fix=redact(exc.hint) if exc.hint else keychain_fix,
-            required=required,
-        )
-    except Exception as exc:
-        # Never the error's message: a keychain backend's error may hold what it read.
-        keychain_fix = f"check that the OS keychain works and retry, or set {spec.env_var}"
-        return CheckResult(
-            name=name,
-            status=status_of(False, required=required),
-            detail=(
-                f"could not read the {spec.provider} key from the OS keychain "
-                f"({type(exc).__name__}); {keychain_fix}"
-            ),
-            label=unreadable,
-            needed_for=needed_for,
-            fix=keychain_fix,
+            fix=source.fix,
             required=required,
         )
     if source is None:
@@ -217,6 +186,8 @@ def _provider_credentials(runtime: Runtime) -> set[str]:
 def judge_checks(runtime: Runtime) -> list[CheckResult]:
     """The keys of the judge-only providers (every registered credential no training
     provider signs in with), then the packages their judges need. Never required."""
+    from pup_finetune.judges import JUDGE_PACKAGES
+
     specs = [
         spec
         for spec in credentials.all_specs()

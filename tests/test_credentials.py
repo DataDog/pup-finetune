@@ -479,8 +479,12 @@ def test_doctor_redacts_returned_check_details(capsys: pytest.CaptureFixture[str
 def test_the_key_source_reports_a_locked_keychain(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(keyring.core, "_keyring_backend", LockedKeyring())
     credentials.register(SPEC)
-    with pytest.raises(ExternalError, match="could not read the acme key"):
-        credentials.key_source("acme")
+    found = credentials.key_source("acme")
+    assert isinstance(found, credentials.KeyUnreadable)
+    assert found.detail.startswith(
+        "could not read the acme key from the OS keychain (KeyringLocked"
+    )
+    assert found.fix == f"unlock the keychain and retry, or set {SPEC.env_var}"
 
 
 # --- redaction --------------------------------------------------------------------------

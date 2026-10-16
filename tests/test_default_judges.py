@@ -19,6 +19,7 @@ import keyring.core
 import pytest
 from typer.testing import CliRunner, Result
 
+from pup_finetune import credentials, readiness
 from pup_finetune.cli import app
 from pup_finetune.curation.triage import SETTINGS_FILE, default_council
 from pup_finetune.data.dataset_dir import DatasetDir
@@ -31,7 +32,7 @@ from pup_finetune.judge_models import (
 )
 from pup_finetune.judges import default_judges
 from pup_finetune.runtime import Runtime
-from tests.fakes.keyring import LockedKeyring, MemoryKeyring
+from tests.fakes.keyring import CRASHED_HOLDING, CrashingKeyring, LockedKeyring, MemoryKeyring
 from tests.fakes.setup import ALL_PACKAGES, installed_packages
 
 ROWS = Path(__file__).resolve().parent / "fixtures" / "rows" / "tool_use.jsonl"
@@ -98,11 +99,19 @@ def test_a_key_in_the_keychain_and_the_anthropic_sdk_login_count(
     )
 
 
-def test_a_locked_keychain_falls_through_to_the_next_default(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("backend", [LockedKeyring, CrashingKeyring])
+def test_a_keychain_that_cannot_be_read_falls_through_to_the_next_default_as_in_doctor(
+    monkeypatch: pytest.MonkeyPatch, backend: type[MemoryKeyring | LockedKeyring]
 ) -> None:
-    monkeypatch.setattr(keyring.core, "_keyring_backend", LockedKeyring())
+    monkeypatch.setattr(keyring.core, "_keyring_backend", backend())
     assert default_judges(EVALUATE_DEFAULTS, env={})[0] == (DEFAULT_JUDGE_MODEL,)
+    assert default_judges(TRIAGE_DEFAULTS, env={"OPENAI_API_KEY": OPENAI_KEY})[0] == (MINI, ASTRA)
+    # doctor reads the same keychain the same way: no Anthropic key, so triage waits on
+    # Fireworks' key.
+    assert not readiness.key_check(credentials.get_spec("anthropic"), required=False).ok
+    fireworks = readiness.key_check(credentials.get_spec("fireworks"), required=False)
+    ready = readiness.ready_map([*readiness.judge_checks(Runtime()), fireworks], Runtime())
+    assert ready["dataset triage"]["blocked_by"] == ["fireworks:key"]
 
 
 def test_an_anthropic_key_without_its_sdk_is_passed_over_and_said_so(
@@ -166,6 +175,18 @@ def test_a_triage_preview_names_the_default_council_and_where_it_came_from(
     assert [judge["model"] for judge in preview["preview"]["judges"]] == [MINI, ASTRA]
     assert preview["preview"]["judges_source"] == "default: OpenAI credential (OPENAI_API_KEY)"
     assert f"--judges {MINI},{ASTRA} --confirm" in preview["next_command"]
+
+
+def test_a_triage_preview_on_a_crashing_keychain_names_the_fireworks_council(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(keyring.core, "_keyring_backend", CrashingKeyring())
+    result = invoke("dataset", "triage", str(dataset), "--rule", "stay on topic")
+    assert result.exit_code == 2, result.stderr
+    preview = output(result)["preview"]
+    assert [judge["model"] for judge in preview["judges"]] == list(FIREWORKS_JUDGES)
+    assert preview["judges_source"] == "default: no Anthropic or OpenAI credential found"
+    assert CRASHED_HOLDING not in result.stdout + result.stderr
 
 
 def test_a_triage_rerun_keeps_the_council_triage_json_froze(

@@ -45,7 +45,7 @@ from pup_finetune.data.schema import (
     without_reasoning,
 )
 from pup_finetune.data.split import (
-    GROUP_MIN_ROWS,
+    GROUP_MIN_TRACES,
     GROUP_SHARE,
     SPLITS,
     SplitAssignments,
@@ -61,7 +61,7 @@ from pup_finetune.data.split import (
     split_groups,
     split_warnings,
 )
-from pup_finetune.display import display_path
+from pup_finetune.display import counted, display_path
 from pup_finetune.errors import DirectoryUsageError, NotADatasetDir, SettingsConflict, StateError
 from pup_finetune.storage import (
     LOCK_FILE_NAME,
@@ -625,19 +625,21 @@ def _grouping_warnings(groups: SplitGroups, conflicts: Sequence[SplitConflict]) 
     if conflicts:
         rows = sum(len(ids) for conflict in conflicts for ids in conflict.outside.values())
         warnings.append(
-            f"{rows} kept rows are copies of a request whose copies are mostly in another "
-            f"split ({len(conflicts)} groups; see split_conflicts), recorded apart before "
+            f"{counted(rows, 'kept row')} {'is a copy' if rows == 1 else 'are copies'} of a "
+            "request whose copies are mostly in another split "
+            f"({counted(len(conflicts), 'group')}; see split_conflicts), recorded apart before "
             "they were grouped, so they may be both trained and tested on; recorded splits "
             f"never move, so drop them with `dataset label --file` and {SPLIT_CONFLICTS_FILE}"
         )
     if groups.ungrouped:
         shown = ", ".join(groups.ungrouped[0][:3])
+        common = len(groups.ungrouped)
         warnings.append(
-            f"{len(groups.ungrouped)} requests repeat across traces that together hold more "
-            f"than {groups.cap} rows ({GROUP_SHARE:.0%} of the dataset, and at least "
-            f"{GROUP_MIN_ROWS}), too many to keep in one split, so their copies keep a split "
-            f"per trace (e.g. rows {shown}); a fixed prompt many conversations share is such a "
-            "request"
+            f"{counted(common, 'request')} {'repeats' if common == 1 else 'repeat'} in more "
+            f"than {groups.cap} traces "
+            f"({GROUP_SHARE:.0%} of the dataset's traces, and at least {GROUP_MIN_TRACES}), too "
+            "many to keep in one split, so their copies keep a split per trace (e.g. rows "
+            f"{shown}); a fixed prompt many conversations share is such a request"
         )
     return warnings
 

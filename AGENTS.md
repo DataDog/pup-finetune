@@ -60,7 +60,9 @@ The offline dev loop trains end to end on the `fake` provider, with no network o
 `train` and `benchmark` on a real provider read only a dataset that is in Datadog (every kept
 row pushed as it is now and no push in flight: `curation/pipeline.py`'s `require_in_datadog`,
 which checks the rows the command goes on to read against the push receipt and takes its
-advice from `Pipeline.push_step`; a `dataset fetch` directory passes); an offline provider
+reason and step from `Pipeline.push_gap`, one table by push status: rows changed after the
+push are named, and their step fetches the dataset as Datadog holds it; a `dataset fetch`
+directory passes); an offline provider
 (`ProviderInfo.offline`, the fake) is exempt, so this loop and the default tests train on an
 imported directory that was never pushed:
 
@@ -468,10 +470,14 @@ Source lives under `src/pup_finetune/`.
   provider's key (`CredentialSpec.needed_for`) and packages (`ProviderInfo.packages`, found
   with `find_spec`, never imported), the judge-only keys and the Anthropic SDK, the live
   `preflight_checks` for `--provider NAME --check`, and `ready_map` (each step, ready or
-  `blocked_by` which checks, `read_only` included).
+  `blocked_by` which checks, `read_only` included). It imports `judges` only inside its
+  functions (for `JUDGE_PACKAGES` and `pick_default`), and `judges` never imports it.
 - `credentials.py` - provider API keys (never Datadog's): a `CredentialSpec` registry, resolution
   from the environment variable, then the OS keychain (`keyring`), as `SecretStr`; `store` refuses
   when there is no OS keychain rather than writing a file. `auth login/status/logout` use it.
+  `key_source` is where a key would come from without reading it out, or a `KeyUnreadable`
+  when the lookup raised anything; `doctor`'s key checks and the default judges both use it,
+  so a keychain that fails means no credential to both.
 - `redaction.py` - masks resolved secrets and `Bearer` tokens in error output and logs.
 - `concurrency.py` - `DaemonPool`, worker threads for parallel remote calls that never hold
   up the process's exit, so Ctrl-C stops at once instead of waiting for a call in flight.
@@ -497,7 +503,9 @@ Source lives under `src/pup_finetune/`.
   (`anthropic/` or `openai/`; anything else is a Fireworks model id, an alias resolved) with the
   provider's defaults (`PROVIDERS`; the lowest reasoning effort each model takes,
   `FIREWORKS_REASONING` per Fireworks model), `default_judges` (and `pick_default`) the default
-  judges by credential with where they came from, `check_available` refuses a missing extra up front,
+  judges by credential with where they came from, `JUDGE_PACKAGES` the package a judge
+  provider needs (what `doctor` checks, a default requires and `check_available` refuses a
+  judge without, missing or broken, up front),
   `open_client` and `open_clients` (one per provider) build the clients.
 - `anthropic_client.py` - `AnthropicChatClient`, the Anthropic judge (and compare model)
   client over the official SDK (the `anthropic` extra), the only module that imports
@@ -539,9 +547,10 @@ Source lives under `src/pup_finetune/`.
   schema cannot see (conversion problems, dataset-level rules);
   `split.py` assigns deterministic, persisted train/validation/test splits per trace, one per
   group of traces asking copies of one request (`request_key`: the user messages lowercased,
-  numbers as `0`, whitespace collapsed, hashed, `None` under `REQUEST_MIN_CHARS`;
-  `split_groups`, a union-find that joins no request whose group would pass `group_cap`, 5%
-  of the rows and at least 4, and reports it as `ungrouped`; `assign_splits`, which never
+  numbers as `0`, whitespace collapsed, hashed, `None` without user text;
+  `split_groups`, a union-find that joins no request whose group would pass `group_cap`
+  traces, 5% of the traces and at least 2 (so two traces asking one request always join),
+  and reports it as `ungrouped`; `assign_splits`, which never
   moves a recorded trace; `split_conflicts`, every group whose kept rows are in several
   splits, which the summary counts);
   `dataset_dir.py` is the dataset directory (`settings.json`, `rows.jsonl`, `excluded.jsonl`,

@@ -109,6 +109,21 @@ def test_labels_move_the_pipeline_on_to_a_first_push_then_training(tmp_path: Pat
 
 
 @pytest.mark.usefixtures("imported")
+def test_with_every_row_dropped_there_is_nothing_to_push_or_train_on(tmp_path: Path) -> None:
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(
+        "".join(
+            json.dumps({"id": row_id, "keep": False, "reason": "synthetic drop"}) + "\n"
+            for row_id in ROW_IDS
+        )
+    )
+    data = output(invoke("label", "ds", "--file", str(labels)))
+    assert data["pipeline"]["rows"]["kept"] == 0
+    commands = [step["command"] for step in data["next_steps"]]
+    assert not any(" push " in c or " train " in c or " benchmark " in c for c in commands)
+
+
+@pytest.mark.usefixtures("imported")
 def test_an_unreadable_receipt_is_reported_not_guessed() -> None:
     (Path("ds") / PUSH_FILE).write_text("{not json")
     state = pipeline_state(DatasetDir(Path("ds")))

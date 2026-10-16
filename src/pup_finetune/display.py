@@ -31,6 +31,7 @@ __all__ = [
     "MEASUREMENTS",
     "SIGNIFICANT_DIGITS",
     "UNROUNDED",
+    "counted",
     "display_path",
     "joined",
     "loss_text",
@@ -134,6 +135,11 @@ def quoted(value: object) -> str:
 def joined(items: Sequence[str]) -> str:
     """``items`` as a sentence lists them: ``a``, ``a and b``, ``a, b and c``."""
     return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+def counted(count: int, noun: str) -> str:
+    """``count`` and ``noun``, plural unless it is one: ``1 kept row``, ``2 kept rows``."""
+    return f"{count} {noun}{'' if count == 1 else 's'}"
 
 
 def _resolved(path: Path) -> Path | None:

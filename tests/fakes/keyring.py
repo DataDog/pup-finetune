@@ -9,6 +9,8 @@
 - :class:`MemoryKeyring` keeps passwords in a dict, like a working OS keychain.
 - :class:`FailKeyring` is keyring's own "no backend available" keyring, as on headless Linux.
 - :class:`LockedKeyring` raises :class:`keyring.errors.KeyringLocked` on every operation.
+- :class:`CrashingKeyring` fails every read with an error keyring does not define, quoting
+  what it read.
 - :class:`StickyKeyring` reports a failed delete as :class:`PasswordDeleteError` and keeps
   the entry, as macOS does when the user denies keychain access.
 - :class:`PlaintextFileKeyring` poses as a ``keyrings.alt`` file backend and really writes a
@@ -72,6 +74,17 @@ class LockedKeyring(KeyringBackend):
 
     def delete_password(self, service: str, username: str) -> None:
         raise KeyringLocked("the keychain is locked")
+
+
+class CrashingKeyring(MemoryKeyring):
+    """A keychain backend that fails with an error keyring does not define, quoting a key."""
+
+    def get_password(self, service: str, username: str) -> str | None:
+        raise RuntimeError(f"backend crashed holding {CRASHED_HOLDING}")
+
+
+CRASHED_HOLDING = "sk-synthetic-crashed-keychain-0000"
+"""What :class:`CrashingKeyring`'s error quotes: no output may show it."""
 
 
 class StickyKeyring(MemoryKeyring):

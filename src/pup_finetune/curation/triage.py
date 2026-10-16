@@ -81,7 +81,7 @@ from pup_finetune.concurrency import DaemonPool
 from pup_finetune.curation.labels import Label, LabelReport, apply_labels
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.schema import TrainingRow
-from pup_finetune.display import display_path
+from pup_finetune.display import counted, display_path
 from pup_finetune.errors import ExternalError, SettingsConflict, StateError, UsageError
 from pup_finetune.judge_models import alias_of
 from pup_finetune.providers.base import ProviderAuthError
@@ -456,10 +456,6 @@ def _review_order(row: TrainingRow) -> str:
     return hashlib.sha256(f"triage:{row.id}".encode()).hexdigest()
 
 
-def _rows(count: int) -> str:
-    return f"{count} row{'' if count == 1 else 's'}"
-
-
 @dataclass(slots=True)
 class TriagePlan:
     """What a triage of ``dataset`` reviews, and what it has already. See :func:`plan_triage`."""
@@ -567,15 +563,14 @@ class TriagePlan:
         names = ", ".join(alias_of(spec) for spec in self.judges)
         if self.references is None:
             action = (
-                f"have {len(self.judges)} judge{'' if len(self.judges) == 1 else 's'} "
-                f"({names}) vote keep or drop on {_rows(len(self.rows))}, and label the rows "
-                "a strict majority decides"
+                f"have {counted(len(self.judges), 'judge')} ({names}) vote keep or drop on "
+                f"{counted(len(self.rows), 'row')}, and label the rows a strict majority decides"
             )
         else:
             action = (
-                f"have {len(self.judges)} judge{'' if len(self.judges) == 1 else 's'} "
-                f"({names}) vote on the {_rows(len(self.rows))} you or the agent labeled, and "
-                "report how often they agree; nothing is labeled"
+                f"have {counted(len(self.judges), 'judge')} ({names}) vote on the "
+                f"{counted(len(self.rows), 'row')} you or the agent labeled, and report how "
+                "often they agree; nothing is labeled"
             )
         preview: dict[str, Any] = {
             "action": action,
@@ -1014,10 +1009,10 @@ def noisy_agreement(rows: int) -> str | None:
     if rows >= MIN_AGREEMENT_ROWS:
         return None
     return (
-        f"the agreement is measured on {_rows(rows)} you or the agent labeled; on fewer than "
-        f"{MIN_AGREEMENT_ROWS} it is noisy (one row moves it by {round(100 / max(rows, 1))} "
-        "points), so label more rows (`dataset sample`, then `dataset label`) before "
-        "trusting it"
+        f"the agreement is measured on {counted(rows, 'row')} you or the agent labeled; on "
+        f"fewer than {MIN_AGREEMENT_ROWS} it is noisy (one row moves it by "
+        f"{round(100 / max(rows, 1))} points), so label more rows (`dataset sample`, then "
+        "`dataset label`) before trusting it"
     )
 
 

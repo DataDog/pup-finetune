@@ -42,14 +42,14 @@ no reasoning effort, so it thinks as its provider's default does.
 from __future__ import annotations
 
 import difflib
-import importlib.util
 import os
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal, cast
 
-from pup_finetune.errors import ExternalError, UsageError, install_hint
+from pup_finetune import providers
+from pup_finetune.errors import UsageError, install_hint
 from pup_finetune.inference import (
     DEFAULT_JUDGE_BASE_URL,
     ChatClient,
@@ -58,12 +58,14 @@ from pup_finetune.inference import (
     JudgeProvider,
 )
 from pup_finetune.judge_models import JUDGE_SHORT_NAMES, JudgeDefault, resolve_alias
+from pup_finetune.providers import Package
 
 if TYPE_CHECKING:
     from pup_finetune.anthropic_client import AnthropicChatClient
 
 __all__ = [
     "FIREWORKS_REASONING",
+    "JUDGE_PACKAGES",
     "JUDGE_SHORT_NAMES",
     "OPENAI_PLAIN_MODELS",
     "PROVIDERS",
@@ -100,6 +102,20 @@ SPEC_FORMS: Final = (
 
 ANTHROPIC_INSTALL_HINT: Final = install_hint("anthropic")
 
+JUDGE_PACKAGES: Final[dict[str, Package]] = {
+    "anthropic": Package(
+        key="sdk",
+        label="Anthropic SDK",
+        modules=("anthropic",),
+        extra="anthropic",
+        steps=(),
+        needed_for="anthropic/... judges",
+    ),
+}
+"""The optional package the judges of a provider need, by credential name: ``doctor``
+checks it, a default judge needs it (:func:`default_judges`), and :func:`check_available`
+refuses a judge without it, all by :func:`~pup_finetune.providers.module_state`."""
+
 
 def default_judges(
     table: Sequence[JudgeDefault], *, env: Mapping[str, str] = os.environ
@@ -113,15 +129,13 @@ def default_judges(
     package found, never imported. A keychain that cannot be read counts as no credential,
     so the default falls to the next row.
     """
-    from pup_finetune import credentials, providers
-    from pup_finetune.readiness import JUDGE_PACKAGES
+    from pup_finetune import credentials
 
     uninstalled: dict[str, str] = {}
 
     def source(name: str) -> str | None:
-        try:
-            found = credentials.key_source(name, env=env)
-        except ExternalError:  # doctor reports the keychain
+        found = credentials.key_source(name, env=env)
+        if not isinstance(found, str):  # doctor reports a keychain it cannot read
             return None
         package = JUDGE_PACKAGES.get(name)
         if (
@@ -332,13 +346,24 @@ def billing(
 
 def check_available(config: JudgeConfig, *, what: str = "judge") -> None:
     """Raise :class:`UsageError` with an install hint when ``config``'s judge needs a
-    package that is not installed (the ``anthropic`` extra), naming the model as ``what``
-    (``judge``, or ``compare model``). Imports nothing."""
-    if config.provider == "anthropic" and importlib.util.find_spec("anthropic") is None:
-        raise _anthropic_missing(what)
+    package (:data:`JUDGE_PACKAGES`) that is not installed or cannot be loaded, naming the
+    model as ``what`` (``judge``, or ``compare model``). Imports nothing."""
+    package = JUDGE_PACKAGES.get(config.provider)
+    if package is None:
+        return
+    states = [providers.module_state(module) for module in package.modules]
+    if all(state == "installed" for state, _ in states):
+        return
+    broken = [reason for state, reason in states if state == "broken"]
+    why = f"installed but cannot be loaded ({broken[0]})" if broken else "not installed"
+    raise UsageError(
+        f"{_name_and_host(config)[0]} {what}s need the '{package.modules[0]}' package, "
+        f"which is {why}",
+        hint=package.fix,
+    )
 
 
-def _anthropic_missing(what: str = "judge") -> UsageError:
+def _anthropic_missing(what: str) -> UsageError:
     return UsageError(
         f"Anthropic {what}s need the 'anthropic' package, which is not installed",
         hint=ANTHROPIC_INSTALL_HINT,

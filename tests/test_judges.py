@@ -16,7 +16,7 @@ from contextlib import contextmanager
 import httpx
 import pytest
 
-from pup_finetune import judges
+from pup_finetune import judges, readiness
 from pup_finetune.errors import UsageError
 from pup_finetune.inference import (
     DEFAULT_JUDGE_BASE_URL,
@@ -29,6 +29,7 @@ from pup_finetune.judge_models import JUDGE_SHORT_NAMES, alias_of
 from pup_finetune.judges import (
     ANTHROPIC_INSTALL_HINT,
     FIREWORKS_REASONING,
+    JUDGE_PACKAGES,
     anthropic_client_class,
     check_available,
     destination,
@@ -36,6 +37,7 @@ from pup_finetune.judges import (
     open_clients,
     parse_judge,
 )
+from tests.fakes.setup import ALL_PACKAGES, installed_packages
 
 ANTHROPIC_KEY = "sk-ant-synthetic-0000-judge-key"
 OPENAI_KEY = "sk-openai-synthetic-0000-judge-key"
@@ -207,6 +209,17 @@ def test_a_missing_anthropic_extra_is_a_usage_error_with_the_install_hint(
         assert "pip install 'pup-finetune[anthropic]'" in ANTHROPIC_INSTALL_HINT
     with pytest.raises(UsageError, match="'anthropic' package"), open_client(config):
         pass
+
+
+def test_an_anthropic_extra_that_cannot_be_loaded_is_refused_as_doctor_reports_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installed_packages(monkeypatch, ALL_PACKAGES, broken={"anthropic": "ImportError: bad build"})
+    with pytest.raises(UsageError, match="cannot be loaded \\(ImportError: bad build\\)") as info:
+        check_available(parse_judge("anthropic/claude-opus-5-5"))
+    assert info.value.hint == ANTHROPIC_INSTALL_HINT
+    package = JUDGE_PACKAGES["anthropic"]
+    assert not readiness.package_check("anthropic", "Anthropic", package, required=False).ok
 
 
 def test_other_judges_need_no_extra(monkeypatch: pytest.MonkeyPatch) -> None:

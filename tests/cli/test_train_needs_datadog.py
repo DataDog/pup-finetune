@@ -58,33 +58,56 @@ def test_train_refuses_kept_rows_not_pushed_yet(dataset: Path) -> None:
     (dataset / PUSH_FILE).write_text(json.dumps(receipt))
     result = train(dataset)
     assert result.exit_code == 2
-    assert "1 of its kept rows are not in dataset 'synthetic-sft' yet" in result.stderr
+    assert "1 of its kept rows is not in dataset 'synthetic-sft' yet" in result.stderr
     assert (
-        "push the 1 kept rows not pushed yet to dataset 'synthetic-sft', which push.json "
+        "push the 1 kept row not pushed yet to dataset 'synthetic-sft', which push.json "
         "names (a remote write; it previews first): `pup finetune dataset push ds`"
     ) in result.stderr
 
 
-def test_train_refuses_kept_rows_changed_after_the_push(dataset: Path) -> None:
-    mark_pushed(dataset)
+def edit_rows(dataset: Path, count: int) -> list[str]:
+    """Edit the answer of the first ``count`` rows after the push; their ids, sorted."""
     rows = [json.loads(line) for line in (dataset / "rows.jsonl").read_text().splitlines()]
-    rows[0]["messages"][-1]["content"] = "An answer edited after the push."
+    for row in rows[:count]:
+        row["messages"][-1]["content"] = "An answer edited after the push."
     (dataset / "rows.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    return sorted(row["id"] for row in rows[:count])
+
+
+def test_train_refuses_kept_rows_changed_after_the_push_and_names_them(dataset: Path) -> None:
+    mark_pushed(dataset)
+    (edited,) = edit_rows(dataset, 1)
     result = train(dataset)
     assert result.exit_code == 2
     assert (
-        "1 of its kept rows changed after they were pushed to dataset 'synthetic-sft'"
+        f"1 of its kept rows changed after the push to dataset 'synthetic-sft' (row {edited})"
         in result.stderr
     )
-    assert "move push.json aside" in result.stderr
-    assert "`pup finetune dataset push ds --name <NEW_NAME>`" in result.stderr
+    # The step runs as written once <NEW_DIR> is chosen: what Datadog holds, fetched.
+    fetch = "`pup finetune dataset fetch <NEW_DIR> --project pup-finetune-dev --name synthetic-sft`"
+    assert fetch in result.stderr
+    assert "--name <NEW_NAME>" not in result.stderr
+    assert "--project <PROJECT>" not in result.stderr
     show = json.loads(invoke("dataset", "show", str(dataset)).stdout)
     assert show["pipeline"]["push"] == {
         "status": "pushed_with_changed_rows",
         "pending": 0,
         "changed": 1,
     }
+    assert fetch.strip("`") in [step["command"] for step in show["next_steps"]]
     assert not any(step["command"].startswith("pup finetune train") for step in show["next_steps"])
+
+
+def test_the_refusal_names_a_few_of_many_changed_rows(dataset: Path) -> None:
+    mark_pushed(dataset)
+    edited = edit_rows(dataset, 7)
+    result = invoke("benchmark", str(dataset), "--models", "qwen3p8-27b")
+    assert result.exit_code == 2
+    shown = ", ".join(edited[:5])
+    assert (
+        "7 of its kept rows changed after the push to dataset 'synthetic-sft' "
+        f"(rows {shown} and 2 more)"
+    ) in result.stderr
 
 
 def test_train_refuses_a_push_still_in_flight(dataset: Path) -> None:

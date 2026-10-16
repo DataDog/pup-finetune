@@ -585,6 +585,24 @@ def test_rows_skips_the_rows_you_labeled_and_agreement_compares_only_those(
     assert "--rows" not in shlex.split(data["next_command"])
 
 
+def test_rows_naming_only_rows_you_labeled_offers_no_confirm(
+    dataset: Path, chat: FakeChatApi, tmp_path: Path
+) -> None:
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(json.dumps({"id": "row-weather-001", "keep": True}) + "\n")
+    assert invoke("dataset", "label", str(dataset), "--file", str(labels)).exit_code == 0
+    subset = row_file(tmp_path, "row-weather-001")
+    result = invoke("dataset", "triage", str(dataset), "--rule", "x", "--rows", str(subset))
+    assert result.exit_code == 2
+    data = output(result)
+    assert data["preview"]["rows"] == {"to_review": 0, "skipped_labeled": 1}
+    assert data["next_command"] is None
+    assert data["preview"]["refused"] == (
+        "there is no row to review: every row --rows names is labeled by you or the agent"
+    )
+    assert chat.requests == []
+
+
 def test_rows_naming_an_id_that_is_no_accepted_row_is_a_usage_error(
     dataset: Path, chat: FakeChatApi, tmp_path: Path
 ) -> None:
