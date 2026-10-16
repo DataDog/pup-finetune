@@ -15,6 +15,8 @@ need none. Every test runs offline, in development mode, on the fake provider.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +24,11 @@ import keyring.core
 import pytest
 from typer.testing import CliRunner, Result
 
+from pup_finetune import credentials, judges
 from pup_finetune.cli import app
+from pup_finetune.errors import ExternalError
+from pup_finetune.evaluation.fake_judge import FakeJudge
+from pup_finetune.inference import ChatCompleter, ChatCompletion, JudgeConfig
 from tests.conftest import JUDGE_KEYS
 from tests.fakes.keyring import MemoryKeyring
 
@@ -136,3 +142,88 @@ def test_triage_needs_each_judge_s_key(dataset: Path, monkeypatch: pytest.Monkey
     monkeypatch.setenv("FIREWORKS_API_KEY", JUDGE_KEYS["FIREWORKS_API_KEY"])
     refused(invoke(*council, "--judges", f"deepseek-v4p1-flash,{PAID}"), "openai", f"judge {PAID}")
     offered(invoke(*council, "--judges", "deepseek-v4p1-flash"))
+
+
+# --- a run with nothing left to ask a model never opens its client --------------------------
+
+
+class Voter:
+    """A triage judge that keeps every row, or with ``down`` fails every call."""
+
+    def __init__(self, *, down: bool = False) -> None:
+        self.down = down
+
+    def complete(self, messages: Sequence[Mapping[str, Any]], **options: Any) -> ChatCompletion:
+        if self.down:
+            raise ExternalError("the judge endpoint is unreachable", source="judge")
+        return ChatCompletion(message={"role": "assistant", "content": KEEP})
+
+
+KEEP = '{"keep": true, "reason": "on topic"}'
+
+
+def serve(monkeypatch: pytest.MonkeyPatch, answer: Callable[[str], ChatCompleter]) -> list[str]:
+    """Serve every judge client with ``answer(provider)``; the providers opened, in order. A
+    provider without a key refuses to open, as its real client does."""
+    opened: list[str] = []
+
+    @contextmanager
+    def open_client(config: JudgeConfig, **options: Any) -> Iterator[ChatCompleter]:
+        if credentials.key_source(config.credential) is None:
+            raise credentials.missing_key_error(config.credential)
+        opened.append(config.provider)
+        yield answer(config.provider)
+
+    monkeypatch.setattr(judges, "open_client", open_client)
+    return opened
+
+
+def test_a_complete_evaluation_reruns_without_the_judge_s_key(
+    run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command = ["evaluate", str(run_dir), "--judge-model", PAID, "--no-publish", "--confirm"]
+    monkeypatch.setenv("OPENAI_API_KEY", JUDGE_KEYS["OPENAI_API_KEY"])
+    assert serve(monkeypatch, lambda provider: FakeJudge()) == []
+    first = invoke(*command)
+    assert first.exit_code == 0, first.stderr
+    monkeypatch.delenv("OPENAI_API_KEY")
+    opened = serve(monkeypatch, lambda provider: FakeJudge())
+    again = invoke(*command)
+    assert again.exit_code == 0, again.stderr
+    assert output(again)["status"] == "complete"
+    assert opened == []
+
+
+def test_a_complete_benchmark_reruns_without_the_judge_s_key(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command = ["benchmark", str(dataset), "--models", "fake-model", "--judge-model", PAID]
+    monkeypatch.setenv("OPENAI_API_KEY", JUDGE_KEYS["OPENAI_API_KEY"])
+    serve(monkeypatch, lambda provider: FakeJudge())
+    first = invoke(*command, "--confirm")
+    assert first.exit_code == 0, first.stderr
+    monkeypatch.delenv("OPENAI_API_KEY")
+    opened = serve(monkeypatch, lambda provider: FakeJudge())
+    again = invoke(*command, "--confirm")
+    assert again.exit_code == 0, again.stderr
+    assert opened == []
+
+
+def test_a_resumed_council_opens_only_the_judges_with_votes_left(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    council = ["dataset", "triage", str(dataset), "--rule", "stay on topic"]
+    council += ["--judges", f"deepseek-v4p1-flash,{PAID}"]
+    for name in ("FIREWORKS_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.setenv(name, JUDGE_KEYS[name])
+    serve(monkeypatch, lambda provider: Voter(down=provider == "openai"))
+    first = invoke(*council, "--confirm")
+    assert output(first)["status"] == "incomplete", first.stderr
+    # Only OpenAI votes are left, so the Fireworks key is no longer needed.
+    monkeypatch.delenv("FIREWORKS_API_KEY")
+    opened = serve(monkeypatch, lambda provider: Voter())
+    offered(invoke(*council))
+    resumed = invoke(*council, "--confirm")
+    assert resumed.exit_code == 0, resumed.stderr
+    assert output(resumed)["status"] == "complete"
+    assert opened == ["openai"]

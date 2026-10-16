@@ -871,15 +871,16 @@ def plan_evaluation(
 @contextmanager
 def open_judge_client(config: JudgeConfig) -> Iterator[ChatCompleter]:
     """The client for ``config``'s judge: the offline fake judge, or the provider's client
-    (:func:`pup_finetune.judges.open_client`) with the key of its credential. Closed on
-    exit."""
+    with the key of its credential, opened on its first call
+    (:func:`pup_finetune.judges.open_lazily`), so a run with nothing left to judge needs no
+    key. Closed on exit."""
     from pup_finetune.evaluation.fake_judge import FakeJudge
-    from pup_finetune.judges import open_client
+    from pup_finetune.judges import open_lazily
 
     if config.provider == "fake":
         yield FakeJudge()
         return
-    with open_client(config) as client:
+    with open_lazily(config) as client:
         yield client
 
 
