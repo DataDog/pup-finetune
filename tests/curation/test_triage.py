@@ -22,7 +22,6 @@ import pytest
 
 from pup_finetune.curation.labels import Label, apply_labels
 from pup_finetune.curation.triage import (
-    DEFAULT_JUDGES,
     JUDGMENTS_FILE,
     SETTINGS_FILE,
     SYSTEM_PROMPT,
@@ -48,6 +47,7 @@ from pup_finetune.data.schema import TrainingRow, validate_row
 from pup_finetune.data.split import SplitParams
 from pup_finetune.errors import ExternalError, StateError, UsageError
 from pup_finetune.inference import ChatCompletion, ContextLimitError
+from pup_finetune.judge_models import FIREWORKS_JUDGES
 from pup_finetune.providers.base import ProviderAuthError
 from tests.fakes.chat_api import block
 
@@ -140,7 +140,6 @@ def test_criteria_need_a_rubric_or_rules() -> None:
 
 
 def test_judges_parse_in_order_without_repeats() -> None:
-    assert parse_judges(None) == DEFAULT_JUDGES
     assert parse_judges(" fireworks/a, openai/b ,fireworks/a,") == ("fireworks/a", "openai/b")
     assert parse_judges("glm-5p3-flash") == ("accounts/fireworks/models/glm-5p3-flash",)
     with pytest.raises(UsageError):
@@ -159,9 +158,9 @@ def test_judges_are_written_one_way() -> None:
         parse_judges("openai/")
 
 
-def test_the_default_judges_are_fireworks_serverless_models() -> None:
-    assert all(judge.startswith("accounts/fireworks/models/") for judge in DEFAULT_JUDGES)
-    assert len(DEFAULT_JUDGES) == 2
+def test_without_a_judge_key_the_default_judges_are_fireworks_serverless_models() -> None:
+    assert all(judge.startswith("accounts/fireworks/models/") for judge in FIREWORKS_JUDGES)
+    assert len(FIREWORKS_JUDGES) == 2
 
 
 def test_the_template_ships_with_the_package() -> None:
@@ -908,7 +907,7 @@ def test_a_judge_with_no_model_is_refused_when_planning(tmp_path: Path) -> None:
 def test_each_judge_is_sent_the_lowest_effort_its_model_takes(tmp_path: Path) -> None:
     dataset = make_dataset(tmp_path, n=1)
     council = FakeCouncil(keep_all)
-    plan = plan_triage(dataset, RUBRIC, (*DEFAULT_JUDGES, "openai/gpt-6-astra", J1))
+    plan = plan_triage(dataset, RUBRIC, (*FIREWORKS_JUDGES, "openai/gpt-6-astra", J1))
     run_triage(plan, council, concurrency=1)
     efforts = dict(zip((model for model, _ in council.calls), council.efforts, strict=True))
     assert efforts == {

@@ -51,6 +51,7 @@ def plan(tmp_path: Path) -> BenchmarkPlan:
         ),
         cases=cases,
         judge=fake_judge_config(),
+        judge_source="fake run",
         settings=BenchmarkSettings(out_dir=tmp_path / "bench"),
         runtime=Runtime.from_env(),
     )

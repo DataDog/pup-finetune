@@ -35,7 +35,7 @@ from pup_finetune.curation.pipeline import pipeline_state
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.display import display_path
 from pup_finetune.errors import UsageError, require_confirm
-from pup_finetune.judge_models import alias_of
+from pup_finetune.judge_models import BY_KEY
 from pup_finetune.next_steps import PROGRAM, step
 from pup_finetune.output import info
 
@@ -88,9 +88,13 @@ DOC = CommandDoc(
         "appended to DIR/judgments.jsonl as they arrive, so a rerun retries only failed "
         "calls. The rubric and the judges are frozen in DIR/triage.json once votes exist: "
         "change them in a new directory or with --reset-triage. Row content is sent to each "
-        "judge's provider: Fireworks serverless (the default judges), Anthropic or OpenAI, "
-        "with that provider's API key; the "
-        "preview names every one. --agreement measures the council against rows you "
+        "judge's provider, Anthropic, OpenAI or Fireworks serverless, with that provider's "
+        "API key; the preview names every one and where the council came from "
+        "(judges_source). Without --judges, the council is the one triage.json froze, else "
+        "anthropic/claude-haiku-5-5 and openai/gpt-5.4-mini when both credentials resolve, "
+        "anthropic/claude-haiku-5-5 and anthropic/claude-sonnet-5-5 with only Anthropic's, "
+        "openai/gpt-5.4-mini and openai/gpt-6-astra with only OpenAI's, else Fireworks' "
+        "deepseek-v4p1-flash and glm-5p3-flash. --agreement measures the council against rows you "
         "labeled first; --rows FILE (one row id per line) reviews only those rows in either "
         "mode, and is not frozen; --print-template prints a rubric to start from.",
     ),
@@ -161,7 +165,7 @@ def triage_rows(
             "--judges",
             metavar="M1,M2",
             help="Aliases (glm-5p3-flash), anthropic/MODEL, openai/MODEL or Fireworks ids. "
-            f"{default_note(', '.join(alias_of(judge) for judge in triage.DEFAULT_JUDGES))}",
+            f"{default_note(BY_KEY)}",
             show_default=False,
             rich_help_panel=JUDGES,
         ),
@@ -241,10 +245,13 @@ def triage_rows(
     )
     if template_task is not None and confirm and not allow_template_rubric:
         raise UsageError(template_task, hint=template_hint)
-    council = triage.parse_judges(judges)
-    _check_available(council)
     require_dataset_dir(directory)
     dataset = DatasetDir(directory)
+    if judges is not None:
+        council, council_source = triage.parse_judges(judges), triage.COUNCIL_GIVEN
+    else:
+        council, council_source = triage.default_council(dataset, reset=reset_triage)
+    _check_available(council)
     plan = triage.plan_triage(
         dataset,
         criteria,
@@ -259,8 +266,9 @@ def triage_rows(
         args += ["--rubric", str(rubric)]
     for text in rules:
         args += ["--rule", text]
-    if judges is not None:
-        args += ["--judges", ",".join(council)]
+    # Pinned: the council decides where the rows go, so --confirm sends them where the
+    # preview said even if the credentials change in between.
+    args += ["--judges", ",".join(council)]
     if concurrency != triage.DEFAULT_CONCURRENCY:
         args += ["--concurrency", str(concurrency)]
     if agreement:
@@ -290,6 +298,7 @@ def triage_rows(
         if not (ctx is not None and given(ctx, param))
     ]
     planned = plan.preview()
+    planned["judges_source"] = council_source
     planned["rubric_file"] = str(rubric) if rubric is not None else None
     preview = with_settings(planned, settings, defaults_used)
     refused = None

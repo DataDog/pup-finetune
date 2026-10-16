@@ -194,7 +194,7 @@ pup finetune dataset triage datasets/my-agent --rubric datasets/rubric.md
 Start with `--agreement` against 20 or more labels you and the user agreed on; it labels
 nothing. Show `agreement.rate`, `agreement.kappa` and the disagreements. Sharpen the rubric and
 measure again (`--reset-triage`) until the user is satisfied. `--rows <ROWS_FILE>` (one row id
-per line) narrows either mode to those rows. With the two default judges, a row is kept only
+per line) narrows either mode to those rows. With a council of two judges, a row is kept only
 when both vote keep; add a third with `--judges` for a true majority.
 
 Also check what no command does: answers that break the app's own output contract (invalid
@@ -271,8 +271,9 @@ Check:
 pup finetune evaluate ft-20261007183443-a8b181
 ```
 
-The preview counts cases, generations and judge calls, and names the judge (Fireworks by
-default; `anthropic/<MODEL>` or `openai/<MODEL>` needs that key and a new consent). After a
+The preview counts cases, generations and judge calls, and names the judge and where it came
+from (`judge_source`: by default Anthropic's or OpenAI's when their key is found, else
+Fireworks'); show it, since a judge on a new provider needs a new consent. After a
 yes, run its `next_command`: both models replay each test conversation into two experiments
 that fill in as it runs; share the link it prints (`publication.comparison_url`). Rerun to
 continue one that stopped. `--compare-model anthropic/<MODEL>` (never the judge) adds the

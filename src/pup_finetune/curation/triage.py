@@ -104,7 +104,6 @@ TriageStatus = Literal["none", "incomplete", "complete", "unreadable"]
 
 __all__ = [
     "DEFAULT_CONCURRENCY",
-    "DEFAULT_JUDGES",
     "JUDGMENTS_FILE",
     "MIN_AGREEMENT_ROWS",
     "SETTINGS_FILE",
@@ -121,6 +120,7 @@ __all__ = [
     "Vote",
     "build_messages",
     "decide",
+    "default_council",
     "failures_shown",
     "has_template_task",
     "judge_config",
@@ -137,12 +137,6 @@ __all__ = [
     "triage_status",
 ]
 
-DEFAULT_JUDGES: Final = (
-    "accounts/fireworks/models/deepseek-v4p1-flash",
-    "accounts/fireworks/models/glm-5p3-flash",
-)
-"""Two Fireworks serverless models, billed per token with the Fireworks API key, served at
-the default judge endpoint (:data:`pup_finetune.inference.DEFAULT_JUDGE_BASE_URL`)."""
 DEFAULT_CONCURRENCY: Final = 4
 JUDGMENTS_FILE: Final = "judgments.jsonl"
 SETTINGS_FILE: Final = "triage.json"
@@ -256,8 +250,30 @@ class Criteria:
         return cls("\n\n".join(parts), "+".join(sources), len(cleaned))
 
 
-def parse_judges(value: str | None) -> tuple[str, ...]:
-    """``--judges m1,m2``: the judge specs, in order, without repeats; the defaults for None.
+COUNCIL_GIVEN: Final = "--judges"
+COUNCIL_FROZEN: Final = SETTINGS_FILE
+"""Where a council came from (``judges_source``) when it is not a default by credential."""
+
+
+def default_council(dataset: DatasetDir, *, reset: bool = False) -> tuple[tuple[str, ...], str]:
+    """The council a triage of ``dataset`` without ``--judges`` uses, and where it came from:
+    the judges ``triage.json`` froze (unless ``reset`` discards them), so a rerun keeps
+    them, else the default by the credentials that resolve
+    (:data:`~pup_finetune.judge_models.TRIAGE_DEFAULTS`)."""
+    from pup_finetune.judge_models import TRIAGE_DEFAULTS
+    from pup_finetune.judges import default_judges
+
+    path = dataset.path / SETTINGS_FILE
+    if not reset and path.exists():
+        stored = read_json(path)
+        frozen = stored.get("judges") if isinstance(stored, dict) else None
+        if isinstance(frozen, list) and frozen and all(isinstance(j, str) for j in frozen):
+            return tuple(frozen), COUNCIL_FROZEN
+    return default_judges(TRIAGE_DEFAULTS)
+
+
+def parse_judges(value: str) -> tuple[str, ...]:
+    """``--judges m1,m2``: the judge specs, in order, without repeats.
 
     Each is checked and written the one way :attr:`~pup_finetune.inference.JudgeConfig.spec`
     writes it, so the same judge is never two. Raises :class:`UsageError` for an empty model
@@ -265,8 +281,6 @@ def parse_judges(value: str | None) -> tuple[str, ...]:
     """
     from pup_finetune.judges import parse_judge
 
-    if value is None:
-        return DEFAULT_JUDGES
     specs = (parse_judge(part).spec for part in value.split(",") if part.strip())
     judges = tuple(dict.fromkeys(specs))
     if not judges:

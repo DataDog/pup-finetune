@@ -429,7 +429,7 @@ Safety: Free · local files only · PUP_READ_ONLY: allowed.
 
 Have each judge model vote keep or drop on each whole row of DIR against --rubric and/or --rule; a strict majority of keep votes keeps a row. Without --confirm, previews the calls and where the rows go. Rerun the same command to resume; start with --max-rows 20 to calibrate the rubric.
 
-A judge reviews every turn of a row and its tools, since training imitates every assistant turn. A tie drops a row; a row missing a vote (a failed call) stays undecided and unlabeled, unless the votes cast already drop it (one drop of two judges, two of three), which also skips its other calls. Decisions are recorded as labels by judge; rows the agent or a person labeled are not reviewed. Votes are appended to DIR/judgments.jsonl as they arrive, so a rerun retries only failed calls. The rubric and the judges are frozen in DIR/triage.json once votes exist: change them in a new directory or with --reset-triage. Row content is sent to each judge's provider: Fireworks serverless (the default judges), Anthropic or OpenAI, with that provider's API key; the preview names every one. --agreement measures the council against rows you labeled first; --rows FILE (one row id per line) reviews only those rows in either mode, and is not frozen; --print-template prints a rubric to start from.
+A judge reviews every turn of a row and its tools, since training imitates every assistant turn. A tie drops a row; a row missing a vote (a failed call) stays undecided and unlabeled, unless the votes cast already drop it (one drop of two judges, two of three), which also skips its other calls. Decisions are recorded as labels by judge; rows the agent or a person labeled are not reviewed. Votes are appended to DIR/judgments.jsonl as they arrive, so a rerun retries only failed calls. The rubric and the judges are frozen in DIR/triage.json once votes exist: change them in a new directory or with --reset-triage. Row content is sent to each judge's provider, Anthropic, OpenAI or Fireworks serverless, with that provider's API key; the preview names every one and where the council came from (judges_source). Without --judges, the council is the one triage.json froze, else anthropic/claude-haiku-5-5 and openai/gpt-5.4-mini when both credentials resolve, anthropic/claude-haiku-5-5 and anthropic/claude-sonnet-5-5 with only Anthropic's, openai/gpt-5.4-mini and openai/gpt-6-astra with only OpenAI's, else Fireworks' deepseek-v4p1-flash and glm-5p3-flash. --agreement measures the council against rows you labeled first; --rows FILE (one row id per line) reviews only those rows in either mode, and is not frozen; --print-template prints a rubric to start from.
 
 ```
 pup finetune dataset triage [OPTIONS] [DIR]
@@ -447,7 +447,7 @@ pup finetune dataset triage [OPTIONS] [DIR]
 | `--allow-template-rubric` |  |  | With --rubric: allow the template's Task text. |
 | `--print-template` |  |  | Print a rubric template and exit. |
 | **Judges** | | | |
-| `--judges` | `M1,M2` | deepseek-v4p1-flash, glm-5p3-flash | Aliases (glm-5p3-flash), anthropic/MODEL, openai/MODEL or Fireworks ids. |
+| `--judges` | `M1,M2` | by key: Anthropic, OpenAI, else Fireworks | Aliases (glm-5p3-flash), anthropic/MODEL, openai/MODEL or Fireworks ids. |
 | `--concurrency` | `N (1<=x<=64)` | `4` | Judge calls at once (1-64). |
 | **Run** | | | |
 | `--max-rows` | `N (x>=1)` |  | Review a fixed sample of at most N rows. |
@@ -553,7 +553,7 @@ pup finetune benchmark [OPTIONS] DATASET
 | `--max-tokens` | `N (x>=1)` | `4096` | Most tokens each generation may produce. |
 | `--seed` | `N (x>=0)` | `0` | Seed for picking cases and the bootstrap. |
 | **Judge** | | | |
-| `--judge-model` | `MODEL` | deepseek-v4p1-flash | An alias (glm-5p3-flash), anthropic/MODEL, openai/MODEL or a Fireworks id. |
+| `--judge-model` | `MODEL` | by key: Anthropic, OpenAI, else Fireworks | An alias (glm-5p3-flash), anthropic/MODEL, openai/MODEL or a Fireworks id. |
 | `--skip-calibration` |  |  | Do not check the judge on known answers first. |
 | **Run** | | | |
 | `--out-dir` | `DIR` | DATASET/benchmark | Output directory. |
@@ -736,7 +736,7 @@ Safety: Free · signals the local training process · PUP_READ_ONLY: allowed.
 
 Replay each held-out test conversation of a run, one recorded assistant turn at a time, with the base model and the run's best checkpoint, and score both with tool-call metrics and an LLM judge. Without --confirm, previews the calls and where the data goes. A complete evaluation is published to Datadog as two experiments, three with --compare-model, when the dataset was pushed (--no-publish skips it).
 
-The result compares the two: pass rates, wins and regressions, and the tuned-minus-base delta with a bootstrap confidence interval. --compare-model, named as --judge-model is, replays a third model on the same cases, judged alike, with its own token limit (16000, thinking included) and the provider's lowest reasoning effort, and adds tuned-minus-compare; added to a complete evaluation, it reuses the base and tuned results and opens no training session. The directory keeps its compare model: a rerun without the flag continues it, and another one needs a new --out-dir. Tools are not executed, so the scores measure agreement with the recorded behavior, not task success. With --confirm, the judge is calibrated first, then every case is replayed; rerun the same command to continue an evaluation that stopped. A changed --max-tokens, judge, seed or --max-cases needs a new --out-dir.
+The result compares the two: pass rates, wins and regressions, and the tuned-minus-base delta with a bootstrap confidence interval. --compare-model, named as --judge-model is, replays a third model on the same cases, judged alike, with its own token limit (16000, thinking included) and the provider's lowest reasoning effort, and adds tuned-minus-compare; added to a complete evaluation, it reuses the base and tuned results and opens no training session. The directory keeps its compare model: a rerun without the flag continues it, and another one needs a new --out-dir. Tools are not executed, so the scores measure agreement with the recorded behavior, not task success. With --confirm, the judge is calibrated first, then every case is replayed; rerun the same command to continue an evaluation that stopped. A changed --max-tokens, judge, seed or --max-cases needs a new --out-dir. Without --judge-model, the judge is the one the --out-dir holds an evaluation by, else anthropic/claude-haiku-5-5 when an Anthropic credential resolves (ANTHROPIC_API_KEY, the OS keychain or the Anthropic SDK's login), else openai/gpt-5.4-mini when an OpenAI one does, else Fireworks' deepseek-v4p1-flash; the preview names it and where it came from (judge_source).
 
 ```
 pup finetune evaluate [OPTIONS] RUN_DIR
@@ -753,7 +753,7 @@ pup finetune evaluate [OPTIONS] RUN_DIR
 | `--max-tokens` | `N (x>=1)` | `4096` | Most tokens each generation may produce. |
 | `--seed` | `N (x>=0)` | `0` | Seed for picking cases and the bootstrap. |
 | **Models** | | | |
-| `--judge-model` | `MODEL` | deepseek-v4p1-flash | An alias (glm-5p3-flash), anthropic/MODEL, openai/MODEL or a Fireworks id. |
+| `--judge-model` | `MODEL` | by key: Anthropic, OpenAI, else Fireworks | An alias (glm-5p3-flash), anthropic/MODEL, openai/MODEL or a Fireworks id. |
 | `--compare-model` | `MODEL` |  | Also replay this model, named as --judge-model. |
 | `--skip-calibration` |  |  | Do not check the judge on known answers first. |
 | **Run** | | | |

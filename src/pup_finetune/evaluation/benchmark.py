@@ -45,6 +45,7 @@ from pup_finetune.evaluation.runner import (
     cancel_on_signals,
     open_judge_client,
     resolve_judge,
+    stored_judge,
 )
 from pup_finetune.next_steps import PROGRAM, command, step
 from pup_finetune.output import info
@@ -131,6 +132,8 @@ class BenchmarkPlan:
     candidates: tuple[Candidate, ...]
     cases: list[ReplayCase]
     judge: JudgeConfig
+    judge_source: str
+    """Where the judge came from (see :func:`~pup_finetune.evaluation.runner.resolve_judge`)."""
     settings: BenchmarkSettings
     runtime: Runtime
 
@@ -309,6 +312,7 @@ class BenchmarkPlan:
             "trajectories": self.trajectories,
             "models": models,
             "judge_model": self.judge.spec,
+            "judge_source": self.judge_source,
             "judge_provider": self.judge.provider,
             "judge_endpoint": self.judge.base_url,
             "already_done": done,
@@ -365,10 +369,11 @@ def plan_benchmark(
     if not candidates:
         raise UsageError("--models names no model", hint="pass --models MODEL,MODEL")
     offline = all(candidate.provider == "fake" for candidate in candidates)
-    judge = resolve_judge(
+    judge, judge_source = resolve_judge(
         settings.judge_model,
         provider="fake" if offline else candidates[0].provider,
         runtime=runtime,
+        stored=_stored_judge(settings.out_dir, candidates),
     )
     for candidate in candidates:
         check_judge_differs(judge, candidate.profile.base_model)
@@ -390,9 +395,23 @@ def plan_benchmark(
         candidates=tuple(candidates),
         cases=cases,
         judge=judge,
+        judge_source=judge_source,
         settings=settings,
         runtime=runtime,
     )
+
+
+def _stored_judge(out_dir: Path, candidates: Sequence[Candidate]) -> str | None:
+    """The judge a benchmark in ``out_dir`` froze: the ``evaluation.json`` of a model with
+    results. A rerun without ``--judge-model`` keeps it."""
+    from pup_finetune.evaluation.replay import EvalDir
+
+    for candidate in candidates:
+        model_dir = EvalDir(out_dir / candidate.target)
+        found = stored_judge(model_dir.stored_identity()) if model_dir.has_work() else None
+        if found is not None:
+            return found
+    return None
 
 
 # --- running ------------------------------------------------------------------------------

@@ -198,6 +198,17 @@ def test_ready_says_which_steps_can_run(use_pup: UsePup) -> None:
     assert ready["deploy on fireworks"]["blocked_by"] == ["fireworks:key"]
 
 
+def test_an_anthropic_key_makes_it_the_default_judges_and_readies_triage(
+    use_pup: UsePup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-synthetic-0000-test-key")
+    use_pup(healthy_pup().client())
+    ready = report_of(invoke())["ready"]
+    assert ready["dataset triage"] == {"ready": True, "blocked_by": []}
+    # The judge is Anthropic's now: evaluating on Baseten needs only Baseten's key.
+    assert ready["evaluate on baseten"]["blocked_by"] == ["baseten:key"]
+
+
 def test_with_the_keys_set_every_step_is_ready(
     use_pup: UsePup, monkeypatch: pytest.MonkeyPatch
 ) -> None:

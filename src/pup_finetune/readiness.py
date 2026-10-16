@@ -24,7 +24,7 @@ from typing import Any, Final
 from pup_finetune import credentials, providers
 from pup_finetune.doctor import CheckResult, error_detail, status_of, unexpected_detail
 from pup_finetune.errors import FinetuneError
-from pup_finetune.judge_models import DEFAULT_JUDGE_MODEL
+from pup_finetune.judge_models import EVALUATE_DEFAULTS, TRIAGE_DEFAULTS, JudgeDefault
 from pup_finetune.providers import Package, ProviderInfo, get_provider, provider_infos
 from pup_finetune.providers.base import Provider
 from pup_finetune.redaction import redact
@@ -73,10 +73,18 @@ def judge_credential(spec: str) -> str:
     return prefix if prefix in ("anthropic", "openai") else "fireworks"
 
 
-def _default_triage_judges() -> tuple[str, ...]:
-    from pup_finetune.curation.triage import DEFAULT_JUDGES
+def _default_judges(
+    table: Sequence[JudgeDefault], by_name: Mapping[str, CheckResult]
+) -> tuple[str, ...]:
+    """The judges a command defaults to by the key checks that passed (see
+    :func:`pup_finetune.judges.default_judges`, which resolves the same credentials)."""
+    from pup_finetune.judges import pick_default
 
-    return tuple(DEFAULT_JUDGES)
+    def source(name: str) -> str | None:
+        check = by_name.get(f"{name}:key")
+        return "check" if check is not None and check.ok else None
+
+    return pick_default(table, source)[0].judges
 
 
 def _shown_source(spec: credentials.CredentialSpec, source: str) -> str:
@@ -335,7 +343,8 @@ def _step(blocked_by: Sequence[str]) -> dict[str, Any]:
 
 def ready_map(checks: Sequence[CheckResult], runtime: Runtime) -> dict[str, dict[str, Any]]:
     """Each step, whether it is ready, and the checks (or :data:`READ_ONLY`) blocking it:
-    the dataset steps on the Datadog checks, triage on its default judges' keys, train and
+    the dataset steps on the Datadog checks, triage on its default judges' keys (the
+    defaults the passing key checks choose), train and
     evaluate on each provider on its key and packages (evaluate on the default judge's key
     too) and on a failed live preflight, and deploy (and undeploy) on each provider that
     deploys on its key and the packages deploying needs. ``PUP_READ_ONLY`` blocks push and
@@ -343,14 +352,17 @@ def ready_map(checks: Sequence[CheckResult], runtime: Runtime) -> dict[str, dict
     by_name = {check.name: check for check in checks}
     read_only = [READ_ONLY] if runtime.read_only else []
     datadog = _blocked(by_name, DATADOG_CHECKS)
-    triage_keys = dict.fromkeys(f"{judge_credential(j)}:key" for j in _default_triage_judges())
+    triage_keys = dict.fromkeys(
+        f"{judge_credential(j)}:key" for j in _default_judges(TRIAGE_DEFAULTS, by_name)
+    )
     steps: dict[str, dict[str, Any]] = {
         "dataset pull": _step(datadog),
         "dataset show": _step([]),
         "dataset push": _step(datadog + read_only),
         "dataset triage": _step(_blocked(by_name, triage_keys)),
     }
-    judge_key = f"{judge_credential(DEFAULT_JUDGE_MODEL)}:key"
+    (judge,) = _default_judges(EVALUATE_DEFAULTS, by_name)
+    judge_key = f"{judge_credential(judge)}:key"
     for info in provider_infos(runtime):
         key = [f"{info.credential}:key"] if info.credential is not None else []
         paid = [] if info.offline else read_only

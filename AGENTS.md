@@ -120,7 +120,7 @@ training is not evaluated in its session (the evaluation would spend the session
 the cap). A budget-capped run still ends `completed`, so `evaluate` evaluates it on request;
 like a budget-capped run, a cancelled run is evaluated by `evaluate` on request (its best
 epoch; one cancelled before any epoch has nothing to evaluate). Evaluating a real run is paid
-and needs the judge's key (`FIREWORKS_API_KEY` for the default judge); the preview is free and allowed with
+and needs the judge's key (the default judge follows the keys there are; see below); the preview is free and allowed with
 `PUP_READ_ONLY` set, evaluating is not (an offline one, on the fake provider and judge and
 not published, is allowed: nothing leaves the machine; `train` and `resume` on the fake
 provider likewise). A changed `--max-tokens`, judge, seed or cap needs a
@@ -173,7 +173,7 @@ project, never to a shared one. A dataset's `next_steps` name `train` and `bench
 once every kept row is pushed; until then they name the push.
 
 `dataset triage` (`--rubric FILE` and/or `--rule TEXT`, repeated) has each judge model
-(`--judges m1,m2`; by default two Fireworks serverless models, with the Fireworks key) review
+(`--judges m1,m2`; by default chosen by the keys there are, see below) review
 each whole row and vote keep or drop: a strict majority of keep votes keeps a row, a tie
 drops it, a row missing a vote stays undecided. Votes go to `judgments.jsonl` as they arrive,
 so rerunning the same command resumes and retries only failed calls; the rubric hash and
@@ -198,7 +198,19 @@ login), `openai/<model>` (`OPENAI_API_KEY`), or otherwise a Fireworks model id s
 `judge_models.JUDGE_SHORT_NAMES`), and a triage council can mix them. An alias resolves to the
 full id, which previews print and `triage.json` and `evaluation.json` freeze. A judge on a
 reasoning model asks for the lowest reasoning effort the model takes (`low` on Anthropic and
-OpenAI; per model on Fireworks, `judges.FIREWORKS_REASONING`). Anthropic
+OpenAI; per model on Fireworks, `judges.FIREWORKS_REASONING`). Without `--judge-model`
+(`--eval-judge-model`, `benchmark --judge-model`) or `--judges`, the judges are the ones the
+directory froze (an evaluation with results, `triage.json`), else a default by the
+credentials that resolve offline (environment variable, keychain, or the Anthropic SDK's
+login; `judge_models.EVALUATE_DEFAULTS` and `TRIAGE_DEFAULTS`, picked by
+`judges.default_judges`): `evaluate` takes `anthropic/claude-haiku-5-5`, else
+`openai/gpt-5.4-mini`, else Fireworks' `deepseek-v4p1-flash`; triage takes Haiku and
+`gpt-5.4-mini` with both keys, Haiku and `anthropic/claude-sonnet-5-5` with Anthropic's,
+`gpt-5.4-mini` and `openai/gpt-6-astra` with OpenAI's, else the two Fireworks models. Previews
+name the judges and where they came from (`judge_source`, `judges_source`), triage's
+`next_command` pins `--judges` as evaluate's pins `--judge-model`, and `doctor`'s `ready` map
+reads the default from its own key checks. The test conftest hides `ANTHROPIC_API_KEY` and
+`OPENAI_API_KEY` (except in `live` tests), so the default tests see the Fireworks defaults. Anthropic
 judges need the `anthropic` extra (`uv sync --all-extras`; `uv sync` is exact, so a bare
 `uv sync --extra anthropic` removes the other extras):
 
@@ -477,11 +489,14 @@ Source lives under `src/pup_finetune/`.
   provider, model, endpoint, credential, sampling settings and reasoning effort (`identity()`
   for resume checks, `spec` for the command line).
 - `judge_models.py` - judge model names with no imports, so help texts can use them: the
-  default judge and `JUDGE_SHORT_NAMES`, the short names of Fireworks judge models.
+  default judges by credential (`EVALUATE_DEFAULTS`, `TRIAGE_DEFAULTS`: ordered
+  `JudgeDefault` rows of the credentials a row needs and its judges; `BY_KEY` for help) and
+  `JUDGE_SHORT_NAMES`, the short names of Fireworks judge models.
 - `judges.py` - judges on any provider, no SDK import: `parse_judge` reads a spec by prefix
   (`anthropic/` or `openai/`; anything else is a Fireworks model id, an alias resolved) with the
   provider's defaults (`PROVIDERS`; the lowest reasoning effort each model takes,
-  `FIREWORKS_REASONING` per Fireworks model), `check_available` refuses a missing extra up front,
+  `FIREWORKS_REASONING` per Fireworks model), `default_judges` (and `pick_default`) the default
+  judges by credential with where they came from, `check_available` refuses a missing extra up front,
   `open_client` and `open_clients` (one per provider) build the clients.
 - `anthropic_client.py` - `AnthropicChatClient`, the Anthropic judge (and compare model)
   client over the official SDK (the `anthropic` extra), the only module that imports

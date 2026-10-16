@@ -43,7 +43,8 @@ from __future__ import annotations
 
 import difflib
 import importlib.util
-from collections.abc import Iterable, Iterator
+import os
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal, cast
@@ -56,7 +57,7 @@ from pup_finetune.inference import (
     JudgeConfig,
     JudgeProvider,
 )
-from pup_finetune.judge_models import JUDGE_SHORT_NAMES, resolve_alias
+from pup_finetune.judge_models import JUDGE_SHORT_NAMES, JudgeDefault, resolve_alias
 
 if TYPE_CHECKING:
     from pup_finetune.anthropic_client import AnthropicChatClient
@@ -73,10 +74,12 @@ __all__ = [
     "anthropic_client_class",
     "billing",
     "check_available",
+    "default_judges",
     "destination",
     "open_client",
     "open_clients",
     "parse_judge",
+    "pick_default",
     "recipient",
 ]
 
@@ -96,6 +99,57 @@ SPEC_FORMS: Final = (
 """How a judge spec may be written, for help texts and errors."""
 
 ANTHROPIC_INSTALL_HINT: Final = install_hint("anthropic")
+
+
+def default_judges(
+    table: Sequence[JudgeDefault], *, env: Mapping[str, str] = os.environ
+) -> tuple[tuple[str, ...], str]:
+    """The judges of the first row of ``table`` whose credentials all resolve, and where the
+    default came from, for a preview: ``default: Anthropic credential (ANTHROPIC_API_KEY)``.
+
+    Resolving makes no network call: the environment variable, the OS keychain, or the
+    Anthropic SDK's own login (:func:`~pup_finetune.credentials.key_source`). A keychain
+    that cannot be read counts as no credential, so the default falls to the next row.
+    """
+    from pup_finetune import credentials
+
+    def source(name: str) -> str | None:
+        try:
+            return credentials.key_source(name, env=env)
+        except Exception:  # a keychain backend may raise anything; doctor reports it
+            return None
+
+    row, found = pick_default(table, source)
+    return row.judges, _default_source(found)
+
+
+def pick_default(
+    table: Sequence[JudgeDefault], source: Callable[[str], str | None]
+) -> tuple[JudgeDefault, dict[str, str | None]]:
+    """The first row of ``table`` whose every credential has a ``source`` (where it
+    resolves from, ``None`` when it does not), and those sources."""
+    for row in table:
+        found = {name: source(name) for name in row.needs}
+        if all(found.values()):
+            return row, found
+    raise ValueError("a judge default table ends with a row that needs no credential")
+
+
+def _default_source(found: Mapping[str, str | None]) -> str:
+    from pup_finetune import credentials
+
+    if not found:
+        return "default: no Anthropic or OpenAI credential found"
+    parts = []
+    for name, where in found.items():
+        spec = credentials.get_spec(name)
+        shown = {
+            "env": spec.env_var,
+            "keychain": "the OS keychain",
+            "provider-config": "its CLI config",
+        }.get(str(where), f"the {spec.label} SDK login")
+        parts.append(f"{spec.label} credential ({shown})")
+    return f"default: {' and '.join(parts)}"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

@@ -135,7 +135,7 @@ pup finetune dataset triage datasets/my-agent --rubric rubric.md
 ```
 
 `--agreement` measures how often the council agrees with the rows you labeled, and labels
-nothing. `--rows FILE` (one row id per line) reviews only those rows, in either mode. With the two default judges, a row is kept only when both vote keep; add a third
+nothing. `--rows FILE` (one row id per line) reviews only those rows, in either mode. With a council of two judges, a row is kept only when both vote keep; add a third
 judge with `--judges` for a true majority. A row is dropped as soon as the votes cast decide
 it (one drop of two judges, two of three), so its remaining calls are not made, and a failed
 call does not leave it undecided.
@@ -298,9 +298,14 @@ pup finetune auth logout fireworks
 A key is never a flag value, never printed and never written to a file. Without an OS
 keychain, use the environment variable.
 
-LLM judges grade `evaluate` and `dataset triage`. They run on Fireworks by default, with the
-same key. Name a judge `anthropic/<model>` or `openai/<model>` to judge on Anthropic or
-OpenAI with that provider's key, and a triage council can mix them:
+LLM judges grade `evaluate` and `dataset triage`. By default they follow the keys you have:
+`evaluate` judges with `anthropic/claude-haiku-5-5` when an Anthropic key (or the Anthropic
+SDK's login) is found, else `openai/gpt-5.4-mini` with an OpenAI key, else Fireworks'
+`deepseek-v4p1-flash`. The triage council is `claude-haiku-5-5` and `gpt-5.4-mini` with both
+keys, `claude-haiku-5-5` and `claude-sonnet-5-5` with Anthropic's, `gpt-5.4-mini` and
+`gpt-6-astra` with OpenAI's, else two Fireworks models. The preview names the judges and where
+the default came from, and a directory keeps the judges it was first judged with. Name a judge
+`anthropic/<model>` or `openai/<model>` to choose one, and a triage council can mix them:
 
 ```sh
 pup finetune evaluate ft-20261007183443-a8b181 --judge-model anthropic/claude-opus-5-5

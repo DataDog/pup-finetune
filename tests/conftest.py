@@ -110,6 +110,15 @@ def _no_anthropic_sdk_login(
     monkeypatch.setattr(judge_credentials, "_sdk_config_dir", lambda env: empty)
 
 
+@pytest.fixture(autouse=True)
+def _no_judge_keys(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hide the developer's own Anthropic and OpenAI keys, which choose the default judges;
+    a live test keeps them, since it calls the provider with them."""
+    if request.node.get_closest_marker("live") is None:
+        for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+            monkeypatch.delenv(name, raising=False)
+
+
 PROGRESS_TIME = datetime(2026, 10, 7, 18, 3, 16)
 """The time of day every test's progress lines are stamped with (``18:03:16``)."""
 

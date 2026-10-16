@@ -27,9 +27,10 @@ from typer.testing import CliRunner, Result
 
 from pup_finetune.cli import app
 from pup_finetune.cli import triage as triage_cli
-from pup_finetune.curation.triage import DEFAULT_JUDGES, JUDGMENTS_FILE, rubric_template
+from pup_finetune.curation.triage import JUDGMENTS_FILE, rubric_template
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.inference import ChatClient, ChatCompleter
+from pup_finetune.judge_models import FIREWORKS_JUDGES as DEFAULT_JUDGES
 from tests.fakes.chat_api import API_KEY, BASE_URL, FakeChatApi, block
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
@@ -123,9 +124,14 @@ def test_the_preview_counts_the_calls_and_calls_nothing(
     assert len(preview["rubric_hash"]) == 12
     assert not {"rows_to_review", "rows_skipped_labeled"} & set(preview)  # under rows
     assert preview["approx_input_tokens"] > 0
+    # The council is pinned: it decides where the rows go.
     assert data["next_command"] == shlex.join(
-        ["pup", "finetune", "dataset", "triage", str(dataset), "--rubric", str(rubric), "--confirm"]
+        [
+            *("pup", "finetune", "dataset", "triage", str(dataset), "--rubric", str(rubric)),
+            *("--judges", ",".join(DEFAULT_JUDGES), "--confirm"),
+        ]
     )
+    assert preview["judges_source"] == "default: no Anthropic or OpenAI credential found"
     assert chat.requests == []
     assert not (dataset / JUDGMENTS_FILE).exists()
 
@@ -241,7 +247,7 @@ def test_triage_labels_rows_and_is_allowed_read_only(
 def test_failed_calls_leave_rows_undecided_and_exit_1(dataset: Path, chat: FakeChatApi) -> None:
     chat.script += [httpx.Response(500), httpx.Response(500)]
     args = ["dataset", "triage", str(dataset), "--rule", "stay on topic"]
-    args += ["--concurrency", "1", "--confirm"]
+    args += ["--judges", ",".join(DEFAULT_JUDGES), "--concurrency", "1", "--confirm"]
     result = invoke(*args)
     assert result.exit_code == 1, result.stderr
     data = output(result)
@@ -532,7 +538,8 @@ def test_rows_narrows_the_review_and_the_calls_previewed(
     dataset: Path, chat: FakeChatApi, tmp_path: Path
 ) -> None:
     subset = row_file(tmp_path, "row-weather-001", "row-calendar-001", "row-calendar-002")
-    args = ["dataset", "triage", str(dataset), "--rule", "stay on topic", "--rows", str(subset)]
+    args = ["dataset", "triage", str(dataset), "--rule", "stay on topic"]
+    args += ["--judges", ",".join(DEFAULT_JUDGES), "--rows", str(subset)]
     preview = output(invoke(*args))
     assert preview["preview"]["rows"]["to_review"] == 3
     assert preview["preview"]["judge_calls"] == 3 * len(DEFAULT_JUDGES)
