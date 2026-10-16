@@ -99,11 +99,16 @@ PROBE_TOOL: Final[ToolSpec] = {
 CompareSource = Literal["flag", "evaluation directory"]
 
 SkipReason = Literal[
-    "no_messages", "unanswered_tool_call", "orphan_tool_result", "ends_on_assistant"
+    "no_messages",
+    "starts_on_assistant",
+    "unanswered_tool_call",
+    "orphan_tool_result",
+    "ends_on_assistant",
 ]
 """Why a compare model's API refuses a case's prefix on every try."""
 SKIP_REASONS: Final[Mapping[str, str]] = {
     "no_messages": "have nothing to send before the recorded action",
+    "starts_on_assistant": "open on an assistant turn, where the user's must come first",
     "unanswered_tool_call": "hold a tool call with no tool result right after it",
     "orphan_tool_result": "hold a tool result that answers no tool call right before it",
     "ends_on_assistant": "end on an assistant turn, a prefill the model refuses",
@@ -111,7 +116,13 @@ SKIP_REASONS: Final[Mapping[str, str]] = {
 """Each reason as it reads after a count of cases."""
 REFUSED_SHAPES: Final[Mapping[str, tuple[SkipReason, ...]]] = {
     "openai": ("no_messages", "unanswered_tool_call", "orphan_tool_result"),
-    "anthropic": ("no_messages", "unanswered_tool_call", "orphan_tool_result", "ends_on_assistant"),
+    "anthropic": (
+        "no_messages",
+        "starts_on_assistant",
+        "unanswered_tool_call",
+        "orphan_tool_result",
+        "ends_on_assistant",
+    ),
 }
 """The prefixes each compare provider's API refuses, in the order a prefix is checked. Any
 other provider (Fireworks, the offline fake) takes every prefix."""
@@ -223,13 +234,15 @@ def refused_prefix(messages: Sequence[Mapping[str, Any]], provider: str) -> Skip
     tool results of one call a turn. The Anthropic Messages API is judged on the turns its
     client sends (:func:`~pup_finetune.anthropic_messages.anthropic_messages`: system
     messages joined, consecutive turns of one role merged), and also refuses a conversation
-    that ends on an assistant turn: current models take no prefill.
+    whose first turn is not the user's, and one that ends on an assistant turn: current
+    models take no prefill.
     """
     shapes = REFUSED_SHAPES.get(provider, ())
     turns = anthropic_messages(messages)[1] if provider == "anthropic" else _chat_turns(messages)
     unanswered, orphaned = _tool_pairing(turns)
     found: dict[SkipReason, bool] = {
         "no_messages": not turns,
+        "starts_on_assistant": bool(turns) and turns[0]["role"] != "user",
         "unanswered_tool_call": unanswered,
         "orphan_tool_result": orphaned,
         "ends_on_assistant": bool(turns) and turns[-1]["role"] == "assistant",

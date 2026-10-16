@@ -264,7 +264,7 @@ evaluation directory keeps its compare model: a rerun without the flag continues
 another model needs a new `--out-dir`. A case whose recorded conversation the compare model's
 API refuses every time (on Anthropic and OpenAI, a tool call with no tool result right after
 it, or a tool result with no call right before it; on Anthropic, also a conversation that
-ends on an assistant turn) is never sent: the preview counts it per reason
+opens or ends on an assistant turn) is never sent: the preview counts it per reason
 (`compare.skipped_by_reason`), the preview and the result warn, and it counts in none of the
 compare model's rates, nor in `tuned_minus_compare`. A compare model that would be sent no
 case at all is refused by the preview.

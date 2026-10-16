@@ -733,10 +733,9 @@ Source lives under `src/pup_finetune/`.
   `refused_prefix`, the pure check of whether a provider's chat API can carry a case's prefix
   (`REFUSED_SHAPES`: OpenAI and Anthropic refuse no messages, a tool call whose results do
   not open the turn right after it, and a tool result that answers no call of the turn
-  before it; Anthropic also a prefix that ends on an assistant turn; Anthropic is judged on
-  the turns its client sends, `anthropic_messages.py`'s conversion; Fireworks and the fake
-  take any), with `compare_skips` over cases; it takes
-  the `compare.json` path and imports nothing from `replay.py`, which imports it.
+  before it; Anthropic also a prefix that opens or ends on an assistant turn; Anthropic is
+  judged on the turns its client sends, `anthropic_messages.py`'s conversion; Fireworks and
+  the fake take any), with `compare_skips` over cases; it takes the `compare.json` path and imports nothing from `replay.py`, which imports it.
   `benchmark.py` is `benchmark`: `plan_benchmark` (the test split's cases, the judge and
   one `Candidate` per base model), `execute` (the judge calibrated once, then each model
   replayed in a session of its own into `OUT/<model>` through `run_replay` with the model as

@@ -315,6 +315,11 @@ LATER = {"role": "user", "content": "Never mind."}
         ([], "no_messages", "no_messages"),
         ([SYSTEM], None, "no_messages"),
         ([SYSTEM, THOUGHT], None, "no_messages"),
+        # Anthropic's first turn must be the user's; OpenAI takes an assistant greeting.
+        ([SYSTEM, SAID, USER], None, "starts_on_assistant"),
+        ([THOUGHT, SAID, LATER], None, "starts_on_assistant"),
+        ([CALLED, RESULT, USER], None, "starts_on_assistant"),
+        ([SYSTEM, THOUGHT, USER], None, None),
     ],
 )
 def test_the_prefixes_each_chat_api_refuses(
