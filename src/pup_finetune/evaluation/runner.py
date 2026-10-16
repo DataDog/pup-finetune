@@ -101,7 +101,7 @@ if TYPE_CHECKING:
     from pup_finetune.evaluation.cases import ReplayCase
     from pup_finetune.evaluation.compare import CompareTarget
     from pup_finetune.evaluation.judge import Judgment
-    from pup_finetune.evaluation.replay import Publisher, ReplaySummary
+    from pup_finetune.evaluation.replay import EvalDir, Publisher, ReplaySummary
     from pup_finetune.inference import ChatCompleter, JudgeConfig
 
 __all__ = [
@@ -572,16 +572,24 @@ class EvalPlan:
             found.append("test cases, generated answers and scores -> Datadog (experiments)")
         return found
 
+    def _refuse_another_compare(self, eval_dir: EvalDir) -> None:
+        """Raise the conflict --confirm would raise for another compare model than the one
+        ``eval_dir`` keeps: fail the preview now, never offer that --confirm."""
+        from pup_finetune.evaluation.compare import compare_conflict, stored_compare
+
+        if self.compare_identity is None:
+            return
+        conflict = compare_conflict(
+            stored_compare(eval_dir.compare_path), self.compare_identity, out_dir=self.out_dir
+        )
+        if conflict is not None:
+            raise conflict
+
     def preview(self, *, tuned: str, tuned_checkpoint: CheckpointRef | None) -> dict[str, Any]:
         """The calls the evaluation makes. With ``tuned_checkpoint`` (a standalone run), what
         ``--out-dir`` already holds under the same settings is left out of the counts."""
         from pup_finetune.datadog.experiments import experiment_name
-        from pup_finetune.evaluation.compare import (
-            compare_conflict,
-            require_sent,
-            skipped_warning,
-            stored_compare,
-        )
+        from pup_finetune.evaluation.compare import require_sent, skipped_warning
         from pup_finetune.evaluation.replay import CAVEAT, COMPARE, EvalDir, remaining_work
 
         settings = self.settings
@@ -607,32 +615,24 @@ class EvalPlan:
         probe = self.compare is not None and (
             not eval_dir.compare_path.exists() or (wanted is not None and eval_dir.replaces(wanted))
         )
-        if wanted is not None and stored is not None:
-            if wanted == stored:
-                # --confirm would refuse another compare model: fail now, never offer it.
-                if self.compare_identity is not None:
-                    conflict = compare_conflict(
-                        stored_compare(eval_dir.compare_path),
-                        self.compare_identity,
-                        out_dir=self.out_dir,
-                    )
-                    if conflict is not None:
-                        raise conflict
-                by_target = {
-                    target: remaining_work(eval_dir, cases, (target,))
-                    for target, cases in replays.items()
-                }
-                if (eval_dir.read_calibration() or {}).get("ok"):
-                    calibration = 0
-            elif eval_dir.has_work():
-                # --confirm would refuse (EvalDir.check_identity): fail now, never offer it.
-                raise SettingsConflict(
-                    f"{self.out_dir} holds an evaluation with other settings (changed: "
-                    f"{', '.join(identity_changes(stored, wanted))}), so its results cannot be "
-                    "reused",
-                    hint="evaluate into a new directory: pass --out-dir "
-                    f"{_q(free_sibling(self.out_dir))}",
-                )
+        reusing = wanted is not None and wanted == stored
+        if wanted is not None and stored is not None and not reusing and eval_dir.has_work():
+            # --confirm would refuse (EvalDir.check_identity): fail now, never offer it.
+            raise SettingsConflict(
+                f"{self.out_dir} holds an evaluation with other settings (changed: "
+                f"{', '.join(identity_changes(stored, wanted))}), so its results cannot be "
+                "reused",
+                hint="evaluate into a new directory: pass --out-dir "
+                f"{_q(free_sibling(self.out_dir))}",
+            )
+        if reusing:
+            self._refuse_another_compare(eval_dir)
+            by_target = {
+                target: remaining_work(eval_dir, cases, (target,))
+                for target, cases in replays.items()
+            }
+            if (eval_dir.read_calibration() or {}).get("ok"):
+                calibration = 0
         from pup_finetune.judges import destination as judge_destination
 
         if probe:
