@@ -728,9 +728,7 @@ def test_a_crashing_keychain_backend_does_not_crash_doctor(
         "Fireworks key unreadable",
         fix,
     )
-    assert key["detail"] == (
-        f"could not read the fireworks key from the OS keychain (RuntimeError); {fix}"
-    )
+    assert key["detail"] == "could not read the fireworks key from the OS keychain (RuntimeError)"
     assert CRASHED_HOLDING not in result.stdout + result.stderr
     assert "pup finetune auth login fireworks" not in [
         s["command"] for s in report_of(result)["next_steps"]

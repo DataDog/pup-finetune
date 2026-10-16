@@ -442,14 +442,11 @@ def key_source(provider: str, *, env: Mapping[str, str] = os.environ) -> str | K
         found = lookup(provider, env=env)
         return found.source if found is not None else sdk_login_source(provider, env=env)
     except FinetuneError as exc:
-        detail = f"{exc.message}; {exc.hint}" if exc.hint else exc.message
         fix = exc.hint or f"unlock the OS keychain and retry, or set {spec.env_var}"
-        return KeyUnreadable(redact(detail), redact(fix))
+        return KeyUnreadable(redact(exc.message), redact(fix))
     except Exception as exc:
         # Never the error's message: a keychain backend's error may hold what it read.
-        fix = f"check that the OS keychain works and retry, or set {spec.env_var}"
         return KeyUnreadable(
-            f"could not read the {spec.provider} key from the OS keychain "
-            f"({type(exc).__name__}); {fix}",
-            fix,
+            f"could not read the {spec.provider} key from the OS keychain ({type(exc).__name__})",
+            f"check that the OS keychain works and retry, or set {spec.env_var}",
         )
