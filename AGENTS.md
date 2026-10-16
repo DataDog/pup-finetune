@@ -61,7 +61,7 @@ The offline dev loop trains end to end on the `fake` provider, with no network o
 row pushed as it is now and no push in flight, or a `dataset fetch` directory
 (`curation/pipeline.py`'s `require_in_datadog`, with its reason and step from
 `Pipeline.push_gap`). Rows changed after the push are named, and their step fetches the
-dataset as Datadog holds it, counting the rows dropped or retired since the push that the
+dataset as Datadog holds it, naming the rows dropped or retired since the push that the
 fetch brings back. An offline provider (`ProviderInfo.offline`, the fake) is exempt, so this
 loop and the default tests train on an imported directory that was never pushed:
 

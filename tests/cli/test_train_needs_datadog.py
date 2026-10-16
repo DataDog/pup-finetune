@@ -116,6 +116,10 @@ def test_the_refusal_names_a_few_of_many_changed_rows(dataset: Path) -> None:
     assert "train on" not in result.stderr
 
 
+def all_row_ids(dataset: Path) -> list[str]:
+    return [json.loads(line)["id"] for line in (dataset / "rows.jsonl").read_text().splitlines()]
+
+
 def drop(dataset: Path, tmp_path: Path, row_ids: list[str]) -> None:
     labels = tmp_path / "labels.jsonl"
     labels.write_text(
@@ -130,14 +134,29 @@ def test_the_fetch_for_changed_rows_says_it_brings_back_rows_dropped_since_the_p
 ) -> None:
     mark_pushed(dataset)
     edited = edit_rows(dataset, 1)
-    rows = [json.loads(line)["id"] for line in (dataset / "rows.jsonl").read_text().splitlines()]
-    drop(dataset, tmp_path, [row for row in rows if row not in edited][:2])
+    dropped = sorted(row for row in all_row_ids(dataset) if row not in edited)[:2]
+    drop(dataset, tmp_path, dropped)
     result = train(dataset)
     assert result.exit_code == 2
     assert (
         "fetch it into a new directory to train on what Datadog holds; the fetch also brings "
-        "back the 2 rows dropped or retired since the push, which you drop again with "
-        "`dataset label` after the fetch"
+        f"back the 2 rows dropped or retired since the push (rows {dropped[0]}, {dropped[1]}), "
+        "which you drop again with `dataset label` after the fetch"
+    ) in " ".join(result.stderr.split())
+
+
+def test_the_fetch_for_changed_rows_names_a_few_of_many_rows_dropped_since_the_push(
+    dataset: Path, tmp_path: Path
+) -> None:
+    mark_pushed(dataset)
+    edited = edit_rows(dataset, 1)
+    dropped = sorted(row for row in all_row_ids(dataset) if row not in edited)[:7]
+    drop(dataset, tmp_path, dropped)
+    result = train(dataset)
+    assert result.exit_code == 2
+    shown = ", ".join(dropped[:5])
+    assert (
+        f"brings back the 7 rows dropped or retired since the push (rows {shown} and 2 more)"
     ) in " ".join(result.stderr.split())
 
 

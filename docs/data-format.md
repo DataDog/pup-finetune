@@ -276,7 +276,8 @@ every kept row as it is now, `pushed_with_new_rows` when `pending` kept rows are
 records pushed for them (a push only adds records, so the dataset holds them as they were
 pushed: the gate names up to 5 of them, and its step fetches that dataset into a new directory
 to train on what Datadog holds; the fetch also brings back the records of rows dropped or
-retired since the push, which the step counts, to drop again with `dataset label`), and
+retired since the push, which the step counts and names up to 5 of, to drop again with
+`dataset label`), and
 `unreadable` (with `pending` and `changed` null) when `push.json` cannot be read. `train` and
 `benchmark` on a real provider read only a `pushed` dataset. An `unreadable` part comes with a
 warning in the result that names the file and the problem.

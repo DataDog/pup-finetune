@@ -43,8 +43,8 @@ now; ``pushed_with_new_rows`` when kept rows are not pushed yet (``dataset push 
 them); ``pushed_with_changed_rows`` when kept rows changed after they were pushed; ``unreadable``
 when ``push.json`` cannot be read."""
 
-SHOWN_CHANGED_IDS = 5
-"""How many ids of rows changed after the push the gate names."""
+SHOWN_IDS = 5
+"""How many ids of rows changed after the push, or dropped since, the gate names."""
 
 FETCH_ANY = template("dataset", "fetch", "<DIR>", "--project", "<PROJECT>", "--name", "<NAME>")
 """The fetch of a dataset already in Datadog, which ``train`` and ``benchmark`` read too."""
@@ -80,9 +80,9 @@ class Pipeline:
     cannot be read."""
     changed_ids: tuple[str, ...] = ()
     """The ids of those rows, sorted."""
-    stale: int = 0
-    """Records ``push.json`` lists for rows no longer kept (dropped or retired since the
-    push), which the dataset still holds."""
+    stale_ids: tuple[str, ...] = ()
+    """The ids, sorted, of rows ``push.json`` lists a record for that are no longer kept
+    (dropped or retired since the push), which the dataset still holds."""
     dataset_name: str | None = None
     """The dataset ``push.json`` names, when there is one."""
     project: str | None = None
@@ -148,23 +148,16 @@ class Pipeline:
                     ),
                 )
             case "pushed_with_changed_rows":
-                ids = list(self.changed_ids)
-                shown = ", ".join(ids[:SHOWN_CHANGED_IDS])
-                more = (
-                    f" and {len(ids) - SHOWN_CHANGED_IDS} more"
-                    if len(ids) > SHOWN_CHANGED_IDS
-                    else ""
-                )
                 stale = (
-                    f"; the fetch also brings back the {counted(self.stale, 'row')} dropped or "
-                    "retired since the push, which you drop again with `dataset label` after "
-                    "the fetch"
-                    if self.stale
+                    f"; the fetch also brings back the {counted(len(self.stale_ids), 'row')} "
+                    f"dropped or retired since the push ({_some(self.stale_ids)}), which you "
+                    "drop again with `dataset label` after the fetch"
+                    if self.stale_ids
                     else ""
                 )
                 return PushGap(
                     f"{self.changed} of its kept rows changed after the push to dataset "
-                    f"{name!r} ({'row' if len(ids) == 1 else 'rows'} {shown}{more})",
+                    f"{name!r} ({_some(self.changed_ids)})",
                     step(
                         template(
                             "dataset",
@@ -194,6 +187,13 @@ class Pipeline:
                 )
 
 
+def _some(ids: Sequence[str]) -> str:
+    """Up to :data:`SHOWN_IDS` of ``ids``, as ``row a`` or ``rows a, b and 3 more``."""
+    shown = ", ".join(ids[:SHOWN_IDS])
+    more = f" and {len(ids) - SHOWN_IDS} more" if len(ids) > SHOWN_IDS else ""
+    return f"{'row' if len(ids) == 1 else 'rows'} {shown}{more}"
+
+
 def pipeline_state(
     dataset: DatasetDir,
     summary: Mapping[str, Any] | None = None,
@@ -212,7 +212,7 @@ def pipeline_state(
     )
     warnings: list[str] = []
     changed_ids: tuple[str, ...] = ()
-    stale = 0
+    stale_ids: tuple[str, ...] = ()
     name = project = None
     try:
         state = read_push_state(dataset)
@@ -232,7 +232,8 @@ def pipeline_state(
             rows = by_split if by_split is not None else dataset.rows_by_split()
             comparison = compare_receipt(state, rows)
             pending, changed = len(comparison.pending), len(comparison.changed)
-            changed_ids, stale = tuple(sorted(comparison.changed)), len(comparison.stale)
+            changed_ids = tuple(sorted(comparison.changed))
+            stale_ids = tuple(sorted(comparison.stale))
             push = (
                 "pushed_with_changed_rows"
                 if changed
@@ -253,7 +254,7 @@ def pipeline_state(
         pending=pending,
         changed=changed,
         changed_ids=changed_ids,
-        stale=stale,
+        stale_ids=stale_ids,
         dataset_name=name,
         project=project,
         warnings=tuple(warnings),
