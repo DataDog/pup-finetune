@@ -98,9 +98,10 @@ record and a child span per replayed action, with the metrics and judge verdicts
 dataset's push receipt (`push.json`): without one the preview and the result warn and the
 evaluation is not published (the local results are complete either way); the result's
 `next_command` is then `null`, and its `next_steps` push the dataset and rerun the evaluation,
-which reuses every finished result (no new model calls when it is complete) and publishes it.
-A complete evaluation's `next_command` is the `deploy` preview. `--no-publish`
-(`--eval-no-publish` for `train --evaluate`) skips it without a warning. Publishing resumes:
+which reuses every finished result (no new model calls when it is complete) and publishes it,
+or deploy it unpublished. A complete evaluation that was published, or run with `--no-publish`
+(`--eval-no-publish` for `train --evaluate`, which skips publishing without a warning), has the
+`deploy` preview as its `next_command`. Publishing resumes:
 `experiments.json` and `published.json` in the evaluation directory record the experiments
 created and the spans sent, so a rerun creates and sends nothing twice, and a failed publish
 exits 1 with a `next_command` that publishes the rest (a Ctrl-C while publishing leaves a
@@ -214,7 +215,8 @@ passed over, and the source says so. The defaults are `judge_models.EVALUATE_DEF
 OpenAI's, else the two Fireworks models. Previews name the judges and where they came from
 (`judge_source`, `judges_source`), triage's `next_command` pins `--judges` as evaluate's pins
 `--judge-model`, and `doctor`'s `ready` map reads the default from its own key and package
-checks. The test conftest hides `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` (except in `live`
+checks. A preview whose judge or compare model has no key fails with the key's login hint
+(`usage`, exit 2). The test conftest clears every provider key variable (except in `live`
 tests), so the default tests see the Fireworks defaults. Anthropic judges need the `anthropic`
 extra (`uv sync --all-extras`; `uv sync` is exact, so a bare `uv sync --extra anthropic`
 removes the other extras):
@@ -505,16 +507,28 @@ Source lives under `src/pup_finetune/`.
   `FIREWORKS_REASONING` per Fireworks model), `default_judges` (and `pick_default`) the
   default judges by credential with where they came from, `JUDGE_PACKAGES` the package a
   judge provider needs (what `doctor` checks, a default requires and `check_available`
-  refuses a judge without, missing or broken, up front), and `open_client` and
-  `open_clients` (one per provider) build the clients.
+  refuses a judge without, missing or broken, up front), `require_key` a missing key (offline:
+  the environment, the keychain, or the Anthropic SDK's own login; the fake judge and compare
+  model need none), which the `evaluate`, `train --evaluate`, `benchmark` and `dataset triage`
+  previews call for every model they would call, so they never offer a `--confirm` that would
+  fail on it (a read-only `evaluate`, `train --evaluate` or `benchmark` preview, which offers
+  none, warns instead: `warnings`), and `open_client` builds a client. `open_lazily` (what
+  `evaluate`, `train --evaluate` and `benchmark` judge with) and `open_clients` (one per
+  provider, for a triage council) open it on its first call (`OnFirstCall`), so a run calls
+  for exactly the keys its preview checked: a complete evaluation or benchmark rerun opens no
+  judge, a resumed council only the judges with votes left.
 - `anthropic_client.py` - `AnthropicChatClient`, the Anthropic judge (and compare model)
   client over the official SDK (the `anthropic` extra), the only module that imports
-  `anthropic` (and its `httpx2`): `system` from the leading system message, OpenAI tools as
-  Anthropic tools, assistant `tool_calls` as `tool_use` blocks and `tool` messages as merged
-  `tool_result` user turns, `tool_use` answers back as OpenAI `tool_calls`, no sampling
+  `anthropic` (and its `httpx2`): the messages as `anthropic_messages.py` converts them,
+  OpenAI tools as Anthropic tools, `tool_use` answers back as OpenAI `tool_calls`, no sampling
   parameters, `output_config` format
   and effort (the judge's), "prompt is too long" as `ContextLimitError`, `fallbacks="default"` through the beta API on the models that have it (never for a compare model: `fallbacks=False`), `stop_reason`
   mapped to `finish_reason`, typed SDK errors mapped to ours. Tests pass a fake SDK client.
+- `anthropic_messages.py` - the one OpenAI-to-Anthropic message conversion, with no SDK
+  import: every system message joined into `system`, assistant `tool_calls` as `tool_use`
+  blocks, `tool` messages as `tool_result` blocks of user turns, empty messages dropped and
+  consecutive turns of one role merged. `anthropic_client.py` sends it, and the compare skip
+  rule checks it.
 - `judge_credentials.py` - registers the `anthropic` and `openai` `CredentialSpec`s (imported
   by the providers package); `anthropic_sdk_login` detects the Anthropic SDK's own login,
   reported as the source `anthropic-sdk`.
@@ -662,7 +676,9 @@ Source lives under `src/pup_finetune/`.
   `deployment.json`, `remote.json` (the job of a `train --remote` run), and `evaluation.json`, each evaluation of the run by its directory with
   every setting, how it stands and its headline, written by
   `evaluation/runner.py`'s `record_evaluation`; `status` names the pinned command that
-  continues one, or `deploy` once one is complete),
+  continues one, or `deploy` once one is complete, unless the missing push kept it
+  unpublished: then, as after the evaluation (`_push_first`), no next command and the steps
+  it recorded under `awaits_push`),
   `RunState`, which the loop reports into, and `execute_run`, which holds the directory lock
   while training and always writes `result.json`, also on Ctrl-C or SIGTERM (reported as
   `TrainingTerminated`, a `FinetuneError`). Any error during training leaves the run
@@ -709,7 +725,9 @@ Source lives under `src/pup_finetune/`.
   tests (same tools with consistent arguments, or mostly the same words). `replay.py` has
   `run_replay`: every `(target, case)` pair (`base`, `tuned`, and `compare` with a compare
   target, whose identity is `compare.json`, frozen when attached and checked under the lock
-  by `compare.attach_compare`; a run planned without an attached one is refused) generated,
+  by `compare.attach_compare`; a run planned without an attached one is refused), each
+  target on its own cases (`replays`, `Replays`: every case unless the caller gives fewer),
+  generated,
   scored and judged on
   a thread pool, each generation appended to `generations.jsonl` and each result to
   `results.jsonl` as it completes, so a rerun skips finished pairs; `evaluation.json` is the
@@ -719,8 +737,9 @@ Source lives under `src/pup_finetune/`.
   pairs in flight, then propagates). `summarize` writes
   `summary.json`: per-target pass rates (judge and metrics), per-trajectory agreement, the
   paired wins, regressions and ties, and `tuned_minus_base` with a seeded paired bootstrap
-  95% CI over trajectories (`paired_bootstrap_ci`), `tuned_minus_compare` the same way (both
-  through `_paired`), plus the agreement-not-task-success `CAVEAT`. A `Publisher` (default `NoopPublisher`) gets a complete evaluation and returns
+  95% CI over trajectories (`bootstrap.py`'s `paired_bootstrap_ci`), `tuned_minus_compare`
+  the same way over the compare target's cases (both through `_paired`; each target counts
+  the cases it does not replay as `skipped`), plus the agreement-not-task-success `CAVEAT`. A `Publisher` (default `NoopPublisher`) gets a complete evaluation and returns
   what it reports, the outcome's `publication`. `runner.py` is what `evaluate` and `train
   --evaluate` run: `plan_evaluation` (an `EvalPlan`: cases, judge, settings and `Publishing`,
   whether the dataset's push receipt allows publishing), calibration (`prepare_eval_dir`
@@ -734,20 +753,31 @@ Source lives under `src/pup_finetune/`.
   with a free `--out-dir`) instead of offering a `--confirm` that would be refused. With
   `--compare-model` (or a `compare.json` the directory has), `EvalPlan.targets` adds
   `compare`, and `StandaloneEvaluation` opens a training session only when base or tuned has
-  a case left to generate, and the compare model's client only when it has, next to the
-  judge's before anything is written; `prepare_eval_dir` has it answer one `probe` under the
+  a case left to generate, and the compare model's client only when it has, before anything
+  is written (the judge's opens on its first call); `prepare_eval_dir` has it answer one `probe` under the
   directory's lock right before `compare.json` is written, so also after `check_identity`
   dropped the one attached. The preview names only the targets that generate (their provider, billing and
   recipients); the others' answers are reused. It counts the probe as one more compare call
   when the run will make it: no `compare.json`, or one `check_identity` drops
-  (`EvalDir.replaces`, which `check_identity` itself decides by).
+  (`EvalDir.replaces`, which `check_identity` itself decides by). `EvalPlan.replays`, the
+  one place the skip rule is applied, are the cases each target replays (the compare model
+  skips `EvalPlan.compare_skips`), passed to `run_replay` and to the publisher's
+  `PublishSettings`; the preview's `compare` block counts the skipped (`skipped`,
+  `skipped_by_reason`), the preview and the result warn about them, and a compare model that
+  would be sent no case at all fails the preview (`compare.require_sent`, exit 2).
   `compare.py` is the compare target: `resolve_compare` (the judge spec grammar,
   `COMPARE_MAX_TOKENS` and the provider's lowest effort; the dev-only `fake-compare`; a stored
   spec is resolved as the flag is, never from the stored endpoint), `CompareTarget` (its
   identity, recipient and billing), `probe`, `stored_compare`, `compare_conflict` (the one
   check the preview and `attach_compare` share: what changed and a free `--out-dir`),
   `attach_compare` (writes `compare.json` under the lock), `ChatSampler` (a `Sampler` over any
-  `ChatCompleter`, the prefix without `reasoning_content`) and `FakeCompareSampler`; it takes
+  `ChatCompleter`, the prefix without `reasoning_content`), `FakeCompareSampler`, and
+  `refused_prefix`, the pure check of whether a provider's chat API can carry a case's prefix
+  (`REFUSED_SHAPES`: OpenAI and Anthropic refuse no messages, a tool call whose results do
+  not open the turn right after it, and a tool result that answers no call of the turn
+  before it; Anthropic also a prefix that ends on an assistant turn; Anthropic is judged on
+  the turns its client sends, `anthropic_messages.py`'s conversion; Fireworks and the fake
+  take any), with `compare_skips` over cases; it takes
   the `compare.json` path and imports nothing from `replay.py`, which imports it.
   `benchmark.py` is `benchmark`: `plan_benchmark` (the test split's cases, the judge and
   one `Candidate` per base model), `execute` (the judge calibrated once, then each model
@@ -905,7 +935,11 @@ secrets, training projects, jobs and job logs `train --remote` reads, whose `rou
 into `FakeLoops.transport()`. `tests/fakes/baseten_cli.py` has `FakeBasetenCli`, the `baseten`
 CLI as a `CliRunner` that records each call with its upload tree and answers as scripted.
 `tests/fakes/keyring.py` has in-memory, failing and locked keyring backends; every test starts
-on the failing one, so none touches the real keychain.
+on the failing one, so none touches the real keychain, and with every registered provider
+key variable cleared (`live` tests keep them), so no key in the developer's shell passes a
+test that fails in CI. The conftest's `judge_keys` fixture
+puts a key for every judge provider in the environment, for tests that preview a paid judge
+or compare model whose client they fake.
 `tests/providers/contract/` has the `RendererContract`, `BackendContract` and
 `ProviderContract` suites every provider subclasses (`tests/providers/test_fake_contract.py`
 runs them against the fake provider; `tests/providers/fireworks/` against Fireworks on its fakes;

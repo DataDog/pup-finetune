@@ -263,7 +263,7 @@ class BenchmarkPlan:
         """The calls the benchmark makes; work ``--out-dir`` already holds is left out."""
         from pup_finetune.evaluation.replay import CAVEAT
         from pup_finetune.judges import billing as judge_billing
-        from pup_finetune.judges import destination
+        from pup_finetune.judges import destination, require_key
 
         settings = self.settings
         models: list[dict[str, Any]] = []
@@ -285,6 +285,11 @@ class BenchmarkPlan:
                 }
             )
         calibration = self.calibration_calls()
+        warnings = self.split_warnings()
+        if judge_calls + calibration:
+            # --confirm would fail on a key nothing provides: fail now, never offer it. A
+            # read-only preview offers none, so it only warns.
+            require_key(self.judge, warnings=warnings if self.runtime.read_only else None)
         billing = [
             get_provider(name, self.runtime).sampling_billing(
                 SamplingUsage(calls=calls, max_tokens_per_call=settings.max_tokens)
@@ -334,7 +339,7 @@ class BenchmarkPlan:
             f"{', '.join(sorted(calls_by_provider))} to generate and to {judged_at} to judge",
             "data_recipients": self.recipients(),
             "caveat": CAVEAT,
-            "warnings": self.split_warnings(),
+            "warnings": warnings,
         }
 
 
@@ -517,7 +522,7 @@ def _replay_model(
             concurrency=plan.settings.concurrency,
             cancel=cancel,
             on_progress=EvaluationProgress(),
-            targets=(candidate.target,),
+            replays={candidate.target: plan.cases},
         )
 
     info(f"benchmarking {candidate.target} on {candidate.provider}")
@@ -606,12 +611,17 @@ def _by_trajectory(cases: Sequence[ReplayCase], values: Mapping[str, float]) -> 
 def _entry(
     plan: BenchmarkPlan, candidate: Candidate, error: Mapping[str, Any] | None
 ) -> dict[str, Any]:
-    from pup_finetune.evaluation.replay import EvalDir, paired_bootstrap_ci, summarize
+    from pup_finetune.evaluation.bootstrap import paired_bootstrap_ci
+    from pup_finetune.evaluation.replay import EvalDir, summarize
 
     eval_dir = EvalDir(plan.model_dir(candidate))
     results, generations = eval_dir.read_results(), eval_dir.read_generations()
     target = summarize(
-        plan.cases, results, generations, seed=plan.settings.seed, targets=(candidate.target,)
+        plan.cases,
+        results,
+        generations,
+        seed=plan.settings.seed,
+        replays={candidate.target: plan.cases},
     )["targets"][candidate.target]
     passes = _ok_passes(plan, candidate)
     interval = paired_bootstrap_ci(
@@ -654,7 +664,7 @@ def leaderboard(
     given), each with its gap to the best: the mean paired difference over the cases both
     passed through the judge, with a 95% bootstrap CI over trajectories. A model is within
     noise of the best when that CI reaches 0 or there are too few cases for one."""
-    from pup_finetune.evaluation.replay import paired_bootstrap_ci
+    from pup_finetune.evaluation.bootstrap import paired_bootstrap_ci
 
     errors = errors or {}
     entries = [

@@ -550,15 +550,19 @@ class TriagePlan:
 
     def preview(self) -> dict[str, Any]:
         """What :func:`run_triage` would do, and every provider the rows are sent to."""
-        from pup_finetune.judges import billing, destination, recipient
+        from pup_finetune.judges import billing, destination, recipient, require_key
 
         configs = {spec: judge_config(spec) for spec in self.judges}
+        pending = Counter(judge for _row, judge in self.pending)
+        for spec, config in configs.items():
+            if pending[spec]:
+                # --confirm would fail on a key nothing provides: fail now, never offer it.
+                require_key(config)
         firsts: dict[str, JudgeConfig] = {}
         for config in configs.values():
             firsts.setdefault(config.provider, config)
         places = [destination(config) for config in firsts.values()]
         judged_at = ", ".join(f"{recipient(config)} (judge)" for config in firsts.values())
-        pending = Counter(judge for _row, judge in self.pending)
         tokens = self.approx_input_tokens()
         names = ", ".join(alias_of(spec) for spec in self.judges)
         if self.references is None:

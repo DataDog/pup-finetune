@@ -51,6 +51,8 @@ from pup_finetune.judge_models import FIREWORKS_JUDGES
 from pup_finetune.providers.base import ProviderAuthError
 from tests.fakes.chat_api import block
 
+pytestmark = pytest.mark.usefixtures("judge_keys")
+
 SETTINGS = DatasetSettings("import", SplitParams(42, 0.0, 0.0))
 AT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 RUBRIC = Criteria.build("## Keep\nHelpful answers.\n## Drop\nWrong tool calls.", [])
@@ -833,6 +835,7 @@ def test_a_council_missing_a_provider_s_client_is_refused(tmp_path: Path) -> Non
     assert not (dataset.path / JUDGMENTS_FILE).exists()
 
 
+@pytest.mark.usefixtures("all_judge_keys")
 def test_the_preview_names_every_provider_the_rows_are_sent_to(tmp_path: Path) -> None:
     dataset = make_dataset(tmp_path)
     preview = plan_triage(dataset, RUBRIC, (J1, CLAUDE, GPT, J2)).preview()

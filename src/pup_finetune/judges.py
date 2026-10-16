@@ -24,7 +24,9 @@ its provider by prefix:
 the provider's defaults (:data:`PROVIDERS`: endpoint, credential, whether a temperature is
 sent, the token limit, and the reasoning effort; thinking shares the limit on Anthropic's and
 OpenAI's current models, so theirs is larger). :func:`open_client` opens the client for a
-judge and :func:`open_clients` one client per provider of a council. Nothing here imports a
+judge; :func:`open_lazily` opens it on the first call instead, and :func:`open_clients` one
+such client per provider of a council, so a run with nothing left to ask a model needs
+neither its key nor its client. Nothing here imports a
 provider SDK: :mod:`pup_finetune.anthropic_client` is loaded only when an Anthropic judge is
 used (:func:`anthropic_client_class`), and :func:`check_available` says before then when its
 extra is missing.
@@ -43,17 +45,19 @@ from __future__ import annotations
 
 import difflib
 import os
+import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from contextlib import ExitStack, contextmanager
+from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, Literal, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
-from pup_finetune import providers
-from pup_finetune.errors import UsageError, install_hint
+from pup_finetune import credentials, providers
+from pup_finetune.errors import ExternalError, FinetuneError, UsageError, install_hint
 from pup_finetune.inference import (
     DEFAULT_JUDGE_BASE_URL,
     ChatClient,
     ChatCompleter,
+    ChatCompletion,
     JudgeConfig,
     JudgeProvider,
 )
@@ -71,6 +75,7 @@ __all__ = [
     "PROVIDERS",
     "SPEC_FORMS",
     "JudgeProvider",
+    "OnFirstCall",
     "ProviderDefaults",
     "RemoteProvider",
     "anthropic_client_class",
@@ -78,11 +83,14 @@ __all__ = [
     "check_available",
     "default_judges",
     "destination",
+    "login_hint",
     "open_client",
     "open_clients",
+    "open_lazily",
     "parse_judge",
     "pick_default",
     "recipient",
+    "require_key",
 ]
 
 RemoteProvider = Literal["fireworks", "anthropic", "openai"]
@@ -356,7 +364,41 @@ def check_available(config: JudgeConfig, *, what: str = "judge") -> None:
         )
 
 
-def _anthropic_missing(what: str) -> UsageError:
+def login_hint(credential: str) -> str:
+    """How a user signs in to the provider of the ``credential`` a judge uses: our key, or
+    for Anthropic the SDK's own login."""
+    hint = credentials.login_hint(credentials.get_spec(credential))
+    return f"{hint}, or sign in with `ant auth login`" if credential == "anthropic" else hint
+
+
+def require_key(
+    config: JudgeConfig, *, what: str = "judge", warnings: list[str] | None = None
+) -> None:
+    """Raise the missing key's :class:`UsageError`, with its login hint, when nothing would
+    sign ``config``'s model in: no key in the environment or the keychain and, for Anthropic,
+    no login of the SDK's own. Offline: no call is made. The fake judge and compare model
+    need no key; ``what`` names the model in the message. With ``warnings`` (a read-only
+    preview, which offers no ``--confirm`` to fail), the error is appended there instead."""
+    if config.provider == "fake":
+        return
+    found = credentials.key_source(config.credential)
+    error: FinetuneError
+    if isinstance(found, credentials.KeyUnreadable):
+        error = ExternalError(found.detail, hint=found.fix, source="the OS keychain")
+    elif found is None:
+        error = credentials.missing_key_error(
+            config.credential,
+            hint=login_hint(config.credential),
+            needed_by=f"the {what} {config.spec}",
+        )
+    else:
+        return
+    if warnings is None:
+        raise error
+    warnings.append(f"{error.message}: {error.hint}")
+
+
+def _anthropic_missing(what: str = "judge") -> UsageError:
     return UsageError(
         f"Anthropic {what}s need the 'anthropic' package, which is not installed",
         hint=ANTHROPIC_INSTALL_HINT,
@@ -407,13 +449,66 @@ def open_client(
         yield chat
 
 
+class OnFirstCall:
+    """A :class:`~pup_finetune.inference.ChatCompleter` that opens its client (``opener()``,
+    a context manager) on its first call, from whichever thread makes it, and closes it with
+    :meth:`close`."""
+
+    def __init__(self, opener: Callable[[], AbstractContextManager[ChatCompleter]]) -> None:
+        self._opener = opener
+        self._stack = ExitStack()
+        self._client: ChatCompleter | None = None
+        self._lock = threading.Lock()
+
+    def complete(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        model: str,
+        tools: Sequence[Mapping[str, Any]] | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        response_schema: Mapping[str, Any] | None = None,
+        reasoning_effort: str | None = None,
+    ) -> ChatCompletion:
+        with self._lock:
+            if self._client is None:
+                self._client = self._stack.enter_context(self._opener())
+        return self._client.complete(
+            messages,
+            model=model,
+            tools=tools,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_schema=response_schema,
+            reasoning_effort=reasoning_effort,
+        )
+
+    def close(self) -> None:
+        self._stack.close()
+
+
+@contextmanager
+def open_lazily(config: JudgeConfig, *, what: str = "judge") -> Iterator[ChatCompleter]:
+    """The client :func:`open_client` opens for ``config``, opened on its first call
+    (:class:`OnFirstCall`) and closed on exit: a run whose work is all done never needs the
+    key. The preview checks the key of every model with calls left
+    (:func:`require_key`), so the first call finds it."""
+    client = OnFirstCall(lambda: open_client(config, what=what))
+    try:
+        yield client
+    finally:
+        client.close()
+
+
 @contextmanager
 def open_clients(configs: Iterable[JudgeConfig]) -> Iterator[dict[JudgeProvider, ChatCompleter]]:
-    """One client per provider of ``configs``, by provider, all opened up front and closed
-    together on exit (see :func:`open_client`)."""
+    """One client per provider of ``configs``, by provider, each opened on its first call
+    (:func:`open_lazily`) and all closed together on exit, so a provider no call is left for
+    (a resumed council's) is never opened."""
     with ExitStack() as stack:
         clients: dict[JudgeProvider, ChatCompleter] = {}
         for config in configs:
             if config.provider not in clients:
-                clients[config.provider] = stack.enter_context(open_client(config))
+                clients[config.provider] = stack.enter_context(open_lazily(config))
         yield clients

@@ -264,7 +264,13 @@ reasoning effort, and its answers are its own (no server-side fallback to anothe
 Right before it is attached, one short call checks that it answers, so a mistyped model or a
 rejected key fails before the directory keeps it or any training session opens. The
 evaluation directory keeps its compare model: a rerun without the flag continues it, and
-another model needs a new `--out-dir`.
+another model needs a new `--out-dir`. A case whose recorded conversation the compare model's
+API refuses every time (on Anthropic and OpenAI, a tool call with no tool result right after
+it, or a tool result with no call right before it; on Anthropic, also a conversation that
+ends on an assistant turn) is never sent: the preview counts it per reason
+(`compare.skipped_by_reason`), the preview and the result warn, and it counts in none of the
+compare model's rates, nor in `tuned_minus_compare`. A compare model that would be sent no
+case at all is refused by the preview.
 
 ## Deploy
 
@@ -315,7 +321,10 @@ pup finetune dataset triage datasets/my-agent --rubric rubric.md --judges deepse
 
 Anthropic judges need the `anthropic` extra. Without an API key, they sign in the way the
 Anthropic SDK does on its own (`ANTHROPIC_AUTH_TOKEN`, or `ant auth login`), which
-`auth status` reports as `anthropic-sdk`.
+`auth status` reports as `anthropic-sdk`. A preview whose judge or compare model nothing
+would sign in fails, naming the key and how to log in, rather than offer a `--confirm` that
+would fail; with `PUP_READ_ONLY` set, when it offers no `--confirm` anyway, it warns instead.
+A rerun with nothing left to judge needs no judge key.
 
 ## Data handling
 

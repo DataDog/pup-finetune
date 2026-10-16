@@ -14,11 +14,10 @@ the ``httpx`` package is ever passed to it.
 :class:`AnthropicChatClient` answers :class:`~pup_finetune.inference.ChatCompleter` calls,
 whose messages and tools are in the OpenAI form:
 
-- A leading system message becomes the top-level ``system``; the other messages are sent as
-  text, except tool calls and their results: an assistant message's ``tool_calls`` become
-  ``tool_use`` blocks (with their ids and parsed arguments), and each ``tool`` message a
-  ``tool_result`` block in a user turn, consecutive ones in one turn, so the turns alternate
-  as the API requires. ``tools`` become Anthropic tools (``input_schema`` from
+- The messages become the top-level ``system`` and alternating turns, with tool calls and
+  their results as ``tool_use`` and ``tool_result`` blocks
+  (:func:`~pup_finetune.anthropic_messages.anthropic_messages`, which the compare target's
+  skip rule checks too). ``tools`` become Anthropic tools (``input_schema`` from
   ``parameters``). ``model`` is the bare model id and ``max_tokens`` the caller's limit,
   which thinking shares on current models.
 - No sampling parameter (``temperature``, ``top_p``, ``top_k``) is ever sent: current models
@@ -71,6 +70,7 @@ import anthropic
 from pydantic import SecretStr
 
 from pup_finetune import credentials
+from pup_finetune.anthropic_messages import anthropic_messages
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.http_common import DETAIL_LIMIT, bearer_key
 from pup_finetune.inference import (
@@ -80,7 +80,7 @@ from pup_finetune.inference import (
     JudgeConfig,
     is_context_limit,
 )
-from pup_finetune.judges import PROVIDERS
+from pup_finetune.judges import PROVIDERS, login_hint
 from pup_finetune.providers.base import ProviderAuthError, ProviderCapacityError, TransientError
 from pup_finetune.redaction import redact
 
@@ -323,17 +323,14 @@ class AnthropicChatClient:
     def _params(
         self, messages: Sequence[Mapping[str, Any]], *, model: str, max_tokens: int | None
     ) -> dict[str, Any]:
-        system: list[str] = []
-        rest = list(messages)
-        while rest and rest[0].get("role") == "system":
-            system.append(_text(rest.pop(0).get("content")))
+        system, turns = anthropic_messages(messages)
         params: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens if max_tokens is not None else _DEFAULT_MAX_TOKENS,
-            "messages": _anthropic_messages(rest),
+            "messages": turns,
         }
-        if system:
-            params["system"] = "\n\n".join(system)
+        if system is not None:
+            params["system"] = system
         return params
 
     # --- errors -----------------------------------------------------------------------
@@ -401,22 +398,7 @@ class AnthropicChatClient:
 
 def _login_hint() -> str:
     """How a user signs in to Anthropic: our key, or the SDK's own login."""
-    spec = credentials.get_spec(SOURCE)
-    return f"{credentials.login_hint(spec)}, or sign in with `ant auth login`"
-
-
-def _text(content: object) -> str:
-    """A message's content as text: a string as it is, the text of text parts."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, Sequence):
-        parts = [
-            str(part.get("text", ""))
-            for part in content
-            if isinstance(part, Mapping) and part.get("type") == "text"
-        ]
-        return "".join(parts)
-    return "" if content is None else str(content)
+    return login_hint(SOURCE)
 
 
 def _anthropic_tool(tool: Mapping[str, Any]) -> dict[str, Any]:
@@ -429,60 +411,6 @@ def _anthropic_tool(tool: Mapping[str, Any]) -> dict[str, Any]:
         "description": str(function.get("description") or ""),
         "input_schema": dict(parameters) if parameters else {"type": "object", "properties": {}},
     }
-
-
-def _anthropic_messages(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """OpenAI messages (after the system ones) as Anthropic turns: a turn of text alone
-    keeps its content a string; tool calls and results become blocks, and consecutive
-    messages of one role (a tool result is the user's) share a turn."""
-    turns: list[tuple[str, list[dict[str, Any]]]] = []
-    for message in messages:
-        role = str(message.get("role"))
-        text = _text(message.get("content"))
-        blocks: list[dict[str, Any]] = [{"type": "text", "text": text}] if text else []
-        if role == "tool":
-            role = "user"
-            blocks = [
-                {
-                    "type": "tool_result",
-                    "tool_use_id": str(message.get("tool_call_id")),
-                    "content": text,
-                }
-            ]
-        calls = message.get("tool_calls") if role == "assistant" else None
-        for call in calls if isinstance(calls, Sequence) else ():
-            function = call.get("function") if isinstance(call, Mapping) else None
-            if isinstance(function, Mapping):
-                blocks.append(
-                    {
-                        "type": "tool_use",
-                        "id": str(call.get("id")),
-                        "name": str(function.get("name")),
-                        "input": _arguments(function.get("arguments")),
-                    }
-                )
-        if not blocks:
-            continue  # e.g. an assistant turn of reasoning alone: the API refuses empty turns
-        if turns and turns[-1][0] == role:
-            turns[-1][1].extend(blocks)
-        else:
-            turns.append((role, blocks))
-    return [
-        {"role": role, "content": blocks[0]["text"]}
-        if len(blocks) == 1 and blocks[0]["type"] == "text"
-        else {"role": role, "content": blocks}
-        for role, blocks in turns
-    ]
-
-
-def _arguments(text: object) -> dict[str, Any]:
-    """A tool call's JSON arguments as the object ``tool_use`` takes; text that is not a JSON
-    object is kept under ``_raw``."""
-    try:
-        parsed = json.loads(text) if isinstance(text, str) else text
-    except ValueError:
-        parsed = None
-    return dict(parsed) if isinstance(parsed, Mapping) else {"_raw": str(text)}
 
 
 def _tool_calls(blocks: Sequence[Any]) -> list[dict[str, Any]]:

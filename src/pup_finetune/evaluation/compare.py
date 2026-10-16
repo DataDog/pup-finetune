@@ -17,6 +17,11 @@ effort, as a judge does. Both are recorded in the evaluation directory's ``compa
 :class:`ChatSampler` makes any :class:`~pup_finetune.inference.ChatCompleter` a
 :class:`~pup_finetune.providers.base.Sampler`; :class:`FakeCompareSampler` is the offline
 compare model of development mode (:data:`FAKE_COMPARE_MODEL`).
+
+Some recorded prefixes are requests a chat API refuses every time (:func:`refused_prefix`,
+by provider: :data:`REFUSED_SHAPES`), so a retry could never answer them. Those cases are
+skipped for the compare target (:func:`compare_skips`): never sent, counted per reason, and
+left out of its rates and of tuned minus compare.
 """
 
 from __future__ import annotations
@@ -26,11 +31,13 @@ import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from itertools import takewhile
 from pathlib import Path
 from typing import Any, Final, Literal
 
+from pup_finetune.anthropic_messages import anthropic_messages
 from pup_finetune.data.split import split_position
-from pup_finetune.display import quoted
+from pup_finetune.display import joined, quoted
 from pup_finetune.errors import SettingsConflict, StateError, UsageError
 from pup_finetune.evaluation.cases import ReplayCase
 from pup_finetune.inference import ChatCompleter, JudgeConfig
@@ -51,14 +58,21 @@ __all__ = [
     "COMPARE_MAX_TOKENS",
     "COMPARE_TIMEOUT_S",
     "FAKE_COMPARE_MODEL",
+    "REFUSED_SHAPES",
+    "SKIP_REASONS",
     "ChatSampler",
     "CompareTarget",
     "FakeCompareSampler",
+    "SkipReason",
     "attach_compare",
     "compare_conflict",
+    "compare_skips",
     "open_compare_sampler",
     "probe",
+    "refused_prefix",
+    "require_sent",
     "resolve_compare",
+    "skipped_warning",
     "stored_compare",
 ]
 
@@ -83,6 +97,24 @@ PROBE_TOOL: Final[ToolSpec] = {
 }
 
 CompareSource = Literal["flag", "evaluation directory"]
+
+SkipReason = Literal[
+    "no_messages", "unanswered_tool_call", "orphan_tool_result", "ends_on_assistant"
+]
+"""Why a compare model's API refuses a case's prefix on every try."""
+SKIP_REASONS: Final[Mapping[str, str]] = {
+    "no_messages": "have nothing to send before the recorded action",
+    "unanswered_tool_call": "hold a tool call with no tool result right after it",
+    "orphan_tool_result": "hold a tool result that answers no tool call right before it",
+    "ends_on_assistant": "end on an assistant turn, a prefill the model refuses",
+}
+"""Each reason as it reads after a count of cases."""
+REFUSED_SHAPES: Final[Mapping[str, tuple[SkipReason, ...]]] = {
+    "openai": ("no_messages", "unanswered_tool_call", "orphan_tool_result"),
+    "anthropic": ("no_messages", "unanswered_tool_call", "orphan_tool_result", "ends_on_assistant"),
+}
+"""The prefixes each compare provider's API refuses, in the order a prefix is checked. Any
+other provider (Fireworks, the offline fake) takes every prefix."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -181,6 +213,115 @@ def resolve_compare(
     return CompareTarget(config=config, source=source)
 
 
+def refused_prefix(messages: Sequence[Mapping[str, Any]], provider: str) -> SkipReason | None:
+    """Why ``provider``'s chat API refuses a request of ``messages`` (a case's prefix, in
+    OpenAI form) every time, or ``None`` when it takes it.
+
+    Each API refuses an empty conversation, a tool call whose results do not come in the
+    turn right after it, before anything else, and a tool result that answers no call of
+    the turn right before it. OpenAI's chat completions take the messages as they are, the
+    tool results of one call a turn. The Anthropic Messages API is judged on the turns its
+    client sends (:func:`~pup_finetune.anthropic_messages.anthropic_messages`: system
+    messages joined, consecutive turns of one role merged), and also refuses a conversation
+    that ends on an assistant turn: current models take no prefill.
+    """
+    shapes = REFUSED_SHAPES.get(provider, ())
+    turns = anthropic_messages(messages)[1] if provider == "anthropic" else _chat_turns(messages)
+    unanswered, orphaned = _tool_pairing(turns)
+    found: dict[SkipReason, bool] = {
+        "no_messages": not turns,
+        "unanswered_tool_call": unanswered,
+        "orphan_tool_result": orphaned,
+        "ends_on_assistant": bool(turns) and turns[-1]["role"] == "assistant",
+    }
+    return next((reason for reason in shapes if found[reason]), None)
+
+
+def compare_skips(cases: Sequence[ReplayCase], provider: str) -> dict[str, SkipReason]:
+    """The cases whose prefix ``provider``'s API refuses (:func:`refused_prefix`), by case
+    id: the compare target never sends them."""
+    return {
+        case.id: reason
+        for case in cases
+        if (reason := refused_prefix(case.prefix, provider)) is not None
+    }
+
+
+def skipped_warning(by_reason: Mapping[str, int], *, spec: str, cases: int) -> str | None:
+    """What a preview and a result warn about the compare model's skipped cases (counts
+    ``by_reason`` of ``cases``), or ``None`` when none is skipped."""
+    total = sum(by_reason.values())
+    if not total:
+        return None
+    return (
+        f"{total} of {cases} cases are not sent to the compare model {spec}, whose API refuses "
+        f"them every time ({_reasons(by_reason)}); they count in none of its rates, nor in "
+        "tuned minus compare"
+    )
+
+
+def require_sent(by_reason: Mapping[str, int], *, spec: str, cases: int) -> None:
+    """Raise a :class:`UsageError` when the compare model ``spec`` would be sent none of
+    ``cases``, its API refusing every one (counts ``by_reason``): nothing would compare."""
+    if sum(by_reason.values()) < cases:
+        return
+    raise UsageError(
+        f"the compare model {spec} would be sent none of the {cases} cases, as its API refuses "
+        f"every one ({_reasons(by_reason)})",
+        hint="compare with a model on Fireworks, which takes every conversation, or evaluate "
+        "without --compare-model",
+    )
+
+
+def _reasons(by_reason: Mapping[str, int]) -> str:
+    return joined(
+        [f"{count} {SKIP_REASONS.get(reason, reason)}" for reason, count in by_reason.items()]
+    )
+
+
+def _chat_turns(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """``messages`` as chat completions take them, as turns of the blocks
+    :func:`~pup_finetune.anthropic_messages.anthropic_messages` makes: a message a turn, but
+    consecutive tool results one turn, the results of the calls before them."""
+    turns: list[dict[str, Any]] = []
+    for message in messages:
+        role = str(message.get("role"))
+        if role == "tool":
+            result = {"type": "tool_result", "tool_use_id": str(message.get("tool_call_id"))}
+            if turns and turns[-1]["role"] == "tool":
+                turns[-1]["content"].append(result)
+            else:
+                turns.append({"role": role, "content": [result]})
+            continue
+        calls = message.get("tool_calls") if role == "assistant" else None
+        calls = calls if isinstance(calls, Sequence) else ()
+        uses = [
+            {"type": "tool_use", "id": str(call.get("id"))}
+            for call in calls
+            if isinstance(call, Mapping)
+        ]
+        turns.append({"role": role, "content": uses})
+    return turns
+
+
+def _tool_pairing(turns: Sequence[Mapping[str, Any]]) -> tuple[bool, bool]:
+    """Whether ``turns`` hold a tool call whose result is not among the tool results that
+    open the turn right after it, and whether they hold a tool result that is not one of
+    those."""
+    unanswered = orphaned = False
+    calls: set[str] = set()
+    for turn in turns:
+        content = turn["content"]
+        blocks: list[Mapping[str, Any]] = content if isinstance(content, list) else []
+        results = [block for block in blocks if block.get("type") == "tool_result"]
+        opening = list(takewhile(lambda block: block.get("type") == "tool_result", blocks))
+        answered = {str(block.get("tool_use_id")) for block in opening}
+        unanswered |= not calls <= answered
+        orphaned |= len(opening) < len(results) or not answered <= calls
+        calls = {str(block.get("id")) for block in blocks if block.get("type") == "tool_use"}
+    return unanswered or bool(calls), orphaned
+
+
 def stored_compare(path: Path) -> dict[str, Any] | None:
     """The compare target attached at ``path`` (an evaluation directory's ``compare.json``),
     or ``None`` when none is."""
@@ -254,8 +395,8 @@ class ChatSampler:
     The answer keeps its text and tool calls. ``stop_reason`` is the completion's
     ``finish_reason``; ``length`` (cut off at ``max_tokens``) and a tool call
     whose arguments are not a JSON object make it not ``format_valid``. A refusal is an
-    answer like any other, judged as one. A failed call raises, which replay records as the
-    pair's generation error.
+    answer like any other, judged as one: an OpenAI refusal's text stands in for its content.
+    A failed call raises, which replay records as the pair's generation error.
     """
 
     def __init__(
@@ -304,6 +445,8 @@ def _assistant(raw: Mapping[str, Any]) -> tuple[ChatMessage, bool]:
     """An answer as an assistant message (its text and tool calls), and whether every tool
     call names a function and has arguments that are a JSON object."""
     content = raw.get("content")
+    if not isinstance(content, str):
+        content = raw.get("refusal")
     message: ChatMessage = {
         "role": "assistant",
         "content": content if isinstance(content, str) else "",

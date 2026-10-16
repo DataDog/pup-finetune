@@ -154,6 +154,16 @@ def test_the_system_message_is_top_level_and_no_sampling_parameter_is_sent() -> 
     assert sdk.closed
 
 
+def test_every_system_message_joins_the_top_level_system() -> None:
+    sdk = FakeSdk()
+    later = [*MESSAGES, {"role": "assistant", "content": "Yes."}]
+    later += [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "Why?"}]
+    chat(sdk).complete(later, model="claude-haiku-4-5")
+    (params,) = sdk.messages.calls
+    assert params["system"] == "You judge.\n\nBe brief."
+    assert [turn["role"] for turn in params["messages"]] == ["user", "assistant", "user"]
+
+
 def test_max_tokens_defaults_to_the_anthropic_judge_limit() -> None:
     sdk = FakeSdk()
     chat(sdk).complete(MESSAGES[1:], model="claude-haiku-4-5")

@@ -309,11 +309,14 @@ def resolve(
     return found
 
 
-def missing_key_error(provider: str, *, hint: str | None = None) -> UsageError:
+def missing_key_error(
+    provider: str, *, hint: str | None = None, needed_by: str | None = None
+) -> UsageError:
     """The :class:`UsageError` :func:`resolve` raises when no source has ``provider``'s key;
-    ``hint`` replaces its login hint."""
+    ``hint`` replaces its login hint, and ``needed_by`` names what needs the key."""
     spec = get_spec(provider)
-    return UsageError(f"no {spec.provider} API key found", hint=hint or login_hint(spec))
+    needed = f" for {needed_by}" if needed_by else ""
+    return UsageError(f"no {spec.provider} API key found{needed}", hint=hint or login_hint(spec))
 
 
 def sdk_login_source(provider: str, *, env: Mapping[str, str] = os.environ) -> str | None:

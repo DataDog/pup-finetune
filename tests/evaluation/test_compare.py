@@ -227,6 +227,14 @@ def test_a_stored_compare_target_is_resolved_from_its_spec(tmp_path: Path) -> No
         resolve_compare(None, fake, runtime=Runtime())
 
 
+def test_an_openai_refusal_keeps_its_text_as_the_answer() -> None:
+    api = FakeChatApi()
+    api.script.append(completion(None, refusal="I can't help with that."))
+    generation = sampler(api).generate(PREFIX, [], max_tokens=10)
+    assert generation.message == {"role": "assistant", "content": "I can't help with that."}
+    assert generation.stop_reason == "refusal"
+
+
 def test_the_chat_sampler_sends_no_recorded_reasoning() -> None:
     api = FakeChatApi()
     api.script.append(completion("done"))
@@ -271,3 +279,65 @@ def test_a_broken_anthropic_install_names_the_compare_model_when_it_opens(
         open_compare_sampler(target, [], seed=0),
     ):
         pass
+
+
+# --- prefixes a chat API refuses ----------------------------------------------------------
+
+USER = {"role": "user", "content": "What changed?"}
+SYSTEM = {"role": "system", "content": "Review."}
+SAID = {"role": "assistant", "content": "Let me check."}
+THOUGHT = {"role": "assistant", "content": "", "reasoning_content": "thinking only"}
+CALLED = {"role": "assistant", "content": "", "tool_calls": [tool_call("{}")]}
+RESULT = {"role": "tool", "tool_call_id": "c1", "content": "plan"}
+LATER = {"role": "user", "content": "Never mind."}
+
+
+@pytest.mark.parametrize(
+    ("prefix", "openai", "anthropic"),
+    [
+        ([SYSTEM, USER], None, None),
+        ([SYSTEM, USER, CALLED, RESULT], None, None),
+        ([USER, CALLED, RESULT, SAID, LATER], None, None),
+        # A turn of reasoning alone: Anthropic gets no turn for it, so it does not end there.
+        ([USER, THOUGHT], None, None),
+        ([USER, SAID], None, "ends_on_assistant"),
+        ([USER, CALLED], "unanswered_tool_call", "unanswered_tool_call"),
+        ([USER, CALLED, LATER], "unanswered_tool_call", "unanswered_tool_call"),
+        ([USER, CALLED, LATER, RESULT], "unanswered_tool_call", "unanswered_tool_call"),
+        # Anthropic gets one assistant turn, the call then the text, so the result follows it.
+        ([USER, CALLED, SAID, RESULT], "unanswered_tool_call", None),
+        # Anthropic gets every system message in its top-level system.
+        ([SYSTEM, USER, SAID, SYSTEM, LATER], None, None),
+        ([SYSTEM, USER, SAID, SYSTEM], None, "ends_on_assistant"),
+        ([RESULT, USER], "orphan_tool_result", "orphan_tool_result"),
+        ([USER, RESULT], "orphan_tool_result", "orphan_tool_result"),
+        ([USER, SAID, RESULT, LATER], "orphan_tool_result", "orphan_tool_result"),
+        ([], "no_messages", "no_messages"),
+        ([SYSTEM], None, "no_messages"),
+        ([SYSTEM, THOUGHT], None, "no_messages"),
+    ],
+)
+def test_the_prefixes_each_chat_api_refuses(
+    prefix: list[dict[str, Any]], openai: str | None, anthropic: str | None
+) -> None:
+    assert compare.refused_prefix(prefix, "openai") == openai
+    assert compare.refused_prefix(prefix, "anthropic") == anthropic
+    # Fireworks and the offline fake take any prefix.
+    assert compare.refused_prefix(prefix, "fireworks") is None
+    assert compare.refused_prefix(prefix, "fake") is None
+
+
+def test_the_skipped_cases_are_those_the_compare_provider_refuses() -> None:
+    def shaped(index: int, prefix: list[dict[str, Any]]) -> ReplayCase:
+        return ReplayCase(
+            id=f"row:{index}", row_id="row", trace_id=None, message_index=index,
+            prefix=tuple(prefix), tools=(), reference=SAID,
+        )  # fmt: skip
+
+    cases = [shaped(1, [USER]), shaped(2, [USER, SAID]), shaped(3, [USER, CALLED])]
+    assert compare.compare_skips(cases, "anthropic") == {
+        "row:2": "ends_on_assistant",
+        "row:3": "unanswered_tool_call",
+    }
+    assert compare.compare_skips(cases, "openai") == {"row:3": "unanswered_tool_call"}
+    assert compare.compare_skips(cases, "fireworks") == {}

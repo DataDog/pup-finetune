@@ -175,6 +175,7 @@ def test_a_triage_preview_names_the_default_council_and_where_it_came_from(
     assert f"--judges {MINI},{ASTRA} --confirm" in preview["next_command"]
 
 
+@pytest.mark.usefixtures("judge_keys")
 def test_a_triage_preview_on_a_crashing_keychain_names_the_fireworks_council(
     dataset: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -187,6 +188,7 @@ def test_a_triage_preview_on_a_crashing_keychain_names_the_fireworks_council(
     assert CRASHED_HOLDING not in result.stdout + result.stderr
 
 
+@pytest.mark.usefixtures("judge_keys")
 def test_a_triage_rerun_keeps_the_council_triage_json_froze(
     dataset: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

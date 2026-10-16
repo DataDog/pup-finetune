@@ -33,6 +33,8 @@ from pup_finetune.inference import ChatClient, ChatCompleter
 from pup_finetune.judge_models import FIREWORKS_JUDGES as DEFAULT_JUDGES
 from tests.fakes.chat_api import API_KEY, BASE_URL, FakeChatApi, block
 
+pytestmark = pytest.mark.usefixtures("judge_keys")
+
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
 
 runner = CliRunner()
@@ -316,6 +318,7 @@ def test_a_reset_sample_leaves_stale_judge_labels_and_asks_for_every_row(
     assert output(final)["pipeline"]["triage"] == "complete"
 
 
+@pytest.mark.usefixtures("all_judge_keys")
 def test_a_mixed_council_previews_every_provider_and_routes_each_judge(
     dataset: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

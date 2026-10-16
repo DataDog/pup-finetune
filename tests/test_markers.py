@@ -62,3 +62,27 @@ def test_tokenizer_gate_enables_tokenizer_tests(
 ) -> None:
     monkeypatch.setenv("PUP_FINETUNE_TOKENIZER_TESTS", "1")
     gated.runpytest().assert_outcomes(passed=2, skipped=1)
+
+
+_KEY_TESTS = """
+import os
+import pytest
+
+@pytest.mark.live
+def test_live_keeps_the_key():
+    assert os.environ["FIREWORKS_API_KEY"] == "fw-shell-key"
+
+def test_plain_gets_no_key():
+    assert "FIREWORKS_API_KEY" not in os.environ
+"""
+
+
+def test_only_live_tests_see_a_provider_key_from_the_shell(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytester.makeconftest(_CONFTEST)
+    pytester.makeini("[pytest]\nmarkers =\n    live: live\n    tokenizer: tokenizer\n")
+    pytester.makepyfile(_KEY_TESTS)
+    monkeypatch.setenv("PUP_FINETUNE_LIVE", "1")
+    monkeypatch.setenv("FIREWORKS_API_KEY", "fw-shell-key")
+    pytester.runpytest().assert_outcomes(passed=2)

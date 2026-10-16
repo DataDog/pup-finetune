@@ -261,6 +261,7 @@ def test_the_preview_repeats_only_the_settings_given(run_dir: Path) -> None:
     )
 
 
+@pytest.mark.usefixtures("all_judge_keys")
 def test_the_preview_names_the_judge_s_provider_and_pins_its_spec(run_dir: Path) -> None:
     result = invoke("evaluate", str(run_dir), "--judge-model", "anthropic/claude-opus-5-5")
     assert result.exit_code == 2, result.stderr
@@ -434,8 +435,9 @@ def test_evaluate_writes_a_summary_where_the_tuned_model_wins(run_dir: Path) -> 
     data = output(result)
     assert data["status"] == "complete"
     assert data["calibration"]["ok"] is True
-    # Publishing is optional: a complete evaluation goes on to the deploy preview.
-    assert data["next_command"] == f"pup finetune deploy {run_dir}"
+    # Not published for want of a push: no next command, and deploying is a step.
+    assert data["next_command"] is None
+    assert f"pup finetune deploy {run_dir}" in [step["command"] for step in data["next_steps"]]
     out = run_dir / "eval"
     assert data["files"] == {
         "summary": str(out / "summary.json"),
@@ -518,6 +520,7 @@ def test_other_settings_in_the_same_out_dir_are_refused(run_dir: Path) -> None:
     assert elsewhere.exit_code == 0, elsewhere.stderr
 
 
+@pytest.mark.usefixtures("judge_keys")
 def test_a_failed_calibration_generates_nothing(
     run_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -548,6 +551,7 @@ def test_a_failed_calibration_generates_nothing(
     assert fixed.exit_code == 0, fixed.stderr
 
 
+@pytest.mark.usefixtures("judge_keys")
 def test_a_rerun_without_judge_model_keeps_the_judge_its_directory_holds(
     run_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -562,6 +566,7 @@ def test_a_rerun_without_judge_model_keeps_the_judge_its_directory_holds(
     )
 
 
+@pytest.mark.usefixtures("judge_keys")
 def test_skip_calibration_judges_without_checking(
     run_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -687,6 +692,7 @@ def test_train_previews_the_evaluation_calls(dataset: Path, tmp_path: Path) -> N
     assert not run.exists()
 
 
+@pytest.mark.usefixtures("all_judge_keys")
 def test_train_evaluate_names_every_recipient_the_judge_included(
     dataset: Path, tmp_path: Path
 ) -> None:
@@ -726,6 +732,7 @@ def test_evaluate_names_its_recipients_and_its_flag_to_skip_publishing(run_dir: 
     assert warning.endswith("or pass --no-publish")
 
 
+@pytest.mark.usefixtures("judge_keys")
 def test_read_only_previews_offer_no_confirm(
     dataset: Path, run_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -789,6 +796,7 @@ def test_train_evaluate_needs_the_foreground(dataset: Path, tmp_path: Path) -> N
     assert "--evaluate" in result.stderr
 
 
+@pytest.mark.usefixtures("judge_keys")
 def test_train_evaluate_trains_nothing_when_calibration_fails(
     dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -951,12 +959,26 @@ def test_status_after_train_evaluate_with_settings_continues_that_evaluation(
     assert result.exit_code == 0, result.stderr
     assert output(result)["evaluation"]["status"] == "complete"
     status = output(invoke("status", str(run)))
-    # Complete: status shows where it is and its headline, and goes on to deploy.
+    # Complete: status shows where it is and its headline. The dataset was never pushed, so
+    # as after the evaluation, no deploy comes next: its steps push, then rerun to publish.
     assert status["evaluation"]["status"] == "complete"
     assert status["evaluation"]["out_dir"] == display(run / "eval")
     assert status["evaluation"]["headline"]["judge_pass_rate"]["tuned"] is not None
-    assert status["next_command"] == f"pup finetune deploy {shlex.quote(display(run))}"
+    evaluated = output(result)["evaluation"]
+    assert evaluated["next_command"] is None
+    assert status["next_command"] is None
+    assert status["next_steps"] == evaluated["next_steps"]
+    push, again, deploy = (item["command"] for item in status["next_steps"][:3])
+    assert shlex.split(push)[2:4] == ["dataset", "push"]
+    assert again.endswith(" --confirm") and "--seed 7" in again
+    assert deploy == f"pup finetune deploy {shlex.quote(display(run))}"
     assert "evaluation complete in" in invoke("status", str(run)).stderr
+    # Unpublished on request, it goes on to deploy.
+    record = json.loads((run / "evaluation.json").read_text())
+    del record["evaluations"]["eval"]["awaits_push"]
+    (run / "evaluation.json").write_text(json.dumps(record))
+    following = output(invoke("status", str(run)))["next_command"]
+    assert following == f"pup finetune deploy {shlex.quote(display(run))}"
     # Not complete (as after a crash or a Ctrl-C): the recorded command, every setting
     # pinned, previews without the settings conflict a bare `evaluate` would hit.
     record = json.loads((run / "evaluation.json").read_text())
@@ -975,7 +997,8 @@ def test_status_after_train_evaluate_with_settings_continues_that_evaluation(
 def test_status_after_evaluate_confirm_no_longer_says_evaluate(run_dir: Path) -> None:
     status = output(invoke("status", str(run_dir)))
     assert shlex.split(status["next_command"])[:3] == ["pup", "finetune", "evaluate"]
-    evaluated = rerun(output(invoke("evaluate", str(run_dir)))["next_command"])
+    # Unpublished on request (a missing push would hold the deploy back for a push first).
+    evaluated = rerun(output(invoke("evaluate", str(run_dir), "--no-publish"))["next_command"])
     assert evaluated.exit_code == 0, evaluated.stderr
     status = output(invoke("status", str(run_dir)))
     assert status["evaluation"]["status"] == "complete"

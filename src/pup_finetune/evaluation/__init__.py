@@ -38,6 +38,7 @@ import importlib
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from pup_finetune.evaluation.bootstrap import paired_bootstrap_ci
     from pup_finetune.evaluation.cases import (
         ReplayCase,
         build_cases,
@@ -75,7 +76,6 @@ if TYPE_CHECKING:
         Publisher,
         ReplaySummary,
         evaluation_identity,
-        paired_bootstrap_ci,
         run_replay,
         summarize,
     )
@@ -103,7 +103,7 @@ _EXPORTS: dict[str, str] = {
     "check_judge_differs": "pup_finetune.evaluation.judge",
     "evaluation_identity": "pup_finetune.evaluation.replay",
     "has_visible_action": "pup_finetune.evaluation.cases",
-    "paired_bootstrap_ci": "pup_finetune.evaluation.replay",
+    "paired_bootstrap_ci": "pup_finetune.evaluation.bootstrap",
     "parallel_call_set_match": "pup_finetune.evaluation.metrics",
     "reference_arguments_match": "pup_finetune.evaluation.metrics",
     "row_cases": "pup_finetune.evaluation.cases",

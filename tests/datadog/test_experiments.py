@@ -1114,3 +1114,31 @@ def test_the_compare_experiment_records_the_compare_model_and_leaves_base_and_tu
         "metrics_version": METRICS_VERSION,
     }
     assert "the compare model (openai/gpt-5.5)" in attributes["description"]
+
+
+def test_an_experiment_holds_only_the_cases_its_target_replayed() -> None:
+    from pup_finetune.datadog.experiments import build_span_groups
+    from pup_finetune.judges import parse_judge
+
+    evaluation = Evaluation(rows=2)
+    skipped, sent = evaluation.row_ids
+    compared = [item for item in evaluation.cases if item.row_id == sent]
+    for item in compared:
+        for store in (evaluation.generations, evaluation.results):
+            store[("compare", item.id)] = {**store[("tuned", item.id)], "target": "compare"}
+    settings = dataclasses.replace(
+        evaluation.settings(),
+        compare=parse_judge("openai/gpt-5.5"),
+        replays={"base": evaluation.cases, "tuned": evaluation.cases, "compare": compared},
+    )
+
+    def rows(target: str) -> list[str]:
+        groups = build_span_groups(
+            settings, target, "exp-1", evaluation.cases, evaluation.generations,
+            evaluation.results, fallback_ns=0,
+        )  # fmt: skip
+        assert all(len(group.spans) == 3 for group in groups)  # the root and its two cases
+        return [group.spans[0]["meta"]["metadata"]["row_id"] for group in groups]
+
+    assert rows("compare") == [sent]
+    assert rows("base") == [skipped, sent]

@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import shlex
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -144,6 +144,7 @@ def test_attaching_a_compare_model_redoes_neither_base_nor_tuned(
     assert shown["compare"] == {
         "model": "fake-compare", "provider": "fake", "endpoint": "offline",
         "max_tokens": 16000, "reasoning_effort": None, "source": "flag",
+        "skipped": 0, "skipped_by_reason": {},
     }  # fmt: skip
     assert shown["data_recipients"] == [
         "test split -> the offline fake compare model (compare; nothing is sent), "
@@ -171,6 +172,7 @@ def test_attaching_a_compare_model_redoes_neither_base_nor_tuned(
         "wins",
         "regressions",
         "ties",
+        "skipped",
     }
     assert by_target(eval_dir / "generations.jsonl") == {
         "base": cases,
@@ -253,6 +255,7 @@ def test_the_fake_compare_model_needs_development_mode(
     assert result.exit_code == 2
 
 
+@pytest.mark.usefixtures("judge_keys")
 def test_read_only_allows_an_offline_compare_and_refuses_a_paid_one(
     evaluated: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -277,11 +280,13 @@ def test_read_only_allows_an_offline_compare_and_refuses_a_paid_one(
         (ProviderAuthError("the API key is not valid (HTTP 401)", source="openai"), 1),
     ],
 )
+@pytest.mark.usefixtures("all_judge_keys")
 def test_a_compare_model_that_cannot_answer_is_never_attached(
     run_dir: Path, monkeypatch: pytest.MonkeyPatch, failure: Any, exit_code: int
 ) -> None:
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    if not isinstance(failure, str):
+    if isinstance(failure, str):
+        monkeypatch.delenv("OPENAI_API_KEY")
+    else:
         serve_compare(monkeypatch, CompareModel(failure))
     monkeypatch.setattr(FakeBackend, "open_session", no_session)
     result = invoke(
@@ -499,3 +504,99 @@ def test_the_progress_line_lists_every_target_that_generates(run_dir: Path) -> N
     )
     assert result.exit_code == 0, result.stderr
     assert "cases, base, tuned and compare (Ctrl-C stops)" in result.stderr
+
+
+def trained_on(tmp_path: Path, rewrite: Callable[[dict[str, Any]], dict[str, Any] | None]) -> Path:
+    """A run trained on the fixture rows as ``rewrite`` returns them (``None`` drops one),
+    with its evaluation of base and tuned complete."""
+    rows = tmp_path / "rows.jsonl"
+    rewritten = (rewrite(json.loads(line)) for line in ROWS.read_text().splitlines())
+    rows.write_text("".join(json.dumps(row) + "\n" for row in rewritten if row is not None))
+    dataset, run = tmp_path / "ds", tmp_path / "run"
+    assert invoke("dataset", "import", str(dataset), "--file", str(rows)).exit_code == 0
+    assert invoke(
+        "train", "--model", "fake-model", "--dataset", str(dataset), "--run-dir", str(run),
+        "--max-epochs", "1", "--confirm",
+    ).exit_code == 0  # fmt: skip
+    assert invoke("evaluate", str(run), "--no-publish", "--confirm").exit_code == 0
+    return run
+
+
+def without_tool_results(row: dict[str, Any]) -> dict[str, Any]:
+    """``row`` without its tool results: every turn after a tool call holds a call chat
+    completions refuse every time."""
+    return {**row, "messages": [m for m in row["messages"] if m["role"] != "tool"]}
+
+
+@pytest.mark.usefixtures("all_judge_keys")
+def test_cases_the_compare_model_s_api_refuses_are_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = trained_on(tmp_path, without_tool_results)
+    first_call = {
+        row["id"]: next(i for i, m in enumerate(row["messages"]) if m.get("tool_calls"))
+        for row in map(json.loads, (tmp_path / "rows.jsonl").read_text().splitlines())
+        if any(m.get("tool_calls") for m in row["messages"])
+    }
+    cases = [line for line in lines(run / "eval" / "results.jsonl") if line["target"] == "base"]
+    skipped = sum(
+        case["row_id"] in first_call and case["message_index"] > first_call[case["row_id"]]
+        for case in cases
+    )
+    assert 0 < skipped < len(cases)
+    model = CompareModel()
+    serve_compare(monkeypatch, model)
+
+    previewed = output(invoke("evaluate", str(run), "--compare-model", "openai/gpt-5.5"))
+    shown = previewed["preview"]
+    assert shown["compare"]["skipped"] == skipped
+    assert shown["compare"]["skipped_by_reason"] == {"unanswered_tool_call": skipped}
+    # One call per case it is sent, and the probe.
+    assert shown["generation_calls_by_target"]["compare"] == len(cases) - skipped + 1
+    warning = f"{skipped} of {len(cases)} cases are not sent to the compare model openai/gpt-5.5"
+    assert any(text.startswith(warning) for text in shown["warnings"])
+
+    result = rerun(previewed["next_command"])
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["status"] == "complete"
+    assert data["errors"] == {"base": 0, "tuned": 0, "compare": 0}
+    assert len(model.calls) == len(cases) - skipped + 1
+    assert data["headline"]["tuned_minus_compare"]["skipped"] == skipped
+    assert any(text.startswith(warning) for text in data["warnings"])
+    summary = json.loads((run / "eval" / "summary.json").read_text())
+    assert summary["targets"]["compare"]["skipped"] == skipped
+    assert summary["targets"]["compare"]["judge_pass"]["n"] == len(cases) - skipped
+    assert summary["tuned_minus_compare"]["n_cases"] == len(cases) - skipped
+
+
+def every_case_after_an_unanswered_call(row: dict[str, Any]) -> dict[str, Any] | None:
+    """``row`` with only its last assistant turn trained and no tool results, kept when a
+    tool call comes before that turn: its one case holds a call no result answers."""
+    row = without_tool_results(row)
+    assistant = [i for i, m in enumerate(row["messages"]) if m["role"] == "assistant"]
+    calls = [i for i, m in enumerate(row["messages"]) if m.get("tool_calls")]
+    if not calls or calls[0] >= assistant[-1]:
+        return None
+    for i in assistant[:-1]:
+        row["messages"][i]["weight"] = 0
+    return row
+
+
+@pytest.mark.usefixtures("judge_keys")
+def test_a_compare_model_sent_no_case_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = trained_on(tmp_path, every_case_after_an_unanswered_call)
+    model = CompareModel()
+    serve_compare(monkeypatch, model)
+    for confirm in ([], ["--confirm"]):
+        result = invoke("evaluate", str(run), "--compare-model", "openai/gpt-5.5", *confirm)
+        assert result.exit_code == 2, result.stderr
+        assert result.stdout == ""
+        assert "Error [usage]: the compare model openai/gpt-5.5 would be sent none of the " in (
+            result.stderr
+        )
+        assert "hold a tool call with no tool result right after it" in result.stderr
+    assert model.calls == []  # not even the probe
+    assert not (run / "eval" / "compare.json").exists()

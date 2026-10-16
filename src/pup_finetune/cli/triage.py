@@ -45,8 +45,8 @@ if TYPE_CHECKING:
 
 @contextmanager
 def open_clients(judges: Sequence[str]) -> Iterator[Mapping[JudgeProvider, ChatCompleter]]:
-    """One chat client per provider of ``judges``, each with its provider's key, opened up
-    front and closed together (:func:`pup_finetune.judges.open_clients`).
+    """One chat client per provider of ``judges``, each with its provider's key, opened on
+    its first call and closed together (:func:`pup_finetune.judges.open_clients`).
 
     Tests replace it with a fake.
     """

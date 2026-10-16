@@ -135,7 +135,7 @@ def test_evaluate_prints_its_warning_then_one_summary_line(run_dir: Path) -> Non
         "evaluation complete: 4 cases from 2 test conversations; judge fake-judge, calibration "
         "passed; judge agreement: base 0%, tuned 25%, tuned - base +25 pts (95% CI "
         f"0 to +50); 1 win, 0 regressions, 3 ties, 0 errors; {CAVEAT}; not published (see the "
-        f"warning above). Next: pup finetune deploy {run_dir}"
+        "warning above)"
     )
     assert "18:03:16 calibration passed: 12/12 checks" in result.stderr
     assert "18:03:16 evaluated 8/8 pairs (100%): 1 judged pass, 7 judged fail, 0 errors" in (
@@ -256,7 +256,6 @@ def test_on_a_terminal_evaluate_shows_the_table(run_dir: Path) -> None:
         "paired: 1 win, 0 regressions, 3 ties, 0 errors",
         CAVEAT,
         "not published (see the warning above)",
-        f"next: pup finetune deploy {run_dir}",
     ]
     assert lines[start - 1].startswith("warning: the evaluation was not published")
 
@@ -549,6 +548,7 @@ def _ends_with_its_summary(command: str, result: Result) -> dict[str, Any]:
     return data
 
 
+@pytest.mark.usefixtures("judge_keys")
 def test_the_dataset_commands_end_with_their_summaries(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
