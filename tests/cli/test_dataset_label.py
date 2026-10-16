@@ -78,8 +78,6 @@ def test_label_applies_labels_and_emits_the_report(dataset: Path, tmp_path: Path
     assert (data["accepted"], data["kept"], data["dropped"]) == (len(FIXTURE_IDS), 13, 1)
     assert data["drop_reasons"] == [{"reason": "wrong tool", "count": 1}]
     assert sum(data["splits"].values()) == 13
-    # Training reads a dataset that is in Datadog: the push (whose name nobody chose yet)
-    # comes first, and is a step.
     quoted = shlex.quote(str(dataset))
     assert data["next_command"] is None
     assert [step["command"] for step in data["next_steps"]] == [

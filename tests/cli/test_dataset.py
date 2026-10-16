@@ -337,7 +337,6 @@ def test_copies_of_one_request_share_one_split(tmp_path: Path) -> None:
     assert len({splits[f"copy-{n:03d}"] for n in range(3)}) == 1
     assert data["split_groups"] == 78
     assert data["split_conflicts"]["groups"] == 0
-    # A later trace asking it again takes the same split.
     again = import_rows(target, rows_file(tmp_path / "b.jsonl", copy_rows(3, 1)))
     assert again.exit_code == 0, again.stderr
     splits = json.loads((target / "splits.json").read_text())["assignments"]
@@ -359,14 +358,12 @@ def test_a_fixed_prompt_in_many_traces_keeps_a_split_per_trace_and_is_warned_abo
 
 def test_copies_recorded_apart_are_named_with_labels_to_drop_them(tmp_path: Path) -> None:
     target = tmp_path / "ds"
-    # Two traces recorded in different splits, as an earlier grouping could leave them.
     first = [synthetic_row("a", BOOKING.format(n=1, d=2), "t1")]
     first.append(synthetic_row("b", "Something else entirely", "t2"))
     assert import_rows(target, rows_file(tmp_path / "a.jsonl", first)).exit_code == 0
     splits_path = target / "splits.json"
     stored = json.loads(splits_path.read_text())
     splits_path.write_text(json.dumps({**stored, "assignments": {"t1": "test", "t2": "train"}}))
-    # A new row of t2 repeats t1's request: every trace is recorded, yet the copies are apart.
     linking = [synthetic_row("c", BOOKING.format(n=7, d=9), "t2")]
     result = import_rows(target, rows_file(tmp_path / "b.jsonl", linking))
     assert result.exit_code == 0, result.stderr

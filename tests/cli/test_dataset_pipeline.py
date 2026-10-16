@@ -98,7 +98,6 @@ def test_labels_move_the_pipeline_on_to_a_first_push_then_training(tmp_path: Pat
         "pup finetune models list",
         "pup finetune dataset push ds --name <NAME>",
     ]
-    # Once every kept row is in Datadog, training is the step.
     mark_pushed(Path("ds"))
     shown = output(invoke("show", "ds"))
     assert [step["command"] for step in shown["next_steps"]] == [

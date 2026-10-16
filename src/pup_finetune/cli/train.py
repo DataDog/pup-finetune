@@ -942,7 +942,7 @@ def train(
     require_dataset_dir(dataset_dir)
     provider_name, provider_source = provider_for_model(model, provider_name, runtime)
     dataset = DatasetDir(dataset_dir)
-    by_split = dataset.rows_by_split()  # read once: what is checked is what is rendered
+    by_split = dataset.rows_by_split()
     require_in_datadog(
         dataset,
         by_split,

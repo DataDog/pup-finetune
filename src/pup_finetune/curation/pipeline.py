@@ -12,9 +12,9 @@ every dataset command can report it as its ``pipeline`` block and choose what to
 next from it. A file it cannot read makes that part ``unreadable``, with a warning naming
 the file and the problem (:attr:`Pipeline.warnings`), rather than a guess.
 
-:func:`require_in_datadog` is the gate of ``train`` and ``benchmark``: they read a dataset
-whose every kept row is in Datadog as it is now, and :meth:`Pipeline.push_gap` is the one
-account of what is missing and how to get there, for the gate and for ``next_steps`` alike.
+:func:`require_in_datadog` is the gate of ``train`` and ``benchmark``: every kept row they
+read must be in Datadog as it is now. :meth:`Pipeline.push_gap` says what is missing and the
+step that fixes it.
 """
 
 from __future__ import annotations
@@ -40,8 +40,7 @@ PushStatus = Literal[
 ]
 """``not_pushed`` without a ``push.json``; ``pushed`` when it lists every kept row as it is
 now; ``pushed_with_new_rows`` when kept rows are not pushed yet (``dataset push DIR`` sends
-them); ``pushed_with_changed_rows`` when kept rows changed after they were pushed (a push
-only adds records, so only a push to a new dataset holds them as they are); ``unreadable``
+them); ``pushed_with_changed_rows`` when kept rows changed after they were pushed; ``unreadable``
 when ``push.json`` cannot be read."""
 
 SHOWN_CHANGED_IDS = 5
@@ -83,7 +82,7 @@ class Pipeline:
     """The ids of those rows, sorted."""
     stale: int = 0
     """Records ``push.json`` lists for rows no longer kept (dropped or retired since the
-    push): a push only adds records, so the dataset still holds them."""
+    push), which the dataset still holds."""
     dataset_name: str | None = None
     """The dataset ``push.json`` names, when there is one."""
     project: str | None = None
@@ -203,8 +202,7 @@ def pipeline_state(
 ) -> Pipeline:
     """``dataset``'s :class:`Pipeline`; ``summary`` is its :meth:`DatasetDir.summary` and
     ``by_split`` its :meth:`DatasetDir.rows_by_split` when the caller has them already. The
-    kept, pending, changed and stale counts read ``by_split`` when it is given, so a gate
-    checks the very rows its command goes on to read."""
+    kept, pending, changed and stale counts read ``by_split`` when it is given."""
     counts = summary if summary is not None else dataset.summary()
     accepted = int(counts["accepted"])
     kept = (
@@ -276,10 +274,9 @@ def require_in_datadog(
     is now: its push receipt lists each with the record it makes, and no push is in flight.
 
     ``command_name`` (``train``, ``benchmark``) names who refuses it, and ``directory`` is
-    the directory as the user typed it. What trains is then what the Agent Observability
-    dataset holds, so a run and its evaluation trace back to records in Datadog; a directory
-    ``dataset fetch`` made has the receipt of the dataset it read, so it passes. An
-    ``offline`` command (the fake provider) never leaves the machine and reads any dataset.
+    the directory as the user typed it. A directory ``dataset fetch`` made has the receipt
+    of the dataset it read, so it passes. An ``offline`` command (the fake provider) reads
+    any dataset.
     """
     if offline:
         return

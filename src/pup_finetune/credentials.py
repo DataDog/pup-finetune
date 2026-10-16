@@ -423,7 +423,7 @@ def delete(provider: str, *, keyring_backend: KeyringBackend | None = None) -> b
 @dataclass(frozen=True, slots=True)
 class KeyUnreadable:
     """Why a key could not be looked up (a locked or failing keychain), never what was read,
-    and what to do about it: signing in again would not help."""
+    and what to do about it."""
 
     detail: str
     fix: str
@@ -432,8 +432,7 @@ class KeyUnreadable:
 def key_source(provider: str, *, env: Mapping[str, str] = os.environ) -> str | KeyUnreadable | None:
     """Where ``provider``'s key would come from (:data:`Source`), ``<provider>-sdk`` when only
     its SDK can sign in on its own, ``None`` when nothing would, or :class:`KeyUnreadable`
-    when looking failed. Never returns the key and never raises: ``doctor`` and the judge
-    defaults both read a key this way, so a failure means the same to both.
+    when looking failed. Never returns the key and never raises.
     """
     spec = get_spec(provider)
     try:

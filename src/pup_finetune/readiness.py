@@ -62,8 +62,7 @@ def _default_judges(
     table: Sequence[JudgeDefault], by_name: Mapping[str, CheckResult]
 ) -> tuple[str, ...]:
     """The judges a command defaults to by the checks that passed: a provider's key, and
-    the package its judges need (see :func:`pup_finetune.judges.default_judges`, which
-    resolves the same credentials and packages)."""
+    the package its judges need (as :func:`pup_finetune.judges.default_judges` picks)."""
     from pup_finetune.judges import JUDGE_PACKAGES, pick_default
 
     def source(name: str) -> str | None:
@@ -309,11 +308,11 @@ def _step(blocked_by: Sequence[str]) -> dict[str, Any]:
 def ready_map(checks: Sequence[CheckResult], runtime: Runtime) -> dict[str, dict[str, Any]]:
     """Each step, whether it is ready, and the checks (or :data:`READ_ONLY`) blocking it:
     the dataset steps on the Datadog checks, triage on its default judges' keys (the
-    defaults the passing key checks choose), train and
-    evaluate on each provider on its key and packages (evaluate on the default judge's key
-    too) and on a failed live preflight, and deploy (and undeploy) on each provider that
-    deploys on its key and the packages deploying needs. ``PUP_READ_ONLY`` blocks push and
-    every paid run or remote write that leaves the machine."""
+    defaults the passing key checks choose), train and evaluate on each provider on its key
+    and packages (evaluate on the default judge's key too) and on a failed live preflight,
+    and deploy (and undeploy) on each provider that deploys on its key and the packages
+    deploying needs. ``PUP_READ_ONLY`` blocks push and every paid run or remote write that
+    leaves the machine."""
     by_name = {check.name: check for check in checks}
     read_only = [READ_ONLY] if runtime.read_only else []
     datadog = _blocked(by_name, DATADOG_CHECKS)

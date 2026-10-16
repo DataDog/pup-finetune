@@ -113,7 +113,7 @@ def _no_anthropic_sdk_login(
 @pytest.fixture(autouse=True)
 def _no_judge_keys(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """Hide the developer's own Anthropic and OpenAI keys, which choose the default judges;
-    a live test keeps them, since it calls the provider with them."""
+    a live test keeps them."""
     if request.node.get_closest_marker("live") is None:
         for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
             monkeypatch.delenv(name, raising=False)

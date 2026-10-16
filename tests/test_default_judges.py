@@ -106,8 +106,6 @@ def test_a_keychain_that_cannot_be_read_falls_through_to_the_next_default_as_in_
     monkeypatch.setattr(keyring.core, "_keyring_backend", backend())
     assert default_judges(EVALUATE_DEFAULTS, env={})[0] == (DEFAULT_JUDGE_MODEL,)
     assert default_judges(TRIAGE_DEFAULTS, env={"OPENAI_API_KEY": OPENAI_KEY})[0] == (MINI, ASTRA)
-    # doctor reads the same keychain the same way: no Anthropic key, so triage waits on
-    # Fireworks' key.
     assert not readiness.key_check(credentials.get_spec("anthropic"), required=False).ok
     fireworks = readiness.key_check(credentials.get_spec("fireworks"), required=False)
     ready = readiness.ready_map([*readiness.judge_checks(Runtime()), fireworks], Runtime())
@@ -195,7 +193,6 @@ def test_a_triage_rerun_keeps_the_council_triage_json_froze(
     (dataset / SETTINGS_FILE).write_text(json.dumps({"judges": list(FIREWORKS_JUDGES)}))
     monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
     assert default_council(DatasetDir(dataset)) == (FIREWORKS_JUDGES, "triage.json")
-    # --reset-triage discards the frozen council, so the default by key applies again.
     assert default_council(DatasetDir(dataset), reset=True)[0] == (HAIKU, SONNET)
     preview = output(invoke("dataset", "triage", str(dataset), "--rule", "x"))
     assert preview["preview"]["judges_source"] == "triage.json"

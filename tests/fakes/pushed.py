@@ -7,8 +7,8 @@
 """A dataset directory as `dataset push` leaves it, without pushing anything.
 
 :func:`mark_pushed` writes the push receipt a complete push of every kept row would have
-written, so `train` and `benchmark` on a real provider (which read only a dataset that is in
-Datadog) run on a dataset made with `dataset import`.
+written, so `train` and `benchmark` on a real provider run on a dataset made with `dataset
+import`.
 """
 
 from __future__ import annotations

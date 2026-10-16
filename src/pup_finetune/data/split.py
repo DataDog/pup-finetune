@@ -13,8 +13,7 @@ case or whitespace (:func:`request_key`) and the rows of their traces form one g
 (:func:`split_groups`), and :func:`assign_splits` gives a group one split, so a test answer
 is not also trained on. A request asked in more traces than :func:`generic_limit` allows (a
 fixed prompt such as "Summarize the above", asked in unrelated conversations) is generic: it
-joins nothing and is reported, rather than pulling a large share of the dataset into one
-split.
+joins nothing and is reported.
 Assignments are persisted in ``splits.json``: once a key is assigned it never moves, and new
 keys are assigned with the fractions frozen there. Copies recorded in different splits
 before they were grouped stay there; :func:`split_conflicts` names them.
@@ -201,8 +200,7 @@ GENERIC_MIN_TRACES = 5
 """A request asked in this many traces or fewer is never generic, however small the
 dataset."""
 LARGE_GROUP_SHARE = 0.10
-"""A group holding more than this share of the rows is reported: its traces are likely
-chained through prompts they share."""
+"""A group holding more than this share of the rows is reported."""
 SHOWN_CONFLICT_IDS = 10
 """How many row ids per split a summary names for split conflicts."""
 
@@ -315,8 +313,7 @@ def assign_splits(
 @dataclass(frozen=True, slots=True)
 class SplitConflict:
     """A group whose kept rows are in more than one split: copies of a request recorded
-    apart before they were grouped. Recorded splits never move, so dropping the copies
-    outside :attr:`split` keeps the others from being both trained and tested on."""
+    apart before they were grouped."""
 
     split: SplitName
     """The split holding most of the group's kept rows (the first of :data:`SPLITS` on a
@@ -388,9 +385,9 @@ def skew_warnings(
     than :data:`SKEW_MAX_TRACES` traces.
 
     ``keys_by_split`` holds the split key of every row, per split. ``more`` is what to do
-    about it (``pull more rows``). Splits are assigned per group of traces, so a small dataset varies
-    by chance; the seed of a frozen directory cannot change, so the warning never suggests
-    it. An empty split is left to :func:`split_warnings`.
+    about it (``pull more rows``). Splits are assigned per group of traces, so a small
+    dataset varies by chance; the seed of a frozen directory cannot change, so the warning
+    never suggests it. An empty split is left to :func:`split_warnings`.
     """
     rows = sum(len(keys) for keys in keys_by_split.values())
     traces = {split: len(set(keys_by_split.get(split, ()))) for split in SPLITS}

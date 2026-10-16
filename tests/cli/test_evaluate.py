@@ -554,7 +554,6 @@ def test_a_rerun_without_judge_model_keeps_the_judge_its_directory_holds(
     use_judge(monkeypatch, AlwaysPass())
     judged = ["evaluate", str(run_dir), "--judge-model", "fireworks/some-judge"]
     assert invoke(*judged, "--skip-calibration", "--confirm").exit_code == 0
-    # A new key would choose another default; the evaluation the directory holds wins.
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-synthetic-0000-test-key")
     preview = output(invoke("evaluate", str(run_dir), "--skip-calibration"))["preview"]
     assert (preview["judge_model"], preview["judge_source"]) == (

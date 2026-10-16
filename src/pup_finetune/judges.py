@@ -112,9 +112,7 @@ JUDGE_PACKAGES: Final[dict[str, Package]] = {
         needed_for="anthropic/... judges",
     ),
 }
-"""The optional package the judges of a provider need, by credential name: ``doctor``
-checks it, a default judge needs it (:func:`default_judges`), and :func:`check_available`
-refuses a judge without it, all by :func:`~pup_finetune.providers.module_state`."""
+"""The optional package the judges of a provider need, by credential name."""
 
 
 def default_judges(
@@ -135,7 +133,7 @@ def default_judges(
 
     def source(name: str) -> str | None:
         found = credentials.key_source(name, env=env)
-        if not isinstance(found, str):  # doctor reports a keychain it cannot read
+        if not isinstance(found, str):
             return None
         package = JUDGE_PACKAGES.get(name)
         if found is not None and package is not None:

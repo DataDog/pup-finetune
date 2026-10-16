@@ -86,7 +86,6 @@ def test_train_refuses_kept_rows_changed_after_the_push_and_names_them(dataset: 
         f"1 of its kept rows changed after the push to dataset 'synthetic-sft' (row {edited})"
         in result.stderr
     )
-    # The step runs as written once <NEW_DIR> is chosen: what Datadog holds, fetched.
     fetch = "`pup finetune dataset fetch <NEW_DIR> --project pup-finetune-dev --name synthetic-sft`"
     assert fetch in result.stderr
     assert "to train on what Datadog holds" in result.stderr
@@ -135,7 +134,6 @@ def test_the_fetch_for_changed_rows_says_it_brings_back_rows_dropped_since_the_p
     drop(dataset, tmp_path, [row for row in rows if row not in edited][:2])
     result = train(dataset)
     assert result.exit_code == 2
-    # The dataset still holds the records of the two dropped rows: a push only adds records.
     assert (
         "fetch it into a new directory to train on what Datadog holds; the fetch also brings "
         "back the 2 rows dropped or retired since the push, which you drop again with "
@@ -144,7 +142,6 @@ def test_the_fetch_for_changed_rows_says_it_brings_back_rows_dropped_since_the_p
 
 
 def test_the_check_counts_the_rows_the_command_reads_not_a_later_state(dataset: Path) -> None:
-    # Read before a concurrent `dataset label` drops every row: those rows are still trained.
     store = DatasetDir(dataset)
     by_split = store.rows_by_split()
     rows = [row.id for split in by_split.values() for row in split]
@@ -180,7 +177,6 @@ def test_dropped_rows_need_no_push(dataset: Path, tmp_path: Path) -> None:
     labels.write_text(json.dumps({"id": row_id, "keep": False, "reason": "synthetic"}) + "\n")
     assert invoke("dataset", "label", str(dataset), "--file", str(labels)).exit_code == 0
     result = train(dataset)
-    # Past the push check: the preview goes on to the provider, which has no key here.
     assert "reads a dataset that is in Datadog" not in result.stderr
 
 

@@ -213,7 +213,6 @@ def test_a_missing_anthropic_extra_is_a_usage_error_with_the_install_hint(
 def test_an_anthropic_sdk_without_httpx2_is_refused_in_the_preview_as_doctor_reports_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The SDK is there but the httpx2 it is built on is not: found missing, never imported.
     monkeypatch.setitem(sys.modules, "httpx2", None)
     with pytest.raises(
         UsageError, match="need the 'httpx2' package, which is not installed"

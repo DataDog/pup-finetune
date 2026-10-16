@@ -124,7 +124,6 @@ def test_the_preview_counts_the_calls_and_calls_nothing(
     assert len(preview["rubric_hash"]) == 12
     assert not {"rows_to_review", "rows_skipped_labeled"} & set(preview)  # under rows
     assert preview["approx_input_tokens"] > 0
-    # The council is pinned: it decides where the rows go.
     assert data["next_command"] == shlex.join(
         [
             *("pup", "finetune", "dataset", "triage", str(dataset), "--rubric", str(rubric)),
@@ -207,7 +206,6 @@ def test_triage_labels_rows_and_is_allowed_read_only(
     assert data["dropped"] > 0
     assert data["top_drop_reasons"] == [{"reason": "off topic", "count": data["dropped"]}]
     assert data["calls_made"] == rows * 3
-    # Every row is labeled now: the push, which training needs, is the step.
     assert data["next_command"] is None
     assert [step["command"] for step in data["next_steps"]] == [
         "pup finetune models list",
@@ -525,9 +523,6 @@ def test_the_card_names_the_rubric_file_the_rules_and_the_hash(
     assert f"  rubric    1 rule (hash {hash_shown})" in rules_only.stderr.splitlines()
 
 
-# --- --rows ---------------------------------------------------------------------------------
-
-
 def row_file(tmp_path: Path, *row_ids: str) -> Path:
     path = tmp_path / "rows.txt"
     path.write_text("".join(f"{row_id}\n\n" for row_id in row_ids))  # blank lines are ignored
@@ -551,7 +546,6 @@ def test_rows_narrows_the_review_and_the_calls_previewed(
     assert data["rows_reviewed"] == 3
     labeled = {row_id for row_id, label in DatasetDir(dataset).labels().items()}
     assert labeled == {"row-weather-001", "row-calendar-001", "row-calendar-002"}
-    # The subset is not frozen: a run over every row reuses the votes and reviews the rest.
     rest = output(invoke("dataset", "triage", str(dataset), "--rule", "stay on topic"))
     assert rest["preview"]["rows"]["to_review"] == accepted(dataset)
     assert rest["preview"]["votes_reused"] == 3 * len(DEFAULT_JUDGES)
@@ -581,7 +575,6 @@ def test_rows_skips_the_rows_you_labeled_and_agreement_compares_only_those(
     assert compared.exit_code == 0, compared.stderr
     data = output(compared)
     assert data["agreement"]["rows_compared"] == 2
-    # Labeling next covers the rows still unlabeled, not the labeled subset compared.
     assert "--rows" not in shlex.split(data["next_command"])
 
 

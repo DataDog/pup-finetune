@@ -135,10 +135,11 @@ pup finetune dataset triage datasets/my-agent --rubric rubric.md
 ```
 
 `--agreement` measures how often the council agrees with the rows you labeled, and labels
-nothing. `--rows FILE` (one row id per line) reviews only those rows, in either mode. With a council of two judges, a row is kept only when both vote keep; add a third
-judge with `--judges` for a true majority. A row is dropped as soon as the votes cast decide
-it (one drop of two judges, two of three), so its remaining calls are not made, and a failed
-call does not leave it undecided.
+nothing. `--rows FILE` (one row id per line) reviews only those rows, in either mode. With a
+council of two judges, a row is kept only when both vote keep; add a third judge with
+`--judges` for a true majority. A row is dropped as soon as the votes cast decide it (one drop
+of two judges, two of three), so its remaining calls are not made, and a failed call does not
+leave it undecided.
 
 ### Push the dataset
 

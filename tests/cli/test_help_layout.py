@@ -325,7 +325,7 @@ def test_every_example_runs_as_written(name: str, example: str) -> None:
 
 
 def test_the_example_checker_catches_mistakes() -> None:
-    assert example_problem("pup finetune dataset preview") is not None  # no such command
+    assert example_problem("pup finetune dataset preview") is not None
     assert example_problem("pup finetune train --bogus") is not None
     assert example_problem("pup finetune nope") is not None
     assert example_problem("pup finetune dataset label ./ds --file missing.jsonl") is None

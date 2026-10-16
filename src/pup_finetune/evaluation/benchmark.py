@@ -359,7 +359,7 @@ def plan_benchmark(
     from pup_finetune.evaluation.judge import check_judge_differs
 
     dataset = DatasetDir(dataset_dir)
-    by_split = dataset.rows_by_split()  # read once: what is checked is what is replayed
+    by_split = dataset.rows_by_split()
     require_in_datadog(
         dataset,
         by_split,

@@ -313,7 +313,6 @@ def test_json_user_turns_with_other_values_are_other_requests() -> None:
         return make_row(row_id, json.dumps(body))
 
     assert request_key(turn("a", "Port Alder", 2)) != request_key(turn("b", "Eastbrook", 2))
-    # The same object with another number is a copy.
     assert request_key(turn("c", "Port Alder", 9)) == request_key(turn("a", "Port Alder", 2))
 
 
@@ -337,7 +336,6 @@ def test_short_copies_that_differ_only_in_numbers_share_a_split() -> None:
 
 
 def test_two_traces_asking_one_request_join_however_many_rows_they_hold() -> None:
-    # Each trace is a request and two sub-agent turns of its own: 6 of 46 rows.
     rows = [
         row
         for trace in ("t1", "t2")
@@ -353,7 +351,6 @@ def test_two_traces_asking_one_request_join_however_many_rows_they_hold() -> Non
 
 
 def test_traces_asking_one_request_join_though_one_is_in_a_group_already() -> None:
-    # t1 asks two requests (a main turn and a sub-agent turn); t2 and t3 each ask one.
     rows = [
         make_row("t1-lisbon", "Book a room in Lisbon", trace_id="t1"),
         make_row("t1-porto", "Search flights to Porto", trace_id="t1"),
@@ -413,7 +410,6 @@ def test_repeated_copies_still_group() -> None:
 
 
 def test_a_fixed_sub_agent_turn_shared_by_traces_does_not_pull_them_together() -> None:
-    # Each of 30 traces runs the same summarizer sub-agent over its own conversation.
     rows = [
         row
         for n in range(30)
@@ -423,7 +419,6 @@ def test_a_fixed_sub_agent_turn_shared_by_traces_does_not_pull_them_together() -
         )
     ]
     grouped = split_groups(rows)
-    # Asked in all 30 traces, more than the 5 a request may join.
     assert len(grouped.groups) == 30
     assert grouped.generic == [[f"sub-{n}" for n in range(30)]]
     splits = SplitAssignments(SplitParams())
@@ -441,7 +436,6 @@ def test_copies_of_one_request_in_new_traces_share_one_split() -> None:
     splits = SplitAssignments(SplitParams())
     assign_splits(rows, splits)
     assert len({splits.assignments[key] for key in KEYS[:4]}) == 1
-    # By the first key in sorted order, whatever the order of the rows.
     again = SplitAssignments(SplitParams())
     assign_splits(list(reversed(rows)), again)
     assert again.assignments == splits.assignments
@@ -457,7 +451,6 @@ def test_a_new_copy_takes_the_split_its_request_already_has() -> None:
 
 
 def test_a_new_trace_linking_copies_already_apart_takes_the_larger_side() -> None:
-    # Recorded before copies were grouped: two traces of one request in two splits.
     rows = [
         booking("a", 1, trace_id="t1"),
         booking("b", 2, trace_id="t2"),
@@ -467,7 +460,6 @@ def test_a_new_trace_linking_copies_already_apart_takes_the_larger_side() -> Non
     ]
     splits = SplitAssignments(SplitParams(), {"t1": "test", "t2": "train"})
     assign_splits(rows, splits)
-    # t2 holds two of the group's three recorded rows; recorded keys never move.
     assert {key: splits.assignments[key] for key in ("t1", "t2", "t3")} == {
         "t1": "test",
         "t2": "train",
@@ -485,14 +477,12 @@ def test_a_tie_between_the_sides_goes_to_the_first_split() -> None:
 
 
 def test_a_row_added_to_a_recorded_trace_that_links_two_splits_is_a_conflict() -> None:
-    # Every trace is recorded already: the new row joins t2 and repeats t1's request.
     rows = [booking("a", 1, trace_id="t1"), make_row("b", "Something else", trace_id="t2")]
     rows.append(booking("c", 2, trace_id="t2"))
     splits = SplitAssignments(SplitParams(), {"t1": "test", "t2": "train"})
     assign_splits(rows, splits)
     assert splits.assignments == {"t1": "test", "t2": "train"}
     assert split_conflicts(split_groups(rows), splits) == [SplitConflict("train", {"test": ["a"]})]
-    # Dropping the copy outside the group's split leaves no conflict.
     assert split_conflicts(split_groups(rows), splits, dropped={"a"}) == []
 
 

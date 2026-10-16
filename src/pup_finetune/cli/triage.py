@@ -266,8 +266,6 @@ def triage_rows(
         args += ["--rubric", str(rubric)]
     for text in rules:
         args += ["--rule", text]
-    # Pinned: the council decides where the rows go, so --confirm sends them where the
-    # preview said even if the credentials change in between.
     args += ["--judges", ",".join(council)]
     if concurrency != triage.DEFAULT_CONCURRENCY:
         args += ["--concurrency", str(concurrency)]
@@ -311,7 +309,6 @@ def triage_rows(
             preview["refused_hint"] = template_hint
     hint = template_hint if refused is not None else None
     if refused is None and not plan.rows:
-        # A --confirm would review nothing, so none is offered.
         among = "row --rows names" if rows is not None else "accepted row"
         refused = "there is no row to review: " + (
             f"every {among} is labeled by you or the agent"
@@ -377,8 +374,6 @@ def triage_rows(
         )
     sampled = {row.id for row in plan.rows}
     if any(row_id not in sampled for row_id in report.stale_labels):
-        # Rows outside the --max-rows sample or --rows subset are judged only by a run over
-        # every row.
         args = every_row
     if report.stale_labels:
         hints.append(
@@ -431,7 +426,6 @@ def _agreement_result(
         data["warnings"] = [noisy]
     without = [word for word in args if word != "--agreement"]
     if "--rows" in without:
-        # The subset was rows the user labeled, which a labeling run skips: label the rest.
         at = without.index("--rows")
         del without[at : at + 2]
     if report.failures:

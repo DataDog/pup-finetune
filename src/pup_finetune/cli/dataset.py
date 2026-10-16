@@ -415,15 +415,14 @@ def dataset_next(
     With accepted rows and none labeled, the next command is a ``dataset sample`` to
     review (``None`` right after one, ``sampled``), and labeling them, by hand or with a
     judge council, are the steps; a fetched dataset (``dataset fetch``) was curated in
-    Datadog, so its rows go straight to training. A triage that is not complete gets a step to finish it.
-    Once rows are labeled, the push is a step (:meth:`~pup_finetune.curation.pipeline.
-    Pipeline.push_gap`). Training (and benchmarking) is a step only once every kept row is
-    pushed as it is now, since it reads a dataset that is in Datadog; its preview needs a
-    model that cannot be chosen without guessing. Kept copies of a request outside their
-    group's split come first: a ``dataset label`` step with the drop labels the summary wrote
-    for them. ``directory`` is the directory as the user typed it; ``summary`` is the
-    dataset's summary when the caller has it already. A pipeline file that cannot be read
-    adds ``warnings`` (see :func:`merge_next`).
+    Datadog, so its rows go straight to training. A triage that is not complete gets a step
+    to finish it. Once rows are labeled, the push is a step
+    (:meth:`~pup_finetune.curation.pipeline.Pipeline.push_gap`). Training (and
+    benchmarking) is a step only once every kept row is pushed as it is now. Kept copies of
+    a request outside their group's split come first: a ``dataset label`` step with the drop
+    labels the summary wrote for them. ``directory`` is the directory as the user typed it;
+    ``summary`` is the dataset's summary when the caller has it already. A pipeline file
+    that cannot be read adds ``warnings`` (see :func:`merge_next`).
     """
     summary = summary if summary is not None else dataset.summary()
     state = pipeline_state(dataset, summary)
@@ -507,7 +506,6 @@ def _next_by_state(
             "to start from)",
         )
         sample = command("dataset", "sample", directory, "--count", REVIEW_SAMPLE_SIZE)
-        # Rows are labeled before a first push; a dataset pushed before gets its advice.
         pushing = push_step if push_step is not None and state.push != "not_pushed" else None
         return {
             "next_command": None if sampled else sample,
@@ -521,7 +519,7 @@ def _next_by_state(
     steps += _pull_more_steps(dataset, directory, state)
     steps += triage_steps
     if not state.kept:
-        return {"next_command": None, "next_steps": steps}  # nothing to push or train on
+        return {"next_command": None, "next_steps": steps}
     steps.append(step(command("models", "list"), "see the models a provider can fine-tune"))
     if push_step is None:
         steps += [

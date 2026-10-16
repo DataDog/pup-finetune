@@ -205,7 +205,6 @@ def test_an_anthropic_key_makes_it_the_default_judges_and_readies_triage(
     use_pup(healthy_pup().client())
     ready = report_of(invoke())["ready"]
     assert ready["dataset triage"] == {"ready": True, "blocked_by": []}
-    # The judge is Anthropic's now: evaluating on Baseten needs only Baseten's key.
     assert ready["evaluate on baseten"]["blocked_by"] == ["baseten:key"]
 
 
