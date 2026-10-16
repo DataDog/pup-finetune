@@ -544,26 +544,64 @@ def test_summary_warns_about_small_splits(tmp_path: Path) -> None:
     params = DatasetSettings("import", SplitParams(42, 0.0, 0.0))
     summary = dataset.add([make_row("a", "one")], settings=params).summary
     assert summary["splits"] == {"train": 1, "validation": 0, "test": 0}
-    assert len(summary["warnings"]) == 4
-    assert summary["warnings"][3].startswith("one group of rows that share a split holds 1 of 1")
+    assert len(summary["warnings"]) == 3
 
 
-def test_summary_warns_about_a_group_holding_over_a_tenth_of_the_rows(tmp_path: Path) -> None:
-    chained = [
-        make_row("a", "Plan a trip for 2", trace_id="t1"),
-        make_row("b1", "Plan a trip for 3", trace_id="t2"),
-        make_row("b2", "Pack 2 bags", trace_id="t2"),
-        make_row("c", "Pack 3 bags", trace_id="t3"),
+def letters(n: int) -> str:
+    """``n`` in letters, so texts told apart by it are not copies (numbers fold to ``0``)."""
+    return "".join(chr(ord("a") + int(digit)) for digit in str(n))
+
+
+def single_traces(prefix: str, count: int) -> list[TrainingRow]:
+    """``count`` unrelated rows, a trace each."""
+    return [
+        make_row(f"{prefix}-{n}", f"{prefix} {letters(n)}", trace_id=f"{prefix}-{n}")
+        for n in range(count)
     ]
-    others = [make_row(f"o-{n}", f"Other {chr(97 + n)}", trace_id=f"o-{n}") for n in range(20)]
-    summary = DatasetDir(tmp_path / "ds").add([*chained, *others], settings=IMPORT).summary
+
+
+CHAINED = [
+    make_row("a1", "Plan a trip for 2", trace_id="t1"),
+    make_row("a2", "Book a hotel", trace_id="t1"),
+    make_row("a3", "Rent a car", trace_id="t1"),
+    make_row("b1", "Plan a trip for 3", trace_id="t2"),
+    make_row("b2", "Pack 2 bags", trace_id="t2"),
+    make_row("b3", "Buy a map", trace_id="t2"),
+    make_row("c1", "Pack 3 bags", trace_id="t3"),
+    make_row("c2", "Call a taxi", trace_id="t3"),
+]
+"""Eight rows in three traces chained by copies: t1 and t2 ask one trip, t2 and t3 one
+packing list."""
+
+
+def test_summary_warns_about_a_chained_group_over_a_tenth_of_the_rows(tmp_path: Path) -> None:
+    rows = [*CHAINED, *single_traces("other", 47)]
+    summary = DatasetDir(tmp_path / "ds").add(rows, settings=IMPORT).summary
+    assert summary["traces"] == 50
     assert (
-        "one group of rows that share a split holds 4 of 24 rows (17%, more than 10%) in 3 "
-        "traces, so one split takes them all; a group that large across many traces is likely "
-        "chained through requests they share (e.g. rows a, b1, b2)"
+        "one group of rows that share a split holds 8 of 55 rows (15%, more than 10%) in 3 "
+        "traces, so one split takes them all; its traces are likely chained through requests "
+        "they share (e.g. rows a1, a2, a3)"
     ) in summary["warnings"]
-    more = [make_row(f"m-{n}", f"More {chr(97 + n)}", trace_id=f"m-{n}") for n in range(16)]
-    summary = DatasetDir(tmp_path / "ds2").add([*chained, *others, *more], settings=IMPORT).summary
+    more = [*rows, *single_traces("more", 30)]
+    summary = DatasetDir(tmp_path / "ds2").add(more, settings=IMPORT).summary
+    assert not any(w.startswith("one group of rows") for w in summary["warnings"])
+
+
+def test_summary_does_not_warn_about_a_group_in_a_dataset_under_50_traces(
+    tmp_path: Path,
+) -> None:
+    rows = [*CHAINED, *single_traces("other", 46)]
+    summary = DatasetDir(tmp_path / "ds").add(rows, settings=IMPORT).summary
+    assert summary["traces"] == 49
+    assert not any(w.startswith("one group of rows") for w in summary["warnings"])
+
+
+def test_summary_does_not_warn_about_one_trace_over_a_tenth_of_the_rows(tmp_path: Path) -> None:
+    agents = [make_row(f"agent-{n}", f"Agent {letters(n)}", trace_id="big") for n in range(12)]
+    rows = [*agents, *single_traces("other", 49)]
+    summary = DatasetDir(tmp_path / "ds").add(rows, settings=IMPORT).summary
+    assert summary["traces"] == 50
     assert not any(w.startswith("one group of rows") for w in summary["warnings"])
 
 

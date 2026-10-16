@@ -105,9 +105,9 @@ whose user messages are the same once lowercased, with numbers as `0` and whites
 join their traces into one group, and a group gets one split. A request asked in more traces
 than 5% of them (rounded up) and more than 5 is generic and joins nothing: a fixed prompt many
 conversations share, such as "Summarize the above", keeps a split per trace, with a warning
-naming some of its rows. Groups have no size cap, so a group holding more than 10% of the rows
-is warned about with a few of its rows: its traces are likely chained through requests they
-share. A trace keeps its split once assigned; a new trace joining copies already in two splits
+naming some of its rows. Groups have no size cap, so in a dataset of 50 traces or more, a
+group of 3 traces or more holding more than 10% of the rows is warned about with a few of its
+rows: its traces are likely chained through requests they share. A trace keeps its split once assigned; a new trace joining copies already in two splits
 takes the split holding most of their kept rows. Whenever the kept rows of a group are in more
 than one split (copies recorded apart before they were grouped), the summary's
 `split_conflicts` counts the groups and the rows outside their group's split, names up to 10 of

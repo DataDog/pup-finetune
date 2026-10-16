@@ -200,7 +200,12 @@ GENERIC_MIN_TRACES = 5
 """A request asked in this many traces or fewer is never generic, however small the
 dataset."""
 LARGE_GROUP_SHARE = 0.10
-"""A group holding more than this share of the rows is reported."""
+"""A chained group holding more than this share of the rows is reported
+(:meth:`SplitGroups.chained`)."""
+CHAINED_MIN_TRACES = 3
+"""A group of this many traces or more is chained through requests they share."""
+CHAINED_MIN_DATASET_TRACES = 50
+"""With fewer traces than this, a chained group is not reported: any group is a large share."""
 SHOWN_CONFLICT_IDS = 10
 """How many row ids per split a summary names for split conflicts."""
 
@@ -238,9 +243,20 @@ class SplitGroups:
     """The most traces a request could be asked in and still join them
     (:func:`generic_limit`)."""
 
-    def largest(self) -> list[TrainingRow]:
-        """The rows of the group holding the most rows (the first such group), or none."""
-        return max(self.groups, key=len, default=[])
+    def chained(self) -> list[TrainingRow]:
+        """The rows of the largest group (the first such group) of at least
+        :data:`CHAINED_MIN_TRACES` traces holding more than :data:`LARGE_GROUP_SHARE` of the
+        rows, in a dataset of at least :data:`CHAINED_MIN_DATASET_TRACES` traces, or none."""
+        rows = [row for group in self.groups for row in group]
+        if len({split_key(row) for row in rows}) < CHAINED_MIN_DATASET_TRACES:
+            return []
+        chained = [
+            group
+            for group in self.groups
+            if len({split_key(row) for row in group}) >= CHAINED_MIN_TRACES
+            and len(group) > LARGE_GROUP_SHARE * len(rows)
+        ]
+        return max(chained, key=len, default=[])
 
 
 def split_groups(rows: Iterable[TrainingRow]) -> SplitGroups:

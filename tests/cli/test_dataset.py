@@ -177,9 +177,6 @@ def test_import_with_custom_split_settings(tmp_path: Path) -> None:
     assert data["warnings"] == [
         "the validation split is empty, so training cannot select a checkpoint by validation loss",
         "the test split is empty, so there is nothing to evaluate on",
-        "one group of rows that share a split holds 2 of 14 rows (14%, more than 10%) in 1 "
-        "trace, so one split takes them all; a group that large across many traces is likely "
-        "chained through requests they share (e.g. rows row-support-001, row-support-002)",
     ]
     settings = json.loads((target / "settings.json").read_text())
     assert settings["split"] == {"seed": 3, "validation_fraction": 0.0, "test_fraction": 0.0}

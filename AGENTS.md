@@ -550,8 +550,9 @@ Source lives under `src/pup_finetune/`.
   numbers as `0`, whitespace collapsed, hashed, `None` without user text; `split_groups`, a
   union-find that joins every trace asking one request unless the request is generic, asked
   in more traces than `generic_limit` (5% of the traces rounded up, and at least 5), which
-  joins nothing and is reported as `generic`; the summary warns about a group holding more
-  than 10% of the rows; `assign_splits`, which never moves a recorded trace;
+  joins nothing and is reported as `generic`; the summary warns about a group of 3 traces or
+  more holding more than 10% of the rows in a dataset of 50 traces or more
+  (`SplitGroups.chained`); `assign_splits`, which never moves a recorded trace;
   `split_conflicts`, every group whose kept rows are in several splits, which the summary
   counts);
   `dataset_dir.py` is the dataset directory (`settings.json`, `rows.jsonl`, `excluded.jsonl`,

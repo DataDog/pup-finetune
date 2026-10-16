@@ -621,8 +621,8 @@ def _split_flags(params: SplitParams) -> str:
 
 def _grouping_warnings(groups: SplitGroups, conflicts: Sequence[SplitConflict]) -> list[str]:
     """Warnings about copies of a request that cannot share a split (ones recorded in
-    several splits before they were grouped, and generic requests), and about a group so
-    large that it is likely chained through prompts its traces share."""
+    several splits before they were grouped, and generic requests), and about a group of
+    traces so large that it is likely chained through prompts they share."""
     warnings: list[str] = []
     if conflicts:
         rows = sum(len(ids) for conflict in conflicts for ids in conflict.outside.values())
@@ -643,16 +643,15 @@ def _grouping_warnings(groups: SplitGroups, conflicts: Sequence[SplitConflict]) 
             "too common to group by, so their copies keep a split per trace (e.g. rows "
             f"{shown}); a fixed prompt many conversations share is such a request"
         )
-    largest = groups.largest()
-    total = sum(len(group) for group in groups.groups)
-    if len(largest) > LARGE_GROUP_SHARE * total:
-        shown = ", ".join(row.id for row in largest[:3])
-        traces = counted(len({split_key(row) for row in largest}), "trace")
+    if chained := groups.chained():
+        total = sum(len(group) for group in groups.groups)
+        shown = ", ".join(row.id for row in chained[:3])
+        traces = len({split_key(row) for row in chained})
         warnings.append(
-            f"one group of rows that share a split holds {len(largest)} of {total} rows "
-            f"({len(largest) / total:.0%}, more than {LARGE_GROUP_SHARE:.0%}) in {traces}, "
-            "so one split takes them all; a group that large across many traces is likely "
-            f"chained through requests they share (e.g. rows {shown})"
+            f"one group of rows that share a split holds {len(chained)} of {total} rows "
+            f"({len(chained) / total:.0%}, more than {LARGE_GROUP_SHARE:.0%}) in {traces} "
+            "traces, so one split takes them all; its traces are likely chained through "
+            f"requests they share (e.g. rows {shown})"
         )
     return warnings
 
