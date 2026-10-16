@@ -395,8 +395,8 @@ class ChatSampler:
     The answer keeps its text and tool calls. ``stop_reason`` is the completion's
     ``finish_reason``; ``length`` (cut off at ``max_tokens``) and a tool call
     whose arguments are not a JSON object make it not ``format_valid``. A refusal is an
-    answer like any other, judged as one. A failed call raises, which replay records as the
-    pair's generation error.
+    answer like any other, judged as one: an OpenAI refusal's text stands in for its content.
+    A failed call raises, which replay records as the pair's generation error.
     """
 
     def __init__(
@@ -445,6 +445,8 @@ def _assistant(raw: Mapping[str, Any]) -> tuple[ChatMessage, bool]:
     """An answer as an assistant message (its text and tool calls), and whether every tool
     call names a function and has arguments that are a JSON object."""
     content = raw.get("content")
+    if not isinstance(content, str):
+        content = raw.get("refusal")
     message: ChatMessage = {
         "role": "assistant",
         "content": content if isinstance(content, str) else "",

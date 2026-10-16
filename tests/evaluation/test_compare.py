@@ -227,6 +227,14 @@ def test_a_stored_compare_target_is_resolved_from_its_spec(tmp_path: Path) -> No
         resolve_compare(None, fake, runtime=Runtime())
 
 
+def test_an_openai_refusal_keeps_its_text_as_the_answer() -> None:
+    api = FakeChatApi()
+    api.script.append(completion(None, refusal="I can't help with that."))
+    generation = sampler(api).generate(PREFIX, [], max_tokens=10)
+    assert generation.message == {"role": "assistant", "content": "I can't help with that."}
+    assert generation.stop_reason == "refusal"
+
+
 def test_the_chat_sampler_sends_no_recorded_reasoning() -> None:
     api = FakeChatApi()
     api.script.append(completion("done"))

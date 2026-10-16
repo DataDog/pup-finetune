@@ -41,12 +41,15 @@ def completion(
     finish_reason: str = "stop",
     usage: dict[str, Any] | None = None,
     tool_calls: list[dict[str, Any]] | None = None,
+    refusal: str | None = None,
 ) -> httpx.Response:
     """A successful chat completion whose first choice says ``content`` (and makes
-    ``tool_calls``, when given)."""
+    ``tool_calls``, or declines with ``refusal``, when given)."""
     message: dict[str, Any] = {"role": "assistant", "content": content}
     if tool_calls is not None:
         message["tool_calls"] = tool_calls
+    if refusal is not None:
+        message["refusal"] = refusal
     return httpx.Response(
         200,
         json={
