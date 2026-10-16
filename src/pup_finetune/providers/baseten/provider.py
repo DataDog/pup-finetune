@@ -62,7 +62,14 @@ from pup_finetune.providers.baseten.client import (
     loops_sdk,
 )
 from pup_finetune.providers.options import parse_options
-from pup_finetune.rendering.families import GLM5_3, QWEN3_5, QWEN3_8, ModelFamily, get_family
+from pup_finetune.rendering.families import (
+    GLM5_3,
+    KIMI_K3,
+    QWEN3_5,
+    QWEN3_8,
+    ModelFamily,
+    get_family,
+)
 from pup_finetune.rendering.hf import ChatTokenizer, HFChatTemplateRenderer
 from pup_finetune.runtime import Runtime
 
@@ -104,6 +111,7 @@ def _profile(
         max_seq_len=max_seq_len,
         supports_reasoning=supports_reasoning,
         notes=notes,
+        trust_remote_code=family.trust_remote_code,
     )
 
 
@@ -130,6 +138,14 @@ PROFILES: Final[tuple[ModelProfile, ...]] = (
         max_seq_len=262_144,
         supports_reasoning=True,
         notes="Qwen3.8 27B; reasoning history is preserved in training.",
+    ),
+    _profile(
+        "kimi-k3",
+        "moonshotai/Kimi-K3",
+        KIMI_K3,
+        max_seq_len=131_072,
+        supports_reasoning=True,
+        notes="Kimi K3; its repository's tokenizer code renders the chat.",
     ),
 )
 """Every model we train on Baseten Loops; ``base_model`` is its Loops name and ``max_seq_len``

@@ -13,8 +13,8 @@ deployed chat endpoint sees. It is provider-neutral; model families configure it
 Wahabi.
 
 **Per turn, by default.** Each trainable assistant turn ``i`` is one example: the generation
-prompt for ``messages[:i]``, rendered by the template and tokenized as **one** string (exactly
-how a chat endpoint tokenizes a prompt), followed by the turn's completion tokens. The loss
+prompt for ``messages[:i]``, rendered and tokenized by the template **whole** (exactly how a
+chat endpoint tokenizes a prompt), followed by the turn's completion tokens. The loss
 covers the completion through its stop token and nothing after it. When the tokenizer merges
 characters across the prompt boundary (Qwen3.8's prompt ends ``<think>\\n`` and an empty
 reasoning block continues ``\\n``, which the whole render encodes as one ``\\n\\n`` token), the
@@ -34,8 +34,17 @@ render, which also catches templates that drop reasoning from earlier turns. Row
 with ``not_prefix_stable`` and :func:`~pup_finetune.training.datums.build_examples` renders it
 per turn instead, so ``prefix_stable`` never claims more than each row delivers.
 
+**The template's own tokens.** Prompts and turns are tokenized as the template tokenizes
+them (:meth:`ChatTokenizer.render_tokens`): for a Jinja template that is the rendered text
+encoded whole; a tokenizer whose own code renders the chat (``trust_remote_code``, Kimi K3)
+may encode message text apart from its control tokens, so text that spells a control token
+stays text. A family whose tokenizer ships no chat template renders through a
+:class:`ChatEncoder` instead (:class:`EncodedChatTokenizer`, :mod:`.encoders`).
+
 ``transformers`` comes from the optional ``hf`` extra and is imported only when a tokenizer
-is first needed, never when this module is imported. Tests inject a :class:`ChatTokenizer`.
+is first needed, never when this module is imported. A family's ``trust_remote_code`` is
+passed to it with the pinned revision, so that code comes from the model's repository at that
+commit. Tests inject a :class:`ChatTokenizer`.
 A tokenizer that cannot be loaded fails every row alike, so it is an :class:`ExternalError`
 (a :class:`UsageError` when the extra is missing), never a per-row :class:`RendererError`.
 """
@@ -47,10 +56,12 @@ import importlib
 import json
 import os
 import re
+import sys
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from importlib import metadata
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Protocol
 
@@ -91,6 +102,17 @@ class ChatTokenizer(Protocol):
         """``messages`` rendered through the chat template, as text."""
         ...
 
+    def render_tokens(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        tools: Sequence[Mapping[str, Any]] | None,
+        add_generation_prompt: bool,
+        template_kwargs: Mapping[str, Any],
+    ) -> list[int]:
+        """``messages`` rendered through the chat template, as the template tokenizes them."""
+        ...
+
     def encode(self, text: str) -> list[int]:
         """Token ids of ``text`` as one string, adding no special tokens."""
         ...
@@ -110,10 +132,16 @@ class ChatTokenizer(Protocol):
 
 
 class TransformersTokenizer:
-    """A ``transformers`` tokenizer adapted to :class:`ChatTokenizer`."""
+    """A ``transformers`` tokenizer adapted to :class:`ChatTokenizer`.
 
-    def __init__(self, tokenizer: Any) -> None:
+    ``remote_code`` says the tokenizer's code came from the model's repository; without a
+    Jinja template, that code renders the chat, and its source stands in as
+    :attr:`chat_template`.
+    """
+
+    def __init__(self, tokenizer: Any, *, remote_code: bool = False) -> None:
         self._tokenizer = tokenizer
+        self._remote_code = remote_code
 
     def render_text(
         self,
@@ -123,19 +151,47 @@ class TransformersTokenizer:
         add_generation_prompt: bool,
         template_kwargs: Mapping[str, Any],
     ) -> str:
-        text = self._tokenizer.apply_chat_template(
-            [dict(message) for message in messages],
-            tools=[dict(tool) for tool in tools] if tools else None,
-            add_generation_prompt=add_generation_prompt,
-            tokenize=False,
-            **template_kwargs,
-        )
+        text = self._apply(messages, tools, add_generation_prompt, template_kwargs, tokenize=False)
         if not isinstance(text, str):
             raise TypeError(f"the chat template rendered {type(text).__name__}, not text")
         return text
 
+    def render_tokens(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        tools: Sequence[Mapping[str, Any]] | None,
+        add_generation_prompt: bool,
+        template_kwargs: Mapping[str, Any],
+    ) -> list[int]:
+        tokens = self._apply(messages, tools, add_generation_prompt, template_kwargs, tokenize=True)
+        if not isinstance(tokens, Sequence) or isinstance(tokens, str):
+            raise TypeError(f"the chat template tokenized to {type(tokens).__name__}, not ids")
+        return [int(token) for token in tokens]
+
+    def _apply(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[Mapping[str, Any]] | None,
+        add_generation_prompt: bool,
+        template_kwargs: Mapping[str, Any],
+        *,
+        tokenize: bool,
+    ) -> Any:
+        return self._tokenizer.apply_chat_template(
+            [dict(message) for message in messages],
+            tools=[dict(tool) for tool in tools] if tools else None,
+            add_generation_prompt=add_generation_prompt,
+            tokenize=tokenize,
+            return_dict=False,
+            **template_kwargs,
+        )
+
     def encode(self, text: str) -> list[int]:
-        return [int(token) for token in self._tokenizer.encode(text, add_special_tokens=False)]
+        # Calling the tokenizer, not its encode: remote tokenizers (Kimi K3) log a warning on
+        # every encode that is passed arguments.
+        ids = self._tokenizer(text, add_special_tokens=False)["input_ids"]
+        return [int(token) for token in ids]
 
     def decode(self, token_ids: Sequence[int]) -> str:
         return str(
@@ -153,25 +209,47 @@ class TransformersTokenizer:
     @property
     def chat_template(self) -> str:
         template = self._tokenizer.chat_template
-        if not isinstance(template, str) or not template:
-            raise ValueError("the tokenizer has no chat template")
-        return template
+        if isinstance(template, str) and template:
+            return template
+        if self._remote_code:
+            return _remote_source(self._tokenizer)
+        raise ValueError("the tokenizer has no chat template")
 
 
-def load_tokenizer(model: str, revision: str) -> TransformersTokenizer:
+def _remote_source(tokenizer: Any) -> str:
+    """The source of the remote modules loaded for ``tokenizer``, read from the package that
+    ``transformers`` stored the repository's code in at the pinned revision."""
+    package = type(tokenizer).__module__.rpartition(".")[0]
+    files = sorted(
+        str(module.__file__)
+        for name, module in list(sys.modules.items())
+        if name.startswith(f"{package}.") and getattr(module, "__file__", None)
+    )
+    return "".join(
+        f"# {Path(path).name}\n{Path(path).read_text(encoding='utf-8')}" for path in files
+    )
+
+
+def load_tokenizer(
+    model: str, revision: str, *, trust_remote_code: bool = False, template: bool = True
+) -> TransformersTokenizer:
     """``model``'s tokenizer at ``revision``, from the Hugging Face cache or Hub.
 
-    Raises :class:`UsageError` when ``transformers`` is not installed and
-    :class:`ExternalError` when the tokenizer cannot be loaded or has no chat template.
+    ``trust_remote_code`` runs the tokenizer code of the model's repository at ``revision``;
+    ``template`` false loads a tokenizer whose chat a :class:`ChatEncoder` renders. Raises
+    :class:`UsageError` when ``transformers`` is not installed and :class:`ExternalError`
+    when the tokenizer cannot be loaded or, with ``template``, renders no chat.
     """
     transformers = _transformers()
     try:
         tokenizer = transformers.AutoTokenizer.from_pretrained(
-            model, revision=revision, trust_remote_code=False
+            model, revision=revision, trust_remote_code=trust_remote_code
         )
     except Exception as exc:
         raise _load_failure(model, revision, exc) from exc
-    adapter = TransformersTokenizer(tokenizer)
+    adapter = TransformersTokenizer(tokenizer, remote_code=trust_remote_code)
+    if not template:
+        return adapter
     try:
         adapter.chat_template  # noqa: B018 - fail at load, not at the first render
     except ValueError as exc:
@@ -180,6 +258,78 @@ def load_tokenizer(model: str, revision: str) -> TransformersTokenizer:
             source="huggingface",
         ) from exc
     return adapter
+
+
+class ChatEncoder(Protocol):
+    """Messages to the text of a model's chat format, for a tokenizer with no chat template."""
+
+    @property
+    def name(self) -> str:
+        """The encoder's key, as model families name it."""
+        ...
+
+    @property
+    def version(self) -> str:
+        """Bumped whenever the text rendered for some conversation changes."""
+        ...
+
+    def render(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[Mapping[str, Any]] | None,
+        *,
+        add_generation_prompt: bool,
+    ) -> str:
+        """``messages`` (tool-call arguments as objects) and ``tools`` as text."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class EncodedChatTokenizer:
+    """``tokenizer`` with its chat rendered by ``encoder``; the rest is the tokenizer's."""
+
+    tokenizer: ChatTokenizer
+    encoder: ChatEncoder
+
+    def render_text(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        tools: Sequence[Mapping[str, Any]] | None,
+        add_generation_prompt: bool,
+        template_kwargs: Mapping[str, Any],
+    ) -> str:
+        return self.encoder.render(messages, tools, add_generation_prompt=add_generation_prompt)
+
+    def render_tokens(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        tools: Sequence[Mapping[str, Any]] | None,
+        add_generation_prompt: bool,
+        template_kwargs: Mapping[str, Any],
+    ) -> list[int]:
+        return self.encode(
+            self.render_text(
+                messages,
+                tools=tools,
+                add_generation_prompt=add_generation_prompt,
+                template_kwargs=template_kwargs,
+            )
+        )
+
+    def encode(self, text: str) -> list[int]:
+        return self.tokenizer.encode(text)
+
+    def decode(self, token_ids: Sequence[int]) -> str:
+        return self.tokenizer.decode(token_ids)
+
+    def token_id(self, token: str) -> int | None:
+        return self.tokenizer.token_id(token)
+
+    @property
+    def chat_template(self) -> str:
+        return f"pup_finetune.rendering.encoders:{self.encoder.name}@{self.encoder.version}"
 
 
 def _load_failure(model: str, revision: str, exc: Exception) -> ExternalError:
@@ -257,7 +407,10 @@ class HFChatTemplateRenderer:
     ``stop_tokens`` name the tokens that end an assistant turn. ``next_role_tag``, for models
     that stop by emitting the next role tag, gives the tag that follows an assistant message;
     it is appended to that turn's completion as its stop target. ``chat_template_kwargs`` are
-    passed to every template render.
+    passed to every template render. ``trust_remote_code`` loads the tokenizer with its
+    repository's code; ``chat_encoder`` renders the chat for a tokenizer without a template;
+    ``check`` names why the template cannot render a conversation (``None`` when it can), and
+    such a row is refused with ``unsupported_message``.
     """
 
     def __init__(
@@ -270,6 +423,9 @@ class HFChatTemplateRenderer:
         prefix_stable: bool = False,
         chat_template_kwargs: Mapping[str, Any] | None = None,
         next_role_tag: Callable[[ChatMessage], str] | None = None,
+        trust_remote_code: bool = False,
+        chat_encoder: ChatEncoder | None = None,
+        check: Callable[[Sequence[ChatMessage]], str | None] | None = None,
         name: str = RENDERER,
         tokenizer: ChatTokenizer | None = None,
     ) -> None:
@@ -286,8 +442,15 @@ class HFChatTemplateRenderer:
         self._prefix_stable = prefix_stable
         self._template_kwargs = MappingProxyType(dict(chat_template_kwargs or {}))
         self._next_role_tag = next_role_tag
+        self._trust_remote_code = trust_remote_code
+        self._encoder = chat_encoder
+        self._check = check
         self._name = name
-        self._tokenizer = tokenizer
+        self._tokenizer = (
+            EncodedChatTokenizer(tokenizer, chat_encoder)
+            if tokenizer is not None and chat_encoder is not None
+            else tokenizer
+        )
         self._stop_token_ids: tuple[int, ...] | None = None
         self._lock = threading.Lock()
 
@@ -312,21 +475,33 @@ class HFChatTemplateRenderer:
         """The whole row as one example, when that trains exactly what the turns would.
 
         Raises :class:`RendererError` with ``not_prefix_stable`` when the row has
-        ``reasoning_content`` or a trainable turn's per-turn example is not a token prefix of
-        the whole render; render it with :meth:`per_turn_examples` then.
+        ``reasoning_content``, a trainable turn's per-turn example is not a token prefix of
+        the whole render, or an untrained turn's generation prompt is not: one example claims
+        every turn saw the history the whole render shows, and a template that rewrites
+        earlier turns later (DeepSeek-V4 without tools) breaks that claim even when only the
+        last turn trains. Render it with :meth:`per_turn_examples` then.
         """
         turns = _trainable_turns(messages)
+        self._refuse_unsupported(messages)
         if any(message.get("reasoning_content") for message in messages):
             raise RendererError(
                 RendererErrorCode.NOT_PREFIX_STABLE, "rows with reasoning_content render per turn"
             )
         prepared = template_messages(messages)
         declared = list(tools) or None
-        tokens = self._encode(
-            self._render(prepared, declared, generation=False, where="the conversation")
-        )
+        tokens = self._tokens(prepared, declared, generation=False, where="the conversation")
         if self._next_role_tag is not None and prepared[-1].get("role") == "assistant":
             tokens.append(self._single_token(self._next_role_tag(prepared[-1])))
+        for index in _assistant_turns(messages):
+            if index in turns:
+                continue
+            where = f"messages[{index}]"
+            prompt = self._tokens(prepared[:index], declared, generation=True, where=where)
+            if tokens[: len(prompt)] != prompt:
+                raise RendererError(
+                    RendererErrorCode.NOT_PREFIX_STABLE,
+                    f"{where}: the turn's prompt is not a prefix of the whole render",
+                )
         weights = [0.0] * len(tokens)
         end = 0
         for index in turns:
@@ -344,6 +519,7 @@ class HFChatTemplateRenderer:
         self, messages: list[ChatMessage], tools: list[ToolSpec]
     ) -> list[TokenizedExample]:
         turns = _trainable_turns(messages)
+        self._refuse_unsupported(messages)
         prepared = template_messages(messages)
         declared = list(tools) or None
         return [self._turn(prepared, declared, index).example() for index in turns]
@@ -351,11 +527,10 @@ class HFChatTemplateRenderer:
     def generation_prompt_tokens(
         self, messages: list[ChatMessage], tools: list[ToolSpec]
     ) -> list[int]:
-        """The prompt text the template renders for the next turn, tokenized as one string."""
+        """The prompt the template renders for the next turn, tokenized as the template does."""
+        self._refuse_unsupported(messages)
         prepared = template_messages(messages)
-        return self._encode(
-            self._render(prepared, list(tools) or None, generation=True, where="the prompt")
-        )
+        return self._tokens(prepared, list(tools) or None, generation=True, where="the prompt")
 
     def decode(self, tokens: Sequence[int]) -> str:
         return self._chat_tokenizer().decode(tokens)
@@ -385,8 +560,21 @@ class HFChatTemplateRenderer:
     def _chat_tokenizer(self) -> ChatTokenizer:
         with self._lock:
             if self._tokenizer is None:
-                self._tokenizer = load_tokenizer(self._tokenizer_model, self._revision)
+                loaded = load_tokenizer(
+                    self._tokenizer_model,
+                    self._revision,
+                    trust_remote_code=self._trust_remote_code,
+                    template=self._encoder is None,
+                )
+                self._tokenizer = (
+                    loaded if self._encoder is None else EncodedChatTokenizer(loaded, self._encoder)
+                )
             return self._tokenizer
+
+    def _refuse_unsupported(self, messages: Sequence[ChatMessage]) -> None:
+        reason = self._check(messages) if self._check is not None else None
+        if reason is not None:
+            raise RendererError(RendererErrorCode.UNSUPPORTED_MESSAGE, reason)
 
     def _stop_ids(self) -> tuple[int, ...]:
         if self._stop_token_ids is None:
@@ -410,18 +598,30 @@ class HFChatTemplateRenderer:
                 template_kwargs=self._template_kwargs,
             )
         except Exception as exc:
-            reason = f"{type(exc).__name__}: {exc}".splitlines()[0][:200]
-            raise RendererError(
-                RendererErrorCode.TEMPLATE_ERROR, f"{where}: the chat template failed: {reason}"
-            ) from exc
+            raise _template_failure(where, exc) from exc
+
+    def _tokens(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[ToolSpec] | None,
+        *,
+        generation: bool,
+        where: str,
+    ) -> list[int]:
+        tokenizer = self._chat_tokenizer()
+        try:
+            tokens = tokenizer.render_tokens(
+                messages,
+                tools=tools,
+                add_generation_prompt=generation,
+                template_kwargs=self._template_kwargs,
+            )
+        except Exception as exc:
+            raise _template_failure(where, exc) from exc
+        return _valid_ids(tokens)
 
     def _encode(self, text: str) -> list[int]:
-        tokens = self._chat_tokenizer().encode(text)
-        if any(type(token) is not int or token < 0 for token in tokens):
-            raise RendererError(
-                RendererErrorCode.TEMPLATE_ERROR, "the tokenizer returned invalid token ids"
-            )
-        return tokens
+        return _valid_ids(self._chat_tokenizer().encode(text))
 
     def _single_token(self, token: str) -> int:
         token_id = self._chat_tokenizer().token_id(token)
@@ -444,8 +644,8 @@ class HFChatTemplateRenderer:
                 RendererErrorCode.PROMPT_MISMATCH,
                 f"{where}: the rendered turn does not extend its generation prompt",
             )
-        prompt = self._encode(prompt_text)
-        tokens = self._encode(text)
+        prompt = self._tokens(messages[:index], tools, generation=True, where=where)
+        tokens = self._tokens(messages[: index + 1], tools, generation=False, where=where)
         if tokens[: len(prompt)] != prompt:
             # The tokenizer merged across the boundary; the model generates after the prompt.
             whole = tokens
@@ -481,6 +681,21 @@ class HFChatTemplateRenderer:
         )
 
 
+def _template_failure(where: str, exc: Exception) -> RendererError:
+    reason = f"{type(exc).__name__}: {exc}".splitlines()[0][:200]
+    return RendererError(
+        RendererErrorCode.TEMPLATE_ERROR, f"{where}: the chat template failed: {reason}"
+    )
+
+
+def _valid_ids(tokens: Sequence[int]) -> list[int]:
+    if any(type(token) is not int or token < 0 for token in tokens):
+        raise RendererError(
+            RendererErrorCode.TEMPLATE_ERROR, "the tokenizer returned invalid token ids"
+        )
+    return list(tokens)
+
+
 def _refuse_embedded_stop(completion: Sequence[int], stops: set[int], where: str) -> None:
     """Refuse a completion holding a stop token before its own stop target.
 
@@ -495,12 +710,12 @@ def _refuse_embedded_stop(completion: Sequence[int], stops: set[int], where: str
         )
 
 
+def _assistant_turns(messages: Sequence[ChatMessage]) -> list[int]:
+    return [index for index, message in enumerate(messages) if message.get("role") == "assistant"]
+
+
 def _trainable_turns(messages: Sequence[ChatMessage]) -> list[int]:
-    turns = [
-        index
-        for index, message in enumerate(messages)
-        if message.get("role") == "assistant" and message.get("weight") != 0
-    ]
+    turns = [index for index in _assistant_turns(messages) if messages[index].get("weight") != 0]
     if not turns:
         raise RendererError(
             RendererErrorCode.NO_TRAINABLE_TOKENS, "no assistant turn has a non-zero weight"

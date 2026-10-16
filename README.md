@@ -170,12 +170,13 @@ pup finetune status --watch
 The preview shows the rendered tokens per split, the rows left out (such as `exceeds_context`)
 and where the rows go. `--model` takes a model's alias, the provider's model id or its
 Hugging Face tokenizer name (`models list` shows them). The provider follows from the model
-when one provider offers it; `qwen3p8-27b` and `glm-5p3-flash` are on both, so name
-`--provider` for them. The run goes in `runs/<run id>`. `--detach` trains in a background worker (its log is `worker.log`). Cap the
+when one provider offers it; `qwen3p8-27b`, `glm-5p3-flash` and `kimi-k3` are on both, so
+name `--provider` for them. The run goes in `runs/<run id>`. `--detach` trains in a background worker (its log is `worker.log`). Cap the
 spend with `--max-train-tokens`, or `--max-spend-usd` with `--hourly-rate-usd`. The epoch with
 the best validation loss is kept, also when a cap stops the run: promoted to a Fireworks model,
-or recorded as the run's `deployable_checkpoint` on Baseten, which has no promotion. The
-Baseten models are `qwen3p5-9b`, `glm-5p3-flash` and `qwen3p8-27b`:
+or recorded as the run's `deployable_checkpoint` on Baseten, which has no promotion. Fireworks
+also trains `deepseek-v4-flash-0731` and `muse-glimmer-30b` (whose rows need a system
+message). The Baseten models are `qwen3p5-9b`, `glm-5p3-flash`, `qwen3p8-27b` and `kimi-k3`:
 `pup finetune train --dataset datasets/my-agent --model qwen3p5-9b --detach`.
 
 `--remote` (Baseten only) runs the training loop in a Baseten CPU job, so training continues
@@ -343,6 +344,11 @@ choose, and every preview lists each recipient in `data_recipients`. `PUP_READ_O
 stays allowed, and it still sends rows to the judges. `train --remote` uploads the train and
 validation rows, their split assignments, the run files and pup-finetune's source to Baseten
 storage for its job; the test split and dropped rows stay on this machine.
+
+Rows are rendered with each model's own tokenizer and chat template, downloaded from Hugging
+Face at a pinned commit. Kimi K3's tokenizer is Python code from the model's repository
+(`trust_remote_code`, which `models list` shows): rendering for `kimi-k3` downloads that code
+at its pinned commit and runs it on this machine.
 [docs/data-format.md](docs/data-format.md)
 describes the rows, the exclusion codes and the files in a dataset directory.
 

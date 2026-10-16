@@ -41,7 +41,8 @@ __all__ = [
 
 TABLE_VIEWS: Final[dict[str, str]] = {
     "models list": (
-        ".models | map({alias, provider, context: .max_seq_len, reasoning: .supports_reasoning})"
+        ".models | map({alias, provider, context: .max_seq_len, reasoning: .supports_reasoning, "
+        "remote_code: .trust_remote_code})"
     ),
     "auth status": ".providers",
     "runs": (

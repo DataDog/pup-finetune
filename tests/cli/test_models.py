@@ -40,6 +40,7 @@ QWEN = {
     "max_seq_len": 131072,
     "supports_reasoning": True,
     "default_lora_rank": 8,
+    "trust_remote_code": False,
     "provider_options": ["max_seq_len"],
 }
 GLM = {
@@ -54,8 +55,17 @@ GLM = {
     "max_seq_len": 65536,
     "supports_reasoning": True,
     "default_lora_rank": 8,
+    "trust_remote_code": False,
     "provider_options": ["max_seq_len"],
 }
+FIREWORKS_ALIASES = [
+    "qwen3p8-27b",
+    "glm-5p3-flash",
+    "kimi-k3",
+    "deepseek-v4-flash-0731",
+    "muse-glimmer-30b",
+]
+MODEL_ROUTES = [f"/v1/accounts/fireworks/models/{alias}" for alias in FIREWORKS_ALIASES]
 QWEN_INTERNALS = {
     "renderer": "qwen3_8",
     "tokenizer": "Qwen/Qwen3.8-27B",
@@ -103,7 +113,12 @@ def output(result: Result) -> Any:
 def test_lists_the_fireworks_profiles_without_a_key() -> None:
     result = invoke("--provider", "fireworks")
     assert result.exit_code == 0, result.stderr
-    assert output(result) == {"provider": "fireworks", "models": [QWEN, GLM]}
+    body = output(result)
+    assert body["provider"] == "fireworks"
+    assert [model["alias"] for model in body["models"]] == FIREWORKS_ALIASES
+    assert body["models"][:2] == [QWEN, GLM]
+    trusting = [model["alias"] for model in body["models"] if model["trust_remote_code"]]
+    assert trusting == ["kimi-k3"]
 
 
 def test_lists_the_fake_profiles_in_dev_mode(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -134,11 +149,11 @@ def test_without_a_provider_it_lists_every_provider_s_models() -> None:
     body = output(result)
     assert body["provider"] is None
     assert [(m["provider"], m["alias"]) for m in body["models"]] == [
-        ("fireworks", "qwen3p8-27b"),
-        ("fireworks", "glm-5p3-flash"),
+        *(("fireworks", alias) for alias in FIREWORKS_ALIASES),
         ("baseten", "qwen3p5-9b"),
         ("baseten", "glm-5p3-flash"),
         ("baseten", "qwen3p8-27b"),
+        ("baseten", "kimi-k3"),
     ]
     assert body["models"][0] == QWEN
     assert all("tokenizer" not in model for model in body["models"])
@@ -153,18 +168,14 @@ def test_without_a_provider_dev_mode_lists_the_fake_too(monkeypatch: pytest.Monk
 def test_check_preflights_each_model(fake: FakeFireworksApi) -> None:
     result = invoke("--provider", "fireworks", "--check")
     assert result.exit_code == 0, result.stderr
-    assert output(result) == {
-        "provider": "fireworks",
-        "models": [
-            {**QWEN, **QWEN_INTERNALS, "preflight": {"ok": True}},
-            {**GLM, **GLM_INTERNALS, "preflight": {"ok": True}},
-        ],
-        "ok": True,
-    }
-    assert [request.url.path for request in fake.requests] == [
-        "/v1/accounts/fireworks/models/qwen3p8-27b",
-        "/v1/accounts/fireworks/models/glm-5p3-flash",
+    body = output(result)
+    assert body["ok"] is True
+    assert body["models"][:2] == [
+        {**QWEN, **QWEN_INTERNALS, "preflight": {"ok": True}},
+        {**GLM, **GLM_INTERNALS, "preflight": {"ok": True}},
     ]
+    assert all(model["preflight"] == {"ok": True} for model in body["models"])
+    assert [request.url.path for request in fake.requests] == MODEL_ROUTES
     assert API_KEY not in result.stdout + result.stderr
 
 
@@ -204,16 +215,15 @@ def test_check_reports_every_profile_on_its_own(
     assert result.exit_code == 1
     body = output(result)
     assert body["ok"] is False
-    missing, qwen, glm = body["models"]
-    assert glm["preflight"] == {"ok": True}
+    missing, qwen, *others = body["models"]
+    assert all(model["preflight"] == {"ok": True} for model in others)
     assert missing["alias"] == "qwen-missing"
     assert missing["preflight"]["ok"] is False
     assert "has no model" in missing["preflight"]["error"]
     assert qwen == {**QWEN, **QWEN_INTERNALS, "preflight": {"ok": True}}
     assert [request.url.path for request in fake.requests] == [
         "/v1/accounts/fireworks/models/qwen-missing",
-        "/v1/accounts/fireworks/models/qwen3p8-27b",
-        "/v1/accounts/fireworks/models/glm-5p3-flash",
+        *MODEL_ROUTES,
     ]
 
 

@@ -8,7 +8,7 @@
 
 A :class:`ResponseParser` reads the text a sampler produced after the generation prompt and
 never raises: text that broke the model's output format comes back with ``format_valid``
-false and a best-effort message. Three tool-call formats are covered:
+false and a best-effort message. These tool-call formats are covered:
 
 - :class:`Qwen3XmlToolParser`, the Qwen3.8 format::
 
@@ -38,6 +38,35 @@ false and a best-effort message. Three tool-call formats are covered:
 
 - :class:`JsonToolCallParser`, one JSON object per block:
   ``<tool_call>{"name": ..., "arguments": {...}}</tool_call>``.
+- :class:`DeepSeekDsmlParser`, DeepSeek-V4's DSML, after an open ``<think>``, with each
+  parameter marked as text or JSON::
+
+      reasoning</think>text
+
+      <｜DSML｜tool_calls>
+      <｜DSML｜invoke name="get_weather">
+      <｜DSML｜parameter name="city" string="true">Paris</｜DSML｜parameter>
+      </｜DSML｜invoke>
+      </｜DSML｜tool_calls><｜end▁of▁sentence｜>
+
+- :class:`KimiXtmlParser`, Kimi K3's XTML channels, after an open think channel, with each
+  argument typed::
+
+      reasoning<|close|>think<|sep|><|open|>response<|sep|>text<|close|>response<|sep|>
+      <|open|>tools<|sep|><|open|>call tool="get_weather" index="1"<|sep|>
+      <|open|>argument key="city" type="string"<|sep|>Paris<|close|>argument<|sep|>
+      <|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|><|end_of_msg|>
+
+  (without the line breaks, which are added here).
+- :class:`MuseAtemParser`, Muse Glimmer's ATEM messages after an open ``<|start|>assistant``:
+  reasoning to ``self``, then either text to ``user`` or one message per tool call::
+
+       to=self<|message|>reasoning<|eom|><|start|>assistant to=get_weather<|message|>
+      <atem:function_calls>
+      <atem:invoke name="get_weather">
+      <atem:parameter name="city">Paris</atem:parameter>
+      </atem:invoke>
+      </atem:function_calls><|eot|>
 
 Each strips one trailing end-of-turn token. Model families pick a parser by name from
 :data:`PARSERS`. A parser is also given the tools the prompt declared: the XML formats need
@@ -56,6 +85,9 @@ from typing import Any, ClassVar, Protocol
 
 from pup_finetune.rendering.base import ChatMessage, ParsedResponse, ToolSpec
 from pup_finetune.storage import loads_finite
+
+# DeepSeek-V4's markers are spelled with U+FF5C, the fullwidth vertical line.
+# ruff: noqa: RUF001, RUF002
 
 _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
@@ -393,12 +425,297 @@ def _json_call(inner: str) -> tuple[str, dict[str, Any]] | None:
     return name, arguments
 
 
+def _sequence(text: str, pattern: re.Pattern[str], separator: str) -> list[re.Match[str]] | None:
+    """The matches of ``pattern`` that make up all of ``text``, ``separator`` between them;
+    ``None`` when anything else is in it (empty text is no matches)."""
+    matches: list[re.Match[str]] = []
+    position = 0
+    for match in pattern.finditer(text):
+        if text[position : match.start()] != (separator if matches else ""):
+            return None
+        matches.append(match)
+        position = match.end()
+    return matches if position == len(text) else None
+
+
+def _decoded(text: str) -> tuple[bool, Any]:
+    """``(True, value)`` for JSON ``text``, ``(False, None)`` otherwise."""
+    try:
+        return True, loads_finite(text)
+    except (ValueError, RecursionError):
+        return False, None
+
+
+def _assistant(
+    content: str, reasoning: str | None, calls: list[tuple[str, dict[str, Any]]]
+) -> ChatMessage:
+    message: ChatMessage = {"role": "assistant", "content": content.strip()}
+    if reasoning and reasoning.strip():
+        message["reasoning_content"] = reasoning.strip()
+    if calls:
+        message["tool_calls"] = [_tool_call(index, *call) for index, call in enumerate(calls)]
+    return message
+
+
+_DSML = "｜DSML｜"
+_DSML_EOS = "<｜end▁of▁sentence｜>"
+_DSML_CALLS_OPEN = f"\n\n<{_DSML}tool_calls>\n"
+_DSML_CALLS_CLOSE = f"\n</{_DSML}tool_calls>"
+_DSML_INVOKE = re.compile(rf'<{_DSML}invoke name="([^"\n]+)">\n(.*?)\n?</{_DSML}invoke>', re.DOTALL)
+_DSML_PARAMETER = re.compile(
+    rf'<{_DSML}parameter name="([^"\n]+)" string="(true|false)">(.*?)</{_DSML}parameter>',
+    re.DOTALL,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DeepSeekDsmlParser:
+    """DeepSeek-V4's format: reasoning up to ``</think>`` (the generation prompt opens
+    ``<think>``), text, then one DSML ``tool_calls`` block, ending ``<｜end▁of▁sentence｜>``.
+
+    Each parameter says whether its value is text (``string="true"``, kept as is) or JSON
+    (decoded), so the declared tools are not needed. Text that never closes the reasoning is
+    format-invalid, all of it reasoning; a malformed block stays in ``content`` as raw text.
+    """
+
+    name: ClassVar[str] = "deepseek_dsml"
+    version: ClassVar[str] = "1"
+
+    def parse(self, text: str, tools: Sequence[ToolSpec] = ()) -> ParsedResponse:
+        body = text.rstrip().removesuffix(_DSML_EOS)
+        if _THINK_CLOSE not in body:
+            return ParsedResponse(
+                _assistant("", body.strip().removeprefix(_THINK_OPEN), []), format_valid=False
+            )
+        head, _, body = body.partition(_THINK_CLOSE)
+        head = head.lstrip().removeprefix(_THINK_OPEN)
+        content, opened, block = body.partition(_DSML_CALLS_OPEN)
+        calls: list[tuple[str, dict[str, Any]]] = []
+        valid = True
+        if opened:
+            inner, closed, rest = block.rpartition(_DSML_CALLS_CLOSE)
+            invokes = _sequence(inner, _DSML_INVOKE, "\n") if closed and not rest else None
+            parsed = [_dsml_call(invoke) for invoke in invokes or []]
+            if not parsed or None in parsed:
+                valid = False
+                content += opened + block
+            else:
+                calls = [call for call in parsed if call is not None]
+        markers = (_DSML, _DSML_EOS, _THINK_OPEN, _THINK_CLOSE)
+        if any(marker in head or marker in content for marker in markers):
+            valid = False
+        return ParsedResponse(_assistant(content, head, calls), format_valid=valid)
+
+
+def _dsml_call(invoke: re.Match[str]) -> tuple[str, dict[str, Any]] | None:
+    parameters = _sequence(invoke.group(2), _DSML_PARAMETER, "\n")
+    if parameters is None:
+        return None
+    arguments: dict[str, Any] = {}
+    for parameter in parameters:
+        key, is_text, raw = parameter.groups()
+        if key in arguments:
+            return None
+        if is_text == "true":
+            arguments[key] = raw
+            continue
+        ok, value = _decoded(raw)
+        if not ok:
+            return None
+        arguments[key] = value
+    return invoke.group(1), arguments
+
+
+_XTML_OPEN = re.escape("<|open|>")
+_XTML_CLOSE = re.escape("<|close|>")
+_XTML_SEP = re.escape("<|sep|>")
+_KIMI_END = "<|end_of_msg|>"
+_KIMI_MESSAGE_CLOSE = "<|close|>message<|sep|>"
+_KIMI_CHANNELS = re.compile(
+    rf"(?P<reasoning>.*?){_XTML_CLOSE}think{_XTML_SEP}"
+    rf"{_XTML_OPEN}response{_XTML_SEP}(?P<content>.*?){_XTML_CLOSE}response{_XTML_SEP}"
+    rf"(?:{_XTML_OPEN}tools{_XTML_SEP}(?P<calls>.*){_XTML_CLOSE}tools{_XTML_SEP})?",
+    re.DOTALL,
+)
+_KIMI_CALL = re.compile(
+    rf'{_XTML_OPEN}call tool="(?P<name>[^"]+)" index="(?P<index>\d+)"{_XTML_SEP}'
+    rf"(?P<arguments>.*?){_XTML_CLOSE}call{_XTML_SEP}",
+    re.DOTALL,
+)
+_KIMI_ARGUMENT = re.compile(
+    rf'{_XTML_OPEN}argument key="(?P<key>[^"]*)" '
+    rf'type="(?P<type>string|number|boolean|null|object|array)"{_XTML_SEP}'
+    rf"(?P<value>.*?){_XTML_CLOSE}argument{_XTML_SEP}",
+    re.DOTALL,
+)
+_KIMI_MARKERS = ("<|open|>", "<|close|>", "<|sep|>", _KIMI_END)
+
+
+@dataclass(frozen=True, slots=True)
+class KimiXtmlParser:
+    """Kimi K3's format: the think channel the generation prompt opened, the response
+    channel, an optional tools channel, then ``<|close|>message<|sep|>`` and
+    ``<|end_of_msg|>``.
+
+    Each argument names its type: a ``string`` is kept as is and any other is decoded as JSON
+    of that type, so the declared tools are not needed. Attribute values are unescaped
+    (``&quot;``, ``&amp;``). Calls must be numbered from 1 in order. Text without the
+    channels is format-invalid, its reasoning kept; a malformed tools channel stays in
+    ``content`` as raw text.
+    """
+
+    name: ClassVar[str] = "kimi_xtml"
+    version: ClassVar[str] = "1"
+
+    def parse(self, text: str, tools: Sequence[ToolSpec] = ()) -> ParsedResponse:
+        body = text.removesuffix(_KIMI_END)
+        closed = body.endswith(_KIMI_MESSAGE_CLOSE)
+        channels = _KIMI_CHANNELS.fullmatch(body.removesuffix(_KIMI_MESSAGE_CLOSE))
+        if channels is None:
+            reasoning = body.partition("<|close|>think<|sep|>")[0]
+            return ParsedResponse(_assistant("", reasoning, []), format_valid=False)
+        content, reasoning = channels["content"], channels["reasoning"]
+        calls: list[tuple[str, dict[str, Any]]] = []
+        valid = closed
+        if channels["calls"] is not None:
+            parsed = [
+                _kimi_call(match, position)
+                for position, match in enumerate(
+                    _sequence(channels["calls"], _KIMI_CALL, "") or [], start=1
+                )
+            ]
+            if not parsed or None in parsed:
+                valid = False
+                content += channels["calls"]
+            else:
+                calls = [call for call in parsed if call is not None]
+        if any(marker in reasoning or marker in content for marker in _KIMI_MARKERS):
+            valid = False
+        return ParsedResponse(_assistant(content, reasoning, calls), format_valid=valid)
+
+
+_KIMI_TYPES: Mapping[str, tuple[type, ...]] = MappingProxyType(
+    {
+        "number": (int, float),
+        "boolean": (bool,),
+        "null": (type(None),),
+        "object": (dict,),
+        "array": (list,),
+    }
+)
+
+
+def _unescape(value: str) -> str:
+    return value.replace("&quot;", '"').replace("&amp;", "&")
+
+
+def _kimi_call(call: re.Match[str], position: int) -> tuple[str, dict[str, Any]] | None:
+    arguments_found = _sequence(call["arguments"], _KIMI_ARGUMENT, "")
+    if arguments_found is None or int(call["index"]) != position:
+        return None
+    arguments: dict[str, Any] = {}
+    for argument in arguments_found:
+        key, kind = _unescape(argument["key"]), argument["type"]
+        if key in arguments:
+            return None
+        if kind == "string":
+            arguments[key] = argument["value"]
+            continue
+        ok, value = _decoded(argument["value"])
+        # bool is an int to Python, but not a number to Kimi.
+        if (
+            not ok
+            or not isinstance(value, _KIMI_TYPES[kind])
+            or (kind == "number" and isinstance(value, bool))
+        ):
+            return None
+        arguments[key] = value
+    return _unescape(call["name"]), arguments
+
+
+_ATEM_END = "<|eot|>"
+_ATEM_NEXT = "<|eom|><|start|>assistant"
+_ATEM_MESSAGE = re.compile(r" to=(?P<to>[^\s<]+)<\|message\|>(?P<body>.*)", re.DOTALL)
+_ATEM_CALL = re.compile(
+    r'<atem:function_calls>\n<atem:invoke name="(?P<name>[^"\n]+)">\n'
+    r"(?P<parameters>.*)</atem:invoke>\n</atem:function_calls>",
+    re.DOTALL,
+)
+_ATEM_PARAMETER = re.compile(
+    r'<atem:parameter name="(?P<key>[^"\n]+)">(?P<value>.*?)</atem:parameter>\n', re.DOTALL
+)
+_ATEM_MARKERS = ("<|start|>", "<|message|>", "<|eom|>", _ATEM_END)
+
+
+@dataclass(frozen=True, slots=True)
+class MuseAtemParser:
+    """Muse Glimmer's format: after the generation prompt's ``<|start|>assistant``, an
+    optional message to ``self`` (the reasoning), then a message to ``user`` (the text) or
+    one message per tool call, each addressed to the function it calls; messages are
+    joined by ``<|eom|><|start|>assistant`` and the turn ends ``<|eot|>``.
+
+    The template writes string values raw and other values as JSON, so a value is read with
+    the type the called tool declares, as in :class:`Qwen3XmlToolParser`. Any other order of
+    messages, or a malformed call, is format-invalid, with the raw text in ``content``.
+    """
+
+    name: ClassVar[str] = "muse_atem"
+    version: ClassVar[str] = "1"
+
+    def parse(self, text: str, tools: Sequence[ToolSpec] = ()) -> ParsedResponse:
+        body = text.rstrip().removesuffix(_ATEM_END)
+        messages = [_ATEM_MESSAGE.fullmatch(part) for part in body.split(_ATEM_NEXT)]
+        reasoning: str | None = None
+        first = messages[0]
+        if first is not None and first["to"] == "self":
+            reasoning, messages = first["body"], messages[1:]
+        found = [message for message in messages if message is not None]
+        valid = bool(found) and len(found) == len(messages)
+        content = ""
+        calls: list[tuple[str, dict[str, Any]]] = []
+        if valid and len(found) == 1 and found[0]["to"] == "user":
+            content = found[0]["body"]
+        elif valid:
+            properties = _properties(tools)
+            parsed = [_atem_call(message, properties) for message in found]
+            if None in parsed:
+                valid = False
+            else:
+                calls = [call for call in parsed if call is not None]
+        if not valid:
+            content = body if reasoning is None else body.partition(_ATEM_NEXT)[2]
+        if any(marker in (reasoning or "") or marker in content for marker in _ATEM_MARKERS):
+            valid = False
+        return ParsedResponse(_assistant(content, reasoning, calls), format_valid=valid)
+
+
+def _atem_call(
+    message: re.Match[str], properties: _Properties
+) -> tuple[str, dict[str, Any]] | None:
+    call = _ATEM_CALL.fullmatch(message["body"])
+    if call is None or call["name"] != message["to"] or message["to"] in ("self", "user"):
+        return None
+    parameters = _sequence(call["parameters"], _ATEM_PARAMETER, "")
+    if parameters is None:
+        return None
+    schemas = properties.get(call["name"], {})
+    arguments: dict[str, Any] = {}
+    for parameter in parameters:
+        if parameter["key"] in arguments:
+            return None
+        arguments[parameter["key"]] = _value(parameter["value"], schemas.get(parameter["key"]))
+    return call["name"], arguments
+
+
 PARSERS: Mapping[str, Callable[[], ResponseParser]] = MappingProxyType(
     {
         "qwen3_xml": Qwen3XmlToolParser,
         "qwen3_5_xml": Qwen3_5XmlToolParser,
         "glm_xml": GlmXmlToolParser,
         "json_tool_call": JsonToolCallParser,
+        "deepseek_dsml": DeepSeekDsmlParser,
+        "kimi_xtml": KimiXtmlParser,
+        "muse_atem": MuseAtemParser,
     }
 )
 """Every parser by name, as :class:`~pup_finetune.rendering.families.ModelFamily` names it."""

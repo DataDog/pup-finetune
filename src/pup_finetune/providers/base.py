@@ -53,6 +53,8 @@ class ModelProfile:
     template; the revision must be a full 40-character lowercase commit SHA, never a branch
     or tag that can move. ``renderer`` names the renderer; ``max_seq_len`` is the training
     context limit in tokens. Any of :attr:`names` selects the profile (:func:`find_profile`).
+    ``trust_remote_code`` says the tokenizer runs code from the model's repository, at the
+    pinned revision.
     """
 
     provider: str
@@ -65,6 +67,7 @@ class ModelProfile:
     default_lora_rank: int = 8
     supports_reasoning: bool = False
     notes: str = ""
+    trust_remote_code: bool = False
 
     def __post_init__(self) -> None:
         if not COMMIT_SHA.fullmatch(self.tokenizer_revision):

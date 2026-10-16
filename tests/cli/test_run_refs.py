@@ -195,7 +195,8 @@ def test_an_unknown_model_lists_the_known_aliases(dataset: Path) -> None:
     assert result.exit_code == 2
     assert "Error [usage]: unknown model 'nope'" in result.stderr
     assert "fake-model (fake)" in result.stderr
-    assert "qwen3p8-27b, glm-5p3-flash (fireworks)" in result.stderr
+    assert "qwen3p8-27b, glm-5p3-flash, kimi-k3" in result.stderr
+    assert "muse-glimmer-30b (fireworks)" in result.stderr
     assert "models list`" in result.stderr
 
 

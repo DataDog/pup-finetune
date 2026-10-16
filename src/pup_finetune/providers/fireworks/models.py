@@ -62,6 +62,30 @@ SPECS: Final[tuple[ProfileSpec, ...]] = (
         supports_reasoning=True,
         notes="GLM-5.3 Flash; it stops by emitting the next role tag.",
     ),
+    ProfileSpec(
+        alias="kimi-k3",
+        base_model="accounts/fireworks/models/kimi-k3",
+        family="kimi_k3",
+        max_seq_len=65_536,
+        supports_reasoning=True,
+        notes="Kimi K3; its repository's tokenizer code renders the chat.",
+    ),
+    ProfileSpec(
+        alias="deepseek-v4-flash-0731",
+        base_model="accounts/fireworks/models/deepseek-v4-flash-0731",
+        family="deepseek_v4",
+        max_seq_len=65_536,
+        supports_reasoning=True,
+        notes="DeepSeek-V4 Flash 0731; reasoning is kept in history when tools are declared.",
+    ),
+    ProfileSpec(
+        alias="muse-glimmer-30b",
+        base_model="accounts/fireworks/models/muse-glimmer-30b",
+        family="muse_glimmer",
+        max_seq_len=131_072,
+        supports_reasoning=True,
+        notes="Muse Glimmer 30B; every row needs a system message.",
+    ),
 )
 """Every supported model. ``max_seq_len`` is the ``trainingContextLength`` Fireworks reports for
 the model; preflight refuses a model that reports less."""
@@ -93,6 +117,7 @@ def build_profiles(specs: Iterable[ProfileSpec]) -> tuple[ModelProfile, ...]:
             default_lora_rank=spec.default_lora_rank,
             supports_reasoning=spec.supports_reasoning,
             notes=spec.notes,
+            trust_remote_code=family.trust_remote_code,
         )
         for name in profile.names:
             if name in names:

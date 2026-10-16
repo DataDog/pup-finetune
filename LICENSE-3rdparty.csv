@@ -13,6 +13,7 @@ keyring,https://pypi.org/project/keyring/,MIT,Kang Zhang and Jason R. Coombs
 pydantic,https://pypi.org/project/pydantic/,MIT,Pydantic Services Inc. and individual contributors
 rich,https://pypi.org/project/rich/,MIT,Will McGugan
 tinker,https://pypi.org/project/tinker/,Apache-2.0,Thinking Machines Lab
+tiktoken,https://pypi.org/project/tiktoken/,MIT,"OpenAI, Shantanu Jain"
 transformers,https://pypi.org/project/transformers/,Apache-2.0,The Hugging Face team
 truststore,https://pypi.org/project/truststore/,MIT,Seth Michael Larson
 typer,https://pypi.org/project/typer/,MIT,Sebastián Ramírez

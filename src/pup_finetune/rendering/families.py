@@ -10,19 +10,23 @@ A family is a table entry: the Hugging Face tokenizer and its 40-character revis
 response parser (by name, from :data:`~pup_finetune.rendering.parsers.PARSERS`), the stop
 tokens, any chat-template arguments, whether the one-example-per-row fast path is worth
 trying, and, for models that stop by emitting the next role tag instead of an end-of-turn
-token, which tag follows an assistant message. Adding a family is adding an entry here, plus
-a parser when its output format is new. Adapted from the Baseten provider work by Fouad
-Wahabi.
+token, which tag follows an assistant message. A family may also run its tokenizer's own code
+from the model's repository at the pinned commit (``trust_remote_code``), render through a
+:mod:`~pup_finetune.rendering.encoders` encoder when the tokenizer ships no chat template
+(``chat_encoder``), and refuse conversations its template cannot render faithfully
+(``check``). Adding a family is adding an entry here, plus a parser when its output format is
+new. Adapted from the Baseten provider work by Fouad Wahabi.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
 from pup_finetune.rendering.base import ChatMessage
+from pup_finetune.rendering.encoders import ENCODERS, get_encoder
 from pup_finetune.rendering.hf import COMMIT_SHA, ChatTokenizer, HFChatTemplateRenderer
 from pup_finetune.rendering.parsers import PARSERS, get_parser
 
@@ -42,6 +46,13 @@ class ModelFamily:
     """Whether to try one example per row; each row is still checked when rendered."""
     next_role_tag: Callable[[ChatMessage], str] | None = None
     """For models that stop by emitting the next role tag: the tag after a message."""
+    trust_remote_code: bool = False
+    """Whether the tokenizer runs code from the model's repository, at :attr:`revision`."""
+    chat_encoder: str | None = None
+    """The :data:`~pup_finetune.rendering.encoders.ENCODERS` key that renders the chat, for a
+    tokenizer that ships no chat template."""
+    check: Callable[[Sequence[ChatMessage]], str | None] | None = None
+    """Why the template cannot render a conversation faithfully, or ``None`` when it can."""
 
     def __post_init__(self) -> None:
         if not COMMIT_SHA.fullmatch(self.revision):
@@ -53,6 +64,15 @@ class ModelFamily:
             raise ValueError(f"model family {self.key!r} names unknown parser {self.parser!r}")
         if not self.stop_tokens:
             raise ValueError(f"model family {self.key!r} needs at least one stop token")
+        if self.chat_encoder is not None and self.chat_encoder not in ENCODERS:
+            raise ValueError(
+                f"model family {self.key!r} names unknown chat encoder {self.chat_encoder!r}"
+            )
+        if self.chat_encoder is not None and self.chat_template_kwargs:
+            raise ValueError(
+                f"model family {self.key!r} renders with an encoder, which takes no "
+                "chat-template arguments"
+            )
         object.__setattr__(
             self, "chat_template_kwargs", MappingProxyType(dict(self.chat_template_kwargs))
         )
@@ -67,6 +87,9 @@ class ModelFamily:
             prefix_stable=self.prefix_stable,
             chat_template_kwargs=self.chat_template_kwargs,
             next_role_tag=self.next_role_tag,
+            trust_remote_code=self.trust_remote_code,
+            chat_encoder=get_encoder(self.chat_encoder) if self.chat_encoder else None,
+            check=self.check,
             name=self.key,
             tokenizer=tokenizer,
         )
@@ -112,8 +135,67 @@ GLM5_3 = ModelFamily(
 )
 """GLM-5.3 with its official template: role tags as stops, ``<arg_key>`` tool calls."""
 
+KIMI_K3 = ModelFamily(
+    key="kimi_k3",
+    tokenizer_model="moonshotai/Kimi-K3",
+    revision="301be1b88c89c0d3a763da6301352cb8fe399e90",
+    parser="kimi_xtml",
+    stop_tokens=("<|end_of_msg|>",),
+    # Every message closes on control tokens and reasoning stays in history, so each turn's
+    # tokens prefix the whole render.
+    prefix_stable=True,
+    trust_remote_code=True,
+)
+"""Kimi K3 with its repository's tokenizer code, which renders the chat as XTML channels in
+Python and encodes message text apart from its control tokens; preserved reasoning, maximum
+thinking effort."""
+
+DEEPSEEK_V4 = ModelFamily(
+    key="deepseek_v4",
+    tokenizer_model="deepseek-ai/DeepSeek-V4-Flash-0731",
+    revision="7872f01b1d1fe23eabc4c98b48bffcef5a386062",
+    parser="deepseek_dsml",
+    stop_tokens=("<｜end▁of▁sentence｜>",),  # noqa: RUF001 - DeepSeek spells it with U+FF5C
+    chat_encoder="deepseek_v4",
+    # With tools every turn keeps its reasoning and prefixes the whole render; without
+    # tools, turns before the last user turn lose theirs, and such rows render per turn.
+    prefix_stable=True,
+)
+"""DeepSeek-V4 Flash 0731, whose repository ships its chat format as Python
+(``encoding/encoding_dsv4.py``) and no template: DSML tool calls, thinking mode."""
+
+
+def _muse_check(messages: Sequence[ChatMessage]) -> str | None:
+    if not any(message.get("role") == "system" for message in messages):
+        return (
+            "Muse Glimmer's template writes the current date into a conversation without a "
+            "system message, so it needs one to render the same every day"
+        )
+    for message in messages:
+        if message.get("tool_calls") and str(message.get("content") or "").strip():
+            return "Muse Glimmer's template drops the text of a message that has tool calls"
+    return None
+
+
+MUSE_GLIMMER = ModelFamily(
+    key="muse_glimmer",
+    tokenizer_model="meta-models/Muse-Glimmer-30B",
+    revision="a4e59da52a7bc87ae7251dd5545c0dd437c44b68",
+    parser="muse_atem",
+    stop_tokens=("<|eot|>",),
+    # Reasoning stays in history and each turn ends on <|eot|>, so its tokens prefix the
+    # whole render.
+    prefix_stable=True,
+    check=_muse_check,
+)
+"""Muse Glimmer with its official template: ATEM messages to ``self``, ``user`` or a tool,
+preserved reasoning; conversations need a system message."""
+
 FAMILIES: Mapping[str, ModelFamily] = MappingProxyType(
-    {family.key: family for family in [QWEN3_8, QWEN3_5, GLM5_3]}
+    {
+        family.key: family
+        for family in [QWEN3_8, QWEN3_5, GLM5_3, KIMI_K3, DEEPSEEK_V4, MUSE_GLIMMER]
+    }
 )
 """Every model family by key, as model profiles name them in ``renderer``."""
 

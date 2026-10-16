@@ -31,8 +31,9 @@ LIST_DOC = CommandDoc(
     description=(
         "List the model profiles of every provider, or of --provider: alias, the names "
         "--model accepts for it, provider, provider model, context length, reasoning "
-        "support, default LoRA rank and the provider's --provider-option keys; this needs no "
-        "API key. With --check, also shows each profile's renderer and pinned tokenizer, asks "
+        "support, default LoRA rank, whether its tokenizer runs code from the model's "
+        "repository (trust_remote_code) and the provider's --provider-option keys; this needs "
+        "no API key. With --check, also shows each profile's renderer and pinned tokenizer, asks "
         "the provider whether each model can be fine-tuned now, and exits 1 when any cannot."
     ),
     examples=(
@@ -59,6 +60,7 @@ def profile_entry(
         "max_seq_len": profile.max_seq_len,
         "supports_reasoning": profile.supports_reasoning,
         "default_lora_rank": profile.default_lora_rank,
+        "trust_remote_code": profile.trust_remote_code,
         "provider_options": list(options),
     }
     if internals:

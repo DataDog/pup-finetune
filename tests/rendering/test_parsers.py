@@ -13,8 +13,11 @@ import pytest
 
 from pup_finetune.rendering.parsers import (
     PARSERS,
+    DeepSeekDsmlParser,
     GlmXmlToolParser,
     JsonToolCallParser,
+    KimiXtmlParser,
+    MuseAtemParser,
     Qwen3_5XmlToolParser,
     Qwen3XmlToolParser,
     get_parser,
@@ -435,7 +438,255 @@ def test_parsers_are_registered_by_name() -> None:
     assert isinstance(get_parser("json_tool_call"), JsonToolCallParser)
     assert isinstance(get_parser("qwen3_5_xml"), Qwen3_5XmlToolParser)
     assert isinstance(get_parser("glm_xml"), GlmXmlToolParser)
+    assert isinstance(get_parser("deepseek_dsml"), DeepSeekDsmlParser)
+    assert isinstance(get_parser("kimi_xtml"), KimiXtmlParser)
+    assert isinstance(get_parser("muse_atem"), MuseAtemParser)
     assert QWEN.name == "qwen3_xml"
     assert QWEN.version
     with pytest.raises(KeyError, match="known: qwen3_xml"):
         get_parser("nope")
+
+
+DSML = DeepSeekDsmlParser()
+DS_EOS = "<｜end▁of▁sentence｜>"  # noqa: RUF001 - DeepSeek spells it with U+FF5C
+
+
+def dsml_call(name: str, *parameters: tuple[str, str, str]) -> str:
+    inner = "\n".join(
+        f'<｜DSML｜parameter name="{key}" string="{flag}">{value}</｜DSML｜parameter>'  # noqa: RUF001
+        for key, flag, value in parameters
+    )
+    return f'<｜DSML｜invoke name="{name}">\n{inner}\n</｜DSML｜invoke>'  # noqa: RUF001
+
+
+def dsml(*invokes: str) -> str:
+    block = "\n".join(invokes)
+    return f"\n\n<｜DSML｜tool_calls>\n{block}\n</｜DSML｜tool_calls>"  # noqa: RUF001
+
+
+def test_deepseek_text_after_reasoning() -> None:
+    parsed = DSML.parse(f"Simple arithmetic.</think>2 + 2 = 4.{DS_EOS}")
+    assert parsed.format_valid
+    assert parsed.message == {
+        "role": "assistant",
+        "content": "2 + 2 = 4.",
+        "reasoning_content": "Simple arithmetic.",
+    }
+
+
+def test_deepseek_several_calls_with_text_and_json_parameters() -> None:
+    text = (
+        "Two lookups.</think>One moment."
+        + dsml(
+            dsml_call("get_weather", ("city", "true", "Paris"), ("days", "false", "2")),
+            dsml_call("lookup", ("code", "true", "123"), ("tags", "false", '["a", {"b": null}]')),
+            dsml_call("now"),
+        )
+        + DS_EOS
+    )
+    parsed = DSML.parse(text)
+    assert parsed.format_valid
+    assert parsed.message["content"] == "One moment."
+    assert calls(parsed.message) == [
+        ("get_weather", {"city": "Paris", "days": 2}),
+        ("lookup", {"code": "123", "tags": ["a", {"b": None}]}),
+        ("now", {}),
+    ]
+
+
+def test_deepseek_reasoning_that_never_closes_is_format_invalid() -> None:
+    parsed = DSML.parse("Let me think about Par")
+    assert not parsed.format_valid
+    assert parsed.message == {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": "Let me think about Par",
+    }
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        dsml(dsml_call("f", ("x", "false", "not json"))),
+        dsml(dsml_call("f", ("x", "true", "1"), ("x", "true", "2"))),
+        dsml(dsml_call("f", ("x", "maybe", "1"))),
+        dsml(dsml_call("f") + "stray"),
+        "\n\n<｜DSML｜tool_calls>\n" + dsml_call("f"),  # noqa: RUF001
+    ],
+)
+def test_deepseek_a_malformed_block_is_format_invalid_and_kept_as_text(block: str) -> None:
+    parsed = DSML.parse(f"</think>Calling.{block}{DS_EOS}")
+    assert not parsed.format_valid
+    assert "tool_calls" not in parsed.message
+    assert parsed.message["content"].startswith("Calling.")
+    assert block.strip() in parsed.message["content"]
+
+
+def test_deepseek_stray_markers_in_the_text_are_format_invalid() -> None:
+    assert not DSML.parse(f"</think>One<think>two{DS_EOS}").format_valid
+    assert not DSML.parse(f"</think>One</think>two{DS_EOS}").format_valid
+    assert not DSML.parse(f"</think>One{DS_EOS}two{DS_EOS}").format_valid
+
+
+KIMI = KimiXtmlParser()
+KIMI_TAIL = "<|close|>message<|sep|><|end_of_msg|>"
+
+
+def kimi_turn(reasoning: str, content: str, tools: str | None = None) -> str:
+    text = (
+        f"{reasoning}<|close|>think<|sep|><|open|>response<|sep|>{content}<|close|>response<|sep|>"
+    )
+    if tools is not None:
+        text += f"<|open|>tools<|sep|>{tools}<|close|>tools<|sep|>"
+    return text + KIMI_TAIL
+
+
+def kimi_call(name: str, index: int, *arguments: tuple[str, str, str]) -> str:
+    body = "".join(
+        f'<|open|>argument key="{key}" type="{kind}"<|sep|>{value}<|close|>argument<|sep|>'
+        for key, kind, value in arguments
+    )
+    return f'<|open|>call tool="{name}" index="{index}"<|sep|>{body}<|close|>call<|sep|>'
+
+
+def test_kimi_text_after_reasoning() -> None:
+    parsed = KIMI.parse(kimi_turn("Check the data.", "Sunny, 14°C."))
+    assert parsed.format_valid
+    assert parsed.message == {
+        "role": "assistant",
+        "content": "Sunny, 14°C.",
+        "reasoning_content": "Check the data.",
+    }
+
+
+def test_kimi_several_typed_calls_and_unescaped_attributes() -> None:
+    tools = kimi_call(
+        "get_weather",
+        1,
+        ("city", "string", 'Paris "Left" & more'),
+        ("code", "string", "123"),
+        ("days", "number", "2"),
+        ("rate", "number", "99.5"),
+        ("ok", "boolean", "true"),
+        ("note", "null", "null"),
+        ("opts", "object", '{"view": "sea"}'),
+        ("floors", "array", "[2, 3]"),
+    ) + kimi_call("now", 2)
+    parsed = KIMI.parse(kimi_turn("", "", tools).replace('key="city"', 'key="ci&quot;ty"'))
+    assert parsed.format_valid
+    assert "reasoning_content" not in parsed.message
+    assert calls(parsed.message) == [
+        (
+            "get_weather",
+            {
+                'ci"ty': 'Paris "Left" & more',
+                "code": "123",
+                "days": 2,
+                "rate": 99.5,
+                "ok": True,
+                "note": None,
+                "opts": {"view": "sea"},
+                "floors": [2, 3],
+            },
+        ),
+        ("now", {}),
+    ]
+
+
+@pytest.mark.parametrize(
+    "tools",
+    [
+        kimi_call("f", 2),
+        kimi_call("f", 1, ("x", "number", "true")),
+        kimi_call("f", 1, ("x", "boolean", "1")),
+        kimi_call("f", 1, ("x", "object", "not json")),
+        kimi_call("f", 1, ("x", "string", "a"), ("x", "string", "b")),
+        kimi_call("f", 1) + "stray",
+    ],
+)
+def test_kimi_a_malformed_tools_channel_is_format_invalid_and_kept_as_text(tools: str) -> None:
+    parsed = KIMI.parse(kimi_turn("", "Calling.", tools))
+    assert not parsed.format_valid
+    assert "tool_calls" not in parsed.message
+    assert parsed.message["content"].startswith("Calling.")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Let me think about Par",
+        kimi_turn("r", "Sunny.").removesuffix(KIMI_TAIL),
+        kimi_turn("r", "Sun<|close|>ny."),
+    ],
+)
+def test_kimi_unfinished_or_stray_markers_are_format_invalid(text: str) -> None:
+    assert not KIMI.parse(text).format_valid
+
+
+def test_kimi_the_stop_token_is_optional() -> None:
+    parsed = KIMI.parse(kimi_turn("", "Sunny.").removesuffix("<|end_of_msg|>"))
+    assert parsed.format_valid
+    assert parsed.message["content"] == "Sunny."
+
+
+MUSE = MuseAtemParser()
+
+
+def atem_call(name: str, *parameters: tuple[str, str]) -> str:
+    body = "".join(
+        f'<atem:parameter name="{key}">{value}</atem:parameter>\n' for key, value in parameters
+    )
+    return (
+        f' to={name}<|message|><atem:function_calls>\n<atem:invoke name="{name}">\n{body}'
+        "</atem:invoke>\n</atem:function_calls>"
+    )
+
+
+def atem(*messages: str) -> str:
+    return "<|eom|><|start|>assistant".join(messages) + "<|eot|>"
+
+
+def test_muse_text_after_reasoning() -> None:
+    parsed = MUSE.parse(atem(" to=self<|message|>Check the data.", " to=user<|message|>Sunny."))
+    assert parsed.format_valid
+    assert parsed.message == {
+        "role": "assistant",
+        "content": "Sunny.",
+        "reasoning_content": "Check the data.",
+    }
+
+
+def test_muse_several_calls_read_with_the_declared_types() -> None:
+    text = atem(
+        " to=self<|message|>Two lookups.",
+        atem_call("lookup", ("code", "123"), ("limit", "5"), ("ok", "true"), ("tags", '["a"]')),
+        atem_call("now"),
+    )
+    parsed = MUSE.parse(text, [lookup_tool(code="string", limit="integer")])
+    assert parsed.format_valid
+    assert parsed.message["content"] == ""
+    assert parsed.message["reasoning_content"] == "Two lookups."
+    assert calls(parsed.message) == [
+        ("lookup", {"code": "123", "limit": 5, "ok": True, "tags": ["a"]}),
+        ("now", {}),
+    ]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        atem(" to=user<|message|>Sunny.", atem_call("f")),
+        atem(atem_call("f"), " to=self<|message|>Late reasoning."),
+        atem(" to=user<|message|>One.", " to=user<|message|>Two."),
+        atem(atem_call("f").replace(" to=f", " to=g")),
+        atem(atem_call("f", ("x", "1"), ("x", "2"))),
+        atem(atem_call("f") + "stray"),
+        atem(" to=self<|message|>Only reasoning."),
+        "no message at all",
+        atem(" to=user<|message|>Sun<|start|>ny."),
+    ],
+)
+def test_muse_any_other_shape_is_format_invalid(text: str) -> None:
+    parsed = MUSE.parse(text)
+    assert not parsed.format_valid
+    assert "tool_calls" not in parsed.message

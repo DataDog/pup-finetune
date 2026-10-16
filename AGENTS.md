@@ -703,14 +703,26 @@ Source lives under `src/pup_finetune/`.
   `base.py` has the `Renderer` protocol and `RendererError`. `hf.py` has
   `HFChatTemplateRenderer`, the one renderer every provider shares: the model's Hugging Face
   chat template and tokenizer at a pinned revision, one example per trainable assistant turn
-  (the prompt tokenized whole, then the completion through its stop token, re-encoded after
-  the prompt when a token merges across the boundary), and a per-row-checked one-example fast
-  path for families that pin `prefix_stable`. It also has the narrow `ChatTokenizer` seam
-  (tests inject `tests/fakes/tokenizer.py`) and the lazily imported `transformers` adapter
-  (the `hf` extra). `parsers.py` has the `ResponseParser`s (`Qwen3XmlToolParser`,
-  `Qwen3_5XmlToolParser`, `GlmXmlToolParser`, `JsonToolCallParser`) that turn sampled text
-  back into a message; `families.py` is the model-family table (`qwen3_8`, `qwen3_5`,
-  `glm5_3`), each entry a tokenizer, revision, parser and stop tokens.
+  (the prompt tokenized whole, as the template tokenizes it: `ChatTokenizer.render_tokens`,
+  then the completion through its stop token, re-encoded after the prompt when a token merges
+  across the boundary), and a per-row-checked one-example fast path for families that pin
+  `prefix_stable` (every trainable turn, and every untrained turn's prompt, a token prefix of
+  the whole render). It also has the narrow `ChatTokenizer` seam (tests inject
+  `tests/fakes/tokenizer.py`), the lazily imported `transformers` adapter (the `hf` extra;
+  `load_tokenizer` passes `trust_remote_code` only for a family that sets it, always with the
+  pinned revision, and a remote tokenizer's identity hashes the remote modules it loaded),
+  and `ChatEncoder` and `EncodedChatTokenizer`, for a tokenizer that ships no chat template.
+  `encoders.py` has those encoders (`DeepSeekV4Encoder`, DeepSeek-V4's
+  `encoding/encoding_dsv4.py` for the messages we train on, held to it by the `tokenizer`
+  tests). `parsers.py` has the `ResponseParser`s (`Qwen3XmlToolParser`,
+  `Qwen3_5XmlToolParser`, `GlmXmlToolParser`, `JsonToolCallParser`, `DeepSeekDsmlParser`,
+  `KimiXtmlParser`, `MuseAtemParser`) that turn sampled text back into a message;
+  `families.py` is the model-family table (`qwen3_8`, `qwen3_5`, `glm5_3`, `kimi_k3`,
+  `deepseek_v4`, `muse_glimmer`), each entry a tokenizer, revision, parser and stop tokens,
+  and when it needs them `trust_remote_code` (Kimi K3 only), a `chat_encoder` (DeepSeek-V4)
+  and a `check` that refuses rows the template cannot render faithfully
+  (`unsupported_message`; Muse Glimmer needs a system message and text without tool calls).
+  The `hf` extra includes `tiktoken`, which Kimi K3's tokenizer code imports.
 - `evaluation/` - replay evaluation, provider-neutral. `cases.py` turns a dataset's kept
   test-split rows into `ReplayCase`s (`cases_from_dataset`, `build_cases`): one per trained
   (`weight` not `0`) assistant message with a visible action, with the recorded prefix and
@@ -822,7 +834,9 @@ Source lives under `src/pup_finetune/`.
   `--provider-option`s with (unknown keys refused, string values decoded as JSON). `fireworks/` is the Fireworks provider: its `__init__.py` only registers the
   `FIREWORKS_API_KEY` `CredentialSpec` (the registry imports it, so `auth` and `doctor` see
   the key without loading anything heavy; the validator lists accounts); `models.py` is the
-  profile table (`qwen3p8-27b`, `glm-5p3-flash`), each entry naming a rendering family that supplies its
+  profile table (`qwen3p8-27b`, `glm-5p3-flash`, `kimi-k3`, `deepseek-v4-flash-0731`,
+  `muse-glimmer-30b`; each `max_seq_len` the `trainingContextLength` Fireworks reports),
+  each entry naming a rendering family that supplies its
   tokenizer and revision; `api.py` is a small read-only REST client over `httpx` (no SDK;
   `model_info`, `list_accounts`, injectable transport, redacted errors, 401/403 as
   `FireworksAuthError`, 404 as a missing model); `provider.py` has `FireworksProvider`
@@ -877,7 +891,8 @@ Source lives under `src/pup_finetune/`.
   session always deactivates its run and samplers. `baseten/__init__.py` only registers the
   `BASETEN_API_KEY` `CredentialSpec`, as Fireworks' does (falling back, read only, to the key
   of the default remote in `~/.trussrc`; the validator lists models). `baseten/provider.py`
-  has `BasetenProvider`: the `qwen3p5-9b`, `glm-5p3-flash` and `qwen3p8-27b` profiles, each
+  has `BasetenProvider`: the `qwen3p5-9b`, `glm-5p3-flash`, `qwen3p8-27b` and `kimi-k3`
+  profiles, each
   with its own context (tokenizer pins from
   their families), a read-only `preflight` (the SDK loads, and Loops' capabilities offer and
   enable the model with a limit of at least the `max_seq_len` option, else the profile's
@@ -917,7 +932,7 @@ delayed or capped indexing); it chains to the `api` handler installed before it,
 one `FakePup` with `FakeDatasetsApi`.
 `tests/fakes/tokenizer.py` has `FakeChatTokenizer`, a character-level chat tokenizer with a
 Qwen3.8-like Python template (optionally merging `\n\n` across the prompt boundary) or a
-GLM-5-like one (`glm5_like`).
+GLM-5-like one (`glm5_like`); its `render_tokens` encodes the rendered text whole.
 `tests/fakes/chat_api.py` has `FakeChatApi`, an OpenAI-compatible chat completions endpoint
 (scripted responses or errors first, then an answer function) and `matching_judge`.
 `tests/fakes/fireworks_api.py` has `FakeFireworksApi`, the Fireworks model and account routes
@@ -954,7 +969,10 @@ or compare model whose client they fake.
 `tests/providers/contract/` has the `RendererContract`, `BackendContract` and
 `ProviderContract` suites every provider subclasses (`tests/providers/test_fake_contract.py`
 runs them against the fake provider; `tests/providers/fireworks/` against Fireworks on its fakes;
-`tests/providers/baseten/` against Baseten on its fake).
+`tests/providers/baseten/` against Baseten on its fake; `tests/rendering/test_hf_contract.py`
+runs the `RendererContract` on each family's real tokenizer under `-m tokenizer`, and
+`RendererContract.preamble` is what every contract conversation starts with, a system message
+for Muse Glimmer).
 Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds canonical rows and
 `llmobs/` raw Export API pages.
 

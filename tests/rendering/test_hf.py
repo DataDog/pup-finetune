@@ -493,7 +493,8 @@ def test_parse_response_uses_the_response_parser() -> None:
 def test_the_tokenizer_loads_lazily_and_once(monkeypatch: pytest.MonkeyPatch) -> None:
     loads: list[tuple[str, str]] = []
 
-    def fake_load(model: str, revision: str) -> FakeChatTokenizer:
+    def fake_load(model: str, revision: str, **options: Any) -> FakeChatTokenizer:
+        assert options == {"trust_remote_code": False, "template": True}
         loads.append((model, revision))
         return FakeChatTokenizer()
 
@@ -553,6 +554,10 @@ def test_load_tokenizer_pins_the_revision_and_adapts_the_tokenizer(
     with pytest.raises(ExternalError, match="has no chat template") as excinfo:
         hf.load_tokenizer("example/tiny-chat", SHA)
     assert excinfo.value.source == "huggingface"
+    # A tokenizer whose chat an encoder renders needs no template.
+    assert hf.load_tokenizer("example/tiny-chat", SHA, template=False).token_id("a") == 97
+    hf.load_tokenizer("example/tiny-chat", SHA, trust_remote_code=True, template=False)
+    assert calls[-1] == (("example/tiny-chat",), {"revision": SHA, "trust_remote_code": True})
 
 
 def _hub_error(kind: str) -> Exception:
@@ -631,13 +636,14 @@ class _StubHFTokenizer:
     def __init__(self) -> None:
         self.kwargs: dict[str, Any] = {}
 
-    def apply_chat_template(self, messages: list[dict[str, Any]], **kwargs: Any) -> str:
+    def apply_chat_template(self, messages: list[dict[str, Any]], **kwargs: Any) -> Any:
         self.kwargs = kwargs
-        return "".join(m["content"] for m in messages)
+        text = "".join(m["content"] for m in messages)
+        return self(text, add_special_tokens=False)["input_ids"] if kwargs["tokenize"] else text
 
-    def encode(self, text: str, add_special_tokens: bool) -> list[int]:
+    def __call__(self, text: str, add_special_tokens: bool) -> dict[str, list[int]]:
         assert add_special_tokens is False
-        return [1000] if text == "<|im_end|>" else [ord(c) for c in text]
+        return {"input_ids": [1000] if text == "<|im_end|>" else [ord(c) for c in text]}
 
     def decode(self, ids: list[int], **kwargs: Any) -> str:
         assert kwargs == {"skip_special_tokens": False, "clean_up_tokenization_spaces": False}
@@ -662,8 +668,17 @@ def test_the_transformers_adapter_renders_text_and_resolves_single_tokens() -> N
         "tools": None,
         "add_generation_prompt": True,
         "tokenize": False,
+        "return_dict": False,
         "enable_thinking": False,
     }
+    tokens = adapter.render_tokens(
+        [{"role": "user", "content": "Hi"}],
+        tools=[],
+        add_generation_prompt=True,
+        template_kwargs={},
+    )
+    assert tokens == [72, 105]
+    assert stub.kwargs["tokenize"] is True
     assert adapter.encode("Hi") == [72, 105]
     assert adapter.decode([72, 1000]) == "H<|im_end|>"
     assert adapter.token_id("<|im_end|>") == 1000

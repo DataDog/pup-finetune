@@ -97,6 +97,24 @@ class FakeChatTokenizer:
             raise ValueError("No messages provided.")
         return self.template(messages, tools, add_generation_prompt, template_kwargs)
 
+    def render_tokens(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        tools: Sequence[Mapping[str, Any]] | None,
+        add_generation_prompt: bool,
+        template_kwargs: Mapping[str, Any],
+    ) -> list[int]:
+        """:meth:`render_text` encoded whole, as a Jinja template's tokens are."""
+        return self.encode(
+            self.render_text(
+                messages,
+                tools=tools,
+                add_generation_prompt=add_generation_prompt,
+                template_kwargs=template_kwargs,
+            )
+        )
+
     def encode(self, text: str) -> list[int]:
         ids: list[int] = []
         position = 0

@@ -109,10 +109,16 @@ provider bills for, with the usage the preview counts, never a price it cannot k
 ## Training matches inference
 
 A chat endpoint renders the conversation with the chat template, tokenizes the whole prompt
-text as **one** string, and the model generates the completion after it. Training must see the
-same tokens, so by default `HFChatTemplateRenderer` renders **one example per trainable
-assistant turn**: the generation prompt for `messages[:i]`, tokenized whole, followed by the
-turn's completion tokens. The loss covers the completion through its stop token and nothing
+as the template does, and the model generates the completion after it. For a Jinja template
+that is the rendered text encoded as **one** string; Kimi K3's tokenizer renders the chat in
+its repository's Python code (`trust_remote_code`) and encodes message text apart from its
+control tokens, so text that spells a control token stays text (`ChatTokenizer.render_tokens`).
+DeepSeek-V4 ships its chat format as Python and no template, so its family renders through
+`rendering/encoders.py`'s `DeepSeekV4Encoder`, which the `tokenizer` tests hold to DeepSeek's
+own encoder and test vectors at the pinned commit. Training must see the same tokens, so by
+default `HFChatTemplateRenderer` renders **one example per trainable assistant turn**: the
+generation prompt for `messages[:i]`, tokenized whole, followed by the turn's completion
+tokens. The loss covers the completion through its stop token and nothing
 after it (for role-tag families, the appended next role tag is the stop target, after any
 whitespace the template renders past the reply is dropped). A turn whose render does not
 continue its own prompt is rejected with `prompt_mismatch`.
@@ -126,14 +132,19 @@ the prompt's tokens, as the model would generate it.
 One example per row with every assistant turn trainable costs O(turns) tokens rather than
 O(turns²), but it is only correct when the renderer is **prefix-stable** for that row: for
 every trainable turn *i*, the turn's per-turn example must be an exact token prefix of the
-whole conversation tokenized once. A family may pin `prefix_stable` to try this fast path;
+whole conversation tokenized once, and so must every untrained turn's own prompt. A family may pin `prefix_stable` to try this fast path;
 the renderer then checks it on every row in `supervised_example` (rows with
 `reasoning_content` always render per turn) and raises `RendererError` with code
 `not_prefix_stable` when it does not hold, and the loop renders that row with
 `per_turn_examples`. A renderer that is not prefix-stable declares `prefix_stable = False` and
 the loop renders every row per turn. Qwen3.8 is not token prefix-stable, so `qwen3_8` renders
 per turn, as does `qwen3_5` (Qwen3.5 also drops reasoning before the last user turn); every
-turn boundary of GLM-5.3 is a special token, so `glm5_3` takes the fast path. Only
+turn boundary of GLM-5.3 is a special token, so `glm5_3` takes the fast path, as do
+`kimi_k3` and `muse_glimmer` (both keep reasoning in history) and `deepseek_v4` (whose rows
+without tools render per turn: it drops reasoning before the last user turn when no tool is
+declared). A family's `check` refuses a row its template cannot render faithfully, with
+`unsupported_message`: Muse Glimmer's template writes the current date into a conversation
+without a system message, and drops a message's text beside its tool calls. Only
 `supervised_example` raises `not_prefix_stable`; a per-turn failure carries its own code, so
 the loop never retries it per turn.
 

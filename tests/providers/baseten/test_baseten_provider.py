@@ -43,7 +43,7 @@ from pup_finetune.providers.baseten.provider import (
 )
 from pup_finetune.providers.fake import FAKE_PROFILE
 from pup_finetune.rendering.base import Renderer
-from pup_finetune.rendering.families import GLM5_3, QWEN3_5, QWEN3_8
+from pup_finetune.rendering.families import GLM5_3, KIMI_K3, QWEN3_5, QWEN3_8
 from pup_finetune.rendering.hf import ChatTokenizer
 from pup_finetune.runtime import Runtime
 from tests.fakes.baseten import Answer, BasetenTransport, FakeLoops, capabilities
@@ -136,7 +136,12 @@ def provider_for(
 
 
 class TestBasetenRenderer(RendererContract):
-    @pytest.fixture(params=PROFILES, ids=lambda profile: profile.alias)
+    # Kimi K3 renders in its repository's code, which no fake mimics; tests/rendering runs the
+    # renderer contract on its real tokenizer.
+    @pytest.fixture(
+        params=[profile for profile in PROFILES if profile.renderer in FAKE_TOKENIZERS],
+        ids=lambda profile: profile.alias,
+    )
     def renderer_factory(self, request: pytest.FixtureRequest) -> Callable[[], Renderer]:
         profile: ModelProfile = request.param
         tokenizer = FAKE_TOKENIZERS[profile.renderer]
@@ -201,11 +206,12 @@ def test_building_the_provider_loads_no_sdk_tokenizer_or_key(tmp_path: Path) -> 
 
 def test_profiles_take_their_tokenizer_from_the_family() -> None:
     by_alias = {profile.alias: profile for profile in PROFILES}
-    assert set(by_alias) == {"qwen3p5-9b", "glm-5p3-flash", "qwen3p8-27b"}
+    assert set(by_alias) == {"qwen3p5-9b", "glm-5p3-flash", "qwen3p8-27b", "kimi-k3"}
     for alias, base_model, family, max_seq_len in [
         ("qwen3p5-9b", "Qwen/Qwen3.5-9B", QWEN3_5, 131_072),
         ("glm-5p3-flash", "zai-org/GLM-5.3-Flash", GLM5_3, 131_072),
         ("qwen3p8-27b", "Qwen/Qwen3.8-27B", QWEN3_8, 262_144),
+        ("kimi-k3", "moonshotai/Kimi-K3", KIMI_K3, 131_072),
     ]:
         profile = by_alias[alias]
         assert profile.base_model == base_model
@@ -215,6 +221,7 @@ def test_profiles_take_their_tokenizer_from_the_family() -> None:
             family.key,
         )
         assert profile.max_seq_len == max_seq_len
+        assert profile.trust_remote_code == family.trust_remote_code
     assert by_alias["qwen3p5-9b"].supports_reasoning
     assert by_alias["qwen3p8-27b"].supports_reasoning
     assert not by_alias["glm-5p3-flash"].supports_reasoning
@@ -224,7 +231,9 @@ def test_an_unknown_model_lists_the_known_aliases() -> None:
     provider, _ = provider_for()
     with pytest.raises(UsageError, match="unknown baseten model 'no-such-model'") as caught:
         provider.resolve_model("no-such-model")
-    assert caught.value.hint.startswith("known models: qwen3p5-9b, glm-5p3-flash, qwen3p8-27b;")
+    assert caught.value.hint.startswith(
+        "known models: qwen3p5-9b, glm-5p3-flash, qwen3p8-27b, kimi-k3;"
+    )
 
 
 # --- preflight ---------------------------------------------------------------------------
