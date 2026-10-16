@@ -48,6 +48,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal, cast
 
+from pup_finetune import credentials
 from pup_finetune.errors import UsageError, install_hint
 from pup_finetune.inference import (
     DEFAULT_JUDGE_BASE_URL,
@@ -74,10 +75,12 @@ __all__ = [
     "billing",
     "check_available",
     "destination",
+    "login_hint",
     "open_client",
     "open_clients",
     "parse_judge",
     "recipient",
+    "require_key",
 ]
 
 RemoteProvider = Literal["fireworks", "anthropic", "openai"]
@@ -259,6 +262,28 @@ def check_available(config: JudgeConfig, *, what: str = "judge") -> None:
     (``judge``, or ``compare model``). Imports nothing."""
     if config.provider == "anthropic" and importlib.util.find_spec("anthropic") is None:
         raise _anthropic_missing(what)
+
+
+def login_hint(credential: str) -> str:
+    """How a user signs in to the provider of the ``credential`` a judge uses: our key, or
+    for Anthropic the SDK's own login."""
+    hint = credentials.login_hint(credentials.get_spec(credential))
+    return f"{hint}, or sign in with `ant auth login`" if credential == "anthropic" else hint
+
+
+def require_key(config: JudgeConfig, *, what: str = "judge") -> None:
+    """Raise the missing key's :class:`UsageError`, with its login hint, when nothing would
+    sign ``config``'s model in: no key in the environment or the keychain and, for Anthropic,
+    no login of the SDK's own. Offline: no call is made. The fake judge and compare model
+    need no key; ``what`` names the model in the message."""
+    if config.provider == "fake":
+        return
+    if credentials.key_source(config.credential) is None:
+        raise credentials.missing_key_error(
+            config.credential,
+            hint=login_hint(config.credential),
+            needed_by=f"the {what} {config.spec}",
+        )
 
 
 def _anthropic_missing(what: str = "judge") -> UsageError:

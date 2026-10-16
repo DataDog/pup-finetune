@@ -51,6 +51,8 @@ from pup_finetune.inference import ChatCompletion, ContextLimitError
 from pup_finetune.providers.base import ProviderAuthError
 from tests.fakes.chat_api import block
 
+pytestmark = pytest.mark.usefixtures("judge_keys")
+
 SETTINGS = DatasetSettings("import", SplitParams(42, 0.0, 0.0))
 AT = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 RUBRIC = Criteria.build("## Keep\nHelpful answers.\n## Drop\nWrong tool calls.", [])

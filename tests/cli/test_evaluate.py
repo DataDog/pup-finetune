@@ -261,6 +261,7 @@ def test_the_preview_repeats_only_the_settings_given(run_dir: Path) -> None:
     )
 
 
+@pytest.mark.usefixtures("judge_keys")
 def test_the_preview_names_the_judge_s_provider_and_pins_its_spec(run_dir: Path) -> None:
     result = invoke("evaluate", str(run_dir), "--judge-model", "anthropic/claude-opus-5-5")
     assert result.exit_code == 2, result.stderr
@@ -519,6 +520,7 @@ def test_other_settings_in_the_same_out_dir_are_refused(run_dir: Path) -> None:
     assert elsewhere.exit_code == 0, elsewhere.stderr
 
 
+@pytest.mark.usefixtures("judge_keys")
 def test_a_failed_calibration_generates_nothing(
     run_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -549,6 +551,7 @@ def test_a_failed_calibration_generates_nothing(
     assert fixed.exit_code == 0, fixed.stderr
 
 
+@pytest.mark.usefixtures("judge_keys")
 def test_skip_calibration_judges_without_checking(
     run_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -671,6 +674,7 @@ def test_train_previews_the_evaluation_calls(dataset: Path, tmp_path: Path) -> N
     assert not run.exists()
 
 
+@pytest.mark.usefixtures("judge_keys")
 def test_train_evaluate_names_every_recipient_the_judge_included(
     dataset: Path, tmp_path: Path
 ) -> None:
@@ -710,6 +714,7 @@ def test_evaluate_names_its_recipients_and_its_flag_to_skip_publishing(run_dir: 
     assert warning.endswith("or pass --no-publish")
 
 
+@pytest.mark.usefixtures("judge_keys")
 def test_read_only_previews_offer_no_confirm(
     dataset: Path, run_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -773,6 +778,7 @@ def test_train_evaluate_needs_the_foreground(dataset: Path, tmp_path: Path) -> N
     assert "--evaluate" in result.stderr
 
 
+@pytest.mark.usefixtures("judge_keys")
 def test_train_evaluate_trains_nothing_when_calibration_fails(
     dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

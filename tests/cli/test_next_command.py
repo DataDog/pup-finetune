@@ -166,6 +166,7 @@ def test_dataset_push_preview(
     assert output(follow(data["next_command"], raised))["pushed"] > 0
 
 
+@pytest.mark.usefixtures("judge_keys")
 def test_dataset_triage_preview(
     monkeypatch: pytest.MonkeyPatch, dataset: Path, tmp_path: Path, raised: list[BaseException]
 ) -> None:

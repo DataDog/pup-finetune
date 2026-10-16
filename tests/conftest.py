@@ -120,6 +120,21 @@ def _fixed_progress_time(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(output, "_now", lambda: PROGRESS_TIME)
 
 
+JUDGE_KEYS: dict[str, str] = {
+    "FIREWORKS_API_KEY": "fw-test-key",
+    "ANTHROPIC_API_KEY": "sk-ant-test-key",
+    "OPENAI_API_KEY": "sk-test-key",
+}
+
+
+@pytest.fixture
+def judge_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A key for every judge provider in the environment, as after `auth login`: for tests
+    that preview paid judges or compare models whose clients they fake."""
+    for name, value in JUDGE_KEYS.items():
+        monkeypatch.setenv(name, value)
+
+
 @pytest.fixture(autouse=True)
 def _no_real_keychain(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default every test to a keyring with no backend, so none can touch the real keychain."""

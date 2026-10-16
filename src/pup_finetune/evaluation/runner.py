@@ -628,9 +628,15 @@ class EvalPlan:
                 "Datadog as experiments on the pushed dataset"
             )
         from pup_finetune.judges import billing as judge_billing
+        from pup_finetune.judges import require_key
         from pup_finetune.providers.base import SamplingUsage
 
         judge_calls = remaining["judge"] + calibration
+        # --confirm would fail on a key nothing provides: fail now, never offer it.
+        if judge_calls:
+            require_key(self.judge)
+        if self.compare is not None and compared:
+            require_key(self.compare.config, what="compare model")
         judge_name = "the fake judge" if self.judge.provider == "fake" else self.judge.spec
         # Only what generates bills or is named: base and tuned answers already stored are
         # reused, so attaching a compare model never mentions the training provider.

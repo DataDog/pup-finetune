@@ -560,6 +560,7 @@ def _ends_with_its_summary(command: str, result: Result) -> dict[str, Any]:
     return data
 
 
+@pytest.mark.usefixtures("judge_keys")
 def test_the_dataset_commands_end_with_their_summaries(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

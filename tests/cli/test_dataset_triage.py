@@ -32,6 +32,8 @@ from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.inference import ChatClient, ChatCompleter
 from tests.fakes.chat_api import API_KEY, BASE_URL, FakeChatApi, block
 
+pytestmark = pytest.mark.usefixtures("judge_keys")
+
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
 
 runner = CliRunner()

@@ -260,7 +260,7 @@ class BenchmarkPlan:
         """The calls the benchmark makes; work ``--out-dir`` already holds is left out."""
         from pup_finetune.evaluation.replay import CAVEAT
         from pup_finetune.judges import billing as judge_billing
-        from pup_finetune.judges import destination
+        from pup_finetune.judges import destination, require_key
 
         settings = self.settings
         models: list[dict[str, Any]] = []
@@ -282,6 +282,9 @@ class BenchmarkPlan:
                 }
             )
         calibration = self.calibration_calls()
+        if judge_calls + calibration:
+            # --confirm would fail on a key nothing provides: fail now, never offer it.
+            require_key(self.judge)
         billing = [
             get_provider(name, self.runtime).sampling_billing(
                 SamplingUsage(calls=calls, max_tokens_per_call=settings.max_tokens)

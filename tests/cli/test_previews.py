@@ -184,6 +184,7 @@ def test_the_train_card_is_short_and_generated_from_the_preview(
     assert "Confirmation required" not in result.stderr
 
 
+@pytest.mark.usefixtures("judge_keys")
 def test_a_read_only_card_says_confirm_is_refused_and_never_cuts_the_cost(
     dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -403,6 +404,7 @@ def triage(dataset: Path, *extra: str) -> Result:
     return invoke("dataset", "triage", str(dataset), "--rule", "stay on topic", *extra)
 
 
+@pytest.mark.usefixtures("judge_keys")
 def test_the_triage_preview_lists_each_judge_once_and_estimates_tokens(dataset: Path) -> None:
     result = triage(dataset)
     assert result.exit_code == 2, result.stderr
@@ -419,6 +421,7 @@ def test_the_triage_preview_lists_each_judge_once_and_estimates_tokens(dataset: 
     assert len(lines) <= CARD_LINES
 
 
+@pytest.mark.usefixtures("judge_keys")
 def test_the_triage_next_command_runs_as_written(dataset: Path, chat: FakeChatApi) -> None:
     data = output(triage(dataset))
     assert shlex.split(data["next_command"])[-1] == "--confirm"

@@ -80,7 +80,7 @@ from pup_finetune.inference import (
     JudgeConfig,
     is_context_limit,
 )
-from pup_finetune.judges import PROVIDERS
+from pup_finetune.judges import PROVIDERS, login_hint
 from pup_finetune.providers.base import ProviderAuthError, ProviderCapacityError, TransientError
 from pup_finetune.redaction import redact
 
@@ -400,8 +400,7 @@ class AnthropicChatClient:
 
 def _login_hint() -> str:
     """How a user signs in to Anthropic: our key, or the SDK's own login."""
-    spec = credentials.get_spec(SOURCE)
-    return f"{credentials.login_hint(spec)}, or sign in with `ant auth login`"
+    return login_hint(SOURCE)
 
 
 def _text(content: object) -> str:

@@ -155,6 +155,7 @@ def test_allow_template_rubric_needs_a_rubric(dataset: Path) -> None:
     assert "--allow-template-rubric needs --rubric" in result.stderr
 
 
+@pytest.mark.usefixtures("judge_keys")
 def test_allow_template_rubric_is_not_repeated_for_an_edited_rubric(
     dataset: Path, tmp_path: Path
 ) -> None:

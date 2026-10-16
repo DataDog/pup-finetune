@@ -307,7 +307,9 @@ pup finetune dataset triage datasets/my-agent --rubric rubric.md --judges deepse
 
 Anthropic judges need the `anthropic` extra. Without an API key, they sign in the way the
 Anthropic SDK does on its own (`ANTHROPIC_AUTH_TOKEN`, or `ant auth login`), which
-`auth status` reports as `anthropic-sdk`.
+`auth status` reports as `anthropic-sdk`. A preview whose judge or compare model nothing
+would sign in fails, naming the key and how to log in, rather than offer a `--confirm` that
+would fail.
 
 ## Data handling
 

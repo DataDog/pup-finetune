@@ -252,6 +252,7 @@ def test_the_fake_compare_model_needs_development_mode(
     assert result.exit_code == 2
 
 
+@pytest.mark.usefixtures("judge_keys")
 def test_read_only_allows_an_offline_compare_and_refuses_a_paid_one(
     evaluated: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -276,11 +277,13 @@ def test_read_only_allows_an_offline_compare_and_refuses_a_paid_one(
         (ProviderAuthError("the API key is not valid (HTTP 401)", source="openai"), 1),
     ],
 )
+@pytest.mark.usefixtures("judge_keys")
 def test_a_compare_model_that_cannot_answer_is_never_attached(
     run_dir: Path, monkeypatch: pytest.MonkeyPatch, failure: Any, exit_code: int
 ) -> None:
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    if not isinstance(failure, str):
+    if isinstance(failure, str):
+        monkeypatch.delenv("OPENAI_API_KEY")
+    else:
         serve_compare(monkeypatch, CompareModel(failure))
     monkeypatch.setattr(FakeBackend, "open_session", no_session)
     result = invoke(

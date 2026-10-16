@@ -192,7 +192,8 @@ login), `openai/<model>` (`OPENAI_API_KEY`), or otherwise a Fireworks model id s
 `judge_models.JUDGE_SHORT_NAMES`), and a triage council can mix them. An alias resolves to the
 full id, which previews print and `triage.json` and `evaluation.json` freeze. A judge on a
 reasoning model asks for the lowest reasoning effort the model takes (`low` on Anthropic and
-OpenAI; per model on Fireworks, `judges.FIREWORKS_REASONING`). Anthropic
+OpenAI; per model on Fireworks, `judges.FIREWORKS_REASONING`). A preview whose judge or
+compare model has no key fails with the key's login hint (`usage`, exit 2). Anthropic
 judges need the `anthropic` extra (`uv sync --all-extras`; `uv sync` is exact, so a bare
 `uv sync --extra anthropic` removes the other extras):
 
@@ -475,7 +476,11 @@ Source lives under `src/pup_finetune/`.
   (`anthropic/` or `openai/`; anything else is a Fireworks model id, an alias resolved) with the
   provider's defaults (`PROVIDERS`; the lowest reasoning effort each model takes,
   `FIREWORKS_REASONING` per Fireworks model), `check_available` refuses a missing extra up front,
-  `open_client` and `open_clients` (one per provider) build the clients.
+  `require_key` a missing key (offline: the environment, the keychain, or the Anthropic SDK's
+  own login; the fake judge and compare model need none), which the `evaluate`, `train
+  --evaluate`, `benchmark` and `dataset triage` previews call for every model they would
+  call, so they never offer a `--confirm` that would fail on it, and `open_client` and
+  `open_clients` (one per provider) build the clients.
 - `anthropic_client.py` - `AnthropicChatClient`, the Anthropic judge (and compare model)
   client over the official SDK (the `anthropic` extra), the only module that imports
   `anthropic` (and its `httpx2`): `system` from the leading system message, OpenAI tools as
@@ -858,7 +863,9 @@ secrets, training projects, jobs and job logs `train --remote` reads, whose `rou
 into `FakeLoops.transport()`. `tests/fakes/baseten_cli.py` has `FakeBasetenCli`, the `baseten`
 CLI as a `CliRunner` that records each call with its upload tree and answers as scripted.
 `tests/fakes/keyring.py` has in-memory, failing and locked keyring backends; every test starts
-on the failing one, so none touches the real keychain.
+on the failing one, so none touches the real keychain. The conftest's `judge_keys` fixture
+puts a key for every judge provider in the environment, for tests that preview a paid judge
+or compare model whose client they fake.
 `tests/providers/contract/` has the `RendererContract`, `BackendContract` and
 `ProviderContract` suites every provider subclasses (`tests/providers/test_fake_contract.py`
 runs them against the fake provider; `tests/providers/fireworks/` against Fireworks on its fakes;
