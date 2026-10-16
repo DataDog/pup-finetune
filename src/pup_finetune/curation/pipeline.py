@@ -230,10 +230,9 @@ def pipeline_state(
         else:
             name, project = state.dataset_name, state.project
             rows = by_split if by_split is not None else dataset.rows_by_split()
-            unpushed, edited = compare_receipt(state, rows)
-            pending, changed, changed_ids = len(unpushed), len(edited), tuple(sorted(edited))
-            kept_ids = {row.id for split in SPLITS for row in rows.get(split, ())}
-            stale = sum(row_id not in kept_ids for row_id in state.record_ids)
+            comparison = compare_receipt(state, rows)
+            pending, changed = len(comparison.pending), len(comparison.changed)
+            changed_ids, stale = tuple(sorted(comparison.changed)), len(comparison.stale)
             push = (
                 "pushed_with_changed_rows"
                 if changed

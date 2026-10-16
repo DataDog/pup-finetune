@@ -27,6 +27,7 @@ from pup_finetune.data.push import (
     PUSH_FILE,
     SOURCE_TAG,
     PushTerminated,
+    compare_receipt,
     dataset_description,
     dataset_record,
     plan_push,
@@ -722,6 +723,23 @@ def test_a_dropped_row_that_changed_is_stale_not_changed(
     plan = plan_push(dataset, project=PROJECT, name=NAME)
     assert plan.changed_records == {}
     assert plan.stale_records == {row.id: first.state.record_ids[row.id]}
+
+
+def test_the_receipt_comparison_sorts_kept_rows_into_pending_changed_and_stale(
+    dataset: DatasetDir, fake: FakePup
+) -> None:
+    first = push(dataset, fake)
+    changed, dropped = ALL_ROWS[3], ALL_ROWS[5]
+    dataset.add(ALL_ROWS[FIRST:], settings=IMPORT, updated=[with_reasoning(changed, "Think.")])
+    drop(dataset, dropped.id)
+    comparison = compare_receipt(read_push_state(dataset), dataset.rows_by_split())
+    assert [item.row_id for item in comparison.pending] == [
+        row_id for row_id in push_order(dataset) if row_id not in first.state.record_ids
+    ]
+    assert comparison.changed == {changed.id: first.state.record_ids[changed.id]}
+    assert comparison.stale == {dropped.id: first.state.record_ids[dropped.id]}
+    never = compare_receipt(None, dataset.rows_by_split())
+    assert (len(never.pending), never.changed, never.stale) == (len(ALL_ROWS) - 1, {}, {})
 
 
 def test_a_receipt_without_record_digests_reports_no_changed_rows(

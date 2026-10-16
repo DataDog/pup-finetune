@@ -285,24 +285,41 @@ class PendingRecord:
     record: dict[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class ReceiptComparison:
+    """How a dataset's kept rows stand against its push receipt (:func:`compare_receipt`)."""
+
+    pending: list[PendingRecord]
+    """Kept rows the receipt lists no record for, train rows first, then validation and test."""
+    changed: dict[str, str]
+    """Kept rows whose record differs from the digest the receipt saved for it: row id to
+    record id."""
+    stale: dict[str, str]
+    """Rows the receipt lists that are no longer kept: row id to record id."""
+
+
 def compare_receipt(
     state: PushState | None, by_split: Mapping[SplitName, Sequence[TrainingRow]]
-) -> tuple[list[PendingRecord], dict[str, str]]:
-    """The kept rows ``by_split`` that ``state`` (``None``: never pushed) lists no record
-    for, and those whose record changed since it was pushed (row id to record id): the
-    record the row makes now differs from the digest the receipt saved for it."""
+) -> ReceiptComparison:
+    """The kept rows ``by_split`` against ``state`` (``None``: never pushed): those it lists
+    no record for, those whose record changed since it was pushed (the record the row makes
+    now differs from the digest the receipt saved for it), and the rows it lists that are no
+    longer kept."""
     pushed = state.record_ids if state is not None else {}
     digests = state.record_digests if state is not None else {}
     pending: list[PendingRecord] = []
     changed: dict[str, str] = {}
+    kept: set[str] = set()
     for split in SPLITS:
         for row in by_split.get(split, ()):
+            kept.add(row.id)
             record = dataset_record(row, split)
             if row.id not in pushed:
                 pending.append(PendingRecord(row.id, split, record))
             elif (sent := digests.get(row.id)) is not None and sent != record_digest(record):
                 changed[row.id] = pushed[row.id]
-    return pending, changed
+    stale = {row_id: record_id for row_id, record_id in pushed.items() if row_id not in kept}
+    return ReceiptComparison(pending, changed, stale)
 
 
 @dataclass(frozen=True, slots=True)
@@ -424,21 +441,18 @@ def plan_push(dataset: DatasetDir, *, project: str, name: str) -> PushPlan:
         _check_state(dataset, state, project=project, name=name, digest=digest)
     by_split = dataset.rows_by_split()
     check_isolation(by_split)
-    pushed = state.record_ids if state is not None else {}
-    kept = {row.id for split in SPLITS for row in by_split[split]}
-    pending, changed = compare_receipt(state, by_split)
+    kept_by_split = {split: len(by_split[split]) for split in SPLITS}
+    comparison = compare_receipt(state, by_split)
     return PushPlan(
         directory=dataset.path,
         project=project,
         dataset_name=name,
         state=state,
-        pending=pending,
-        already_pushed=len(kept) - len(pending),
-        kept_by_split={split: len(by_split[split]) for split in SPLITS},
-        stale_records={
-            row_id: record_id for row_id, record_id in pushed.items() if row_id not in kept
-        },
-        changed_records=changed,
+        pending=comparison.pending,
+        already_pushed=sum(kept_by_split.values()) - len(comparison.pending),
+        kept_by_split=kept_by_split,
+        stale_records=comparison.stale,
+        changed_records=comparison.changed,
         settings_hash=digest,
     )
 
