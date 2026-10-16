@@ -1582,16 +1582,21 @@ def next_after_training(run_dir: Path) -> dict[str, Any]:
 def _unpublished_next(run_dir: Path, found: RecordedEvaluation) -> dict[str, Any]:
     """What follows a complete evaluation the missing push kept unpublished, read from the
     run and its dataset as they are now: while the dataset still needs a push, no next
-    command and the steps the evaluation gave (:func:`_push_first`); once it is pushed, the
-    evaluation's own command, which previews publishing it, or deploying it unpublished.
-    A dataset or push receipt it cannot read gets that command too, whose preview reports
-    it."""
+    command and the push-first steps the evaluation gave (:func:`_push_first`, without its
+    compare suggestion); once it is pushed, the evaluation's own command, which previews
+    publishing it, or deploying it unpublished. A dataset or push receipt it cannot read
+    gets no next command, since that command's preview would fail on it, and a step that
+    says why."""
     rerun = found.command(run_dir)
     try:
         dataset = DatasetDir(Path(str(RunDir(run_dir).manifest()["dataset_dir"])))
         publishing = plan_publishing(dataset, enabled=True)
-    except (FinetuneError, KeyError):
-        return {"next_command": rerun, "next_steps": []}
+    except (FinetuneError, KeyError) as exc:
+        why = exc.message if isinstance(exc, FinetuneError) else "the run names no dataset"
+        return {
+            "next_command": None,
+            "next_steps": [step(rerun, f"rerun it once its dataset can be read: {why}")],
+        }
     pushing = _push_first(publishing, rerun, run_dir, complete=True)
     if pushing:
         return {"next_command": None, "next_steps": pushing}
