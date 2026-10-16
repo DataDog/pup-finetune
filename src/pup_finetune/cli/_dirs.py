@@ -4,8 +4,7 @@
 #
 # This product includes software developed at Datadog (https://www.datadoghq.com/).
 # Copyright 2026-present Datadog, Inc.
-"""The wrong kind of directory: a dataset passed to a run command, a run to a dataset one, or
-a dataset that is not in Datadog to a command that trains or benchmarks on it.
+"""The wrong kind of directory: a dataset passed to a run command, or a run to a dataset one.
 
 Without these checks the mistake surfaces as a missing file (``ds/run.json does not exist``)
 or, for ``dataset import`` and ``dataset pull``, as a dataset written into a run directory.
@@ -21,17 +20,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from pup_finetune.curation.pipeline import pipeline_state
 from pup_finetune.data.dataset_dir import DatasetDir
-from pup_finetune.data.push import PUSH_FILE
 from pup_finetune.display import display_path, quoted
-from pup_finetune.errors import (
-    DirectoryUsageError,
-    FinetuneError,
-    NotADatasetDir,
-    NotARunDir,
-    RunDirNotEmpty,
-)
+from pup_finetune.errors import FinetuneError, NotADatasetDir, NotARunDir, RunDirNotEmpty
 from pup_finetune.output import info
 from pup_finetune.runs import RUN_FILE, RunDir, is_run_id
 from pup_finetune.workspace import RUNS_DIR, find_run_dir
@@ -41,7 +32,6 @@ __all__ = [
     "RUN_DIR_GIVEN",
     "RUN_DIR_NEWEST",
     "require_dataset_dir",
-    "require_in_datadog",
     "require_new_run_dir",
     "require_run_dir",
     "resolve_run_dir",
@@ -144,47 +134,3 @@ def require_new_run_dir(path: Path) -> None:
             f"{path} is a dataset directory, not a new run directory",
             hint=f"train on it with --dataset {_q(path)}, and omit --run-dir or pass a new one",
         )
-
-
-def require_in_datadog(path: Path, command: str) -> None:
-    """Raise :class:`~pup_finetune.errors.DirectoryUsageError` unless every kept row of the
-    dataset in ``path`` is in Datadog: its push receipt lists them all and no push is in
-    flight. ``command`` (``train``, ``benchmark``) names who refuses it.
-
-    What trains is then what the Agent Observability dataset holds, so a run and its
-    evaluation trace back to records in Datadog. A directory ``dataset fetch`` made has the
-    receipt of the dataset it read, so it passes."""
-    dataset = DatasetDir(path)
-    dataset.settings()  # NotADatasetDir, with how to make one
-    state = pipeline_state(dataset)
-    if state.push == "pushed":
-        return
-    where = display_path(path)
-    fetch = (
-        "or train on a dataset already in Datadog: `pup finetune dataset fetch <DIR> "
-        "--project <PROJECT> --name <NAME>`"
-    )
-    if state.push == "not_pushed":
-        raise DirectoryUsageError(
-            f"{command} reads a dataset that is in Datadog, and {where} was never pushed",
-            hint=f"push its {state.kept} kept rows first: `pup finetune dataset push "
-            f"{_q(path)} --name <NAME>` (a remote write; it previews first), {fetch}",
-        )
-    if state.push == "pushed_with_new_rows":
-        missing = (
-            f"{state.pending} of its kept rows are not"
-            if state.pending
-            else "its last push did not finish, so its rows may not be"
-        )
-        raise DirectoryUsageError(
-            f"{command} reads a dataset that is in Datadog, and {missing} in dataset "
-            f"{state.dataset_name!r} yet",
-            hint=f"push the rest: `pup finetune dataset push {_q(path)}` sends them to the "
-            f"dataset {PUSH_FILE} names (a remote write; it previews first), {fetch}",
-        )
-    raise DirectoryUsageError(
-        f"{command} reads a dataset that is in Datadog, and whether {where} is cannot be "
-        f"read: {PUSH_FILE} is unreadable",
-        hint=f"`pup finetune dataset show {_q(path)}` says why; fix or move aside {PUSH_FILE}, "
-        f"then push again, {fetch}",
-    )

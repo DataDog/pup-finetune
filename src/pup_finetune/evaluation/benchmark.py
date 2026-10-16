@@ -50,7 +50,7 @@ from pup_finetune.evaluation.runner import (
 from pup_finetune.next_steps import PROGRAM, command, step
 from pup_finetune.output import info
 from pup_finetune.progress import EvaluationProgress
-from pup_finetune.providers import get_provider, require_packages
+from pup_finetune.providers import get_provider, provider_info, require_packages
 from pup_finetune.providers.base import (
     Generation,
     LoraConfig,
@@ -354,11 +354,19 @@ def plan_benchmark(
     Raises :class:`UsageError` for fewer than one model, a model given twice, a missing
     package, a judge that is one of the models, or a test split with no case.
     """
-    from pup_finetune.evaluation.cases import cases_from_dataset
+    from pup_finetune.curation.pipeline import require_in_datadog
+    from pup_finetune.evaluation.cases import build_cases
     from pup_finetune.evaluation.judge import check_judge_differs
 
     dataset = DatasetDir(dataset_dir)
-    dataset.settings()  # NotADatasetDir, with how to make one, before anything else
+    by_split = dataset.rows_by_split()  # read once: what is checked is what is replayed
+    require_in_datadog(
+        dataset,
+        by_split,
+        "benchmark",
+        directory=dataset_dir,
+        offline=all(provider_info(provider, runtime).offline for _, provider in models),
+    )
     candidates: list[Candidate] = []
     for alias, provider_name in models:
         require_packages(provider_name, runtime, "evaluate")
@@ -377,14 +385,14 @@ def plan_benchmark(
     )
     for candidate in candidates:
         check_judge_differs(judge, candidate.profile.base_model)
-    cases = cases_from_dataset(
-        dataset,
-        split="test",
+    cases = build_cases(
+        by_split["test"],
         max_cases_per_trajectory=settings.max_cases_per_trajectory,
         seed=settings.seed,
+        split="test",
     )
     if not cases:
-        rows = len(dataset.rows_for_split("test"))
+        rows = len(by_split["test"])
         raise UsageError(
             f"nothing to benchmark: the test split of {display_path(dataset.path)} has {rows} "
             "kept rows and no assistant turn to replay",

@@ -285,6 +285,26 @@ class PendingRecord:
     record: dict[str, Any]
 
 
+def compare_receipt(
+    state: PushState | None, by_split: Mapping[SplitName, Sequence[TrainingRow]]
+) -> tuple[list[PendingRecord], dict[str, str]]:
+    """The kept rows ``by_split`` that ``state`` (``None``: never pushed) lists no record
+    for, and those whose record changed since it was pushed (row id to record id): the
+    record the row makes now differs from the digest the receipt saved for it."""
+    pushed = state.record_ids if state is not None else {}
+    digests = state.record_digests if state is not None else {}
+    pending: list[PendingRecord] = []
+    changed: dict[str, str] = {}
+    for split in SPLITS:
+        for row in by_split.get(split, ()):
+            record = dataset_record(row, split)
+            if row.id not in pushed:
+                pending.append(PendingRecord(row.id, split, record))
+            elif (sent := digests.get(row.id)) is not None and sent != record_digest(record):
+                changed[row.id] = pushed[row.id]
+    return pending, changed
+
+
 @dataclass(frozen=True, slots=True)
 class PushReceipt:
     """What :func:`push_dataset` did, and the receipt saved in ``push.json``."""
@@ -405,18 +425,8 @@ def plan_push(dataset: DatasetDir, *, project: str, name: str) -> PushPlan:
     by_split = dataset.rows_by_split()
     check_isolation(by_split)
     pushed = state.record_ids if state is not None else {}
-    digests = state.record_digests if state is not None else {}
     kept = {row.id for split in SPLITS for row in by_split[split]}
-    pending: list[PendingRecord] = []
-    changed: dict[str, str] = {}
-    for split in SPLITS:
-        for row in by_split[split]:
-            if row.id not in pushed:
-                pending.append(PendingRecord(row.id, split, dataset_record(row, split)))
-            elif (sent := digests.get(row.id)) is not None and sent != record_digest(
-                dataset_record(row, split)
-            ):
-                changed[row.id] = pushed[row.id]
+    pending, changed = compare_receipt(state, by_split)
     return PushPlan(
         directory=dataset.path,
         project=project,

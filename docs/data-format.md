@@ -101,11 +101,18 @@ A content list is joined when every part is text. An assistant message with neit
 nor tool calls is dropped. Within a trace, a conversation that is a prefix or a duplicate of
 another is dropped, so each sub-agent keeps its own row. A row's split comes from its trace,
 so every row of a trace lands in the same split, and copies of one request share it too: rows
-whose user messages are the same once lowercased, with quoted strings as `?`, numbers as `0`
-and whitespace collapsed, join their traces into one group, and a group gets one split. A
-trace keeps its split once assigned; a new trace joining a request whose copies are already in
-two splits takes the split holding most of them and is counted as a `split_conflicts` (with a
-warning). `split_groups` in a dataset's summary is how many groups its traces form. In a dataset of fewer than 50 traces, a
+whose user messages are the same once lowercased, with numbers as `0` and whitespace
+collapsed, join their traces into one group, and a group gets one split. A request shorter
+than 64 characters that way (a fixed prompt such as "Summarize the above") joins nothing, and
+one whose group would hold more than 5% of the rows (at least 4) is not joined either: its
+copies keep a split per trace, with a warning naming some of them. A trace keeps its split
+once assigned; a new trace joining copies already in two splits takes the split holding most
+of their kept rows. Whenever the kept rows of a group are in more than one split (copies
+recorded apart before they were grouped), the summary's `split_conflicts` counts the groups
+and the rows outside their group's split, names up to 10 of them per split, and names
+`split_conflicts.jsonl`, a drop label for each of them that `dataset label --file` takes (the
+result's first next step). `split_groups` in a dataset's summary is how many groups its traces
+form. In a dataset of fewer than 50 traces, a
 validation or test split more than twice its fraction, or 10 or more points off it, is
 warned about (`validation has 5 of 14 rows (36%, 4 of 13 traces) though
 --validation-fraction is 0.1 ...`): splits are assigned per trace and request, so small datasets vary,
@@ -168,6 +175,7 @@ content. Keep it out of version control.
 | `labels.jsonl` | Keep/drop decisions appended by `dataset label` and `dataset triage`: `{"id", "keep", "reason", "by", "at"}`, where `by` is `manual` (recorded with `dataset label`) or `judge` (decided by the `dataset triage` council; triage never relabels a manual row). Older files that say `agent` or `human` read as `manual`. The last label of an id wins, a reason is required to drop, and a dropped row never trains and is never pushed. |
 | `splits.json` | The split of every trace (one per group of traces and copies of one request) and the frozen seed and fractions. A trace never changes split once assigned. |
 | `summary.json` | Counts, splits and warnings, rewritten after every change. |
+| `split_conflicts.jsonl` | While a group of copies has kept rows in more than one split, a drop label (`{"id", "keep": false, "reason"}`) for each kept row outside the split holding most of the group, for `dataset label --file`; rewritten with `summary.json`, and removed once there are none. |
 | `raw/` | For a Datadog pull, the Export API pages it read, so a rerun resumes without fetching them again. |
 | `pull_limits.json` | For a Datadog pull, the last pull's `--target-count` and `--max-candidates`, which a rerun without them continues toward. Not frozen. |
 | `judgments.jsonl`, `triage.json` | For `dataset triage`, every judge vote (`{"row_id", "row_sha256", "judge", "criteria_sha256", "keep", "reason", "at"}`, plus `"too_long": true` when the judge refused the row as longer than its context window, which drops it) and the frozen rubric hash, judges and the settings they are called with. |
@@ -254,7 +262,7 @@ Every dataset command's result (`import`, `pull`, `show`, `sample`, `label`, `tr
 {
   "rows": {"accepted": 14, "kept": 13, "dropped": 1, "unlabeled": 12},
   "triage": "incomplete",
-  "push": {"status": "pushed_with_new_rows", "pending": 3}
+  "push": {"status": "pushed_with_new_rows", "pending": 3, "changed": 0}
 }
 ```
 
@@ -262,8 +270,12 @@ Every dataset command's result (`import`, `pull`, `show`, `sample`, `label`, `tr
 label is backed by the votes under the frozen rubric and judges, `unreadable` when
 `triage.json` or `judgments.jsonl` cannot be read, and `incomplete` otherwise (for example
 after `--max-rows`). `push.status` is `not_pushed` without `push.json`, `pushed`
-when it lists every kept row, `pushed_with_new_rows` when `pending` kept rows are not pushed
-yet, and `unreadable` (with `pending` null) when `push.json` cannot be read. An `unreadable`
+when it lists every kept row as it is now, `pushed_with_new_rows` when `pending` kept rows are
+not pushed yet (or a push did not finish), `pushed_with_changed_rows` when `changed` kept rows
+differ from the records pushed for them (a push only adds records, so only a push to a new
+dataset holds them as they are), and `unreadable` (with `pending` and `changed` null) when
+`push.json` cannot be read. `train` and `benchmark` on a real provider read only a `pushed`
+dataset. An `unreadable`
 part comes with a warning in the result that names the file and the problem.
 
 ## What a command prints, and what its files keep

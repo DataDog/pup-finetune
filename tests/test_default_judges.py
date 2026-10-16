@@ -32,6 +32,7 @@ from pup_finetune.judge_models import (
 from pup_finetune.judges import default_judges
 from pup_finetune.runtime import Runtime
 from tests.fakes.keyring import LockedKeyring, MemoryKeyring
+from tests.fakes.setup import ALL_PACKAGES, installed_packages
 
 ROWS = Path(__file__).resolve().parent / "fixtures" / "rows" / "tool_use.jsonl"
 ANTHROPIC_KEY = "sk-ant-synthetic-0000-test-key"
@@ -89,11 +90,11 @@ def test_a_key_in_the_keychain_and_the_anthropic_sdk_login_count(
     memory.set_password("pup-finetune", "openai", OPENAI_KEY)
     monkeypatch.setattr(keyring.core, "_keyring_backend", memory)
     judges, source = default_judges(EVALUATE_DEFAULTS, env={})
-    assert (judges, source) == ((MINI,), "default: OpenAI credential (the OS keychain)")
+    assert (judges, source) == ((MINI,), "default: OpenAI credential (keychain)")
     sdk = {"ANTHROPIC_AUTH_TOKEN": "synthetic-token"}
     assert default_judges(EVALUATE_DEFAULTS, env=sdk) == (
         (HAIKU,),
-        "default: Anthropic credential (the Anthropic SDK login)",
+        "default: Anthropic credential (Anthropic SDK login)",
     )
 
 
@@ -102,6 +103,36 @@ def test_a_locked_keychain_falls_through_to_the_next_default(
 ) -> None:
     monkeypatch.setattr(keyring.core, "_keyring_backend", LockedKeyring())
     assert default_judges(EVALUATE_DEFAULTS, env={})[0] == (DEFAULT_JUDGE_MODEL,)
+
+
+def test_an_anthropic_key_without_its_sdk_is_passed_over_and_said_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installed_packages(monkeypatch, ALL_PACKAGES - {"anthropic"})
+    unused = (
+        "; the Anthropic credential is not used, as Anthropic judges need the 'anthropic' "
+        "package, which is not installed"
+    )
+    env = {"ANTHROPIC_API_KEY": ANTHROPIC_KEY}
+    assert default_judges(EVALUATE_DEFAULTS, env=env) == (
+        (DEFAULT_JUDGE_MODEL,),
+        "default: no Anthropic or OpenAI judge available" + unused,
+    )
+    both = {**env, "OPENAI_API_KEY": OPENAI_KEY}
+    assert default_judges(TRIAGE_DEFAULTS, env=both) == (
+        (MINI, ASTRA),
+        "default: OpenAI credential (OPENAI_API_KEY)" + unused,
+    )
+
+
+def test_an_evaluate_preview_without_the_anthropic_sdk_keeps_the_fireworks_judge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    installed_packages(monkeypatch, ALL_PACKAGES - {"anthropic"})
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
+    config, source = runner_module.resolve_judge(None, provider="fireworks", runtime=Runtime())
+    assert config.spec == DEFAULT_JUDGE_MODEL
+    assert source.startswith("default: no Anthropic or OpenAI judge available")
 
 
 def test_evaluate_resolves_the_default_and_keeps_a_frozen_judge(

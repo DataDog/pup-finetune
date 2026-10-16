@@ -58,7 +58,7 @@ def test_import_reports_the_pipeline_and_warns_about_the_skewed_split(imported: 
     assert data["pipeline"] == {
         "rows": {"accepted": 14, "kept": 14, "dropped": 0, "unlabeled": 14},
         "triage": "none",
-        "push": {"status": "not_pushed", "pending": 14},
+        "push": {"status": "not_pushed", "pending": 14, "changed": 0},
     }
     assert data["splits"] == {"train": 7, "validation": 5, "test": 2}
     assert SKEW in data["warnings"]
@@ -91,7 +91,7 @@ def test_labels_move_the_pipeline_on_to_a_first_push_then_training(tmp_path: Pat
     assert data["pipeline"] == {
         "rows": {"accepted": 14, "kept": 13, "dropped": 1, "unlabeled": 12},
         "triage": "none",
-        "push": {"status": "not_pushed", "pending": 13},
+        "push": {"status": "not_pushed", "pending": 13, "changed": 0},
     }
     assert data["next_command"] is None
     assert [step["command"] for step in data["next_steps"]] == [
@@ -116,7 +116,7 @@ def test_an_unreadable_receipt_is_reported_not_guessed() -> None:
     result = invoke("sample", "ds", "--count", "1")
     assert result.exit_code == 0, result.stderr
     data = output(result)
-    assert data["pipeline"]["push"] == {"status": "unreadable", "pending": None}
+    assert data["pipeline"]["push"] == {"status": "unreadable", "pending": None, "changed": None}
     assert "pup finetune dataset show ds" in [step["command"] for step in data["next_steps"]]
     # The warning names the file and the problem.
     [warning] = [w for w in data["warnings"] if PUSH_FILE in w]

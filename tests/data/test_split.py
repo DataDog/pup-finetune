@@ -19,13 +19,16 @@ from pup_finetune.data.schema import TrainingRow, validate_row
 from pup_finetune.data.split import (
     SPLITS,
     SplitAssignments,
+    SplitConflict,
     SplitName,
     SplitParams,
     assign_split,
     assign_splits,
     check_isolation,
+    conflict_summary,
     request_key,
     skew_warnings,
+    split_conflicts,
     split_groups,
     split_position,
     split_warnings,
@@ -265,83 +268,173 @@ def test_split_warnings_flag_empty_splits_and_few_train_rows() -> None:
 
 # --- copies of one request ------------------------------------------------------------------
 
-
-def test_a_request_key_ignores_quoted_strings_numbers_case_and_whitespace() -> None:
-    first = make_row("a", 'Book "Port Alder" for 2 nights,  starting 2026-03-01')
-    second = make_row("b", "book 'Eastbrook' for 14 nights, starting 2025-12-24")
-    assert request_key(first) == request_key(second)
-    assert request_key(make_row("c", "Book Port Alder for 2 nights")) != request_key(first)
-    # An apostrophe inside a word is not a quote.
-    assert request_key(make_row("d", "don't stop at it's end")) != request_key(
-        make_row("e", "don't stop at its end")
-    )
+BOOKING = "Please book a room at the harbour hotel for {n} nights starting on 2026-03-{d:02d}."
+SUBAGENT = (
+    "You are the summarizer. Read the conversation above and summarize it in three short "
+    "bullet points for the user."
+)
 
 
-def test_a_row_without_user_text_has_no_request_key() -> None:
-    row = validate_row({"id": "a", "messages": [{"role": "assistant", "content": "Hi."}]})
-    assert request_key(row) is None
+def booking(row_id: str, n: int, *, trace_id: str) -> TrainingRow:
+    return make_row(row_id, BOOKING.format(n=n, d=n % 28 + 1), trace_id=trace_id)
+
+
+def filler(count: int) -> list[TrainingRow]:
+    """``count`` unrelated rows, a trace each, so a dataset has room for groups."""
+    return [make_row(f"filler-{n}", f"Unrelated {n}", trace_id=f"filler-{n}") for n in range(count)]
+
+
+def test_a_request_key_ignores_numbers_case_and_whitespace_only() -> None:
+    first = booking("a", 2, trace_id="t1")
+    second = make_row("b", BOOKING.format(n=14, d=24).upper().replace(" ", "   "))
+    assert request_key(first) == request_key(second) is not None
+    other = make_row("c", BOOKING.format(n=2, d=3).replace("harbour", "station"))
+    assert request_key(other) != request_key(first)
+
+
+def test_a_templated_prompt_with_other_quoted_text_is_another_request() -> None:
+    template = 'Classify support ticket {n} into billing, shipping or other: "{text}"'
+    first = make_row("a", template.format(n=1, text="My card was charged twice for one order."))
+    second = make_row("b", template.format(n=2, text="The parcel never arrived at my door."))
+    assert request_key(first) != request_key(second)
+
+
+def test_json_user_turns_with_other_values_are_other_requests() -> None:
+    def turn(row_id: str, city: str, nights: int) -> TrainingRow:
+        body = {"task": "book_hotel", "city": city, "nights": nights, "currency": "EUR"}
+        return make_row(row_id, json.dumps(body))
+
+    assert request_key(turn("a", "Port Alder", 2)) != request_key(turn("b", "Eastbrook", 2))
+    # The same object with another number is a copy.
+    assert request_key(turn("c", "Port Alder", 9)) == request_key(turn("a", "Port Alder", 2))
+
+
+def test_a_short_request_joins_nothing() -> None:
+    assert request_key(make_row("a", "Summarize the above")) is None
     assert request_key(make_row("b", "   ")) is None
+    row = validate_row({"id": "c", "messages": [{"role": "assistant", "content": "Hi."}]})
+    assert request_key(row) is None
+    rows = [make_row(f"r{n}", "Summarize the above", trace_id=f"t{n}") for n in range(3)]
+    assert [[row.id for row in group] for group in split_groups(rows).groups] == [
+        ["r0"],
+        ["r1"],
+        ["r2"],
+    ]
 
 
 def test_rows_sharing_a_trace_or_a_request_form_one_group() -> None:
     rows = [
-        make_row("a", "Weather in Port Alder?", trace_id="t1"),
-        make_row("b", "Weather in Port Alder?", trace_id="t2"),  # the request of a
+        booking("a", 1, trace_id="t1"),
+        booking("b", 2, trace_id="t2"),  # the request of a
         make_row("c", "Something else", trace_id="t2"),  # the trace of b
         make_row("d", "Unrelated", trace_id="t3"),
-        make_row("e", "No user text", trace_id="t4"),
-        make_row("f", "No user text", trace_id="t5"),  # the request of e
+        *filler(20),
     ]
-    groups = [[row.id for row in group] for group in split_groups(rows)]
-    assert groups == [["a", "b", "c"], ["d"], ["e", "f"]]
+    grouped = split_groups(rows)
+    assert [[row.id for row in group] for group in grouped.groups][:2] == [["a", "b", "c"], ["d"]]
+    assert grouped.ungrouped == []
+
+
+def test_repeated_copies_still_group() -> None:
+    copies = [booking(f"copy-{n}", n, trace_id=f"t{n}") for n in range(5)]
+    grouped = split_groups([*copies, *filler(95)])
+    assert grouped.cap == 5
+    assert [row.id for row in grouped.groups[0]] == [row.id for row in copies]
+    assert grouped.ungrouped == []
+
+
+def test_a_fixed_sub_agent_turn_shared_by_traces_does_not_pull_them_together() -> None:
+    # Each of 30 traces runs the same summarizer sub-agent over its own conversation.
+    rows = [
+        row
+        for n in range(30)
+        for row in (
+            make_row(f"main-{n}", f"Plan trip {n}", trace_id=f"t{n}"),
+            make_row(f"sub-{n}", SUBAGENT, trace_id=f"t{n}"),
+        )
+    ]
+    grouped = split_groups(rows)
+    # Grouping its 30 traces would put 60 of 60 rows in one split: over the cap of 4.
+    assert len(grouped.groups) == 30
+    assert grouped.ungrouped == [[f"sub-{n}" for n in range(30)]]
+    splits = SplitAssignments(SplitParams())
+    assign_splits(rows, splits)
+    assert len(set(splits.assignments.values())) == 3
 
 
 def copies(count: int) -> list[TrainingRow]:
     """``count`` copies of one request, each in a trace of its own."""
-    return [make_row(f"row-{n}", f"Order {n} please", trace_id=KEYS[n]) for n in range(count)]
+    return [booking(f"row-{n}", n, trace_id=KEYS[n]) for n in range(count)]
 
 
 def test_copies_of_one_request_in_new_traces_share_one_split() -> None:
+    rows = [*copies(4), *filler(76)]
     splits = SplitAssignments(SplitParams())
-    assert assign_splits(copies(40), splits) == 0
-    assert set(splits.assignments) == set(KEYS[:40])
-    assert len(set(splits.assignments.values())) == 1
+    assign_splits(rows, splits)
+    assert len({splits.assignments[key] for key in KEYS[:4]}) == 1
     # By the first key in sorted order, whatever the order of the rows.
     again = SplitAssignments(SplitParams())
-    assign_splits(list(reversed(copies(40))), again)
-    assert (
-        again.assignments
-        == splits.assignments
-        == dict.fromkeys(KEYS[:40], SplitParams().assign(KEYS[0]))
-    )
+    assign_splits(list(reversed(rows)), again)
+    assert again.assignments == splits.assignments
+    assert splits.assignments[KEYS[1]] == SplitParams().assign(KEYS[0])
 
 
 def test_a_new_copy_takes_the_split_its_request_already_has() -> None:
     splits = SplitAssignments(SplitParams(), {KEYS[0]: "test"})
-    assert assign_splits(copies(3), splits) == 0
+    assign_splits(copies(3), splits)
     assert splits.assignments == dict.fromkeys(KEYS[:3], "test")
+    assert split_conflicts(split_groups(copies(3)), splits) == []
 
 
-def test_a_new_trace_linking_copies_already_apart_takes_the_larger_side_and_is_counted() -> None:
+def test_a_new_trace_linking_copies_already_apart_takes_the_larger_side() -> None:
     # Recorded before copies were grouped: two traces of one request in two splits.
     rows = [
-        make_row("a", "Order 1", trace_id="t1"),
-        make_row("b", "Order 2", trace_id="t2"),
+        booking("a", 1, trace_id="t1"),
+        booking("b", 2, trace_id="t2"),
         make_row("c", "Refund 3", trace_id="t2"),
-        make_row("d", "Order 4", trace_id="t3"),  # new: it links t1 and t2
+        booking("d", 4, trace_id="t3"),  # new: it links t1 and t2
     ]
     splits = SplitAssignments(SplitParams(), {"t1": "test", "t2": "train"})
-    assert assign_splits(rows, splits) == 1
+    assign_splits(rows, splits)
     # t2 holds two of the group's three recorded rows; recorded keys never move.
     assert splits.assignments == {"t1": "test", "t2": "train", "t3": "train"}
+    assert split_conflicts(split_groups(rows), splits) == [SplitConflict("train", {"test": ["a"]})]
 
 
 def test_a_tie_between_the_sides_goes_to_the_first_split() -> None:
-    rows = [make_row("a", "Order 1", trace_id="t1"), make_row("b", "Order 2", trace_id="t2")]
-    rows.append(make_row("c", "Order 3", trace_id="t3"))
+    rows = [booking("a", 1, trace_id="t1"), booking("b", 2, trace_id="t2")]
+    rows.append(booking("c", 3, trace_id="t3"))
     splits = SplitAssignments(SplitParams(), {"t1": "test", "t2": "validation"})
-    assert assign_splits(rows, splits) == 1
+    assign_splits(rows, splits)
     assert splits.assignments["t3"] == "validation"
+
+
+def test_a_row_added_to_a_recorded_trace_that_links_two_splits_is_a_conflict() -> None:
+    # Every trace is recorded already: the new row joins t2 and repeats t1's request.
+    rows = [booking("a", 1, trace_id="t1"), make_row("b", "Something else", trace_id="t2")]
+    rows.append(booking("c", 2, trace_id="t2"))
+    splits = SplitAssignments(SplitParams(), {"t1": "test", "t2": "train"})
+    assign_splits(rows, splits)
+    assert splits.assignments == {"t1": "test", "t2": "train"}
+    assert split_conflicts(split_groups(rows), splits) == [SplitConflict("train", {"test": ["a"]})]
+    # Dropping the copy outside the group's split leaves no conflict.
+    assert split_conflicts(split_groups(rows), splits, dropped={"a"}) == []
+
+
+def test_a_conflict_summary_names_a_few_rows_per_split() -> None:
+    conflicts = [
+        SplitConflict("train", {"test": [f"t-{n:02d}" for n in range(12)]}),
+        SplitConflict("test", {"validation": ["v-1"], "train": ["r-1"]}),
+    ]
+    assert conflict_summary(conflicts) == {
+        "groups": 2,
+        "rows": 14,
+        "row_ids": {
+            "train": ["r-1"],
+            "validation": ["v-1"],
+            "test": [f"t-{n:02d}" for n in range(10)],
+        },
+    }
 
 
 # --- skew -----------------------------------------------------------------------------------

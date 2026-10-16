@@ -75,8 +75,8 @@ def test_import_emits_counts_and_next_command(tmp_path: Path) -> None:
         "added": TOOL_USE_COUNT,
         "unchanged": 0,
         "excluded": 0,
-        "split_conflicts": 0,
     }
+    assert data["split_conflicts"] == {"groups": 0, "rows": 0, "row_ids": {}, "labels_file": None}
     # Nothing is labeled yet: review a sample; labeling is a step, with a file to write first.
     quoted = shlex.quote(str(target))
     assert data["next_command"] == f"pup finetune dataset sample {quoted} --count 20"
@@ -287,42 +287,91 @@ def test_dataset_without_a_subcommand_shows_help() -> None:
 # --- copies of one request ------------------------------------------------------------------
 
 
-def copies_file(path: Path, *, first: int, count: int) -> Path:
-    """``count`` rows, each in a trace of its own, asking one request with another city and
-    number of nights, and one unrelated row per trace."""
-    lines = []
-    for n in range(first, first + count):
-        trace = {"trace_id": f"synthetic-copy-trace-{n:03d}"}
-        for kind, text in (
-            ("copy", f'Book "City {n}" for {n % 5 + 1} nights'),
-            ("other", f"Tell me about item {chr(97 + n % 26) * (1 + n // 26)}"),
-        ):
-            row = {
-                "id": f"synthetic-{kind}-{n:03d}",
-                "messages": [
-                    {"role": "user", "content": text},
-                    {"role": "assistant", "content": f"Done for {kind} {n}."},
-                ],
-                "source": trace,
-            }
-            lines.append(json.dumps(row) + "\n")
-    path.write_text("".join(lines))
+BOOKING = "Please book a room at the harbour hotel for {n} nights starting on 2026-03-{d:02d}."
+
+
+def synthetic_row(row_id: str, text: str, trace_id: str) -> dict[str, Any]:
+    return {
+        "id": row_id,
+        "messages": [
+            {"role": "user", "content": text},
+            {"role": "assistant", "content": f"Done for {row_id}."},
+        ],
+        "source": {"trace_id": trace_id},
+    }
+
+
+def rows_file(path: Path, rows: list[dict[str, Any]]) -> Path:
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
     return path
 
 
-def test_copies_of_one_request_share_one_split_with_their_traces(tmp_path: Path) -> None:
+def copy_rows(first: int, count: int) -> list[dict[str, Any]]:
+    """``count`` copies of one request (another number of nights each), a trace each."""
+    return [
+        synthetic_row(f"synthetic-copy-{n:03d}", BOOKING.format(n=n, d=n % 28 + 1), f"copy-{n:03d}")
+        for n in range(first, first + count)
+    ]
+
+
+def other_rows(count: int) -> list[dict[str, Any]]:
+    return [
+        synthetic_row(f"synthetic-other-{n:03d}", f"Tell me about item {n}", f"other-{n:03d}")
+        for n in range(count)
+    ]
+
+
+def test_copies_of_one_request_share_one_split(tmp_path: Path) -> None:
     target = tmp_path / "ds"
-    result = import_rows(target, copies_file(tmp_path / "a.jsonl", first=0, count=30))
+    first = rows_file(tmp_path / "a.jsonl", [*copy_rows(0, 3), *other_rows(77)])
+    data = output_json(import_rows(target, first))
+    splits = json.loads((target / "splits.json").read_text())["assignments"]
+    assert len({splits[f"copy-{n:03d}"] for n in range(3)}) == 1
+    assert data["split_groups"] == 78
+    assert data["split_conflicts"]["groups"] == 0
+    # A later trace asking it again takes the same split.
+    again = import_rows(target, rows_file(tmp_path / "b.jsonl", copy_rows(3, 1)))
+    assert again.exit_code == 0, again.stderr
+    splits = json.loads((target / "splits.json").read_text())["assignments"]
+    assert splits["copy-003"] == splits["copy-000"]
+
+
+def test_copies_recorded_apart_are_named_with_labels_to_drop_them(tmp_path: Path) -> None:
+    target = tmp_path / "ds"
+    # Two traces recorded in different splits, as an earlier grouping could leave them.
+    first = [synthetic_row("a", BOOKING.format(n=1, d=2), "t1")]
+    first.append(synthetic_row("b", "Something else entirely", "t2"))
+    assert import_rows(target, rows_file(tmp_path / "a.jsonl", first)).exit_code == 0
+    splits_path = target / "splits.json"
+    stored = json.loads(splits_path.read_text())
+    splits_path.write_text(json.dumps({**stored, "assignments": {"t1": "test", "t2": "train"}}))
+    # A new row of t2 repeats t1's request: every trace is recorded, yet the copies are apart.
+    linking = [synthetic_row("c", BOOKING.format(n=7, d=9), "t2")]
+    result = import_rows(target, rows_file(tmp_path / "b.jsonl", linking))
     assert result.exit_code == 0, result.stderr
     data = output_json(result)
-    # 30 traces joined by the one request: one group, so one split holds all 60 rows.
-    assert data["split_groups"] == 1
-    assert sorted(data["splits"].values()) == [0, 0, 60]
-    assert data["import"]["split_conflicts"] == 0
-    # A later trace asking it again takes the same split.
-    again = import_rows(target, copies_file(tmp_path / "b.jsonl", first=30, count=1))
-    assert output_json(again)["splits"] == {
-        split: count + (2 if count else 0) for split, count in data["splits"].items()
+    assert data["split_conflicts"] == {
+        "groups": 1,
+        "rows": 1,
+        "row_ids": {"test": ["a"]},
+        "labels_file": "split_conflicts.jsonl",
     }
+    assert any("1 kept rows are copies of a request" in w for w in data["warnings"])
+    labels_file = target / "split_conflicts.jsonl"
+    assert [json.loads(line) for line in labels_file.read_text().splitlines()] == [
+        {
+            "id": "a",
+            "keep": False,
+            "reason": "a copy of a request whose copies are mostly in the train split",
+        }
+    ]
+    drop = data["next_steps"][0]["command"]
+    assert drop == f"pup finetune dataset label {shlex.quote(str(target))} --file " + shlex.quote(
+        str(labels_file)
+    )
+    labeled = invoke(*shlex.split(drop)[3:])
+    assert labeled.exit_code == 0, labeled.stderr
+    assert output_json(labeled)["next_steps"][0]["command"] != drop
+    assert not labels_file.exists()
     show = output_json(invoke("show", str(target)))
-    assert (show["summary"]["traces"], show["summary"]["split_groups"]) == (31, 1)
+    assert show["summary"]["split_conflicts"]["groups"] == 0

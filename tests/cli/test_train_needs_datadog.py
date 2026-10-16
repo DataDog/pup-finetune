@@ -59,7 +59,32 @@ def test_train_refuses_kept_rows_not_pushed_yet(dataset: Path) -> None:
     result = train(dataset)
     assert result.exit_code == 2
     assert "1 of its kept rows are not in dataset 'synthetic-sft' yet" in result.stderr
-    assert "`pup finetune dataset push ds` sends them" in result.stderr
+    assert (
+        "push the 1 kept rows not pushed yet to dataset 'synthetic-sft', which push.json "
+        "names (a remote write; it previews first): `pup finetune dataset push ds`"
+    ) in result.stderr
+
+
+def test_train_refuses_kept_rows_changed_after_the_push(dataset: Path) -> None:
+    mark_pushed(dataset)
+    rows = [json.loads(line) for line in (dataset / "rows.jsonl").read_text().splitlines()]
+    rows[0]["messages"][-1]["content"] = "An answer edited after the push."
+    (dataset / "rows.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    result = train(dataset)
+    assert result.exit_code == 2
+    assert (
+        "1 of its kept rows changed after they were pushed to dataset 'synthetic-sft'"
+        in result.stderr
+    )
+    assert "move push.json aside" in result.stderr
+    assert "`pup finetune dataset push ds --name <NEW_NAME>`" in result.stderr
+    show = json.loads(invoke("dataset", "show", str(dataset)).stdout)
+    assert show["pipeline"]["push"] == {
+        "status": "pushed_with_changed_rows",
+        "pending": 0,
+        "changed": 1,
+    }
+    assert not any(step["command"].startswith("pup finetune train") for step in show["next_steps"])
 
 
 def test_train_refuses_a_push_still_in_flight(dataset: Path) -> None:
@@ -69,14 +94,15 @@ def test_train_refuses_a_push_still_in_flight(dataset: Path) -> None:
     (dataset / PUSH_FILE).write_text(json.dumps(receipt))
     result = train(dataset)
     assert result.exit_code == 2
-    assert "its last push did not finish" in result.stderr
+    assert "its last push to dataset 'synthetic-sft' did not finish" in result.stderr
+    assert "finish the interrupted push to dataset 'synthetic-sft'" in result.stderr
 
 
 def test_train_refuses_an_unreadable_push_receipt(dataset: Path) -> None:
     (dataset / PUSH_FILE).write_text("{not json")
     result = train(dataset)
     assert result.exit_code == 2
-    assert f"{PUSH_FILE} is unreadable" in result.stderr
+    assert f"whether ds was pushed is unknown: {PUSH_FILE} cannot be read" in result.stderr
     assert "`pup finetune dataset show ds`" in result.stderr
 
 

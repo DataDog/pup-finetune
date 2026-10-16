@@ -56,7 +56,6 @@ from pup_finetune.cli._dirs import (
     RUN_DIR_BY_ID,
     RUN_DIR_NEWEST,
     require_dataset_dir,
-    require_in_datadog,
     require_new_run_dir,
     resolve_run_ref,
 )
@@ -71,6 +70,7 @@ from pup_finetune.cli._views import (
     status_view,
     train_view,
 )
+from pup_finetune.curation.pipeline import require_in_datadog
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.display import display_path, joined, quoted
 from pup_finetune.errors import (
@@ -945,9 +945,15 @@ def train(
     RunDir(run_dir).require_empty(default=default_dir)
     require_dataset_dir(dataset_dir)
     provider_name, provider_source = provider_for_model(model, provider_name, runtime)
-    # An offline provider never leaves the machine, so it trains on any dataset directory.
-    if not provider_info(provider_name, runtime).offline:
-        require_in_datadog(dataset_dir, "train")
+    dataset = DatasetDir(dataset_dir)
+    by_split = dataset.rows_by_split()  # read once: what is checked is what is rendered
+    require_in_datadog(
+        dataset,
+        by_split,
+        "train",
+        directory=dataset_dir,
+        offline=provider_info(provider_name, runtime).offline,
+    )
     # What the preview can know fails here, not after --confirm: a package the provider needs
     # (its SDK, the renderer), or a flag it cannot honor.
     if remote:
@@ -989,10 +995,8 @@ def train(
     require_supported_flags(provider.name, runtime, flags)
     spec = _spec(flags, options)
     provider.preflight(profile)
-    dataset = DatasetDir(dataset_dir)
-    dataset.settings()  # a clear error when it is not a dataset directory
     renderer = provider.renderer(profile)
-    inputs = build_inputs(dataset, renderer, profile)
+    inputs = build_inputs(dataset, renderer, profile, by_split)
     defaults_used = _defaults_used(ctx, raw_options)
     seq_flag = MAX_SEQ_LEN_FLAG if max_seq_len is not None else MAX_SEQ_LEN_OPTION_FLAG
     preview = _preview(

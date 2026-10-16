@@ -39,7 +39,6 @@ from pup_finetune.curation.samples import (
 )
 from pup_finetune.data.convert import ReasoningMode
 from pup_finetune.data.dataset_dir import (
-    AddResult,
     DatasetDir,
     DatasetSettings,
     read_import_file,
@@ -106,7 +105,7 @@ dataset_app = group(
         "Build a dataset directory from your traces or a JSONL file, review and label its "
         "rows, and push the kept rows to Datadog. Rows are split into train, validation and "
         "test sets by trace, the same way every time, and copies of one request (the same "
-        "user messages but for quoted strings and numbers) share a split.",
+        "user messages but for numbers, case and spacing) share a split.",
         "Dataset files hold conversation content, so directories are created 0700 and files 0600.",
     ),
 )
@@ -417,20 +416,50 @@ def dataset_next(
     review (``None`` right after one, ``sampled``), and labeling them, by hand or with a
     judge council, are the steps; a fetched dataset (``dataset fetch``) was curated in
     Datadog, so its rows go straight to training. A triage that is not complete gets a step to finish it.
-    Once rows are labeled, the push is a step: with ``--name`` while the dataset was never
-    pushed, and without any flag (the receipt names the dataset) while kept rows are not
-    pushed yet. Training (and benchmarking) is a step only once every kept row is pushed,
-    since it reads a dataset that is in Datadog; its preview needs a model that cannot be
-    chosen without guessing. ``directory`` is the directory as the user typed it; ``summary`` is
-    the dataset's summary when the caller has it already. A pipeline file that cannot be
-    read adds ``warnings`` (see :func:`merge_next`).
+    Once rows are labeled, the push is a step (:meth:`~pup_finetune.curation.pipeline.
+    Pipeline.push_step`). Training (and benchmarking) is a step only once every kept row is
+    pushed as it is now, since it reads a dataset that is in Datadog; its preview needs a
+    model that cannot be chosen without guessing. Kept copies of a request outside their
+    group's split come first: a ``dataset label`` step with the drop labels the summary wrote
+    for them. ``directory`` is the directory as the user typed it; ``summary`` is the
+    dataset's summary when the caller has it already. A pipeline file that cannot be read
+    adds ``warnings`` (see :func:`merge_next`).
     """
+    summary = summary if summary is not None else dataset.summary()
     state = pipeline_state(dataset, summary)
+    push_step = state.push_step(directory)
     shown: dict[str, Any] = {"pipeline": state.to_json()}
     if state.warnings:
         shown["warnings"] = list(state.warnings)
     if not state.accepted:
         return {**shown, "next_command": None, "next_steps": []}
+    following = _next_by_state(dataset, directory, state, push_step, sampled=sampled)
+    conflicts = summary["split_conflicts"]
+    if conflicts["labels_file"] is not None:
+        following["next_steps"].insert(
+            0,
+            step(
+                command(
+                    "dataset", "label", directory, "--file", directory / conflicts["labels_file"]
+                ),
+                f"drop the {conflicts['rows']} kept rows outside their group's split (see "
+                "split_conflicts), so no copy of a test request is trained on; the file holds "
+                "a drop label for each, to review first (a label is never withdrawn)",
+            ),
+        )
+    return {**shown, **following}
+
+
+def _next_by_state(
+    dataset: DatasetDir,
+    directory: Path,
+    state: Pipeline,
+    push_step: dict[str, str] | None,
+    *,
+    sampled: bool,
+) -> dict[str, Any]:
+    """:func:`dataset_next`'s ``next_command`` and ``next_steps`` for ``state``, which has
+    accepted rows."""
     label_step = step(
         template("dataset", "label", directory, "--file", "<LABELS_FILE>"),
         'record keep/drop decisions: write <LABELS_FILE> first, one {"id", "keep", '
@@ -476,20 +505,21 @@ def dataset_next(
             "to start from)",
         )
         sample = command("dataset", "sample", directory, "--count", REVIEW_SAMPLE_SIZE)
+        # Rows are labeled before a first push; a dataset pushed before gets its advice.
+        pushing = push_step if push_step is not None and state.push != "not_pushed" else None
         return {
-            **shown,
             "next_command": None if sampled else sample,
             "next_steps": [
                 label_step,
                 *(triage_steps or [triage_step]),
-                *_push_steps(state, directory),
+                *([pushing] if pushing is not None else []),
             ],
         }
     steps = [label_step] if sampled else []
     steps += _pull_more_steps(dataset, directory, state)
     steps += triage_steps
     steps.append(step(command("models", "list"), "see the models a provider can fine-tune"))
-    if state.push == "pushed":
+    if push_step is None:
         steps += [
             step(
                 template("benchmark", directory, "--models", "<MODELS>"),
@@ -502,17 +532,9 @@ def dataset_next(
                 "user (its provider is inferred, and the run goes in runs/RUN_ID)",
             ),
         ]
-    elif state.push == "not_pushed":
-        steps.append(
-            step(
-                template("dataset", "push", directory, "--name", "<NAME>"),
-                "push the kept rows to Datadog before training: train and benchmark read a "
-                "dataset that is in Datadog, and an evaluation publishes its experiments on "
-                "it (a remote write; it previews first)",
-            )
-        )
-    steps += _push_steps(state, directory)
-    return {**shown, "next_command": None, "next_steps": steps}
+    else:
+        steps.append(push_step)
+    return {"next_command": None, "next_steps": steps}
 
 
 def _pull_more_steps(dataset: DatasetDir, directory: Path, state: Pipeline) -> list[dict[str, str]]:
@@ -541,41 +563,6 @@ def merge_next(result: dict[str, Any], following: Mapping[str, Any]) -> dict[str
     if warnings:
         result["warnings"] = [*(result.get("warnings") or []), *warnings]
     return result
-
-
-def _push_steps(state: Pipeline, directory: Path) -> list[dict[str, str]]:
-    """The step for a dataset pushed before: the rows not pushed yet, or why it is unknown."""
-    if state.push == "pushed_with_new_rows":
-        return [
-            step(
-                command("dataset", "push", directory),
-                f"push the {state.pending} kept rows not pushed yet to dataset "
-                f"{state.dataset_name!r}, which {PUSH_FILE} names, before training on it (a "
-                "remote write; it previews first)",
-            )
-        ]
-    if state.push == "unreadable":
-        return [
-            step(
-                command("dataset", "show", directory),
-                f"{PUSH_FILE} cannot be read, so whether the dataset was pushed is unknown; "
-                "show reports why",
-            )
-        ]
-    return []
-
-
-def _conflict_warnings(added: AddResult) -> list[str]:
-    """A warning when new traces joined copies of one request that were already split two
-    ways (see :func:`~pup_finetune.data.split.assign_splits`)."""
-    if not added.split_conflicts:
-        return []
-    return [
-        f"{added.split_conflicts} new traces repeat a request whose copies were already in "
-        "two splits; each took the split holding most of those copies, and the copies "
-        "already split stay where they are (drop the train or validation ones with "
-        "`dataset label` to keep the test split clean)"
-    ]
 
 
 def _ignore_note(directory: Path) -> ParentSetup:
@@ -620,14 +607,14 @@ def import_rows(
             "excluded_by_code": summary["excluded_by_code"],
             "splits": summary["splits"],
             "split_groups": summary["split_groups"],
+            "split_conflicts": summary["split_conflicts"],
             "notes": notes.notes,
-            "warnings": [*notes.warnings, *summary["warnings"], *_conflict_warnings(result)],
+            "warnings": [*notes.warnings, *summary["warnings"]],
             "import": {
                 "file": str(file),
                 "added": result.added,
                 "unchanged": result.unchanged,
                 "excluded": result.excluded,
-                "split_conflicts": result.split_conflicts,
             },
         },
         dataset_next(dataset, directory, summary=summary),
@@ -678,8 +665,9 @@ def fetch(
             "excluded_by_code": summary["excluded_by_code"],
             "splits": summary["splits"],
             "split_groups": summary["split_groups"],
+            "split_conflicts": summary["split_conflicts"],
             "notes": notes.notes,
-            "warnings": [*notes.warnings, *summary["warnings"], *_conflict_warnings(fetched.added)],
+            "warnings": [*notes.warnings, *summary["warnings"]],
             "fetch": {
                 "project": project,
                 "dataset_name": name,
@@ -689,7 +677,6 @@ def fetch(
                 "added": fetched.added.added,
                 "unchanged": fetched.added.unchanged,
                 "excluded": fetched.added.excluded,
-                "split_conflicts": fetched.added.split_conflicts,
             },
         },
         dataset_next(dataset, directory, summary=summary),
@@ -951,12 +938,12 @@ def pull_rows(
         "exclusion_explanations": _explanations(summary["excluded_by_code"]),
         "splits": summary["splits"],
         "split_groups": summary["split_groups"],
+        "split_conflicts": summary["split_conflicts"],
         "notes": notes.notes,
         "warnings": [
             *notes.warnings,
             *_collection_warnings(collection, options),
             *summary["warnings"],
-            *_conflict_warnings(added),
             *pipeline_warnings,
         ],
         "window": window,
@@ -970,7 +957,6 @@ def pull_rows(
             "excluded": added.excluded,
             "retired": added.retired,
             "updated": added.updated,
-            "split_conflicts": added.split_conflicts,
             **collection.stats(),
         },
         **following,

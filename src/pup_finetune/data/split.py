@@ -8,11 +8,15 @@
 
 A row's split is recorded per split key (its trace id; see
 :func:`~pup_finetune.data.schema.split_key`), so every row of a trace lands in the same split.
-Copies of one request share a split too: rows whose user messages differ only in quoted
-strings, numbers, case or whitespace (:func:`request_key`) and the rows of their traces form
-one group (:func:`split_groups`), and :func:`assign_splits` gives a group one split, so a
-test answer is not also trained on. Assignments are persisted in ``splits.json``: once a key
-is assigned it never moves, and new keys are assigned with the fractions frozen there.
+Copies of one request share a split too: rows whose user messages differ only in numbers,
+case or whitespace (:func:`request_key`) and the rows of their traces form one group
+(:func:`split_groups`), and :func:`assign_splits` gives a group one split, so a test answer
+is not also trained on. A short request (a fixed prompt such as "Summarize the above") joins
+nothing, and a request repeated in more rows than :func:`group_cap` allows is left
+ungrouped and reported rather than pulling a large share of the dataset into one split.
+Assignments are persisted in ``splits.json``: once a key is assigned it never moves, and new
+keys are assigned with the fractions frozen there. Copies recorded in different splits
+before they were grouped stay there; :func:`split_conflicts` names them.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ import hashlib
 import math
 import re
 from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Self, cast
@@ -187,83 +191,173 @@ def check_isolation(rows_by_split: Mapping[SplitName, Iterable[TrainingRow]]) ->
                 )
 
 
-_QUOTED = re.compile(r""""(?:[^"\\]|\\.)*"|(?<!\w)'(?:[^'\\]|\\.)*'(?!\w)""")
-"""A quoted string literal: double-quoted, or single-quoted where the quotes are not
-apostrophes inside a word."""
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")
 _SPACE = re.compile(r"\s+")
 
+REQUEST_MIN_CHARS = 64
+"""A request whose normalized user text is shorter than this joins nothing: short fixed
+prompts are asked in unrelated conversations, so sharing one says nothing about copies."""
+GROUP_SHARE = 0.05
+"""The largest share of a dataset's rows a request may gather into one group."""
+GROUP_MIN_ROWS = 4
+"""The cap on a request's group in a dataset small enough that :data:`GROUP_SHARE` of it
+is fewer rows, so a pair of copies always groups."""
+SHOWN_CONFLICT_IDS = 10
+"""How many row ids per split a summary names for split conflicts."""
+
 
 def request_key(row: TrainingRow) -> str | None:
-    """A hash of what ``row`` asks: every user message's text, lowercased, with quoted string
-    literals as ``?``, numbers as ``0`` and whitespace collapsed. ``None`` when the row has
-    no user text, so such rows are grouped by trace alone."""
+    """A hash of what ``row`` asks: every user message's text, lowercased, with numbers as
+    ``0`` and whitespace collapsed. ``None`` when that text is shorter than
+    :data:`REQUEST_MIN_CHARS`, so such rows are grouped by trace alone."""
     texts = []
     for message in row.messages:
-        if message.role != "user":
-            continue
-        text = _NUMBER.sub("0", _QUOTED.sub("?", message.content.lower()))
-        texts.append(_SPACE.sub(" ", text).strip())
-    if not any(texts):
+        if message.role == "user":
+            texts.append(_SPACE.sub(" ", _NUMBER.sub("0", message.content.lower())).strip())
+    text = "\x1f".join(texts)
+    if len(text) < REQUEST_MIN_CHARS:
         return None
-    return hashlib.sha256("\x1f".join(texts).encode()).hexdigest()
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
-def split_groups(rows: Iterable[TrainingRow]) -> list[list[TrainingRow]]:
+def group_cap(rows: int) -> int:
+    """The most rows a request may gather into one group in a dataset of ``rows`` rows."""
+    return max(GROUP_MIN_ROWS, math.floor(GROUP_SHARE * rows))
+
+
+@dataclass(frozen=True, slots=True)
+class SplitGroups:
+    """Rows in the groups that share a split (:func:`split_groups`)."""
+
+    groups: list[list[TrainingRow]]
+    """The rows of each group, groups and rows in the order of the rows given."""
+    ungrouped: list[list[str]]
+    """The row ids of each request too common to group by: joining its copies would grow
+    their group past :func:`group_cap`, so they are split by trace instead."""
+    cap: int
+
+
+def split_groups(rows: Iterable[TrainingRow]) -> SplitGroups:
     """``rows`` in groups that share a split: the rows of one trace, joined with every row
-    asking the same request (:func:`request_key`), transitively. Groups and the rows in each
-    keep the order of ``rows``."""
-    parent: dict[str, str] = {}
-
-    def find(node: str) -> str:
-        parent.setdefault(node, node)
-        while parent[node] != node:
-            parent[node] = parent[parent[node]]
-            node = parent[node]
-        return node
-
+    asking the same request (:func:`request_key`), transitively, unless that would grow a
+    group past :func:`group_cap` rows. Requests are joined in the order of their keys, so
+    the groups depend on the set of rows only."""
     listed = list(rows)
+    parent: dict[str, str] = {}
+    size = Counter(split_key(row) for row in listed)
+
+    def find(key: str) -> str:
+        parent.setdefault(key, key)
+        while parent[key] != key:
+            parent[key] = parent[parent[key]]
+            key = parent[key]
+        return key
+
+    asked: dict[str, list[TrainingRow]] = {}
     for row in listed:
-        trace = find(f"trace:{split_key(row)}")
-        request = request_key(row)
-        if request is not None:
-            parent[find(f"request:{request}")] = trace
+        if (request := request_key(row)) is not None:
+            asked.setdefault(request, []).append(row)
+    cap = group_cap(len(listed))
+    ungrouped: list[list[str]] = []
+    for request in sorted(asked):
+        copies = asked[request]
+        roots = sorted({find(split_key(row)) for row in copies})
+        if len(roots) < 2:
+            continue
+        if sum(size[root] for root in roots) > cap:
+            ungrouped.append([row.id for row in copies])
+            continue
+        for root in roots[1:]:
+            parent[root] = roots[0]
+            size[roots[0]] += size.pop(root)
     groups: dict[str, list[TrainingRow]] = {}
     for row in listed:
-        groups.setdefault(find(f"trace:{split_key(row)}"), []).append(row)
-    return list(groups.values())
+        groups.setdefault(find(split_key(row)), []).append(row)
+    return SplitGroups(list(groups.values()), ungrouped, cap)
 
 
-def assign_splits(rows: Iterable[TrainingRow], splits: SplitAssignments) -> int:
+def _most(counts: Counter[SplitName]) -> SplitName:
+    """The split ``counts`` holds most of, the first of :data:`SPLITS` on a tie."""
+    return max(SPLITS, key=lambda name: (counts[name], -SPLITS.index(name)))
+
+
+def assign_splits(
+    rows: Iterable[TrainingRow], splits: SplitAssignments, *, dropped: Collection[str] = ()
+) -> None:
     """Assign each split key of ``rows`` that ``splits`` does not hold yet, by group
-    (:func:`split_groups`); returns the number of new keys that joined groups already split
-    two ways (``split_conflicts``).
+    (:func:`split_groups`); ``dropped`` are the ids of rows labeled drop.
 
-    A recorded key never moves. A group with no key recorded takes the split of its first
-    key in sorted order, so the result does not depend on the order of ``rows``. A new key
-    joining a group whose recorded keys share one split takes it. One joining recorded keys
-    of several splits (copies already apart, now linked by the new trace) takes the split
-    holding most of the group's rows, the first of :data:`SPLITS` on a tie, and is counted.
+    A recorded key never moves. A new key joining a group with recorded keys takes the
+    split holding most of the group's kept rows (all of its rows, when none is kept), the
+    first of :data:`SPLITS` on a tie. A group with no key recorded takes the split of its
+    first key in sorted order. Within one call the result depends on the set of rows only,
+    not their order; rows added over several calls can land apart from where the same rows
+    added at once would, since what is recorded stays.
     """
-    conflicts = 0
-    for group in split_groups(rows):
+    for group in split_groups(rows).groups:
         keys = sorted({split_key(row) for row in group})
         new = [key for key in keys if splits.get(key) is None]
         if not new:
             continue
+        held = [(row, splits.get(split_key(row))) for row in group]
         recorded = Counter(
-            held for row in group if (held := splits.get(split_key(row))) is not None
-        )
-        split: SplitName
-        if not recorded:
-            split = splits.params.assign(keys[0])
-        else:
-            split = max(SPLITS, key=lambda name: (recorded[name], -SPLITS.index(name)))
-            if len(recorded) > 1:
-                conflicts += len(new)
+            split for row, split in held if split is not None and row.id not in dropped
+        ) or Counter(split for _row, split in held if split is not None)
+        split = _most(recorded) if recorded else splits.params.assign(keys[0])
         for key in new:
             splits.assignments[key] = split
+
+
+@dataclass(frozen=True, slots=True)
+class SplitConflict:
+    """A group whose kept rows are in more than one split: copies of a request recorded
+    apart before they were grouped. Recorded splits never move, so dropping the copies
+    outside :attr:`split` keeps the others from being both trained and tested on."""
+
+    split: SplitName
+    """The split holding most of the group's kept rows (the first of :data:`SPLITS` on a
+    tie)."""
+    outside: dict[SplitName, list[str]]
+    """The ids of the group's kept rows in each other split."""
+
+
+def split_conflicts(
+    groups: SplitGroups, splits: SplitAssignments, *, dropped: Collection[str] = ()
+) -> list[SplitConflict]:
+    """Every group of ``groups`` whose rows not in ``dropped`` are in more than one split of
+    ``splits``; a row without a recorded split is left out."""
+    conflicts: list[SplitConflict] = []
+    for group in groups.groups:
+        by_split: dict[SplitName, list[str]] = {}
+        for row in group:
+            if row.id not in dropped and (split := splits.get(split_key(row))) is not None:
+                by_split.setdefault(split, []).append(row.id)
+        if len(by_split) < 2:
+            continue
+        most = _most(Counter({split: len(ids) for split, ids in by_split.items()}))
+        conflicts.append(
+            SplitConflict(most, {split: ids for split, ids in by_split.items() if split != most})
+        )
     return conflicts
+
+
+def conflict_summary(conflicts: Sequence[SplitConflict]) -> dict[str, Any]:
+    """``conflicts`` as a dataset summary reports them: how many groups, how many kept rows
+    are outside their group's split, and up to :data:`SHOWN_CONFLICT_IDS` of their ids per
+    split."""
+    outside: dict[SplitName, list[str]] = {}
+    for conflict in conflicts:
+        for split, ids in conflict.outside.items():
+            outside.setdefault(split, []).extend(ids)
+    return {
+        "groups": len(conflicts),
+        "rows": sum(len(ids) for ids in outside.values()),
+        "row_ids": {
+            split: sorted(outside[split])[:SHOWN_CONFLICT_IDS]
+            for split in SPLITS
+            if split in outside
+        },
+    }
 
 
 def split_warnings(counts: Mapping[SplitName, int]) -> list[str]:

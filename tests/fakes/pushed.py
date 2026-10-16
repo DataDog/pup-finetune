@@ -16,7 +16,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from pup_finetune.data.dataset_dir import DatasetDir
-from pup_finetune.data.push import PushState, push_path
+from pup_finetune.data.push import PushState, dataset_record, push_path, record_digest
+from pup_finetune.data.split import SPLITS
 from pup_finetune.storage import atomic_write_json, settings_hash
 
 DATASET_NAME = "synthetic-sft"
@@ -27,6 +28,8 @@ def mark_pushed(directory: Path, *, name: str = DATASET_NAME) -> Path:
     """Record every kept row of the dataset in ``directory`` as pushed to dataset ``name``;
     returns ``directory``."""
     dataset = DatasetDir(directory)
+    by_split = dataset.rows_by_split()
+    rows = [(row, split) for split in SPLITS for row in by_split[split]]
     state = PushState(
         project=PROJECT,
         project_id="synthetic-project-id",
@@ -35,7 +38,8 @@ def mark_pushed(directory: Path, *, name: str = DATASET_NAME) -> Path:
         push_id="synthetic-push-id",
         dataset_id="synthetic-dataset-id",
         dataset_version=1,
-        record_ids={row.id: f"synthetic-record-{n}" for n, row in enumerate(dataset.kept_rows())},
+        record_ids={row.id: f"synthetic-record-{n}" for n, (row, _split) in enumerate(rows)},
+        record_digests={row.id: record_digest(dataset_record(row, split)) for row, split in rows},
         pushed_at="2026-01-01T00:00:00+00:00",
     )
     atomic_write_json(push_path(dataset), state.to_json())

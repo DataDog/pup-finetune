@@ -49,7 +49,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal, cast
 
-from pup_finetune.errors import UsageError, install_hint
+from pup_finetune.errors import ExternalError, UsageError, install_hint
 from pup_finetune.inference import (
     DEFAULT_JUDGE_BASE_URL,
     ChatClient,
@@ -104,30 +104,44 @@ ANTHROPIC_INSTALL_HINT: Final = install_hint("anthropic")
 def default_judges(
     table: Sequence[JudgeDefault], *, env: Mapping[str, str] = os.environ
 ) -> tuple[tuple[str, ...], str]:
-    """The judges of the first row of ``table`` whose credentials all resolve, and where the
-    default came from, for a preview: ``default: Anthropic credential (ANTHROPIC_API_KEY)``.
+    """The judges of the first row of ``table`` whose providers all have a credential and
+    the package their judges need, and where the default came from, for a preview:
+    ``default: Anthropic credential (ANTHROPIC_API_KEY)``.
 
     Resolving makes no network call: the environment variable, the OS keychain, or the
-    Anthropic SDK's own login (:func:`~pup_finetune.credentials.key_source`). A keychain
-    that cannot be read counts as no credential, so the default falls to the next row.
+    Anthropic SDK's own login (:func:`~pup_finetune.credentials.key_source`), and the
+    package found, never imported. A keychain that cannot be read counts as no credential,
+    so the default falls to the next row.
     """
-    from pup_finetune import credentials
+    from pup_finetune import credentials, providers
+    from pup_finetune.readiness import JUDGE_PACKAGES
+
+    uninstalled: dict[str, str] = {}
 
     def source(name: str) -> str | None:
         try:
-            return credentials.key_source(name, env=env)
-        except Exception:  # a keychain backend may raise anything; doctor reports it
+            found = credentials.key_source(name, env=env)
+        except ExternalError:  # doctor reports the keychain
             return None
+        package = JUDGE_PACKAGES.get(name)
+        if (
+            found is not None
+            and package is not None
+            and not all(providers.installed(module) for module in package.modules)
+        ):
+            uninstalled[name] = package.modules[0]
+            return None
+        return found
 
     row, found = pick_default(table, source)
-    return row.judges, _default_source(found)
+    return row.judges, _default_source(found, uninstalled)
 
 
 def pick_default(
     table: Sequence[JudgeDefault], source: Callable[[str], str | None]
 ) -> tuple[JudgeDefault, dict[str, str | None]]:
     """The first row of ``table`` whose every credential has a ``source`` (where it
-    resolves from, ``None`` when it does not), and those sources."""
+    resolves from, ``None`` when it does not or cannot be used), and those sources."""
     for row in table:
         found = {name: source(name) for name in row.needs}
         if all(found.values()):
@@ -135,21 +149,30 @@ def pick_default(
     raise ValueError("a judge default table ends with a row that needs no credential")
 
 
-def _default_source(found: Mapping[str, str | None]) -> str:
+def _default_source(found: Mapping[str, str | None], uninstalled: Mapping[str, str]) -> str:
+    """Where a default came from: the credentials ``found`` (provider to source), and the
+    ones passed over in ``uninstalled`` (provider to the package its judges need, which is
+    not installed)."""
     from pup_finetune import credentials
 
-    if not found:
-        return "default: no Anthropic or OpenAI credential found"
     parts = []
     for name, where in found.items():
         spec = credentials.get_spec(name)
-        shown = {
-            "env": spec.env_var,
-            "keychain": "the OS keychain",
-            "provider-config": "its CLI config",
-        }.get(str(where), f"the {spec.label} SDK login")
-        parts.append(f"{spec.label} credential ({shown})")
-    return f"default: {' and '.join(parts)}"
+        parts.append(f"{spec.label} credential ({credentials.shown_source(spec, str(where))})")
+    shown = (
+        f"default: {' and '.join(parts)}"
+        if parts
+        else "default: no Anthropic or OpenAI credential found"
+        if not uninstalled
+        else "default: no Anthropic or OpenAI judge available"
+    )
+    for name, package in uninstalled.items():
+        label = credentials.get_spec(name).label
+        shown += (
+            f"; the {label} credential is not used, as {label} judges need the "
+            f"'{package}' package, which is not installed"
+        )
+    return shown
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

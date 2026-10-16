@@ -27,7 +27,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 from pydantic import SecretStr
 
@@ -58,12 +58,26 @@ __all__ = [
     "register_secret",
     "resolve",
     "sdk_login_source",
+    "shown_source",
     "store",
 ]
 
 KEYCHAIN_SERVICE = "pup-finetune"
 
 Source = Literal["env", "keychain", "provider-config"]
+
+_SHOWN: Final[dict[str, str]] = {"keychain": "keychain", "provider-config": "provider config"}
+
+
+def shown_source(spec: CredentialSpec, source: str) -> str:
+    """How a key found at ``source`` (a :data:`Source`, or ``<provider>-sdk`` from
+    :func:`key_source`) reads to the user: its environment variable, ``keychain``,
+    ``provider config``, or ``Anthropic SDK login``."""
+    if source == "env":
+        return spec.env_var
+    if source.endswith("-sdk"):
+        return f"{spec.label} SDK login"
+    return _SHOWN.get(source, source)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

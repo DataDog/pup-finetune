@@ -58,8 +58,9 @@ The top-level `ok` and each check's `ok` stay for one release.
 
 The offline dev loop trains end to end on the `fake` provider, with no network or credentials.
 `train` and `benchmark` on a real provider read only a dataset that is in Datadog (every kept
-row pushed and no push in flight, `cli/_dirs.py`'s `require_in_datadog`, which reads the
-`pipeline` block's push state; a `dataset fetch` directory passes); an offline provider
+row pushed as it is now and no push in flight: `curation/pipeline.py`'s `require_in_datadog`,
+which checks the rows the command goes on to read against the push receipt and takes its
+advice from `Pipeline.push_step`; a `dataset fetch` directory passes); an offline provider
 (`ProviderInfo.offline`, the fake) is exempt, so this loop and the default tests train on an
 imported directory that was never pushed:
 
@@ -162,8 +163,8 @@ first pull. The result's `window` holds the bounds read and whether they are the
 Every dataset command's result holds a `pipeline` block (`curation/pipeline.py`): `rows`
 (`accepted`, `kept`, `dropped`, `unlabeled`), `triage` (`none`, `incomplete`, `complete`; see
 `triage.triage_status`) and `push` (`status` `not_pushed`, `pushed`,
-`pushed_with_new_rows` or `unreadable`, and `pending`), which `cli/dataset.py`'s
-`dataset_next` turns into `next_command` and `next_steps`. A validation or test split far from
+`pushed_with_new_rows`, `pushed_with_changed_rows` or `unreadable`, `pending` and `changed`),
+which `cli/dataset.py`'s `dataset_next` turns into `next_command` and `next_steps`. A validation or test split far from
 its fraction in a dataset of fewer than 50 traces is a warning (`split.skew_warnings`, through
 `DatasetDir.summary`), which suggests more rows, never another seed.
 
@@ -202,14 +203,15 @@ OpenAI; per model on Fireworks, `judges.FIREWORKS_REASONING`). Without `--judge-
 (`--eval-judge-model`, `benchmark --judge-model`) or `--judges`, the judges are the ones the
 directory froze (an evaluation with results, `triage.json`), else a default by the
 credentials that resolve offline (environment variable, keychain, or the Anthropic SDK's
-login; `judge_models.EVALUATE_DEFAULTS` and `TRIAGE_DEFAULTS`, picked by
-`judges.default_judges`): `evaluate` takes `anthropic/claude-haiku-5-5`, else
+login) for a provider whose judge package is installed (an Anthropic key without the
+`anthropic` package is passed over, and the source says so; `judge_models.EVALUATE_DEFAULTS`
+and `TRIAGE_DEFAULTS`, picked by `judges.default_judges`): `evaluate` takes `anthropic/claude-haiku-5-5`, else
 `openai/gpt-5.4-mini`, else Fireworks' `deepseek-v4p1-flash`; triage takes Haiku and
 `gpt-5.4-mini` with both keys, Haiku and `anthropic/claude-sonnet-5-5` with Anthropic's,
 `gpt-5.4-mini` and `openai/gpt-6-astra` with OpenAI's, else the two Fireworks models. Previews
 name the judges and where they came from (`judge_source`, `judges_source`), triage's
 `next_command` pins `--judges` as evaluate's pins `--judge-model`, and `doctor`'s `ready` map
-reads the default from its own key checks. The test conftest hides `ANTHROPIC_API_KEY` and
+reads the default from its own key and package checks. The test conftest hides `ANTHROPIC_API_KEY` and
 `OPENAI_API_KEY` (except in `live` tests), so the default tests see the Fireworks defaults. Anthropic
 judges need the `anthropic` extra (`uv sync --all-extras`; `uv sync` is exact, so a bare
 `uv sync --extra anthropic` removes the other extras):
@@ -381,8 +383,7 @@ Source lives under `src/pup_finetune/`.
   hidden option, with a warning (`--max-cases-per-trajectory`, `--eval-max-cases-per-trajectory`,
   `dataset sample --n`; remove them in the next release). `_dirs.py` names the wrong kind of
   directory: a dataset given to a run command, a run given to a dataset command or as `train
-  --dataset`, a dataset as `train --run-dir`, and a dataset not in Datadog to `train` or
-  `benchmark` on a real provider (`require_in_datadog`); its `resolve_run_dir`, which every run command
+  --dataset`, a dataset as `train --run-dir`; its `resolve_run_dir`, which every run command
   calls first, reads a bare run id as `runs/<id>` and says so on stderr. `_presentation.py` is how commands show in
   `--help`: every command has a `CommandDoc` (a short help of 12 words or fewer naming its
   gate, a description of at most three sentences, the rest after `\f` for the generated docs,
@@ -538,12 +539,15 @@ Source lives under `src/pup_finetune/`.
   schema cannot see (conversion problems, dataset-level rules);
   `split.py` assigns deterministic, persisted train/validation/test splits per trace, one per
   group of traces asking copies of one request (`request_key`: the user messages lowercased,
-  quoted strings as `?`, numbers as `0`, whitespace collapsed, hashed; `split_groups`, a
-  union-find; `assign_splits`, which never moves a recorded trace and counts a new trace that
-  links copies already split two ways as a `split_conflicts`);
+  numbers as `0`, whitespace collapsed, hashed, `None` under `REQUEST_MIN_CHARS`;
+  `split_groups`, a union-find that joins no request whose group would pass `group_cap`, 5%
+  of the rows and at least 4, and reports it as `ungrouped`; `assign_splits`, which never
+  moves a recorded trace; `split_conflicts`, every group whose kept rows are in several
+  splits, which the summary counts);
   `dataset_dir.py` is the dataset directory (`settings.json`, `rows.jsonl`, `excluded.jsonl`,
-  `splits.json`, `summary.json`, `raw/`, a pull's page cache, and `push.json`, the receipt
-  `dataset push` writes) behind `dataset import`, `dataset pull` and `dataset show`;
+  `splits.json`, `summary.json`, `split_conflicts.jsonl`, drop labels for the kept copies
+  outside their group's split, written with the summary while there are any, `raw/`, a
+  pull's page cache, and `push.json`, the receipt `dataset push` writes) behind `dataset import`, `dataset pull` and `dataset show`;
   `labels.py` has the keep/drop `Label` and the `labels.jsonl` format (append-only, last label
   per id wins, a reason required to drop; `DatasetDir.kept_rows` leaves dropped rows out of
   training and split exports).

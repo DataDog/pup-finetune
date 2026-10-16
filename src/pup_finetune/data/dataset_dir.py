@@ -45,13 +45,19 @@ from pup_finetune.data.schema import (
     without_reasoning,
 )
 from pup_finetune.data.split import (
+    GROUP_MIN_ROWS,
+    GROUP_SHARE,
     SPLITS,
     SplitAssignments,
+    SplitConflict,
+    SplitGroups,
     SplitName,
     SplitParams,
     assign_splits,
     check_isolation,
+    conflict_summary,
     skew_warnings,
+    split_conflicts,
     split_groups,
     split_warnings,
 )
@@ -76,6 +82,10 @@ EXCLUDED_FILE = "excluded.jsonl"
 LABELS_FILE = "labels.jsonl"
 SPLITS_FILE = "splits.json"
 SUMMARY_FILE = "summary.json"
+SPLIT_CONFLICTS_FILE = "split_conflicts.jsonl"
+"""Drop labels for the kept rows outside their group's split (see
+:func:`~pup_finetune.data.split.split_conflicts`), for ``dataset label --file``; written
+with the summary while there are any, removed once there are none."""
 RAW_DIR = "raw"
 
 SourceKind = Literal["import", "datadog", "datadog_dataset"]
@@ -116,9 +126,6 @@ class AddResult:
     """Stored rows taken out and recorded as excluded."""
     updated: int = 0
     """Stored rows replaced by a version with more reasoning."""
-    split_conflicts: int = 0
-    """New traces that joined copies of one request already in two splits (see
-    :func:`~pup_finetune.data.split.assign_splits`)."""
 
 
 class DatasetDir:
@@ -225,8 +232,13 @@ class DatasetDir:
         """Counts of accepted, excluded, kept and dropped rows, and warnings.
 
         Exclusions are counted per code, kept rows per split, and drops per reason (the most
-        frequent reasons only).
+        frequent reasons only). ``split_conflicts`` counts the groups of copies whose kept
+        rows are in several splits and names some of the rows outside their group's split.
         """
+        return self._summary()[0]
+
+    def _summary(self) -> tuple[dict[str, Any], list[SplitConflict]]:
+        """:meth:`summary`, and every split conflict it counts."""
         rows = self.rows()
         labels = self.labels()
         kept = self._kept(rows, labels)
@@ -235,7 +247,10 @@ class DatasetDir:
         excluded = _reconcile(self.excluded(), (), accepted_ids={row.id for row in rows})
         by_code = Counter(str(record.get("code")) for record in excluded)
         counts = {split: len(by_split[split]) for split in SPLITS}
-        return {
+        groups = split_groups(rows)
+        dropped = {row_id for row_id, label in labels.items() if not label.keep}
+        conflicts = split_conflicts(groups, splits, dropped=dropped)
+        summary = {
             "total": len(rows) + len(excluded),
             "accepted": len(rows),
             "excluded": len(excluded),
@@ -244,7 +259,11 @@ class DatasetDir:
             **label_counts(labels, (row.id for row in rows)),
             "splits": counts,
             "traces": len({split_key(row) for row in rows}),
-            "split_groups": len(split_groups(rows)),
+            "split_groups": len(groups.groups),
+            "split_conflicts": {
+                **conflict_summary(conflicts),
+                "labels_file": SPLIT_CONFLICTS_FILE if conflicts else None,
+            },
             "warnings": [
                 *split_warnings(counts),
                 *skew_warnings(
@@ -252,8 +271,10 @@ class DatasetDir:
                     splits.params,
                     more=self._more_rows(),
                 ),
+                *_grouping_warnings(groups, conflicts),
             ],
         }
+        return summary, conflicts
 
     def _more_rows(self) -> str:
         """What a skew warning advises: more rows, from the command that built the dataset."""
@@ -285,7 +306,23 @@ class DatasetDir:
         return self._write_summary()
 
     def _write_summary(self) -> dict[str, Any]:
-        summary = self.summary()
+        summary, conflicts = self._summary()
+        path = self.path / SPLIT_CONFLICTS_FILE
+        if conflicts:
+            labels = [
+                {
+                    "id": row_id,
+                    "keep": False,
+                    "reason": f"a copy of a request whose copies are mostly in the "
+                    f"{conflict.split} split",
+                }
+                for conflict in conflicts
+                for split in SPLITS
+                for row_id in sorted(conflict.outside.get(split, ()))
+            ]
+            atomic_write_text(path, "".join(canonical_json(label) + "\n" for label in labels))
+        else:
+            path.unlink(missing_ok=True)
         atomic_write_json(self.summary_path, summary)
         return summary
 
@@ -376,7 +413,8 @@ class DatasetDir:
                         f"{self.splits_path} assigns {key!r} to {splits.get(key)}, not {split}"
                     )
                 splits.assignments[key] = split
-            conflicts = assign_splits(all_rows, splits)
+            dropped = {row_id for row_id, label in self.labels().items() if not label.keep}
+            assign_splits(all_rows, splits, dropped=dropped)
             check_isolation(_group_by_split(all_rows, splits, where=self.splits_path))
             records = _reconcile(
                 self.excluded(), excluded, accepted_ids={row.id for row in all_rows}
@@ -399,9 +437,7 @@ class DatasetDir:
             self._write_excluded(records)
             summary = self._write_summary()
         retired_rows = len(stored) - len(existing)
-        return AddResult(
-            len(new_rows), unchanged, len(excluded), summary, retired_rows, changed, conflicts
-        )
+        return AddResult(len(new_rows), unchanged, len(excluded), summary, retired_rows, changed)
 
     def _write_excluded(self, records: Iterable[dict[str, Any]]) -> None:
         lines = "".join(canonical_json(record) + "\n" for record in records)
@@ -580,6 +616,30 @@ def _split_flags(params: SplitParams) -> str:
         f"--seed {params.seed} --validation-fraction {params.validation_fraction} "
         f"--test-fraction {params.test_fraction}"
     )
+
+
+def _grouping_warnings(groups: SplitGroups, conflicts: Sequence[SplitConflict]) -> list[str]:
+    """Warnings about copies of a request that cannot share a split: ones recorded in
+    several splits before they were grouped, and requests too common to group by."""
+    warnings: list[str] = []
+    if conflicts:
+        rows = sum(len(ids) for conflict in conflicts for ids in conflict.outside.values())
+        warnings.append(
+            f"{rows} kept rows are copies of a request whose copies are mostly in another "
+            f"split ({len(conflicts)} groups; see split_conflicts), recorded apart before "
+            "they were grouped, so they may be both trained and tested on; recorded splits "
+            f"never move, so drop them with `dataset label --file` and {SPLIT_CONFLICTS_FILE}"
+        )
+    if groups.ungrouped:
+        shown = ", ".join(groups.ungrouped[0][:3])
+        warnings.append(
+            f"{len(groups.ungrouped)} requests repeat across traces that together hold more "
+            f"than {groups.cap} rows ({GROUP_SHARE:.0%} of the dataset, and at least "
+            f"{GROUP_MIN_ROWS}), too many to keep in one split, so their copies keep a split "
+            f"per trace (e.g. rows {shown}); a fixed prompt many conversations share is such a "
+            "request"
+        )
+    return warnings
 
 
 def _group_by_split(

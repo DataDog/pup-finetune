@@ -63,8 +63,6 @@ JUDGE_PACKAGES: Final[dict[str, Package]] = {
 }
 """The optional package each judge-only provider needs, by credential name."""
 
-_SOURCES: Final[dict[str, str]] = {"keychain": "keychain", "provider-config": "provider config"}
-
 
 def judge_credential(spec: str) -> str:
     """The credential a judge spec signs in with, by its prefix (see :mod:`pup_finetune.
@@ -76,23 +74,19 @@ def judge_credential(spec: str) -> str:
 def _default_judges(
     table: Sequence[JudgeDefault], by_name: Mapping[str, CheckResult]
 ) -> tuple[str, ...]:
-    """The judges a command defaults to by the key checks that passed (see
-    :func:`pup_finetune.judges.default_judges`, which resolves the same credentials)."""
+    """The judges a command defaults to by the checks that passed: a provider's key, and
+    the package its judges need (see :func:`pup_finetune.judges.default_judges`, which
+    resolves the same credentials and packages)."""
     from pup_finetune.judges import pick_default
 
     def source(name: str) -> str | None:
-        check = by_name.get(f"{name}:key")
-        return "check" if check is not None and check.ok else None
+        needed = [f"{name}:key"]
+        if (package := JUDGE_PACKAGES.get(name)) is not None:
+            needed.append(f"{name}:{package.key}")
+        passed = all((check := by_name.get(c)) is not None and check.ok for c in needed)
+        return "check" if passed else None
 
     return pick_default(table, source)[0].judges
-
-
-def _shown_source(spec: credentials.CredentialSpec, source: str) -> str:
-    if source == "env":
-        return spec.env_var
-    if source.endswith("-sdk"):
-        return f"{spec.label} SDK login"
-    return _SOURCES.get(source, source)
 
 
 KEY_NOT_SET: Final = " key not set"
@@ -158,7 +152,7 @@ def key_check(spec: credentials.CredentialSpec, *, required: bool) -> CheckResul
         name=name,
         status="pass",
         detail=detail,
-        label=f"{spec.label} key ({_shown_source(spec, source)})",
+        label=f"{spec.label} key ({credentials.shown_source(spec, source)})",
         needed_for=needed_for,
         required=required,
     )

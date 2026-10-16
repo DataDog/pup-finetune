@@ -209,6 +209,17 @@ def test_an_anthropic_key_makes_it_the_default_judges_and_readies_triage(
     assert ready["evaluate on baseten"]["blocked_by"] == ["baseten:key"]
 
 
+def test_an_anthropic_key_without_its_sdk_leaves_the_default_judges_on_fireworks(
+    use_pup: UsePup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installed_packages(monkeypatch, ALL_PACKAGES - {"anthropic"})
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-synthetic-0000-test-key")
+    use_pup(healthy_pup().client())
+    ready = report_of(invoke())["ready"]
+    assert ready["dataset triage"]["blocked_by"] == ["fireworks:key"]
+    assert ready["evaluate on baseten"]["blocked_by"] == ["baseten:key", "fireworks:key"]
+
+
 def test_with_the_keys_set_every_step_is_ready(
     use_pup: UsePup, monkeypatch: pytest.MonkeyPatch
 ) -> None:

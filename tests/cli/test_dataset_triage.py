@@ -223,7 +223,7 @@ def test_triage_labels_rows_and_is_allowed_read_only(
             "unlabeled": 0,
         },
         "triage": "complete",
-        "push": {"status": "not_pushed", "pending": data["kept"]},
+        "push": {"status": "not_pushed", "pending": data["kept"], "changed": 0},
     }
     # The rubric is named as the preview names it.
     assert len(data["rubric_hash"]) == 12 and "rubric_sha256" not in data

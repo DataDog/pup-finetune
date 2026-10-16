@@ -22,14 +22,13 @@ from typing import Annotated, Any
 import typer
 
 from pup_finetune.cli._common import CommandResult, current_context, get_runtime, run_command
-from pup_finetune.cli._dirs import require_dataset_dir, require_in_datadog
+from pup_finetune.cli._dirs import require_dataset_dir
 from pup_finetune.cli._flags import given
 from pup_finetune.cli._presentation import TRAIN, CommandDoc, Safety, default_note, describe
 from pup_finetune.cli.train import provider_for_model
 from pup_finetune.errors import PAID_RUN, UsageError, require_confirm, require_writable
 from pup_finetune.evaluation import benchmark, runner
 from pup_finetune.judge_models import BY_KEY
-from pup_finetune.providers import provider_info
 
 SETTING_PARAMS: dict[str, tuple[str, ...]] = {
     "judge_model": ("judge_model",),
@@ -207,8 +206,6 @@ def benchmark_command(
     if not aliases:
         raise UsageError("--models names no model", hint="pass --models MODEL,MODEL")
     resolved = [(alias, provider_for_model(alias, None, runtime)[0]) for alias in aliases]
-    if not all(provider_info(name, runtime).offline for _, name in resolved):
-        require_in_datadog(dataset_dir, "benchmark")
     settings = benchmark.BenchmarkSettings(
         out_dir=out_dir if out_dir is not None else dataset_dir / benchmark.DEFAULT_OUT_DIR_NAME,
         max_cases_per_trajectory=max_cases,
