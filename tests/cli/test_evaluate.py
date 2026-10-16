@@ -185,7 +185,7 @@ class Interrupting(FakeJudge):
 
 def use_judge(monkeypatch: pytest.MonkeyPatch, judge: ChatCompleter) -> None:
     @contextmanager
-    def opened(config: JudgeConfig) -> Iterator[ChatCompleter]:
+    def opened(config: JudgeConfig, **options: Any) -> Iterator[ChatCompleter]:
         yield judge
 
     monkeypatch.setattr(runner_module, "open_judge_client", opened)

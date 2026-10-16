@@ -274,7 +274,21 @@ def test_a_judge_without_its_key_is_a_usage_error_naming_its_login() -> None:
         assert f"pup finetune auth login {provider}" in (info.value.hint or "")
 
 
-def test_a_council_gets_one_client_per_provider_opened_on_its_first_call(
+def test_a_council_gets_one_client_per_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", OPENAI_KEY)
+    monkeypatch.setenv("FIREWORKS_API_KEY", "fw-synthetic-0000-judge-key")
+    configs = [
+        parse_judge("openai/gpt-x"),
+        JudgeConfig(),
+        parse_judge("openai/gpt-y"),
+        parse_judge("accounts/test/models/judge-x"),
+    ]
+    with open_clients(configs) as clients:
+        assert sorted(clients) == ["fireworks", "openai"]
+        assert all(isinstance(client, ChatClient) for client in clients.values())
+
+
+def test_a_council_that_cannot_open_a_provider_closes_the_ones_it_opened(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", OPENAI_KEY)
@@ -283,7 +297,7 @@ def test_a_council_gets_one_client_per_provider_opened_on_its_first_call(
     real_open_client = judges.open_client
 
     @contextmanager
-    def recording(config: JudgeConfig, **options: object) -> Iterator[ChatCompleter]:
+    def recording(config: JudgeConfig) -> Iterator[ChatCompleter]:
         with real_open_client(config) as client:
             opened.append(config.provider)
             try:
@@ -292,22 +306,10 @@ def test_a_council_gets_one_client_per_provider_opened_on_its_first_call(
                 closed.append(config.provider)
 
     monkeypatch.setattr(judges, "open_client", recording)
-    monkeypatch.setattr(ChatClient, "complete", lambda self, messages, **options: None)
-    # No Anthropic key: the council still opens, as no call has needed that provider yet.
-    council = [
-        parse_judge("openai/gpt-x"),
-        parse_judge("anthropic/claude-opus-5-5"),
-        parse_judge("openai/gpt-y"),
-    ]
-    with open_clients(council) as clients:
-        assert sorted(clients) == ["anthropic", "openai"]
-        assert opened == []
-        for _ in range(2):
-            clients["openai"].complete([{"role": "user", "content": "judge"}], model="gpt-x")
-        assert opened == ["openai"]
-        with pytest.raises(UsageError, match="no anthropic API key") as info:
-            clients["anthropic"].complete([], model="claude-opus-5-5")
-        assert "pup finetune auth login anthropic" in (info.value.hint or "")
+    council = [parse_judge("openai/gpt-x"), parse_judge("anthropic/claude-opus-5-5")]
+    with pytest.raises(UsageError, match="no anthropic API key") as info, open_clients(council):
+        pass
+    assert "pup finetune auth login anthropic" in (info.value.hint or "")
     assert opened == closed == ["openai"]
 
 

@@ -208,6 +208,12 @@ class BenchmarkPlan:
             "intervals are wide: pull more rows for a firmer choice"
         ]
 
+    def judge_calls(self) -> int:
+        """The judge calls a run would still make: calibration's and every candidate's.
+        The preview counts them and execution opens the judge only when one is left."""
+        remaining = sum(self.remaining(candidate)["judge"] for candidate in self.candidates)
+        return remaining + self.calibration_calls()
+
     def calibration_calls(self) -> int:
         if self.settings.skip_calibration or self._calibrated():
             return 0
@@ -519,20 +525,18 @@ def execute(plan: BenchmarkPlan) -> dict[str, Any]:
     cancel = threading.Event()
     errors: dict[str, dict[str, Any]] = {}
     EvalDir(plan.out_dir).create()
-    with (
-        DirectoryLock(plan.out_dir),
-        cancel_on_signals(cancel),
-        open_judge_client(plan.judge) as client,
-    ):
-        calibration = _calibration(plan, client)
-        if calibration is not None and not calibration.get("ok"):
-            return _calibration_failed(plan, calibration)
-        for candidate in plan.candidates:
-            if cancel.is_set():
-                break
-            error = _replay_model(plan, candidate, client, cancel)
-            if error is not None:
-                errors[candidate.target] = error
+    with DirectoryLock(plan.out_dir), cancel_on_signals(cancel):
+        calls = plan.judge_calls()
+        with open_judge_client(plan.judge, calls=calls) as client:
+            calibration = _calibration(plan, client)
+            if calibration is not None and not calibration.get("ok"):
+                return _calibration_failed(plan, calibration)
+            for candidate in plan.candidates:
+                if cancel.is_set():
+                    break
+                error = _replay_model(plan, candidate, client, cancel)
+                if error is not None:
+                    errors[candidate.target] = error
     board = leaderboard(plan, errors)
     result = _result(plan, board, calibration=calibration, cancelled=cancel.is_set())
     atomic_write_json(plan.out_dir / RESULT_FILE, finite_json(result))

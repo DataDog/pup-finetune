@@ -481,12 +481,13 @@ Source lives under `src/pup_finetune/`.
   --evaluate`, `benchmark` and `dataset triage` previews call for every model they would
   call, so they never offer a `--confirm` that would fail on it (a read-only `evaluate`,
   `train --evaluate` or `benchmark` preview, which offers none, warns instead: `warnings`),
-  and `open_client` builds a
-  client. `open_lazily` (what `evaluate`, `train --evaluate` and `benchmark` judge with) and
-  `open_clients` (one per provider, for a triage council) open it on its first call
-  (`OnFirstCall`), so a run calls for exactly the keys its preview checked: a complete
-  evaluation or benchmark rerun opens no judge, a resumed council only the judges with votes
-  left.
+  and `open_client` and `open_clients` (one per provider) build the clients. A run opens
+  them up front, before anything is generated, so a malformed key, a missing SDK or a
+  locked keychain fails before anything is paid, but only those its preview checked: the
+  judge when the same count the preview showed (`EvalPlan.work`,
+  `BenchmarkPlan.judge_calls`) has a judge call left, so a complete evaluation or benchmark
+  rerun opens none, and in a triage council the judges with votes pending
+  (`TriagePlan.pending_judges`).
 - `anthropic_client.py` - `AnthropicChatClient`, the Anthropic judge (and compare model)
   client over the official SDK (the `anthropic` extra), the only module that imports
   `anthropic` (and its `httpx2`): the messages as `anthropic_messages.py` converts them,
@@ -711,10 +712,11 @@ Source lives under `src/pup_finetune/`.
   with a free `--out-dir`) instead of offering a `--confirm` that would be refused. With
   `--compare-model` (or a `compare.json` the directory has), `EvalPlan.targets` adds
   `compare`, and `StandaloneEvaluation` opens a training session only when base or tuned has
-  a case left to generate, and the compare model's client only when it has, before anything
-  is written (the judge's opens on its first call); `prepare_eval_dir` has it answer one `probe` under the
-  directory's lock right before `compare.json` is written, so also after `check_identity`
-  dropped the one attached. The preview names only the targets that generate (their provider, billing and
+  a case left to generate, and the compare model's client only when it has, next to the
+  judge's before anything is written (`EvalPlan.work`, what the preview counts, says which
+  have work left); `prepare_eval_dir` has it answer one `probe` under the directory's lock
+  right before `compare.json` is written, so also after `check_identity` dropped the one
+  attached. The preview names only the targets that generate (their provider, billing and
   recipients); the others' answers are reused. It counts the probe as one more compare call
   when the run will make it: no `compare.json`, or one `check_identity` drops
   (`EvalDir.replaces`, which `check_identity` itself decides by). `EvalPlan.replays`, the

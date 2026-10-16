@@ -505,6 +505,13 @@ class TriagePlan:
             if judge not in self.votes.get(row.id, {})
         ]
 
+    @property
+    def pending_judges(self) -> list[str]:
+        """The judges with a call :attr:`pending`, in :attr:`judges` order: the ones whose
+        key the preview checks and whose client :func:`run_triage` is given."""
+        left = {judge for _row, judge in self.pending}
+        return [judge for judge in self.judges if judge in left]
+
     def stale_labels(self, *, judged: bool = False) -> list[str]:
         """The rows whose judge label the votes that count do not back, in row order.
 
@@ -544,10 +551,9 @@ class TriagePlan:
 
         configs = {spec: judge_config(spec) for spec in self.judges}
         pending = Counter(judge for _row, judge in self.pending)
-        for spec, config in configs.items():
-            if pending[spec]:
-                # --confirm would fail on a key nothing provides: fail now, never offer it.
-                require_key(config)
+        for spec in self.pending_judges:
+            # --confirm would fail on a key nothing provides: fail now, never offer it.
+            require_key(configs[spec])
         firsts: dict[str, JudgeConfig] = {}
         for config in configs.values():
             firsts.setdefault(config.provider, config)
@@ -1186,7 +1192,7 @@ def run_triage(
     failures: list[Failure] = []
     cast = skipped = 0
     pending = plan.pending
-    routes = _routes(client, plan.judges)
+    routes = _routes(client, plan.pending_judges)
     queue = iter(pending)
 
     def next_pairs(n: int) -> list[tuple[TrainingRow, str]]:

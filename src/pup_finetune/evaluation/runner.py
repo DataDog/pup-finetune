@@ -102,7 +102,7 @@ if TYPE_CHECKING:
     from pup_finetune.evaluation.compare import CompareTarget
     from pup_finetune.evaluation.judge import Judgment
     from pup_finetune.evaluation.replay import EvalDir, Publisher, ReplaySummary
-    from pup_finetune.inference import ChatCompleter, JudgeConfig
+    from pup_finetune.inference import ChatCompleter, ChatCompletion, JudgeConfig
 
 __all__ = [
     "CALIBRATION_CASES",
@@ -117,6 +117,7 @@ __all__ = [
     "SPEND_POLL_S",
     "EvalPlan",
     "EvalSettings",
+    "EvalWork",
     "EvaluateAfterTraining",
     "Publishing",
     "RecordedEvaluation",
@@ -387,6 +388,29 @@ def evaluate_words(
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class EvalWork:
+    """What an evaluation would still do (:meth:`EvalPlan.work`)."""
+
+    by_target: dict[str, dict[str, int]]
+    """Each target's ``{"done", "generate", "judge"}`` pairs."""
+    calibration: int
+    """The judge calls calibration makes: none once one passed in the directory."""
+    probe: bool
+    """Whether the compare model answers one call before it is attached."""
+
+    @property
+    def judge_calls(self) -> int:
+        return sum(counts["judge"] for counts in self.by_target.values()) + self.calibration
+
+    @property
+    def trained(self) -> int:
+        """The generations base and tuned make, in the training provider's session."""
+        from pup_finetune.evaluation.replay import TARGETS
+
+        return sum(self.by_target[target]["generate"] for target in TARGETS)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class EvalPlan:
     """What an evaluation of one run replays, with which judge, into which directory."""
 
@@ -582,26 +606,19 @@ class EvalPlan:
         if conflict is not None:
             raise conflict
 
-    def preview(self, *, tuned: str, tuned_checkpoint: CheckpointRef | None) -> dict[str, Any]:
-        """The calls the evaluation makes. With ``tuned_checkpoint`` (a standalone run), what
-        ``--out-dir`` already holds under the same settings is left out of the counts."""
-        from pup_finetune.datadog.experiments import experiment_name
-        from pup_finetune.evaluation.compare import require_sent, skipped_warning
-        from pup_finetune.evaluation.replay import CAVEAT, COMPARE, EvalDir, remaining_work
+    def work(self, tuned_checkpoint: CheckpointRef | None) -> EvalWork:
+        """What the evaluation would still do: everything, or with ``tuned_checkpoint`` (a
+        standalone run) less what ``--out-dir`` already holds under the same settings. The
+        preview counts it and execution opens the judge only when it has a judge call left.
 
-        settings = self.settings
-        warnings: list[str] = []
-        targets = self.targets
-        replays = self.replays
-        skips = Counter(self.compare_skips.values())
-        if self.compare is not None:
-            # --confirm would attach a model that answers nothing: fail now, never offer it.
-            require_sent(skips, spec=self.compare.spec, cases=len(self.cases))
-            if skipped := skipped_warning(skips, spec=self.compare.spec, cases=len(self.cases)):
-                warnings.append(skipped)
+        Raises the :class:`SettingsConflict` ``--confirm`` would raise for a directory that
+        holds work under other settings, or another compare model.
+        """
+        from pup_finetune.evaluation.replay import EvalDir, remaining_work
+
         by_target = {
             target: {"done": 0, "generate": len(cases), "judge": len(cases)}
-            for target, cases in replays.items()
+            for target, cases in self.replays.items()
         }
         calibration = self.calibration_calls()
         eval_dir = EvalDir(self.out_dir)
@@ -624,12 +641,34 @@ class EvalPlan:
             )
         if reusing:
             self._refuse_another_compare(eval_dir)
-            by_target = remaining_work(eval_dir, replays)
+            by_target = remaining_work(eval_dir, self.replays)
             if (eval_dir.read_calibration() or {}).get("ok"):
                 calibration = 0
+        return EvalWork(by_target=by_target, calibration=calibration, probe=probe)
+
+    def preview(self, *, tuned: str, tuned_checkpoint: CheckpointRef | None) -> dict[str, Any]:
+        """The calls the evaluation makes. With ``tuned_checkpoint`` (a standalone run), what
+        ``--out-dir`` already holds under the same settings is left out of the counts."""
+        from pup_finetune.datadog.experiments import experiment_name
+        from pup_finetune.evaluation.compare import require_sent, skipped_warning
+        from pup_finetune.evaluation.replay import CAVEAT, COMPARE
+
+        settings = self.settings
+        warnings: list[str] = []
+        targets = self.targets
+        replays = self.replays
+        skips = Counter(self.compare_skips.values())
+        if self.compare is not None:
+            # --confirm would attach a model that answers nothing: fail now, never offer it.
+            require_sent(skips, spec=self.compare.spec, cases=len(self.cases))
+            if skipped := skipped_warning(skips, spec=self.compare.spec, cases=len(self.cases)):
+                warnings.append(skipped)
+        work = self.work(tuned_checkpoint)
+        by_target = {target: dict(counts) for target, counts in work.by_target.items()}
+        calibration = work.calibration
         from pup_finetune.judges import destination as judge_destination
 
-        if probe:
+        if work.probe:
             by_target[COMPARE]["generate"] += 1
         remaining = {
             key: sum(counts[key] for counts in by_target.values())
@@ -688,7 +727,7 @@ class EvalPlan:
         if self.compare is not None and compared:
             models.append(
                 f"{self.compare.spec} (after one call that checks it answers)"
-                if probe
+                if work.probe
                 else self.compare.spec
             )
             billing.append(self.compare.billing(compared))
@@ -864,19 +903,30 @@ def plan_evaluation(
 # --- the judge ----------------------------------------------------------------------------
 
 
+class _NoJudgeCall:
+    """The judge of a run with no judge call left (:attr:`EvalWork.judge_calls`)."""
+
+    def complete(self, *args: Any, **kwargs: Any) -> ChatCompletion:
+        raise AssertionError("the judge was called with no judge call left")
+
+
 @contextmanager
-def open_judge_client(config: JudgeConfig) -> Iterator[ChatCompleter]:
-    """The client for ``config``'s judge: the offline fake judge, or the provider's client
-    with the key of its credential, opened on its first call
-    (:func:`pup_finetune.judges.open_lazily`), so a run with nothing left to judge needs no
-    key. Closed on exit."""
+def open_judge_client(config: JudgeConfig, *, calls: int) -> Iterator[ChatCompleter]:
+    """The client for ``config``'s judge, opened now, before anything is generated, with
+    the key of its credential (:func:`pup_finetune.judges.open_client`), so a malformed key,
+    a missing package or an unreadable keychain fails before anything is paid; the offline
+    fake judge; or, with no ``calls`` left, none, so a rerun with nothing left to judge
+    needs no key. Closed on exit."""
     from pup_finetune.evaluation.fake_judge import FakeJudge
-    from pup_finetune.judges import open_lazily
+    from pup_finetune.judges import open_client
 
     if config.provider == "fake":
         yield FakeJudge()
         return
-    with open_lazily(config) as client:
+    if not calls:
+        yield _NoJudgeCall()
+        return
+    with open_client(config) as client:
         yield client
 
 
@@ -1763,9 +1813,10 @@ class StandaloneEvaluation:
 
         plan = self.plan
         cancel = threading.Event()
+        work = plan.work(self.training)
         with ExitStack() as stack:
-            client = stack.enter_context(open_judge_client(plan.judge))
-            compare, target = self._open_compare(stack), plan.compare
+            client = stack.enter_context(open_judge_client(plan.judge, calls=work.judge_calls))
+            compare, target = self._open_compare(stack, work), plan.compare
             check = (
                 None
                 if compare is None or target is None
@@ -1777,7 +1828,7 @@ class StandaloneEvaluation:
             record_evaluation(plan, {"status": "running"})
             try:
                 with cancel_on_signals(cancel):
-                    result = self._replay(client, compare, cancel, report)
+                    result = self._replay(client, compare, cancel, report, work)
                 record_evaluation(plan, result)
                 return result
             except KeyboardInterrupt:
@@ -1787,18 +1838,14 @@ class StandaloneEvaluation:
                     "its next_command continues it",
                 ) from None
 
-    def _open_compare(self, stack: ExitStack) -> Sampler | None:
+    def _open_compare(self, stack: ExitStack, work: EvalWork) -> Sampler | None:
         """The compare model's sampler when it has cases left to generate, opened on
         ``stack`` before anything is written or any training session opens."""
         from pup_finetune.evaluation.compare import open_compare_sampler
-        from pup_finetune.evaluation.replay import COMPARE, EvalDir, remaining_work
+        from pup_finetune.evaluation.replay import COMPARE
 
         plan = self.plan
-        eval_dir = EvalDir(plan.out_dir)
-        if (
-            plan.compare is None
-            or not remaining_work(eval_dir, {COMPARE: plan.replays[COMPARE]})[COMPARE]["generate"]
-        ):
+        if plan.compare is None or not work.by_target[COMPARE]["generate"]:
             return None
         return stack.enter_context(
             open_compare_sampler(plan.compare, plan.cases, seed=plan.settings.seed)
@@ -1810,20 +1857,19 @@ class StandaloneEvaluation:
         compare: Sampler | None,
         cancel: threading.Event,
         report: Mapping[str, Any] | None,
+        work: EvalWork,
     ) -> dict[str, Any]:
         """Replay with the samplers of the targets that have cases left to generate: a
         training session only for base and tuned, and ``compare``, already open, for the
         compare model."""
-        from pup_finetune.evaluation.replay import COMPARE, TARGETS, EvalDir, remaining_work
+        from pup_finetune.evaluation.replay import COMPARE
         from pup_finetune.evaluation.targets import run_samplers
 
         plan = self.plan
-        left = remaining_work(EvalDir(plan.out_dir), {target: plan.cases for target in TARGETS})
-        trained = sum(counts["generate"] for counts in left.values())
         samplers: dict[str, Sampler] = {}
         tuned_sampler = None
         with ExitStack() as stack:
-            if trained:
+            if work.trained:
                 targets = stack.enter_context(run_samplers(self.provider, self.run, self.result))
                 samplers |= targets.samplers
                 tuned_sampler = targets.tuned_checkpoint

@@ -498,9 +498,11 @@ evaluation or triage made before a change to it is continued only in a new `--ou
 after `--reset-triage`. `JudgeConfig.provider` is part of the
 judge's identity, so a judge on another provider never reuses earlier judgments or votes, and
 `JudgeConfig.spec` writes the judge back the one way commands pin it. `open_client` builds
-the client for a judge, `open_lazily` builds it on its first call, and `open_clients` one such
-client per provider for a council that mixes them, so a rerun with nothing left to judge
-needs no key; every client answers the one `ChatCompleter.complete` call, which takes an optional
+the client for a judge, and `open_clients` one client per provider for a council that mixes
+them. A run opens them before anything is generated, so a key the client refuses fails
+before anything is paid, but only those with calls left by the count its preview showed, so
+a rerun with nothing left to judge needs no key; every client answers the one
+`ChatCompleter.complete` call, which takes an optional
 `response_schema` for a JSON answer and an optional `reasoning_effort`. A request longer than
 the model's context window is a `ContextLimitError` on every provider (`is_context_limit`
 reads each one's error answer), which no retry fixes.

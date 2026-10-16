@@ -247,3 +247,25 @@ def test_a_read_only_preview_warns_of_the_missing_key(
         missing = f"no openai API key found for the judge {PAID}: "
         (warning,) = (text for text in data["preview"]["warnings"] if text.startswith(missing))
         assert "pup finetune auth login openai" in warning
+
+
+def test_a_malformed_judge_key_fails_before_anything_is_generated(
+    run_dir: Path, dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The preview finds a key; opening the judge refuses it before any generation.
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test key")
+    runs = (
+        (
+            ["evaluate", str(run_dir), "--judge-model", PAID, "--no-publish"],
+            run_dir / "eval" / "generations.jsonl",
+        ),
+        (
+            ["benchmark", str(dataset), "--models", "fake-model", "--judge-model", PAID],
+            dataset / "benchmark" / "fake-model" / "generations.jsonl",
+        ),
+    )
+    for args, generations in runs:
+        result = invoke(*args, "--skip-calibration", "--confirm")
+        assert result.exit_code == 2, result.stderr
+        assert "Error [usage]: the openai API key is malformed" in result.stderr
+        assert not generations.exists()
