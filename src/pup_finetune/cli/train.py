@@ -1372,7 +1372,8 @@ def run_next(
     A running run is watched, a stale one cancelled. A completed run with a model
     (``promoted``: a promoted model or a deployable checkpoint) goes on as
     :func:`~pup_finetune.evaluation.runner.next_after_training` says: evaluated (a free
-    preview), its recorded evaluation continued, or, once that is complete, deployed. So
+    preview), its recorded evaluation continued, or, once that is complete, deployed (with
+    no next command and the evaluation's steps while the missing push kept it unpublished). So
     does a cancelled one whose best epoch was promoted, with resuming it as a step. A
     completed run without one (no epoch finished, e.g. under a token budget below one
     epoch) has no next command: the step trains a new run. Anything else (interrupted,
@@ -1390,9 +1391,13 @@ def run_next(
             )
         )
     elif phase == "completed":
-        next_command = evaluation.next_after_training(path)
+        after = evaluation.next_after_training(path)
+        next_command = after["next_command"]
+        steps += after["next_steps"]
     elif phase == "cancelled" and promoted:
-        next_command = evaluation.next_after_training(path)
+        after = evaluation.next_after_training(path)
+        next_command = after["next_command"]
+        steps += after["next_steps"]
         steps.append(
             step(resume_command(path), "to train the remaining epochs (paid; it previews first)")
         )

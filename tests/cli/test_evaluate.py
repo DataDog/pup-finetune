@@ -941,12 +941,26 @@ def test_status_after_train_evaluate_with_settings_continues_that_evaluation(
     assert result.exit_code == 0, result.stderr
     assert output(result)["evaluation"]["status"] == "complete"
     status = output(invoke("status", str(run)))
-    # Complete: status shows where it is and its headline, and goes on to deploy.
+    # Complete: status shows where it is and its headline. The dataset was never pushed, so
+    # as after the evaluation, no deploy comes next: its steps push, then rerun to publish.
     assert status["evaluation"]["status"] == "complete"
     assert status["evaluation"]["out_dir"] == display(run / "eval")
     assert status["evaluation"]["headline"]["judge_pass_rate"]["tuned"] is not None
-    assert status["next_command"] == f"pup finetune deploy {shlex.quote(display(run))}"
+    evaluated = output(result)["evaluation"]
+    assert evaluated["next_command"] is None
+    assert status["next_command"] is None
+    assert status["next_steps"] == evaluated["next_steps"]
+    push, again, deploy = (item["command"] for item in status["next_steps"][:3])
+    assert shlex.split(push)[2:4] == ["dataset", "push"]
+    assert again.endswith(" --confirm") and "--seed 7" in again
+    assert deploy == f"pup finetune deploy {shlex.quote(display(run))}"
     assert "evaluation complete in" in invoke("status", str(run)).stderr
+    # Unpublished on request, it goes on to deploy.
+    record = json.loads((run / "evaluation.json").read_text())
+    del record["evaluations"]["eval"]["awaits_push"]
+    (run / "evaluation.json").write_text(json.dumps(record))
+    following = output(invoke("status", str(run)))["next_command"]
+    assert following == f"pup finetune deploy {shlex.quote(display(run))}"
     # Not complete (as after a crash or a Ctrl-C): the recorded command, every setting
     # pinned, previews without the settings conflict a bare `evaluate` would hit.
     record = json.loads((run / "evaluation.json").read_text())
@@ -965,7 +979,8 @@ def test_status_after_train_evaluate_with_settings_continues_that_evaluation(
 def test_status_after_evaluate_confirm_no_longer_says_evaluate(run_dir: Path) -> None:
     status = output(invoke("status", str(run_dir)))
     assert shlex.split(status["next_command"])[:3] == ["pup", "finetune", "evaluate"]
-    evaluated = rerun(output(invoke("evaluate", str(run_dir)))["next_command"])
+    # Unpublished on request (a missing push would hold the deploy back for a push first).
+    evaluated = rerun(output(invoke("evaluate", str(run_dir), "--no-publish"))["next_command"])
     assert evaluated.exit_code == 0, evaluated.stderr
     status = output(invoke("status", str(run_dir)))
     assert status["evaluation"]["status"] == "complete"

@@ -1222,7 +1222,7 @@ def _replay_next(
     steps: list[dict[str, str]] = []
     rerun = plan.evaluate_command()
     deploy = deploy_command(plan.run_dir)
-    push = plan.publishing.push_step() if publication["status"] == "skipped" else None
+    push = _push_first(plan, publication.get("status"))
     if push is not None:
         steps.append(push)
         if status == "complete":
@@ -1260,6 +1260,13 @@ def _replay_next(
     else:
         next_command = None if push is not None else deploy
     return {"next_command": next_command, "next_steps": steps}
+
+
+def _push_first(plan: EvalPlan, publication: object) -> dict[str, str] | None:
+    """The ``dataset push`` step an evaluation whose publication is ``publication`` waits
+    for: the missing push kept it unpublished, so its next step pushes the dataset and no
+    deploy is its next command, after it and in ``status`` alike. ``None`` otherwise."""
+    return plan.publishing.push_step() if publication == "skipped" else None
 
 
 def deploy_command(run_dir: Path) -> str | None:
@@ -1398,14 +1405,17 @@ def record_evaluation(plan: EvalPlan, outcome: Mapping[str, Any]) -> None:
     published = str(publication.get("status")) if isinstance(publication, Mapping) else None
     summary = outcome.get("summary")
     settings = _settings_record(plan)
+    complete = _is_complete(status, published)
     entry = {
         "settings": settings,
         "status": status,
-        "complete": _is_complete(status, published),
+        "complete": complete,
         "publication": published,
         "headline": headline(summary) if isinstance(summary, Mapping) else None,
         "recorded_at": utcnow().isoformat(timespec="seconds").replace("+00:00", "Z"),
     }
+    if complete and _push_first(plan, published) is not None:
+        entry["awaits_push"] = {"next_steps": list(outcome.get("next_steps") or [])}
     run = RunDir(plan.run_dir)
     try:
         record = run.read_evaluations() or {}
@@ -1435,6 +1445,9 @@ class RecordedEvaluation:
     headline: dict[str, Any] | None
     settings: EvalSettings
     judge_model: str
+    awaits_push: list[dict[str, str]] | None = None
+    """A complete evaluation the missing push kept unpublished: the steps its result gave
+    (push the dataset, then rerun it to publish, or deploy it unpublished)."""
 
     def command(self, run_dir: Path) -> str:
         """The ``evaluate`` command that continues it (a free preview), every setting
@@ -1492,6 +1505,8 @@ def _recorded(run_dir: Path, entry: object) -> RecordedEvaluation | None:
         return None
     found_headline = entry.get("headline")
     publication = entry.get("publication")
+    awaits = entry.get("awaits_push")
+    steps = awaits.get("next_steps") if isinstance(awaits, Mapping) else None
     return RecordedEvaluation(
         out_dir=out_dir,
         status=str(entry.get("status")),
@@ -1500,20 +1515,26 @@ def _recorded(run_dir: Path, entry: object) -> RecordedEvaluation | None:
         headline=dict(found_headline) if isinstance(found_headline, Mapping) else None,
         settings=values,
         judge_model=str(settings["judge_model"]),
+        awaits_push=[dict(item) for item in steps if isinstance(item, Mapping)]
+        if isinstance(steps, list)
+        else None,
     )
 
 
-def next_after_training(run_dir: Path) -> str | None:
-    """What follows a trained run with a best epoch: ``evaluate`` (a free preview) when it
-    was never evaluated; the recorded evaluation's own command while it is not complete
-    (every setting pinned, so it continues that evaluation); ``deploy`` (a free preview)
-    once it is, or ``None`` while the run is deployed."""
+def next_after_training(run_dir: Path) -> dict[str, Any]:
+    """``next_command`` and ``next_steps`` for a trained run with a best epoch: ``evaluate``
+    (a free preview) when it was never evaluated; the recorded evaluation's own command while
+    it is not complete (every setting pinned, so it continues that evaluation); once it is,
+    ``deploy`` (a free preview, ``None`` while the run is deployed), unless the missing push
+    kept it unpublished: then, as after the evaluation, no next command, and its steps."""
     found = recorded_evaluation(run_dir)
     if found is None:
-        return command("evaluate", run_dir)
+        return {"next_command": command("evaluate", run_dir), "next_steps": []}
     if not found.complete:
-        return found.command(run_dir)
-    return deploy_command(run_dir)
+        return {"next_command": found.command(run_dir), "next_steps": []}
+    if found.awaits_push is not None:
+        return {"next_command": None, "next_steps": found.awaits_push}
+    return {"next_command": deploy_command(run_dir), "next_steps": []}
 
 
 SPEND_POLL_S: Final = 0.5

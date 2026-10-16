@@ -632,7 +632,9 @@ Source lives under `src/pup_finetune/`.
   `deployment.json`, `remote.json` (the job of a `train --remote` run), and `evaluation.json`, each evaluation of the run by its directory with
   every setting, how it stands and its headline, written by
   `evaluation/runner.py`'s `record_evaluation`; `status` names the pinned command that
-  continues one, or `deploy` once one is complete),
+  continues one, or `deploy` once one is complete, unless the missing push kept it
+  unpublished: then, as after the evaluation (`_push_first`), no next command and the steps
+  it recorded under `awaits_push`),
   `RunState`, which the loop reports into, and `execute_run`, which holds the directory lock
   while training and always writes `result.json`, also on Ctrl-C or SIGTERM (reported as
   `TrainingTerminated`, a `FinetuneError`). Any error during training leaves the run
