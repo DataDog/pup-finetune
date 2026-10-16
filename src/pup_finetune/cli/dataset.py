@@ -8,10 +8,8 @@
 
 from __future__ import annotations
 
-import re
 import shlex
 import time
-from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -37,18 +35,16 @@ from pup_finetune.curation.samples import (
     DEFAULT_SAMPLE_SEED,
     DEFAULT_SAMPLE_SIZE,
     SampleSplit,
-    row_summary,
     sample_rows,
 )
 from pup_finetune.data.convert import ReasoningMode
 from pup_finetune.data.dataset_dir import DatasetDir, DatasetSettings, read_import_file
-from pup_finetune.data.exclusions import Exclusion, explain
+from pup_finetune.data.exclusions import explain
 from pup_finetune.data.pull import (
     DEFAULT_MAX_CANDIDATES,
     DEFAULT_TARGET_COUNT,
     Collection,
     PullOptions,
-    collect,
     frozen_window,
     pull,
     read_limits,
@@ -64,26 +60,19 @@ from pup_finetune.data.push import (
     push_path,
     read_push_state,
 )
-from pup_finetune.data.schema import TrainingRow, split_key
 from pup_finetune.data.split import (
     DEFAULT_SEED,
     DEFAULT_TEST_FRACTION,
     DEFAULT_VALIDATION_FRACTION,
     SPLITS,
-    SplitName,
     SplitParams,
-    skew_warnings,
-    split_counts,
-    split_warnings,
 )
 from pup_finetune.datadog.datasets import DEFAULT_PROJECT, RECORDS_BATCH_SIZE
 from pup_finetune.datadog.pup import Pup
 from pup_finetune.datadog.spans import (
-    RELATIVE_TIME_UNITS_MS,
     Clock,
     SpanQuery,
     TimeBound,
-    epoch_ms,
     parse_time_bound,
 )
 from pup_finetune.display import display_path
@@ -93,23 +82,14 @@ from pup_finetune.output import info
 from pup_finetune.workspace import ParentSetup, ignore_new_parent
 
 SAMPLE_IDS_PER_SPLIT = 5
-SAMPLE_SIZE = 5
-"""How many accepted and excluded rows a preview shows."""
 EXPLAINED_CODES = 5
 """How many of the most frequent exclusion codes get an explanation in the output."""
 
 DEFAULT_FROM = "7d"
 DEFAULT_TO = "now"
-_DEFAULT_FROM_BOUND = parse_time_bound(DEFAULT_FROM, "--from")
-"""The default ``--from`` as the query holds it (``now-7d``)."""
-WIDER_FROM = "30d"
-"""The ``--from`` a preview that accepted no row suggests when it read less than this."""
-_WIDER_FROM_MS = 30 * RELATIVE_TIME_UNITS_MS["d"]
 
 REVIEW_SAMPLE_SIZE = 20
 """How many rows the ``dataset sample`` a dataset's ``next_command`` names shows."""
-DATASETS_DIR = Path("datasets")
-"""Where ``dataset preview`` proposes to pull into: ``datasets/<ml_app>`` under the cwd."""
 
 clock: Clock = time.time
 """What ``now`` in ``--from`` and ``--to`` is resolved against; tests replace it."""
@@ -129,7 +109,7 @@ FILTER_PANEL = "Filter"
 LIMITS_PANEL = "Limits"
 ROWS_PANEL = "Rows"
 SPLITS_PANEL = "Splits"
-"""The option panels of `dataset pull` and `dataset preview` (and `import`'s splits)."""
+"""The option panels of `dataset pull` (and `import`'s splits)."""
 
 DirArgument = Annotated[
     Path, typer.Argument(metavar="DIR", help="The dataset directory.", show_default=False)
@@ -146,16 +126,6 @@ TestFractionOption = Annotated[
     float, typer.Option(metavar="X", help="Share of traces for test.", rich_help_panel=SPLITS_PANEL)
 ]
 
-MlAppOption = Annotated[
-    str,
-    typer.Option(
-        "--ml-app",
-        metavar="NAME",
-        help="The ml_app whose LLM spans to read.",
-        show_default=False,
-        rich_help_panel=FILTER_PANEL,
-    ),
-]
 PullMlAppOption = Annotated[
     str | None,
     typer.Option(
@@ -262,13 +232,6 @@ _PULL_FLAGS = (
     "milliseconds, not seconds: one below 10^11 (before March 1973) is refused."
 )
 
-_DATADOG_READ = Safety(
-    data="reads Datadog, prints sample rows",
-    recipients="your terminal: samples of trace content are printed (and reach the agent's "
-    "model when an agent runs it); reads Datadog through pup",
-    without="previews rows in memory",
-)
-
 
 IMPORT_DOC = CommandDoc(
     path="dataset import",
@@ -361,25 +324,6 @@ PUSH_DOC = CommandDoc(
         confirm="pushes the kept rows (a remote write)",
         read_only="confirm_refused",
     ),
-)
-
-PREVIEW_DOC = CommandDoc(
-    path="dataset preview",
-    short="Try a Datadog span filter; writes nothing.",
-    description=describe(
-        "Read --ml-app's LLM spans from Datadog and convert them into training rows in "
-        "memory, writing nothing. Shows the time range read, how many rows would be accepted "
-        "and why the rest would not, a few samples, and the `dataset pull` command with the "
-        "same flags.",
-        "The samples are trace content, printed to your terminal, so when an agent runs the "
-        "preview they reach the agent's model. The pull goes into a new directory under "
-        f"./datasets named after --ml-app. {_PULL_FLAGS}",
-    ),
-    examples=(
-        "pup finetune dataset preview --ml-app my-agent",
-        "pup finetune dataset preview --ml-app my-agent --span-name chat --from 3d",
-    ),
-    safety=_DATADOG_READ,
 )
 
 PULL_DOC = CommandDoc(
@@ -896,74 +840,6 @@ def _receipt_warnings(stale: Mapping[str, str], changed: Mapping[str, str]) -> l
     return warnings
 
 
-@dataset_app.command(**PREVIEW_DOC.typer())
-@run_command
-def preview(
-    ml_app: MlAppOption,
-    span_name: SpanNameOption = None,
-    query: QueryOption = None,
-    tag: TagOption = None,
-    from_: FromOption = DEFAULT_FROM,
-    to: ToOption = DEFAULT_TO,
-    target_count: TargetCountOption = DEFAULT_TARGET_COUNT,
-    max_candidates: MaxCandidatesOption = DEFAULT_MAX_CANDIDATES,
-    reasoning: ReasoningOption = "omit",
-    include_errors: IncludeErrorsOption = False,
-    seed: SeedOption = DEFAULT_SEED,
-    validation_fraction: ValidationFractionOption = DEFAULT_VALIDATION_FRACTION,
-    test_fraction: TestFractionOption = DEFAULT_TEST_FRACTION,
-) -> dict[str, Any]:
-    params = SplitParams(seed, validation_fraction, test_fraction)
-    options = _pull_options(
-        ml_app=ml_app,
-        span_name=span_name,
-        query=query,
-        tags=tag,
-        from_=from_,
-        to=to,
-        target_count=target_count,
-        max_candidates=max_candidates,
-        reasoning=reasoning,
-        include_errors=include_errors,
-    )
-    options = options.resolved(epoch_ms(clock))
-    collection = collect(Pup(), options, progress=info)
-    excluded_by_code = _count_codes(exclusion.code.value for exclusion in collection.exclusions)
-    counts = split_counts(collection.rows, params)
-    warnings = _collection_warnings(collection, options)
-    if collection.rows:
-        # With no row accepted, the splits are empty for that reason alone.
-        warnings += [
-            *split_warnings(counts),
-            *skew_warnings(_keys_by_split(collection.rows, params), params, more="pull more rows"),
-        ]
-    return {
-        "query": options.settings(),
-        "time_range": _time_range(options),
-        "limits": {"target_count": target_count, "max_candidates": max_candidates},
-        "matched_spans": collection.spans,
-        "traces": collection.traces,
-        "candidate_rows": (
-            len(collection.rows) + collection.over_target + len(collection.exclusions)
-        ),
-        "accepted": len(collection.rows),
-        "excluded": len(collection.exclusions),
-        "excluded_by_code": excluded_by_code,
-        "exclusion_explanations": _explanations(excluded_by_code),
-        "splits": counts,
-        "warnings": warnings,
-        "sample_accepted": [row_summary(row) for row in collection.rows[:SAMPLE_SIZE]],
-        "sample_excluded": _sample_exclusions(collection.exclusions),
-        "stats": collection.stats(),
-        "next_command": (
-            _pull_command(_new_dataset_dir(ml_app), options, params) if collection.rows else None
-        ),
-        "next_steps": (
-            [] if collection.rows else _no_rows_steps(collection, options, params, excluded_by_code)
-        ),
-    }
-
-
 @dataset_app.command(**PULL_DOC.typer())
 @run_command
 def pull_rows(
@@ -1403,132 +1279,10 @@ def _utc(bound: TimeBound) -> str | None:
     return moment.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def _new_dataset_dir(ml_app: str) -> str:
-    """``./datasets/<ml_app>`` (made safe for a path), with ``-2``, ``-3``, ... when taken."""
-    slug = re.sub(r"[^a-z0-9._-]+", "-", ml_app.strip().lower()).strip("-.") or "dataset"
-    candidate, n = DATASETS_DIR / slug, 2
-    while candidate.exists():
-        candidate, n = DATASETS_DIR / f"{slug}-{n}", n + 1
-    return f"./{candidate}"
-
-
 def _short_time(bound: str) -> str:
     """A canonical relative --from the way the help writes it: ``now-7d`` as ``7d``
     (``--to 1d`` would read as a duration, so a --to keeps its ``now-``)."""
     return bound.removeprefix("now-")
-
-
-def _pull_command(directory: str, options: PullOptions, params: SplitParams) -> str:
-    """The ``dataset pull`` command into ``directory`` with the flags that differ from the
-    defaults (the filter, and the time range as written)."""
-    return command("dataset", "pull", directory, *_source_args(options, params))
-
-
-def _source_args(
-    options: PullOptions,
-    params: SplitParams,
-    *,
-    from_: str | None = None,
-    include_errors: bool | None = None,
-) -> list[str]:
-    """The flags of a preview or pull that differ from the defaults: the filter, the time
-    range as written (a relative --from the short way), the limits, rows and splits.
-    ``from_`` and ``include_errors`` replace the options' own."""
-    query = options.query
-    args: list[str] = ["--ml-app", query.ml_app or ""]
-    if query.span_name:
-        args += ["--span-name", query.span_name]
-    if query.query:
-        args += ["--query", query.query]
-    for key, value in sorted(query.tags.items()):
-        args += ["--tag", f"{key}:{value}"]
-    if from_ is not None:
-        args += ["--from", from_]
-    elif str(query.from_) != _DEFAULT_FROM_BOUND:
-        args += ["--from", _short_time(str(query.from_))]
-    if str(query.to) != DEFAULT_TO:
-        args += ["--to", str(query.to)]
-    if options.target_count != DEFAULT_TARGET_COUNT:
-        args += ["--target-count", str(options.target_count)]
-    if options.max_candidates != DEFAULT_MAX_CANDIDATES:
-        args += ["--max-candidates", str(options.max_candidates)]
-    if options.reasoning != "omit":
-        args += ["--reasoning", options.reasoning]
-    if options.include_errors if include_errors is None else include_errors:
-        args.append("--include-errors")
-    if params != SplitParams():
-        args += [
-            "--seed",
-            str(params.seed),
-            "--validation-fraction",
-            str(params.validation_fraction),
-            "--test-fraction",
-            str(params.test_fraction),
-        ]
-    return args
-
-
-_RELATIVE = re.compile(r"now-(?P<amount>[0-9]+)(?P<unit>[smhdw])")
-
-
-def _no_rows_steps(
-    collection: Collection,
-    options: PullOptions,
-    params: SplitParams,
-    excluded_by_code: Mapping[str, int],
-) -> list[dict[str, str]]:
-    """What a preview that accepted no row suggests instead of a pull: keeping errored
-    calls when they are what was excluded, a wider time range, and checking the filter."""
-    steps: list[dict[str, str]] = []
-    if collection.spans and excluded_by_code.get("span_error") and not options.include_errors:
-        steps.append(
-            step(
-                template("dataset", "preview", *_source_args(options, params, include_errors=True)),
-                f"{excluded_by_code['span_error']} spans were excluded as span_error: keep the "
-                "errored LLM calls too",
-            )
-        )
-    wider = _wider_from(options.query.from_)
-    read = "every span read was excluded" if collection.spans else "no LLM span matched"
-    steps.append(
-        step(
-            template("dataset", "preview", *_source_args(options, params, from_=wider)),
-            f"{read} in the time range read; widen it with an earlier --from"
-            + (" (an ISO 8601 date, or a relative time such as 90d)" if wider == "<FROM>" else ""),
-        )
-    )
-    steps.append(
-        step(
-            template("dataset", "preview", "--ml-app", "<ML_APP>"),
-            "check the filter: --ml-app must be the ml_app your agent reports its LLM spans "
-            "under, and --span-name, --query and --tag each narrow it further, so leave them "
-            "out to see every span",
-        )
-    )
-    return steps
-
-
-def _wider_from(bound: TimeBound) -> str:
-    """The ``--from`` a preview that accepted no row suggests: :data:`WIDER_FROM` when the
-    range read is a shorter relative one, else a placeholder."""
-    match = _RELATIVE.fullmatch(bound) if isinstance(bound, str) else None
-    if match is None:
-        return "<FROM>"
-    read_ms = int(match["amount"]) * RELATIVE_TIME_UNITS_MS[match["unit"]]
-    return WIDER_FROM if read_ms < _WIDER_FROM_MS else "<FROM>"
-
-
-def _keys_by_split(rows: Iterable[TrainingRow], params: SplitParams) -> dict[SplitName, list[str]]:
-    """The split key of each of ``rows`` by the split ``params`` would assign it."""
-    keys: dict[SplitName, list[str]] = {split: [] for split in SPLITS}
-    for row in rows:
-        key = split_key(row)
-        keys[params.assign(key)].append(key)
-    return keys
-
-
-def _count_codes(codes: Iterable[str]) -> dict[str, int]:
-    return dict(sorted(Counter(codes).items()))
 
 
 def _explanations(excluded_by_code: dict[str, int]) -> dict[str, str]:
@@ -1574,22 +1328,6 @@ def _collection_warnings(collection: Collection, options: PullOptions) -> list[s
             f"{unreadable} spans could not be read and were skipped (excluded as unreadable_span)"
         )
     return warnings
-
-
-def _sample_exclusions(exclusions: Sequence[Exclusion]) -> list[dict[str, Any]]:
-    """Up to :data:`SAMPLE_SIZE` exclusions: one per code first (most frequent codes first)."""
-    counts = Counter(exclusion.code.value for exclusion in exclusions)
-    firsts: dict[str, Exclusion] = {}
-    for exclusion in exclusions:
-        firsts.setdefault(exclusion.code.value, exclusion)
-    ordered = sorted(firsts.values(), key=lambda e: (-counts[e.code.value], e.code.value))
-    picked = ordered[:SAMPLE_SIZE]
-    for exclusion in exclusions:
-        if len(picked) >= SAMPLE_SIZE:
-            break
-        if not any(exclusion is chosen for chosen in picked):
-            picked.append(exclusion)
-    return [exclusion.to_json() for exclusion in picked]
 
 
 def register(app: typer.Typer) -> None:

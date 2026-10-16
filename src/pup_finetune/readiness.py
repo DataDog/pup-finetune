@@ -345,7 +345,6 @@ def ready_map(checks: Sequence[CheckResult], runtime: Runtime) -> dict[str, dict
     datadog = _blocked(by_name, DATADOG_CHECKS)
     triage_keys = dict.fromkeys(f"{judge_credential(j)}:key" for j in _default_triage_judges())
     steps: dict[str, dict[str, Any]] = {
-        "dataset preview": _step(datadog),
         "dataset pull": _step(datadog),
         "dataset show": _step([]),
         "dataset push": _step(datadog + read_only),

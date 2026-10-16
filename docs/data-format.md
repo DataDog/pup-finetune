@@ -84,7 +84,7 @@ A synthetic example, formatted over several lines here (a file holds one row per
 
 ## From an LLM span to a row
 
-`dataset preview` and `dataset pull` read LLM spans through the Agent Observability Export
+`dataset pull` reads LLM spans through the Agent Observability Export
 API. Each span becomes one conversation: its input messages followed by its output messages
 ([`src/pup_finetune/data/convert.py`](../src/pup_finetune/data/convert.py)).
 

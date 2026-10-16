@@ -29,11 +29,11 @@ pup finetune doctor                  # what you can run now, and what to fix
 
 The agent shows you every paid or remote step before it runs, and waits for your yes.
 
-**By hand:** `dataset preview` → `dataset pull` → review (`dataset sample` and `dataset
-label`, or `dataset triage`) → `train` → `status` → `evaluate` → `deploy` → `undeploy`.
+**By hand:** `dataset pull` → review (`dataset sample` and `dataset label`, or `dataset
+triage`) → `train` → `status` → `evaluate` → `deploy` → `undeploy`.
 
 ```sh
-pup finetune dataset preview --ml-app my-agent --from 7d
+pup llm-obs spans search --ml-app my-agent --span-kind llm --from 7d --limit 50 --summary
 pup finetune dataset pull datasets/my-agent --ml-app my-agent --from 7d
 pup finetune dataset sample datasets/my-agent --count 20
 pup finetune dataset label datasets/my-agent --file labels.jsonl
@@ -70,7 +70,7 @@ installs every extra. `evaluate` also uses the Datadog login to publish its expe
 <!-- BEGIN GENERATED: what each step needs (scripts/gen_command_docs.py) -->
 | Step | Datadog login | API key | Extra |
 | --- | --- | --- | --- |
-| `dataset preview`, `dataset pull` | yes | - | - |
+| `dataset pull` | yes | - | - |
 | `dataset import`, `show`, `sample`, `label`; `status`, `runs` | - | - | - |
 | `dataset triage` | - | `FIREWORKS_API_KEY` | - |
 | `dataset push` | yes | - | - |
@@ -93,17 +93,16 @@ under `files` hold the full record. `pup finetune help <command>` prints a comma
 
 ## Build a dataset
 
-`dataset preview` converts the spans in memory and writes nothing. Tune the filter with it,
-then pull:
+Look at the spans with pup first, and test a filter there, then pull:
 
 ```sh
-pup finetune dataset preview --ml-app my-agent --from 7d --span-name chat --tag env:prod
+pup llm-obs spans search --ml-app my-agent --span-kind llm --span-name chat --tags env:prod --from 7d --limit 50 --summary
 pup finetune dataset pull datasets/my-agent --ml-app my-agent --from 7d --span-name chat --tag env:prod
 pup finetune dataset show datasets/my-agent
 ```
 
-The preview shows sample rows (the first user message and the final answer), how many rows it
-would accept, and why it leaves the rest out. `--tag` repeats, and every tag must match.
+The pull reports how many rows it accepted, and why it left the rest out
+(`excluded_by_code`, with `exclusion_explanations`). `--tag` repeats, and every tag must match.
 `--query` takes a search query, and `--include-errors` keeps errored LLM calls. `--from` and
 `--to` take ISO 8601, epoch milliseconds (a bare number is milliseconds), or a relative time:
 `7d`, `24h`, `now-7d`, `now`.

@@ -367,7 +367,6 @@ def with_exclusions(text: str) -> str:
 
 
 _DATASET_STEPS = (
-    "dataset preview",
     "dataset pull",
     "dataset show",
     "dataset triage",

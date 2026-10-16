@@ -12,7 +12,7 @@ with the user. Datadog access is Pup's login; provider keys stay out of the chat
 ## The flow
 
 ```text
-Step 0 doctor -> 1 explore spans -> 2 dataset preview, pull -> 3 review (sample + label, or triage)
+Step 0 doctor -> 1 explore spans -> 2 test the filter, pull -> 3 review (sample + label, or triage)
   -> 4 dataset push (curate in Datadog, dataset fetch) -> 5 benchmark, train, status -> 6 evaluate
   -> 7 deploy, undeploy
 ```
@@ -127,7 +127,7 @@ a rare, valuable decision (say, recommending a change), which mistake costs more
 (optimize precision), a missed one (recall), or both alike (F1); and whether cost or latency
 drives this. Agree how to read that decision from an answer (a tool called, an output field's
 value) and the bar to reach; do not switch metrics after seeing results. This decides
-rebalancing (step 4) and the recipe kept (step 6). The filter's flags, for `preview` and `pull`:
+rebalancing (step 4) and the recipe kept (step 6). The filter's flags, for `dataset pull`:
 
 | Flag | Selects |
 | --- | --- |
@@ -139,8 +139,7 @@ rebalancing (step 4) and the recipe kept (step 6). The filter's flags, for `prev
 | `--from 7d`, `--to now` | The window: `7d`, `24h`, `now-7d`, `now`, ISO 8601 or epoch ms. |
 | `--target-count`, `--max-candidates` | Rows to keep (rows dropped in review do not count) and spans read. |
 
-Build a filter only from values you saw. Test every filter, a `--query` above all, with
-`dataset preview` before you pull.
+Build a filter only from values you saw, and test it (a `--query` above all) in step 2.
 
 Check:
 
@@ -148,18 +147,19 @@ Check:
 - [ ] The user named the metric that decides success, and agreed on the quality signal and
       the time range.
 
-## Step 2: preview, then pull the dataset
+## Step 2: test the filter, then pull the dataset
 
 ```sh
-pup finetune dataset preview --ml-app <ML_APP> --from 7d --span-name chat --tag env:prod
-pup finetune dataset pull datasets/my-agent --ml-app <ML_APP> --from 7d --span-name chat --tag env:prod
+pup llm-obs spans search --ml-app <ML_APP> --query '<QUERY>' --from 7d --limit 50 --summary
+pup llm-obs spans get-content --trace-id <TRACE_ID> --span-id <SPAN_ID> --field messages --from 7d
+pup finetune dataset pull datasets/my-agent --ml-app <ML_APP> --from 7d --query '<QUERY>'
 pup finetune dataset show datasets/my-agent
 ```
 
-The preview writes nothing. Read its `sample_accepted` rows and exclusion reasons with the
-user. Its `next_command` is the same pull into `datasets/<ml_app>`, which gets a `.gitignore`.
-The pull freezes the filter, splits and window, so `pup finetune dataset pull datasets/my-agent` resumes
-it with the last limits; after a review drops rows, it reads on to replace them.
+The search writes nothing: agree with the user that its spans (read a few with `get-content`)
+are the ones to train on, then pull the same filter into `datasets/<ml_app>` (git-ignored).
+The pull freezes the filter, splits and window, so `pup finetune dataset pull datasets/my-agent`
+resumes it with the last limits; after a review drops rows, it reads on to replace them.
 
 Check:
 
@@ -385,7 +385,7 @@ Errors read `Error [<code>]: <message>`, then `Hint: ...`. The codes, with their
 | --- | --- | --- |
 | `doctor` fails `datadog_auth` | Pup is not signed in, or to another site | The user runs `pup auth login`; rerun `doctor`. |
 | No provider key, or `Error [provider_auth]` | No key, or a revoked one | The user runs `pup finetune auth login <PROVIDER>` (or the judge's provider) in their own terminal. |
-| `dataset preview` matches no spans | Wrong ml_app, filter or window | Back to step 1: use only values seen in real spans, or widen `--from`. |
+| `dataset pull` matches no spans | Wrong ml_app, filter or window | Back to step 1: use only values seen in real spans, or widen `--from`. |
 | Most rows are excluded | Spans that cannot train | Read `excluded_by_code` in `dataset show`. `span_error` needs `--include-errors` and a yes. |
 | `Error [read_only]` | Read-only mode | Tell the user; previews and local commands still work. |
 | `Error [settings_conflict]` | Settings frozen per directory | Leave the flags out (the frozen values are used), or use a new directory or `--out-dir`. |

@@ -159,8 +159,9 @@ def test_a_healthy_pup_is_ready_without_any_provider_key(use_pup: UsePup) -> Non
     assert report["next_command"] is None
     assert report["next_steps"] == [
         {
-            "command": "pup finetune dataset preview --ml-app <ML_APP> --from 7d",
-            "why": "read a sample of your Agent Observability traces, in memory",
+            "command": "pup finetune dataset pull <DIR> --ml-app <ML_APP> --from 7d",
+            "why": "pull your Agent Observability traces into a dataset directory, once "
+            "`pup llm-obs spans search` showed the spans and filter to read",
         },
         {
             "command": "pup finetune auth login fireworks",
@@ -180,7 +181,6 @@ def test_ready_says_which_steps_can_run(use_pup: UsePup) -> None:
     use_pup(healthy_pup().client())
     ready = report_of(invoke())["ready"]
     assert {name: step["ready"] for name, step in ready.items()} == {
-        "dataset preview": True,
         "dataset pull": True,
         "dataset show": True,
         "dataset push": True,
@@ -211,7 +211,7 @@ def test_with_the_keys_set_every_step_is_ready(
     assert (key["status"], key["label"]) == ("pass", "Fireworks key (FIREWORKS_API_KEY)")
     assert key["detail"] == "fireworks API key found (source: env)"
     assert [step["command"] for step in report["next_steps"]] == [
-        "pup finetune dataset preview --ml-app <ML_APP> --from 7d"
+        "pup finetune dataset pull <DIR> --ml-app <ML_APP> --from 7d"
     ]
     assert API_KEY not in result.stdout + result.stderr
 
@@ -247,7 +247,7 @@ def test_read_only_mode_blocks_push_and_paid_runs(
     assert ready["dataset push"]["blocked_by"] == ["read_only"]
     assert ready["train on fireworks"]["blocked_by"] == ["read_only"]
     assert ready["deploy on fireworks"]["blocked_by"] == ["read_only"]
-    assert ready["dataset preview"]["ready"] is True
+    assert ready["dataset pull"]["ready"] is True
     assert ready["dataset triage"]["ready"] is True
 
 
@@ -260,7 +260,7 @@ def test_the_ready_line_says_which_steps_read_only_mode_blocks(
     lines = invoke().stderr.splitlines()
     ready = next(line for line in lines if line.startswith("Ready: "))
     assert ready == (
-        "Ready: dataset preview, pull, show, triage.  Not ready: dataset push (read-only), "
+        "Ready: dataset pull, show, triage.  Not ready: dataset push (read-only), "
         "train on fireworks (read-only), evaluate on fireworks (read-only), deploy on "
         "fireworks (read-only), train on baseten (read-only), evaluate on baseten (read-only), "
         "deploy on baseten (read-only)."
@@ -297,7 +297,7 @@ def test_old_pup_fails_but_still_emits_the_report(use_pup: UsePup) -> None:
     assert "older than the minimum 1.10.7" in pup_check["detail"]
     assert pup_check["fix"] == "upgrade with `brew upgrade datadog/pack/pup`"
     assert report["checks"][1]["status"] == "pass"
-    assert report["ready"]["dataset preview"]["blocked_by"] == ["pup"]
+    assert report["ready"]["dataset pull"]["blocked_by"] == ["pup"]
 
 
 def test_missing_pup_fails_and_skips_auth(use_pup: UsePup, tmp_path: Path) -> None:
@@ -441,7 +441,7 @@ def test_a_named_provider_s_steps_are_the_only_ones_not_ready(
     result = invoke("--provider", "fireworks")
     ready = next(line for line in result.stderr.splitlines() if line.startswith("Ready: "))
     assert ready == (
-        "Ready: dataset preview, pull, show, push, triage.  Not ready: train on fireworks, "
+        "Ready: dataset pull, show, push, triage.  Not ready: train on fireworks, "
         "evaluate on fireworks, deploy on fireworks."
     )
     # The JSON keeps every step.
@@ -613,10 +613,10 @@ def test_the_checklist_follows_the_report_on_stderr(
         "--    Anthropic/OpenAI keys not set                only for anthropic/... or openai/... "
         "judges",
         "ok    Anthropic SDK installed                      anthropic/... judges",
-        "Ready: dataset preview, pull, show, push, triage.  Not ready: train on fireworks, "
+        "Ready: dataset pull, show, push, triage.  Not ready: train on fireworks, "
         "evaluate on fireworks, deploy on fireworks, train on baseten, evaluate on baseten, "
         "deploy on baseten.",
-        "Next: pup finetune dataset preview --ml-app <ML_APP> --from 7d",
+        "Next: pup finetune dataset pull <DIR> --ml-app <ML_APP> --from 7d",
     ]
 
 
@@ -628,7 +628,7 @@ def test_a_failing_doctor_still_prints_its_checklist(use_pup: UsePup, tmp_path: 
     assert lines[1].startswith("FAIL  pup not found")
     assert lines[2].startswith("      fix: install pup with `brew install datadog/pack/pup`")
     assert lines[3].startswith("skip  Datadog login not checked (no pup)")
-    assert lines[-2].startswith("Ready: dataset show.  Not ready: dataset preview, pull, push")
+    assert lines[-2].startswith("Ready: dataset show.  Not ready: dataset pull, push")
     assert lines[-1].startswith("Next: install pup with `brew install datadog/pack/pup`")
 
 

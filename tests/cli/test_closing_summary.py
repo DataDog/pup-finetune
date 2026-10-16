@@ -274,15 +274,6 @@ def _calibration_failed() -> dict[str, Any]:
 
 
 EXAMPLES: dict[str, dict[str, Any]] = {
-    "dataset preview": {
-        "matched_spans": 10,
-        "accepted": 4,
-        "excluded": 3,
-        "excluded_by_code": {"span_error": 1, "non_text_content": 1, "no_assistant_message": 1},
-        "splits": {"train": 2, "validation": 1, "test": 1},
-        "stats": {"pages_fetched": 2, "pages_cached": 0},
-        "next_command": "pup finetune dataset pull ./ds --ml-app a",
-    },
     "dataset pull": {
         "accepted": 4,
         "excluded": 5,
@@ -329,9 +320,6 @@ EXAMPLES: dict[str, dict[str, Any]] = {
 }
 
 EXPECTED: dict[str, str] = {
-    "dataset preview": "read 10 spans on 2 pages: 4 rows accepted, 3 excluded (1 no_assistant_message, "
-    "1 non_text_content, 1 span_error) (nothing written). Next: pup finetune dataset pull ./ds "
-    "--ml-app a",
     "dataset pull": "read 10 spans on 2 pages: 4 rows accepted, 5 excluded (2 a, 1 b, 1 c, +1 more); "
     "4 rows added, 0 unchanged. Next: pup finetune dataset sample ./ds",
     "dataset triage": "triage complete: 12 kept, 3 dropped, 1 undecided, 2 too long; 36 judge "
@@ -374,8 +362,8 @@ def test_doctor_prints_its_whole_checklist_on_or_off_a_terminal() -> None:
         ],
         "ready": {
             "dataset show": {"ready": True},
-            "dataset preview": {"ready": False},
             "dataset pull": {"ready": False},
+            "dataset push": {"ready": False},
         },
         "next_command": None,
         "next_steps": [],
@@ -389,7 +377,7 @@ def test_doctor_prints_its_whole_checklist_on_or_off_a_terminal() -> None:
         "FAIL  Datadog: not signed in  reading traces",
         "      fix: run `pup auth login`",
         "--    A key not set           only for a/x",
-        "Ready: dataset show.  Not ready: dataset preview, pull.",
+        "Ready: dataset show.  Not ready: dataset pull, push.",
         "Next: run `pup auth login`",
     )
     assert found.line == "\n".join(found.lines)
@@ -577,7 +565,6 @@ def test_the_dataset_commands_end_with_their_summaries(
     fake = FakeDatasetsApi().install(FakeExportApi(fixture_pages()).install(FakePup()))
     monkeypatch.setattr(dataset_cli, "Pup", fake.client)
     query = ("--ml-app", "synthetic-trip-planner", "--to", "now")
-    _ends_with_its_summary("dataset preview", invoke("dataset", "preview", *query))
     target = tmp_path / "pulled"
     _ends_with_its_summary("dataset pull", invoke("dataset", "pull", str(target), *query))
 

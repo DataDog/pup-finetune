@@ -229,18 +229,19 @@ def _next(
     line shows the first one), and signing in is never a ``next_command``, since only the
     user may enter a key. ``next_steps`` signs in each provider whose key is not set (only
     the named one with ``--provider``; never one whose key could not be read, whose fix is
-    the keychain), after reading traces when that is ready.
+    the keychain), after pulling traces when that is ready.
     """
     next_command: str | None = None
     failed = [check for check in checks if check.required and not check.ok]
     if named is not None and not live and not failed:
         next_command = command("doctor", "--provider", named.name, "--check")
     steps: list[dict[str, str]] = []
-    if ready["dataset preview"]["ready"]:
+    if ready["dataset pull"]["ready"]:
         steps.append(
             step(
-                template("dataset", "preview", "--ml-app", "<ML_APP>", "--from", "7d"),
-                "read a sample of your Agent Observability traces, in memory",
+                template("dataset", "pull", "<DIR>", "--ml-app", "<ML_APP>", "--from", "7d"),
+                "pull your Agent Observability traces into a dataset directory, once "
+                "`pup llm-obs spans search` showed the spans and filter to read",
             )
         )
     by_name = {check.name: check for check in checks}

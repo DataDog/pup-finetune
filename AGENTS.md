@@ -124,11 +124,10 @@ new `--out-dir`. An evaluation whose pairs ended in errors (a sampler or judge o
 1 when a target has no verdict at all; a cancelled one reports `partial`.
 
 To build a dataset from your own Agent Observability traces (Datadog reads through pup, so
-both work with `PUP_READ_ONLY` set):
+both work with `PUP_READ_ONLY` set; test a filter with `pup llm-obs spans search` first):
 
 ```sh
-uv run pup-finetune dataset preview --ml-app my-app --from 7d   # in memory, writes nothing;
-                                     # next_command pulls into a new ./datasets/my-app
+pup llm-obs spans search --ml-app my-app --span-kind llm --from 7d --limit 50 --summary
 uv run pup-finetune dataset pull /tmp/ds --ml-app my-app --from 7d
 uv run pup-finetune dataset pull /tmp/ds   # rerun to resume: the frozen settings fill in
                                      # the flags (pages cached in /tmp/ds/raw)
@@ -332,7 +331,7 @@ Source lives under `src/pup_finetune/`.
   summary of each command (`SUMMARIES`, by command path), generated from the result mapping
   alone; `run_command` prints it, after the result's warnings, unless `PUP_FINETUNE_QUIET`
   is on. `dataset.py` has `dataset import`,
-  `preview`, `pull`, `show`, `sample`, `label` and `push`, and `dataset_next`, the next
+  `fetch`, `pull`, `show`, `sample`, `label` and `push`, and `dataset_next`, the next
   command and steps a dataset directory's state calls for (unlabeled: `dataset sample`;
   labeled: training steps, since the model is the user's to choose; the provider follows from
   it and the run directory defaults); `train.py` has `train` (`provider_for_model` infers
@@ -529,8 +528,8 @@ Source lives under `src/pup_finetune/`.
   that run before conversion, in order, first failure wins (`span_error`; errored calls are kept
   with `--include-errors`); there is no `truncated_content` check, as the Export API gives no
   explicit truncation signal. `exclusions.py` also explains every code (`explain`). `pull.py` is
-  what `dataset preview` (in memory) and `dataset pull` (into a dataset, through its `raw/`
-  cache, with the settings frozen first) run, a relative time range resolved once (a re-run
+  what `dataset pull` runs (into a dataset, through its `raw/` cache, with the settings frozen
+  first; `collect` is the export and conversion, which tests run in memory), a relative time range resolved once (a re-run
   reuses the frozen window, `resolve_window`): export a page at a time, check, convert, drop
   repeated conversations, and stop at `--target-count` rows or `--max-candidates` spans before
   fetching another page. Unreadable items are excluded as `unreadable_span` and count toward
@@ -563,7 +562,7 @@ Source lives under `src/pup_finetune/`.
 - `curation/` - deciding which accepted rows to train on. `labels.py` has `apply_labels`
   (every id an accepted row, last label per id wins, repeats skipped, appended through
   `DatasetDir.append_labels`); `samples.py` picks a seeded, readable sample of rows for
-  review (`row_summary` is the brief form `dataset preview`'s samples share); `pipeline.py`
+  review (`row_summary` is a row's brief form); `pipeline.py`
   has `pipeline_state`, the `pipeline` block of every dataset result. `triage.py` is the judge council behind `dataset triage`: `Criteria` (rubric and/or
   rules, hashed), `build_messages` (the untrusted-data system prompt with the rubric, the
   whole row JSON-encoded in blocks), `parse_vote` (strict `{"keep", "reason"}`), `Vote`s in

@@ -53,7 +53,7 @@ RUNS_DIR: Final = Path("runs")
 """Where runs go by default, relative to the working directory."""
 
 DATASETS_DIR: Final = Path("datasets")
-"""Where ``dataset preview`` suggests pulling into, relative to the working directory."""
+"""Where dataset directories go by default, relative to the working directory."""
 
 IGNORED_DIRS: Final = (RUNS_DIR, DATASETS_DIR)
 """The directories that get a ``.gitignore`` when a command creates them."""

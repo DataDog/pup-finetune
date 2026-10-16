@@ -62,7 +62,7 @@ def test_the_table_of_what_each_step_needs_comes_from_the_registries() -> None:
         assert f"`train` on {name.capitalize()}" in table or f"on {name.capitalize()} |" in table
     assert "Fake" not in table  # development-only providers stay out of the README
     assert gen.requirement_rows() == [
-        ("`dataset preview`, `dataset pull`", "yes", "", ""),
+        ("`dataset pull`", "yes", "", ""),
         ("`dataset import`, `show`, `sample`, `label`; `status`, `runs`", "", "", ""),
         ("`dataset triage`", "", "`FIREWORKS_API_KEY`", ""),
         ("`dataset push`", "yes", "", ""),

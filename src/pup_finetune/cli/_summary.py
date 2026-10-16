@@ -582,20 +582,6 @@ def _accepted(accepted: object, excluded: object, by_code: object) -> str:
     return f"{text} ({codes})" if codes else text
 
 
-def preview_summary(result: Mapping[str, Any]) -> Summary:
-    """``dataset preview``: spans read, rows accepted and excluded by code; nothing written."""
-    stats = result.get("stats") or {}
-    pages = int(stats.get("pages_fetched", 0)) + int(stats.get("pages_cached", 0))
-    headline = (
-        f"{_read(result.get('matched_spans'), pages)}: "
-        f"{_accepted(result.get('accepted'), result.get('excluded'), result.get('excluded_by_code'))}"
-        " (nothing written)"
-    )
-    splits = _splits(result.get("splits"))
-    details = [f"splits: {splits}"] if splits else []
-    return _summary(headline, details, next_command=result.get("next_command"))
-
-
 def pull_summary(result: Mapping[str, Any]) -> Summary:
     """``dataset pull``: spans read, rows added, and the dataset's rows by code and split."""
     pull = result.get("pull") or {}
@@ -817,7 +803,7 @@ def _note(check: Mapping[str, Any]) -> str:
 
 
 def _steps_text(names: Sequence[str], marks: Mapping[str, str] | None = None) -> str:
-    """``dataset preview, pull, show`` for steps that share their first word and are one
+    """``dataset pull, show, push`` for steps that share their first word and are one
     word after it; every other step in full. ``marks`` adds a note after a step's name
     (``dataset push (read-only)``)."""
     parts: list[str] = []
@@ -1280,7 +1266,6 @@ SUMMARIES: Final[dict[str, Summarizer]] = {
     "runs": runs_summary,
     "evaluate": evaluate_summary,
     "benchmark": benchmark_summary,
-    "dataset preview": preview_summary,
     "dataset pull": pull_summary,
     "dataset import": import_summary,
     "dataset label": label_summary,

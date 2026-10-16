@@ -45,7 +45,6 @@ These print text on stdout instead of one JSON document: `help` (alone or with a
 - [`pup finetune skill show`](#pup-finetune-skill-show): Print the skill's path and content.
 - [`pup finetune skill install`](#pup-finetune-skill-install): Install the skill for your coding agents.
 - [`pup finetune help`](#pup-finetune-help): Show the help for a command, as --help does.
-- [`pup finetune dataset preview`](#pup-finetune-dataset-preview): Try a Datadog span filter; writes nothing.
 - [`pup finetune dataset pull`](#pup-finetune-dataset-pull): Pull training rows from Datadog into a dataset directory.
 - [`pup finetune dataset import`](#pup-finetune-dataset-import): Import canonical rows from a local JSONL file.
 - [`pup finetune dataset show`](#pup-finetune-dataset-show): Show a dataset's counts, exclusions, splits and settings.
@@ -78,7 +77,6 @@ What each command does without and with `--confirm`, where its data goes, and wh
 | `pup finetune skill show` | prints the skill | no `--confirm` | nowhere: local files | allowed |
 | `pup finetune skill install` | installs the skill | no `--confirm` | nowhere: npx gets no secrets | allowed |
 | `pup finetune help` | prints the help | no `--confirm` | nowhere | allowed |
-| `pup finetune dataset preview` | previews rows in memory | no `--confirm` | your terminal: samples of trace content are printed (and reach the agent's model when an agent runs it); reads Datadog through pup | allowed |
 | `pup finetune dataset pull` | pulls rows into DIR | no `--confirm` | DIR: reads Datadog through pup | allowed |
 | `pup finetune dataset import` | imports rows into DIR | no `--confirm` | nowhere: local files | allowed |
 | `pup finetune dataset show` | shows the dataset | no `--confirm` | nowhere: local files | allowed |
@@ -274,45 +272,6 @@ pup finetune help dataset pull
 ```
 
 Safety: Free · reads nothing · PUP_READ_ONLY: allowed.
-
-## `pup finetune dataset preview`
-
-Read --ml-app's LLM spans from Datadog and convert them into training rows in memory, writing nothing. Shows the time range read, how many rows would be accepted and why the rest would not, a few samples, and the `dataset pull` command with the same flags.
-
-The samples are trace content, printed to your terminal, so when an agent runs the preview they reach the agent's model. The pull goes into a new directory under ./datasets named after --ml-app. Spans are LLM spans of --ml-app in the time range, narrowed by --span-name, --query and --tag. Each span becomes a conversation (input then output messages; a plain input or output value is the user or assistant message); per trace, a conversation another one contains is dropped, so sub-agents stay their own rows. Errored LLM calls are excluded as span_error unless --include-errors is passed. Reading stops once --target-count rows are accepted or --max-candidates spans are read, unreadable ones included. A relative time is a number and a unit (s, m, h, d or w, or spelled out, such as 5min or 2hours), with or without now- in front (7d is now-7d), or now; it is resolved once, when the command starts. A bare number is epoch milliseconds, not seconds: one below 10^11 (before March 1973) is refused.
-
-```
-pup finetune dataset preview [OPTIONS]
-```
-
-| Option | Value | Default | Description |
-| --- | --- | --- | --- |
-| **Filter** | | | |
-| `--ml-app` | `NAME` | required | The ml_app whose LLM spans to read. |
-| `--span-name` | `NAME` |  | Only spans with this name. |
-| `--query` | `TEXT` |  | Only spans that match this search query. |
-| `--tag` | `KEY:VALUE, repeatable` |  | Only spans with this tag; repeatable. |
-| `--from` | `TIME` | `7d` | Start: ISO 8601, epoch ms, or relative: 7d, 24h, now-7d, now. |
-| `--to` | `TIME` | `now` | End, in the same forms as --from. |
-| **Limits** | | | |
-| `--target-count` | `N (x>=1)` | `200` | Stop once this many rows are accepted. |
-| `--max-candidates` | `N (x>=1)` | `5000` | Read at most this many spans. |
-| **Rows** | | | |
-| `--reasoning` | `omit\|preserve` | `omit` | omit or preserve reasoning messages. |
-| `--include-errors` |  |  | Keep errored LLM calls. |
-| **Splits** | | | |
-| `--seed` | `N` | `42` | Seed for the split assignment. |
-| `--validation-fraction` | `X` | `0.1` | Share of traces for validation. |
-| `--test-fraction` | `X` | `0.1` | Share of traces for test. |
-
-Examples:
-
-```sh
-pup finetune dataset preview --ml-app my-agent
-pup finetune dataset preview --ml-app my-agent --span-name chat --from 3d
-```
-
-Safety: Free · reads Datadog, prints sample rows · PUP_READ_ONLY: allowed.
 
 ## `pup finetune dataset pull`
 

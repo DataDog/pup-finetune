@@ -28,7 +28,6 @@ from typer.testing import CliRunner, Result
 from pup_finetune.cli import app
 from pup_finetune.cli import dataset as dataset_cli
 from pup_finetune.cli import train as train_module
-from pup_finetune.datadog.spans import EXPORT_PATH
 from pup_finetune.errors import ERROR_CODES
 from pup_finetune.providers.base import Provider
 from pup_finetune.providers.fireworks.provider import FireworksProvider
@@ -143,9 +142,9 @@ def _locked_dataset(w: World) -> list[str]:
 
 
 def _pup_fails(w: World) -> list[str]:
-    fake = FakePup().on("api", EXPORT_PATH, returncode=1, stderr="Error: 500 Internal Error")
+    fake = FakePup().on("auth", "status", returncode=1, stderr="Error: 500 Internal Error")
     w.monkeypatch.setattr(dataset_cli, "Pup", fake.client)
-    return ["dataset", "preview", "--ml-app", "synthetic-app"]
+    return ["dataset", "pull", str(w.tmp / "pulled"), "--ml-app", "synthetic-app"]
 
 
 def _pup_interrupted(w: World) -> list[str]:
@@ -154,9 +153,9 @@ def _pup_interrupted(w: World) -> list[str]:
     def interrupt(_call: object) -> object:
         raise KeyboardInterrupt
 
-    fake = FakePup().on("api", EXPORT_PATH, handler=interrupt)
+    fake = FakePup().on("auth", "status", handler=interrupt)
     w.monkeypatch.setattr(dataset_cli, "Pup", fake.client)
-    return ["dataset", "preview", "--ml-app", "synthetic-app"]
+    return ["dataset", "pull", str(w.tmp / "pulled"), "--ml-app", "synthetic-app"]
 
 
 def _fireworks(failure: str) -> Callable[[World], list[str]]:

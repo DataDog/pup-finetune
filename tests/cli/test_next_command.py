@@ -38,7 +38,6 @@ from pup_finetune.inference import ChatCompleter, ChatCompletion
 from pup_finetune.next_steps import PROGRAM, problems
 from pup_finetune.runs import RunDir
 from tests.fakes.datasets import FakeDatasetsApi
-from tests.fakes.llmobs import FakeExportApi, fixture_pages
 from tests.fakes.pup import FakePup
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
@@ -143,18 +142,6 @@ class AlwaysKeep:
 
 
 # --- each preview -------------------------------------------------------------------------
-
-
-def test_dataset_preview_runs_its_pull(
-    monkeypatch: pytest.MonkeyPatch, raised: list[BaseException]
-) -> None:
-    fake = FakeExportApi(fixture_pages()).install(FakePup())
-    monkeypatch.setattr(dataset_cli, "Pup", fake.client)
-    result = invoke("dataset", "preview", "--ml-app", "synthetic-trip-planner", "--to", "now")
-    assert result.exit_code == 0, result.stderr
-    pulled = output(follow(output(result)["next_command"], raised))
-    assert pulled["accepted"] > 0
-    assert pulled["dataset_dir"] == str(Path("datasets") / "synthetic-trip-planner")
 
 
 def test_dataset_push_preview(
