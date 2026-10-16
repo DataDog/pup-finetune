@@ -102,10 +102,12 @@ nor tool calls is dropped. Within a trace, a conversation that is a prefix or a 
 another is dropped, so each sub-agent keeps its own row. A row's split comes from its trace,
 so every row of a trace lands in the same split, and copies of one request share it too: rows
 whose user messages are the same once lowercased, with numbers as `0` and whitespace
-collapsed, join their traces into one group, and a group gets one split. A request whose
-group would hold more than 5% of the traces (and more than 2, so two traces asking one request
-always join) is not joined: a fixed prompt many conversations share, such as "Summarize the
-above", keeps a split per trace, with a warning naming some of its rows. A trace keeps its split
+collapsed, join their traces into one group, and a group gets one split. A request asked in
+more than 5% of the traces (rounded up, and more than 5) is generic and joins nothing: a fixed
+prompt many conversations share, such as "Summarize the above", keeps a split per trace, with
+a warning naming some of its rows. Groups have no size cap, so a group holding more than 10%
+of the rows is warned about with a few of its rows: its traces are likely chained through
+requests they share. A trace keeps its split
 once assigned; a new trace joining copies already in two splits takes the split holding most
 of their kept rows. Whenever the kept rows of a group are in more than one split (copies
 recorded apart before they were grouped), the summary's `split_conflicts` counts the groups
@@ -274,7 +276,8 @@ when it lists every kept row as it is now, `pushed_with_new_rows` when `pending`
 not pushed yet (or a push did not finish), `pushed_with_changed_rows` when `changed` kept rows
 differ from the records pushed for them (a push only adds records, so the dataset holds them
 as they were pushed: the gate names up to 5 of them, and its step fetches that dataset into a
-new directory to train on what Datadog holds), and `unreadable` (with `pending` and `changed` null) when
+new directory to train on what Datadog holds; the fetch also brings back the records of rows
+dropped or retired since the push, which the step counts, to drop again with `dataset label`), and `unreadable` (with `pending` and `changed` null) when
 `push.json` cannot be read. `train` and `benchmark` on a real provider read only a `pushed`
 dataset. An `unreadable`
 part comes with a warning in the result that names the file and the problem.

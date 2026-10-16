@@ -11,9 +11,10 @@ A row's split is recorded per split key (its trace id; see
 Copies of one request share a split too: rows whose user messages differ only in numbers,
 case or whitespace (:func:`request_key`) and the rows of their traces form one group
 (:func:`split_groups`), and :func:`assign_splits` gives a group one split, so a test answer
-is not also trained on. A request repeated in more traces than :func:`group_cap` allows (a
-fixed prompt such as "Summarize the above", asked in unrelated conversations) is left
-ungrouped and reported rather than pulling a large share of the dataset into one split.
+is not also trained on. A request asked in more traces than :func:`generic_limit` allows (a
+fixed prompt such as "Summarize the above", asked in unrelated conversations) is generic: it
+joins nothing and is reported, rather than pulling a large share of the dataset into one
+split.
 Assignments are persisted in ``splits.json``: once a key is assigned it never moves, and new
 keys are assigned with the fractions frozen there. Copies recorded in different splits
 before they were grouped stay there; :func:`split_conflicts` names them.
@@ -194,11 +195,14 @@ def check_isolation(rows_by_split: Mapping[SplitName, Iterable[TrainingRow]]) ->
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")
 _SPACE = re.compile(r"\s+")
 
-GROUP_SHARE = 0.05
-"""The largest share of a dataset's traces a request may gather into one group."""
-GROUP_MIN_TRACES = 2
-"""The cap on a request's group in a dataset small enough that :data:`GROUP_SHARE` of it
-is fewer traces, so two traces asking one request always group."""
+GENERIC_PERCENT = 5
+"""A request asked in more than this percent of a dataset's traces is generic."""
+GENERIC_MIN_TRACES = 5
+"""A request asked in this many traces or fewer is never generic, however small the
+dataset."""
+LARGE_GROUP_SHARE = 0.10
+"""A group holding more than this share of the rows is reported: its traces are likely
+chained through prompts they share."""
 SHOWN_CONFLICT_IDS = 10
 """How many row ids per split a summary names for split conflicts."""
 
@@ -216,10 +220,11 @@ def request_key(row: TrainingRow) -> str | None:
     return hashlib.sha256("\x1f".join(texts).encode()).hexdigest()
 
 
-def group_cap(traces: int) -> int:
-    """The most traces a request may gather into one group in a dataset of ``traces``
-    traces."""
-    return max(GROUP_MIN_TRACES, math.floor(GROUP_SHARE * traces))
+def generic_limit(traces: int) -> int:
+    """The most traces a request may be asked in, in a dataset of ``traces`` traces, and
+    still join them: :data:`GENERIC_PERCENT` of them rounded up, and at least
+    :data:`GENERIC_MIN_TRACES`."""
+    return max(GENERIC_MIN_TRACES, -(-traces * GENERIC_PERCENT // 100))
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,21 +233,25 @@ class SplitGroups:
 
     groups: list[list[TrainingRow]]
     """The rows of each group, groups and rows in the order of the rows given."""
-    ungrouped: list[list[str]]
-    """The row ids of each request too common to group by: joining its copies would grow
-    their group past :func:`group_cap`, so they are split by trace instead."""
-    cap: int
-    """The most traces a request could gather (:func:`group_cap`)."""
+    generic: list[list[str]]
+    """The row ids of each generic request: asked in more traces than :func:`generic_limit`,
+    so it joins none of them."""
+    limit: int
+    """The most traces a request could be asked in and still join them
+    (:func:`generic_limit`)."""
+
+    def largest(self) -> list[TrainingRow]:
+        """The rows of the group holding the most rows (the first such group), or none."""
+        return max(self.groups, key=len, default=[])
 
 
 def split_groups(rows: Iterable[TrainingRow]) -> SplitGroups:
-    """``rows`` in groups that share a split: the rows of one trace, joined with every row
-    asking the same request (:func:`request_key`), transitively, unless that would grow a
-    group past :func:`group_cap` traces. Requests are joined in the order of their keys, so
-    the groups depend on the set of rows only."""
+    """``rows`` in groups that share a split: the rows of one trace, joined with the traces
+    of every row asking the same request (:func:`request_key`), transitively, unless the
+    request is asked in more traces than :func:`generic_limit` allows. The groups depend on
+    the set of rows only."""
     listed = list(rows)
     parent: dict[str, str] = {}
-    size = Counter({split_key(row): 1 for row in listed})
 
     def find(key: str) -> str:
         parent.setdefault(key, key)
@@ -255,23 +264,20 @@ def split_groups(rows: Iterable[TrainingRow]) -> SplitGroups:
     for row in listed:
         if (request := request_key(row)) is not None:
             asked.setdefault(request, []).append(row)
-    cap = group_cap(len(size))
-    ungrouped: list[list[str]] = []
+    limit = generic_limit(len({split_key(row) for row in listed}))
+    generic: list[list[str]] = []
     for request in sorted(asked):
         copies = asked[request]
-        roots = sorted({find(split_key(row)) for row in copies})
-        if len(roots) < 2:
+        keys = sorted({split_key(row) for row in copies})
+        if len(keys) > limit:
+            generic.append([row.id for row in copies])
             continue
-        if sum(size[root] for root in roots) > cap:
-            ungrouped.append([row.id for row in copies])
-            continue
-        for root in roots[1:]:
-            parent[root] = roots[0]
-            size[roots[0]] += size.pop(root)
+        for key in keys[1:]:
+            parent[find(key)] = find(keys[0])
     groups: dict[str, list[TrainingRow]] = {}
     for row in listed:
         groups.setdefault(find(split_key(row)), []).append(row)
-    return SplitGroups(list(groups.values()), ungrouped, cap)
+    return SplitGroups(list(groups.values()), generic, limit)
 
 
 def _most(counts: Counter[SplitName]) -> SplitName:

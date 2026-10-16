@@ -106,7 +106,7 @@ JUDGE_PACKAGES: Final[dict[str, Package]] = {
     "anthropic": Package(
         key="sdk",
         label="Anthropic SDK",
-        modules=("anthropic",),
+        modules=("anthropic", "httpx2"),
         extra="anthropic",
         steps=(),
         needed_for="anthropic/... judges",
@@ -138,13 +138,11 @@ def default_judges(
         if not isinstance(found, str):  # doctor reports a keychain it cannot read
             return None
         package = JUDGE_PACKAGES.get(name)
-        if (
-            found is not None
-            and package is not None
-            and not all(providers.installed(module) for module in package.modules)
-        ):
-            uninstalled[name] = package.modules[0]
-            return None
+        if found is not None and package is not None:
+            missing = [module for module in package.modules if not providers.installed(module)]
+            if missing:
+                uninstalled[name] = missing[0]
+                return None
         return found
 
     row, found = pick_default(table, source)
@@ -346,21 +344,18 @@ def billing(
 
 def check_available(config: JudgeConfig, *, what: str = "judge") -> None:
     """Raise :class:`UsageError` with an install hint when ``config``'s judge needs a
-    package (:data:`JUDGE_PACKAGES`) that is not installed or cannot be loaded, naming the
-    model as ``what`` (``judge``, or ``compare model``). Imports nothing."""
+    package (:data:`JUDGE_PACKAGES`) that is not installed, naming the model as ``what``
+    (``judge``, or ``compare model``). Imports nothing."""
     package = JUDGE_PACKAGES.get(config.provider)
     if package is None:
         return
-    states = [providers.module_state(module) for module in package.modules]
-    if all(state == "installed" for state, _ in states):
-        return
-    broken = [reason for state, reason in states if state == "broken"]
-    why = f"installed but cannot be loaded ({broken[0]})" if broken else "not installed"
-    raise UsageError(
-        f"{_name_and_host(config)[0]} {what}s need the '{package.modules[0]}' package, "
-        f"which is {why}",
-        hint=package.fix,
-    )
+    missing = [module for module in package.modules if not providers.installed(module)]
+    if missing:
+        raise UsageError(
+            f"{_name_and_host(config)[0]} {what}s need the '{missing[0]}' package, which is "
+            "not installed",
+            hint=package.fix,
+        )
 
 
 def _anthropic_missing(what: str) -> UsageError:

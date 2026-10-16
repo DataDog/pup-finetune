@@ -348,18 +348,47 @@ def test_two_traces_asking_one_request_join_however_many_rows_they_hold() -> Non
         )
     ]
     grouped = split_groups([*rows, *filler(40)])
-    assert grouped.cap == 2
     assert [row.id for row in grouped.groups[0]] == [row.id for row in rows]
-    assert grouped.ungrouped == []
+    assert grouped.generic == []
 
 
-def test_the_share_cap_applies_from_the_third_trace() -> None:
-    three = [booking(f"copy-{n}", n, trace_id=f"t{n}") for n in range(3)]
-    small = split_groups([*three, *filler(40)])  # 43 traces: 5% is 2
-    assert (small.cap, small.ungrouped) == (2, [["copy-0", "copy-1", "copy-2"]])
-    large = split_groups([*three, *filler(57)])  # 60 traces: 5% is 3
-    assert (large.cap, large.ungrouped) == (3, [])
-    assert [row.id for row in large.groups[0]] == ["copy-0", "copy-1", "copy-2"]
+def test_traces_asking_one_request_join_though_one_is_in_a_group_already() -> None:
+    # t1 asks two requests (a main turn and a sub-agent turn); t2 and t3 each ask one.
+    rows = [
+        make_row("t1-lisbon", "Book a room in Lisbon", trace_id="t1"),
+        make_row("t1-porto", "Search flights to Porto", trace_id="t1"),
+        make_row("t2-lisbon", "Book a room in Lisbon", trace_id="t2"),
+        make_row("t3-porto", "Search flights to Porto", trace_id="t3"),
+        *filler(20),
+    ]
+    grouped = split_groups(rows)
+    assert [row.id for row in grouped.groups[0]] == [
+        "t1-lisbon",
+        "t1-porto",
+        "t2-lisbon",
+        "t3-porto",
+    ]
+    splits = SplitAssignments(SplitParams())
+    assign_splits(rows, splits)
+    assert len({splits.assignments[trace] for trace in ("t1", "t2", "t3")}) == 1
+
+
+def test_a_prompt_retried_three_times_in_forty_traces_groups() -> None:
+    retried = [booking(f"retry-{n}", n, trace_id=f"t{n}") for n in range(3)]
+    grouped = split_groups([*retried, *filler(37)])
+    assert grouped.limit == 5
+    assert [row.id for row in grouped.groups[0]] == ["retry-0", "retry-1", "retry-2"]
+    assert grouped.generic == []
+
+
+def test_a_request_is_generic_past_five_percent_of_the_traces_and_at_least_five() -> None:
+    six = [booking(f"copy-{n}", n, trace_id=f"t{n}") for n in range(6)]
+    small = split_groups([*six, *filler(94)])  # 100 traces: 5% is 5
+    assert (small.limit, small.generic) == (5, [[row.id for row in six]])
+    assert len(small.groups) == 100
+    large = split_groups([*six, *filler(115)])  # 121 traces: 5% is 6.05, so 7
+    assert (large.limit, large.generic) == (7, [])
+    assert [row.id for row in large.groups[0]] == [row.id for row in six]
 
 
 def test_rows_sharing_a_trace_or_a_request_form_one_group() -> None:
@@ -372,15 +401,15 @@ def test_rows_sharing_a_trace_or_a_request_form_one_group() -> None:
     ]
     grouped = split_groups(rows)
     assert [[row.id for row in group] for group in grouped.groups][:2] == [["a", "b", "c"], ["d"]]
-    assert grouped.ungrouped == []
+    assert grouped.generic == []
 
 
 def test_repeated_copies_still_group() -> None:
     copies = [booking(f"copy-{n}", n, trace_id=f"t{n}") for n in range(5)]
     grouped = split_groups([*copies, *filler(95)])
-    assert grouped.cap == 5
+    assert grouped.limit == 5
     assert [row.id for row in grouped.groups[0]] == [row.id for row in copies]
-    assert grouped.ungrouped == []
+    assert grouped.generic == []
 
 
 def test_a_fixed_sub_agent_turn_shared_by_traces_does_not_pull_them_together() -> None:
@@ -394,9 +423,9 @@ def test_a_fixed_sub_agent_turn_shared_by_traces_does_not_pull_them_together() -
         )
     ]
     grouped = split_groups(rows)
-    # Grouping its 30 traces would put every row in one split: over the cap of 2 traces.
+    # Asked in all 30 traces, more than the 5 a request may join.
     assert len(grouped.groups) == 30
-    assert grouped.ungrouped == [[f"sub-{n}" for n in range(30)]]
+    assert grouped.generic == [[f"sub-{n}" for n in range(30)]]
     splits = SplitAssignments(SplitParams())
     assign_splits(rows, splits)
     assert len(set(splits.assignments.values())) == 3
@@ -420,7 +449,7 @@ def test_copies_of_one_request_in_new_traces_share_one_split() -> None:
 
 
 def test_a_new_copy_takes_the_split_its_request_already_has() -> None:
-    rows = [*copies(3), *filler(57)]  # 60 traces: a request may gather 3
+    rows = [*copies(3), *filler(57)]
     splits = SplitAssignments(SplitParams(), {KEYS[0]: "test"})
     assign_splits(rows, splits)
     assert [splits.assignments[key] for key in KEYS[:3]] == ["test"] * 3

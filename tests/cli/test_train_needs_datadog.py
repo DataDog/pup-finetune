@@ -16,7 +16,10 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from pup_finetune.cli import app
+from pup_finetune.curation.pipeline import require_in_datadog
+from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.push import PUSH_FILE
+from pup_finetune.errors import DirectoryUsageError
 from tests.fakes.pushed import mark_pushed
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
@@ -86,8 +89,10 @@ def test_train_refuses_kept_rows_changed_after_the_push_and_names_them(dataset: 
     # The step runs as written once <NEW_DIR> is chosen: what Datadog holds, fetched.
     fetch = "`pup finetune dataset fetch <NEW_DIR> --project pup-finetune-dev --name synthetic-sft`"
     assert fetch in result.stderr
+    assert "to train on what Datadog holds" in result.stderr
     assert "--name <NEW_NAME>" not in result.stderr
     assert "--project <PROJECT>" not in result.stderr
+    assert "brings back" not in result.stderr
     show = json.loads(invoke("dataset", "show", str(dataset)).stdout)
     assert show["pipeline"]["push"] == {
         "status": "pushed_with_changed_rows",
@@ -108,6 +113,45 @@ def test_the_refusal_names_a_few_of_many_changed_rows(dataset: Path) -> None:
         "7 of its kept rows changed after the push to dataset 'synthetic-sft' "
         f"(rows {shown} and 2 more)"
     ) in result.stderr
+    assert "fetch it into a new directory to benchmark on what Datadog holds" in result.stderr
+    assert "train on" not in result.stderr
+
+
+def drop(dataset: Path, tmp_path: Path, row_ids: list[str]) -> None:
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(
+        "".join(json.dumps({"id": i, "keep": False, "reason": "synthetic"}) + "\n" for i in row_ids)
+    )
+    result = invoke("dataset", "label", str(dataset), "--file", str(labels))
+    assert result.exit_code == 0, result.stderr
+
+
+def test_the_fetch_for_changed_rows_says_it_brings_back_rows_dropped_since_the_push(
+    dataset: Path, tmp_path: Path
+) -> None:
+    mark_pushed(dataset)
+    edited = edit_rows(dataset, 1)
+    rows = [json.loads(line)["id"] for line in (dataset / "rows.jsonl").read_text().splitlines()]
+    drop(dataset, tmp_path, [row for row in rows if row not in edited][:2])
+    result = train(dataset)
+    assert result.exit_code == 2
+    # The dataset still holds the records of the two dropped rows: a push only adds records.
+    assert (
+        "fetch it into a new directory to train on what Datadog holds; the fetch also brings "
+        "back the 2 rows dropped or retired since the push, which you drop again with "
+        "`dataset label` after the fetch"
+    ) in " ".join(result.stderr.split())
+
+
+def test_the_check_counts_the_rows_the_command_reads_not_a_later_state(dataset: Path) -> None:
+    # Read before a concurrent `dataset label` drops every row: those rows are still trained.
+    store = DatasetDir(dataset)
+    by_split = store.rows_by_split()
+    rows = [row.id for split in by_split.values() for row in split]
+    drop(dataset, dataset.parent, rows)
+    assert store.summary()["kept"] == 0
+    with pytest.raises(DirectoryUsageError, match="ds was never pushed"):
+        require_in_datadog(store, by_split, "train", directory=dataset, offline=False)
 
 
 def test_train_refuses_a_push_still_in_flight(dataset: Path) -> None:

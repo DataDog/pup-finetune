@@ -28,7 +28,7 @@ from pup_finetune.curation.triage import TriageStatus, triage_status
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.push import PUSH_FILE, compare_receipt, read_push_state
 from pup_finetune.data.schema import TrainingRow
-from pup_finetune.data.split import SplitName
+from pup_finetune.data.split import SPLITS, SplitName
 from pup_finetune.display import counted, display_path
 from pup_finetune.errors import DirectoryUsageError, StateError
 from pup_finetune.next_steps import command, step, template
@@ -47,6 +47,9 @@ when ``push.json`` cannot be read."""
 SHOWN_CHANGED_IDS = 5
 """How many ids of rows changed after the push the gate names."""
 
+FETCH_ANY = template("dataset", "fetch", "<DIR>", "--project", "<PROJECT>", "--name", "<NAME>")
+"""The fetch of a dataset already in Datadog, which ``train`` and ``benchmark`` read too."""
+
 
 @dataclass(frozen=True, slots=True)
 class PushGap:
@@ -57,6 +60,8 @@ class PushGap:
     """What is missing, as it reads after ``train reads a dataset that is in Datadog, and``."""
     step: dict[str, str]
     """The ``next_steps`` entry that fixes it."""
+    alternative: str | None = FETCH_ANY
+    """Another way to a dataset in Datadog, ``None`` when :attr:`step` is it already."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +81,9 @@ class Pipeline:
     cannot be read."""
     changed_ids: tuple[str, ...] = ()
     """The ids of those rows, sorted."""
+    stale: int = 0
+    """Records ``push.json`` lists for rows no longer kept (dropped or retired since the
+    push): a push only adds records, so the dataset still holds them."""
     dataset_name: str | None = None
     """The dataset ``push.json`` names, when there is one."""
     project: str | None = None
@@ -99,10 +107,11 @@ class Pipeline:
             "push": {"status": self.push, "pending": self.pending, "changed": self.changed},
         }
 
-    def push_gap(self, directory: Path) -> PushGap | None:
+    def push_gap(self, directory: Path, command_name: str = "train") -> PushGap | None:
         """What keeps the kept rows from all being in Datadog as they are now, and the step
         that fixes it; ``None`` when they all are, or there are none. ``directory`` is the
-        dataset directory as the user typed it."""
+        dataset directory as the user typed it, and ``command_name`` (``train``,
+        ``benchmark``) what reads it."""
         name = self.dataset_name
         match self.push:
             case "pushed":
@@ -147,6 +156,13 @@ class Pipeline:
                     if len(ids) > SHOWN_CHANGED_IDS
                     else ""
                 )
+                stale = (
+                    f"; the fetch also brings back the {counted(self.stale, 'row')} dropped or "
+                    "retired since the push, which you drop again with `dataset label` after "
+                    "the fetch"
+                    if self.stale
+                    else ""
+                )
                 return PushGap(
                     f"{self.changed} of its kept rows changed after the push to dataset "
                     f"{name!r} ({'row' if len(ids) == 1 else 'rows'} {shown}{more})",
@@ -161,10 +177,11 @@ class Pipeline:
                             name,
                         ),
                         f"a push only adds records, so dataset {name!r} holds those rows as "
-                        "they were pushed: fetch it into a new directory to train on what "
-                        "Datadog holds (to train on the rows as they are now, move "
-                        f"{PUSH_FILE} aside and push them to a new --name)",
+                        f"they were pushed: fetch it into a new directory to {command_name} on "
+                        f"what Datadog holds{stale} (to {command_name} on the rows as they are "
+                        f"now, move {PUSH_FILE} aside and push them to a new --name)",
                     ),
+                    alternative=None,
                 )
             case "unreadable":
                 return PushGap(
@@ -185,12 +202,19 @@ def pipeline_state(
     by_split: Mapping[SplitName, Sequence[TrainingRow]] | None = None,
 ) -> Pipeline:
     """``dataset``'s :class:`Pipeline`; ``summary`` is its :meth:`DatasetDir.summary` and
-    ``by_split`` its :meth:`DatasetDir.rows_by_split` when the caller has them already."""
+    ``by_split`` its :meth:`DatasetDir.rows_by_split` when the caller has them already. The
+    kept, pending, changed and stale counts read ``by_split`` when it is given, so a gate
+    checks the very rows its command goes on to read."""
     counts = summary if summary is not None else dataset.summary()
     accepted = int(counts["accepted"])
-    kept = int(counts["kept"])
+    kept = (
+        int(counts["kept"])
+        if by_split is None
+        else sum(len(by_split.get(split, ())) for split in SPLITS)
+    )
     warnings: list[str] = []
     changed_ids: tuple[str, ...] = ()
+    stale = 0
     name = project = None
     try:
         state = read_push_state(dataset)
@@ -207,10 +231,11 @@ def pipeline_state(
             push, pending, changed = "not_pushed", kept, 0
         else:
             name, project = state.dataset_name, state.project
-            unpushed, edited = compare_receipt(
-                state, by_split if by_split is not None else dataset.rows_by_split()
-            )
+            rows = by_split if by_split is not None else dataset.rows_by_split()
+            unpushed, edited = compare_receipt(state, rows)
             pending, changed, changed_ids = len(unpushed), len(edited), tuple(sorted(edited))
+            kept_ids = {row.id for split in SPLITS for row in rows.get(split, ())}
+            stale = sum(row_id not in kept_ids for row_id in state.record_ids)
             push = (
                 "pushed_with_changed_rows"
                 if changed
@@ -231,6 +256,7 @@ def pipeline_state(
         pending=pending,
         changed=changed,
         changed_ids=changed_ids,
+        stale=stale,
         dataset_name=name,
         project=project,
         warnings=tuple(warnings),
@@ -257,16 +283,12 @@ def require_in_datadog(
     """
     if offline:
         return
-    state = pipeline_state(dataset, by_split=by_split)
-    gap = state.push_gap(directory)
+    gap = pipeline_state(dataset, by_split=by_split).push_gap(directory, command_name)
     if gap is None:
         return
     hint = f"{gap.step['why']}: `{gap.step['command']}`"
-    if state.push != "pushed_with_changed_rows":  # whose step is the fetch already
-        hint += (
-            f"; or {command_name} on a dataset already in Datadog: "
-            "`pup finetune dataset fetch <DIR> --project <PROJECT> --name <NAME>`"
-        )
+    if gap.alternative is not None:
+        hint += f"; or {command_name} on a dataset already in Datadog: `{gap.alternative}`"
     raise DirectoryUsageError(
         f"{command_name} reads a dataset that is in Datadog, and {gap.reason}", hint=hint
     )

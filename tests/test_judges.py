@@ -25,7 +25,7 @@ from pup_finetune.inference import (
     ChatCompleter,
     JudgeConfig,
 )
-from pup_finetune.judge_models import JUDGE_SHORT_NAMES, alias_of
+from pup_finetune.judge_models import EVALUATE_DEFAULTS, JUDGE_SHORT_NAMES, alias_of
 from pup_finetune.judges import (
     ANTHROPIC_INSTALL_HINT,
     FIREWORKS_REASONING,
@@ -37,7 +37,6 @@ from pup_finetune.judges import (
     open_clients,
     parse_judge,
 )
-from tests.fakes.setup import ALL_PACKAGES, installed_packages
 
 ANTHROPIC_KEY = "sk-ant-synthetic-0000-judge-key"
 OPENAI_KEY = "sk-openai-synthetic-0000-judge-key"
@@ -211,15 +210,22 @@ def test_a_missing_anthropic_extra_is_a_usage_error_with_the_install_hint(
         pass
 
 
-def test_an_anthropic_extra_that_cannot_be_loaded_is_refused_as_doctor_reports_it(
+def test_an_anthropic_sdk_without_httpx2_is_refused_in_the_preview_as_doctor_reports_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    installed_packages(monkeypatch, ALL_PACKAGES, broken={"anthropic": "ImportError: bad build"})
-    with pytest.raises(UsageError, match="cannot be loaded \\(ImportError: bad build\\)") as info:
+    # The SDK is there but the httpx2 it is built on is not: found missing, never imported.
+    monkeypatch.setitem(sys.modules, "httpx2", None)
+    with pytest.raises(
+        UsageError, match="need the 'httpx2' package, which is not installed"
+    ) as info:
         check_available(parse_judge("anthropic/claude-opus-5-5"))
     assert info.value.hint == ANTHROPIC_INSTALL_HINT
     package = JUDGE_PACKAGES["anthropic"]
     assert not readiness.package_check("anthropic", "Anthropic", package, required=False).ok
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
+    chosen, source = judges.default_judges(EVALUATE_DEFAULTS)
+    assert chosen == (DEFAULT_JUDGE_MODEL,)
+    assert source.endswith("Anthropic judges need the 'httpx2' package, which is not installed")
 
 
 def test_other_judges_need_no_extra(monkeypatch: pytest.MonkeyPatch) -> None:

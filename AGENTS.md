@@ -61,7 +61,8 @@ The offline dev loop trains end to end on the `fake` provider, with no network o
 row pushed as it is now and no push in flight: `curation/pipeline.py`'s `require_in_datadog`,
 which checks the rows the command goes on to read against the push receipt and takes its
 reason and step from `Pipeline.push_gap`, one table by push status: rows changed after the
-push are named, and their step fetches the dataset as Datadog holds it; a `dataset fetch`
+push are named, and their step fetches the dataset as Datadog holds it, saying how many rows
+dropped or retired since the push that fetch brings back; a `dataset fetch`
 directory passes); an offline provider
 (`ProviderInfo.offline`, the fake) is exempt, so this loop and the default tests train on an
 imported directory that was never pushed:
@@ -548,9 +549,10 @@ Source lives under `src/pup_finetune/`.
   `split.py` assigns deterministic, persisted train/validation/test splits per trace, one per
   group of traces asking copies of one request (`request_key`: the user messages lowercased,
   numbers as `0`, whitespace collapsed, hashed, `None` without user text;
-  `split_groups`, a union-find that joins no request whose group would pass `group_cap`
-  traces, 5% of the traces and at least 2 (so two traces asking one request always join),
-  and reports it as `ungrouped`; `assign_splits`, which never
+  `split_groups`, a union-find that joins every trace asking one request unless the request
+  is generic, asked in more traces than `generic_limit` (5% of the traces rounded up, and at
+  least 5), which joins nothing and is reported as `generic`; the summary warns about a
+  group holding more than 10% of the rows; `assign_splits`, which never
   moves a recorded trace; `split_conflicts`, every group whose kept rows are in several
   splits, which the summary counts);
   `dataset_dir.py` is the dataset directory (`settings.json`, `rows.jsonl`, `excluded.jsonl`,

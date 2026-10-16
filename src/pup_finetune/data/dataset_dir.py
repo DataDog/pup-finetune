@@ -45,8 +45,9 @@ from pup_finetune.data.schema import (
     without_reasoning,
 )
 from pup_finetune.data.split import (
-    GROUP_MIN_TRACES,
-    GROUP_SHARE,
+    GENERIC_MIN_TRACES,
+    GENERIC_PERCENT,
+    LARGE_GROUP_SHARE,
     SPLITS,
     SplitAssignments,
     SplitConflict,
@@ -619,8 +620,9 @@ def _split_flags(params: SplitParams) -> str:
 
 
 def _grouping_warnings(groups: SplitGroups, conflicts: Sequence[SplitConflict]) -> list[str]:
-    """Warnings about copies of a request that cannot share a split: ones recorded in
-    several splits before they were grouped, and requests too common to group by."""
+    """Warnings about copies of a request that cannot share a split (ones recorded in
+    several splits before they were grouped, and generic requests), and about a group so
+    large that it is likely chained through prompts its traces share."""
     warnings: list[str] = []
     if conflicts:
         rows = sum(len(ids) for conflict in conflicts for ids in conflict.outside.values())
@@ -631,15 +633,26 @@ def _grouping_warnings(groups: SplitGroups, conflicts: Sequence[SplitConflict]) 
             "they were grouped, so they may be both trained and tested on; recorded splits "
             f"never move, so drop them with `dataset label --file` and {SPLIT_CONFLICTS_FILE}"
         )
-    if groups.ungrouped:
-        shown = ", ".join(groups.ungrouped[0][:3])
-        common = len(groups.ungrouped)
+    if groups.generic:
+        shown = ", ".join(groups.generic[0][:3])
+        common = len(groups.generic)
         warnings.append(
             f"{counted(common, 'request')} {'repeats' if common == 1 else 'repeat'} in more "
-            f"than {groups.cap} traces "
-            f"({GROUP_SHARE:.0%} of the dataset's traces, and at least {GROUP_MIN_TRACES}), too "
-            "many to keep in one split, so their copies keep a split per trace (e.g. rows "
+            f"than {groups.limit} traces "
+            f"({GENERIC_PERCENT}% of the dataset's traces, and at least {GENERIC_MIN_TRACES}), "
+            "too common to group by, so their copies keep a split per trace (e.g. rows "
             f"{shown}); a fixed prompt many conversations share is such a request"
+        )
+    largest = groups.largest()
+    total = sum(len(group) for group in groups.groups)
+    if len(largest) > LARGE_GROUP_SHARE * total:
+        shown = ", ".join(row.id for row in largest[:3])
+        traces = counted(len({split_key(row) for row in largest}), "trace")
+        warnings.append(
+            f"one group of rows that share a split holds {len(largest)} of {total} rows "
+            f"({len(largest) / total:.0%}, more than {LARGE_GROUP_SHARE:.0%}) in {traces}, "
+            "so one split takes them all; a group that large across many traces is likely "
+            f"chained through requests they share (e.g. rows {shown})"
         )
     return warnings
 

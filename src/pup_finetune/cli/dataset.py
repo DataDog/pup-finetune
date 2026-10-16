@@ -443,8 +443,9 @@ def dataset_next(
                 command(
                     "dataset", "label", directory, "--file", directory / conflicts["labels_file"]
                 ),
-                f"drop the {counted(conflicts['rows'], 'kept row')} outside their group's "
-                "split (see split_conflicts), so no copy of a test request is trained on; the "
+                f"drop the {counted(conflicts['rows'], 'kept row')} outside "
+                f"{'its' if conflicts['rows'] == 1 else 'their'} group's split (see "
+                "split_conflicts), so no copy of a test request is trained on; the "
                 "file holds a drop label for each, to review first (a label is never withdrawn)",
             ),
         )

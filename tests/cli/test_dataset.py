@@ -177,6 +177,9 @@ def test_import_with_custom_split_settings(tmp_path: Path) -> None:
     assert data["warnings"] == [
         "the validation split is empty, so training cannot select a checkpoint by validation loss",
         "the test split is empty, so there is nothing to evaluate on",
+        "one group of rows that share a split holds 2 of 14 rows (14%, more than 10%) in 1 "
+        "trace, so one split takes them all; a group that large across many traces is likely "
+        "chained through requests they share (e.g. rows row-support-001, row-support-002)",
     ]
     settings = json.loads((target / "settings.json").read_text())
     assert settings["split"] == {"seed": 3, "validation_fraction": 0.0, "test_fraction": 0.0}
@@ -344,11 +347,12 @@ def test_copies_of_one_request_share_one_split(tmp_path: Path) -> None:
 def test_a_fixed_prompt_in_many_traces_keeps_a_split_per_trace_and_is_warned_about(
     tmp_path: Path,
 ) -> None:
-    fixed = [synthetic_row(f"sum-{n}", "Summarize the above", f"t{n}") for n in range(3)]
+    fixed = [synthetic_row(f"sum-{n}", "Summarize the above", f"t{n}") for n in range(6)]
     data = output_json(import_rows(tmp_path / "ds", rows_file(tmp_path / "a.jsonl", fixed)))
-    assert data["split_groups"] == 3
+    assert data["split_groups"] == 6
     assert any(
-        w.startswith("1 request repeats in more than 2 traces") and "sum-0, sum-1, sum-2" in w
+        w.startswith("1 request repeats in more than 5 traces (5% of the dataset's traces, and")
+        and "sum-0, sum-1, sum-2" in w
         for w in data["warnings"]
     )
 
@@ -383,6 +387,9 @@ def test_copies_recorded_apart_are_named_with_labels_to_drop_them(tmp_path: Path
         }
     ]
     drop = data["next_steps"][0]["command"]
+    assert data["next_steps"][0]["why"].startswith(
+        "drop the 1 kept row outside its group's split (see split_conflicts)"
+    )
     assert drop == f"pup finetune dataset label {shlex.quote(str(target))} --file " + shlex.quote(
         str(labels_file)
     )

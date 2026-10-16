@@ -544,7 +544,30 @@ def test_summary_warns_about_small_splits(tmp_path: Path) -> None:
     params = DatasetSettings("import", SplitParams(42, 0.0, 0.0))
     summary = dataset.add([make_row("a", "one")], settings=params).summary
     assert summary["splits"] == {"train": 1, "validation": 0, "test": 0}
-    assert len(summary["warnings"]) == 3
+    # The three split warnings, then the one group holding the only row.
+    assert len(summary["warnings"]) == 4
+    assert summary["warnings"][3].startswith("one group of rows that share a split holds 1 of 1")
+
+
+def test_summary_warns_about_a_group_holding_over_a_tenth_of_the_rows(tmp_path: Path) -> None:
+    # Traces chained by copies of requests they share: t1-t2 by a trip, t2-t3 by bags.
+    chained = [
+        make_row("a", "Plan a trip for 2", trace_id="t1"),
+        make_row("b1", "Plan a trip for 3", trace_id="t2"),
+        make_row("b2", "Pack 2 bags", trace_id="t2"),
+        make_row("c", "Pack 3 bags", trace_id="t3"),
+    ]
+    others = [make_row(f"o-{n}", f"Other {chr(97 + n)}", trace_id=f"o-{n}") for n in range(20)]
+    summary = DatasetDir(tmp_path / "ds").add([*chained, *others], settings=IMPORT).summary
+    assert (
+        "one group of rows that share a split holds 4 of 24 rows (17%, more than 10%) in 3 "
+        "traces, so one split takes them all; a group that large across many traces is likely "
+        "chained through requests they share (e.g. rows a, b1, b2)"
+    ) in summary["warnings"]
+    # With 40 rows, the same group is a tenth of them: no warning.
+    more = [make_row(f"m-{n}", f"More {chr(97 + n)}", trace_id=f"m-{n}") for n in range(16)]
+    summary = DatasetDir(tmp_path / "ds2").add([*chained, *others, *more], settings=IMPORT).summary
+    assert not any(w.startswith("one group of rows") for w in summary["warnings"])
 
 
 def test_kept_rows_are_all_rows_without_labels(
