@@ -67,8 +67,8 @@ DOC = CommandDoc(
         "not task success.",
     ),
     examples=(
-        "pup finetune benchmark ds --models qwen3p5-9b,glm-5p3-flash",
-        "pup finetune benchmark ds --models qwen3p5-9b,glm-5p3-flash --max-cases 1",
+        "pup finetune benchmark ds --models qwen3p5-9b,baseten/glm-5p3-flash",
+        "pup finetune benchmark ds --models qwen3p5-9b,baseten/glm-5p3-flash --max-cases 1",
     ),
     safety=Safety(
         data="sends test rows to each model's provider and to the judge",

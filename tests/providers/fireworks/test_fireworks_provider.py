@@ -204,7 +204,7 @@ def test_resolve_by_alias_base_model_or_tokenizer() -> None:
 def test_an_unknown_model_lists_the_known_aliases() -> None:
     with pytest.raises(UsageError, match="unknown fireworks model 'gpt-x'") as caught:
         provider_for().resolve_model("gpt-x")
-    assert caught.value.hint.startswith("known models: qwen3p8-27b;")
+    assert caught.value.hint.startswith("known models: qwen3p8-27b, glm-5p3-flash;")
 
 
 # --- preflight ---------------------------------------------------------------------------

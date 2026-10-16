@@ -1822,7 +1822,7 @@ TRAIN_DOC = CommandDoc(
         "directory; cancel cannot stop the job yet.",
     ),
     examples=(
-        "pup finetune train --dataset ds --model qwen3p8-27b",
+        "pup finetune train --dataset ds --model qwen3p5-9b",
         "pup finetune train --provider fireworks --model qwen3p8-27b --dataset ds "
         "--run-dir run --max-seq-len 8192 --detach",
     ),

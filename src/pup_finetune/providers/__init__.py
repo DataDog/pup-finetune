@@ -490,6 +490,11 @@ register_provider(
             "accounts/fireworks/models/qwen3p8-27b",
             "Qwen/Qwen3.8-27B",
         ),
+        "glm-5p3-flash": (
+            "glm-5p3-flash",
+            "accounts/fireworks/models/glm-5p3-flash",
+            "zai-org/GLM-5.3-Flash",
+        ),
     },
     label="Fireworks",
     credential="fireworks",
@@ -520,6 +525,7 @@ register_provider(
     models={
         "qwen3p5-9b": ("qwen3p5-9b", "Qwen/Qwen3.5-9B"),
         "glm-5p3-flash": ("glm-5p3-flash", "zai-org/GLM-5.3-Flash"),
+        "qwen3p8-27b": ("qwen3p8-27b", "Qwen/Qwen3.8-27B"),
     },
     label="Baseten",
     credential="baseten",

@@ -42,12 +42,31 @@ QWEN = {
     "default_lora_rank": 8,
     "provider_options": ["max_seq_len"],
 }
+GLM = {
+    "alias": "glm-5p3-flash",
+    "names": [
+        "glm-5p3-flash",
+        "accounts/fireworks/models/glm-5p3-flash",
+        "zai-org/GLM-5.3-Flash",
+    ],
+    "provider": "fireworks",
+    "base_model": "accounts/fireworks/models/glm-5p3-flash",
+    "max_seq_len": 65536,
+    "supports_reasoning": True,
+    "default_lora_rank": 8,
+    "provider_options": ["max_seq_len"],
+}
 QWEN_INTERNALS = {
     "renderer": "qwen3_8",
     "tokenizer": "Qwen/Qwen3.8-27B",
     "tokenizer_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
 }
 """What only ``--check`` adds to a profile."""
+GLM_INTERNALS = {
+    "renderer": "glm5_3",
+    "tokenizer": "zai-org/GLM-5.3-Flash",
+    "tokenizer_revision": "eb9eb208eb0d988989d07a6a12d0fdeb5f52574a",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -84,7 +103,7 @@ def output(result: Result) -> Any:
 def test_lists_the_fireworks_profiles_without_a_key() -> None:
     result = invoke("--provider", "fireworks")
     assert result.exit_code == 0, result.stderr
-    assert output(result) == {"provider": "fireworks", "models": [QWEN]}
+    assert output(result) == {"provider": "fireworks", "models": [QWEN, GLM]}
 
 
 def test_lists_the_fake_profiles_in_dev_mode(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -116,8 +135,10 @@ def test_without_a_provider_it_lists_every_provider_s_models() -> None:
     assert body["provider"] is None
     assert [(m["provider"], m["alias"]) for m in body["models"]] == [
         ("fireworks", "qwen3p8-27b"),
+        ("fireworks", "glm-5p3-flash"),
         ("baseten", "qwen3p5-9b"),
         ("baseten", "glm-5p3-flash"),
+        ("baseten", "qwen3p8-27b"),
     ]
     assert body["models"][0] == QWEN
     assert all("tokenizer" not in model for model in body["models"])
@@ -134,11 +155,15 @@ def test_check_preflights_each_model(fake: FakeFireworksApi) -> None:
     assert result.exit_code == 0, result.stderr
     assert output(result) == {
         "provider": "fireworks",
-        "models": [{**QWEN, **QWEN_INTERNALS, "preflight": {"ok": True}}],
+        "models": [
+            {**QWEN, **QWEN_INTERNALS, "preflight": {"ok": True}},
+            {**GLM, **GLM_INTERNALS, "preflight": {"ok": True}},
+        ],
         "ok": True,
     }
     assert [request.url.path for request in fake.requests] == [
-        "/v1/accounts/fireworks/models/qwen3p8-27b"
+        "/v1/accounts/fireworks/models/qwen3p8-27b",
+        "/v1/accounts/fireworks/models/glm-5p3-flash",
     ]
     assert API_KEY not in result.stdout + result.stderr
 
@@ -179,7 +204,8 @@ def test_check_reports_every_profile_on_its_own(
     assert result.exit_code == 1
     body = output(result)
     assert body["ok"] is False
-    missing, qwen = body["models"]
+    missing, qwen, glm = body["models"]
+    assert glm["preflight"] == {"ok": True}
     assert missing["alias"] == "qwen-missing"
     assert missing["preflight"]["ok"] is False
     assert "has no model" in missing["preflight"]["error"]
@@ -187,6 +213,7 @@ def test_check_reports_every_profile_on_its_own(
     assert [request.url.path for request in fake.requests] == [
         "/v1/accounts/fireworks/models/qwen-missing",
         "/v1/accounts/fireworks/models/qwen3p8-27b",
+        "/v1/accounts/fireworks/models/glm-5p3-flash",
     ]
 
 

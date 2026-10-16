@@ -21,7 +21,7 @@ def spec(**overrides: object) -> ProfileSpec:
 
 
 def test_the_qwen3p8_profile() -> None:
-    (profile,) = PROFILES
+    profile = next(profile for profile in PROFILES if profile.alias == "qwen3p8-27b")
     assert profile.provider == "fireworks"
     assert profile.alias == "qwen3p8-27b"
     assert profile.base_model == "accounts/fireworks/models/qwen3p8-27b"
@@ -30,6 +30,14 @@ def test_the_qwen3p8_profile() -> None:
     assert profile.tokenizer_revision == "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
     assert profile.max_seq_len == 131_072
     assert profile.default_lora_rank == 8
+    assert profile.supports_reasoning is True
+
+
+def test_the_glm_profile_renders_with_the_glm5_3_family() -> None:
+    profile = next(profile for profile in PROFILES if profile.alias == "glm-5p3-flash")
+    assert profile.base_model == "accounts/fireworks/models/glm-5p3-flash"
+    assert (profile.renderer, profile.tokenizer_model) == ("glm5_3", "zai-org/GLM-5.3-Flash")
+    assert profile.max_seq_len == 65_536
     assert profile.supports_reasoning is True
 
 
@@ -44,7 +52,7 @@ def test_every_profile_takes_its_tokenizer_from_its_family() -> None:
 
 
 def test_aliases_and_base_models_are_unique() -> None:
-    names = [name for profile in PROFILES for name in (profile.alias, profile.base_model)]
+    names = [name for profile in PROFILES for name in profile.names]
     assert len(names) == len(set(names))
 
 
@@ -56,6 +64,12 @@ def test_a_duplicate_alias_is_refused() -> None:
 def test_a_duplicate_base_model_is_refused() -> None:
     with pytest.raises(ValueError, match="more than once"):
         build_profiles([SPECS[0], spec(alias="other")])
+
+
+def test_two_profiles_of_one_family_would_share_its_tokenizer_name() -> None:
+    other = spec(alias="other", base_model="accounts/fireworks/models/other")
+    with pytest.raises(ValueError, match=r"'Qwen/Qwen3\.8-27B' is used more than once"):
+        build_profiles([SPECS[0], other])
 
 
 def test_an_alias_may_not_shadow_another_base_model() -> None:

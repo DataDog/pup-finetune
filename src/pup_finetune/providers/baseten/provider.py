@@ -62,7 +62,7 @@ from pup_finetune.providers.baseten.client import (
     loops_sdk,
 )
 from pup_finetune.providers.options import parse_options
-from pup_finetune.rendering.families import GLM5_3, QWEN3_5, ModelFamily, get_family
+from pup_finetune.rendering.families import GLM5_3, QWEN3_5, QWEN3_8, ModelFamily, get_family
 from pup_finetune.rendering.hf import ChatTokenizer, HFChatTemplateRenderer
 from pup_finetune.runtime import Runtime
 
@@ -90,6 +90,7 @@ def _profile(
     base_model: str,
     family: ModelFamily,
     *,
+    max_seq_len: int,
     supports_reasoning: bool = False,
     notes: str = "",
 ) -> ModelProfile:
@@ -100,7 +101,7 @@ def _profile(
         tokenizer_model=family.tokenizer_model,
         tokenizer_revision=family.revision,
         renderer=family.key,
-        max_seq_len=131_072,
+        max_seq_len=max_seq_len,
         supports_reasoning=supports_reasoning,
         notes=notes,
     )
@@ -111,6 +112,7 @@ PROFILES: Final[tuple[ModelProfile, ...]] = (
         "qwen3p5-9b",
         "Qwen/Qwen3.5-9B",
         QWEN3_5,
+        max_seq_len=131_072,
         supports_reasoning=True,
         notes="Qwen3.5 9B; reasoning is kept after the last user turn only.",
     ),
@@ -118,12 +120,22 @@ PROFILES: Final[tuple[ModelProfile, ...]] = (
         "glm-5p3-flash",
         "zai-org/GLM-5.3-Flash",
         GLM5_3,
+        max_seq_len=131_072,
         notes="GLM-5.3 Flash; it stops by emitting the next role tag.",
     ),
+    _profile(
+        "qwen3p8-27b",
+        "Qwen/Qwen3.8-27B",
+        QWEN3_8,
+        max_seq_len=262_144,
+        supports_reasoning=True,
+        notes="Qwen3.8 27B; reasoning history is preserved in training.",
+    ),
 )
-"""Every model we train on Baseten Loops; ``base_model`` is its Loops name, and the tokenizer
-and its pinned revision come from the model family, so a profile cannot drift from its
-renderer."""
+"""Every model we train on Baseten Loops; ``base_model`` is its Loops name and ``max_seq_len``
+the context Loops' capabilities report for it, which preflight checks the workspace against.
+The tokenizer and its pinned revision come from the model family, so a profile cannot drift
+from its renderer."""
 
 MAX_SEQ_LEN: Final = max(profile.max_seq_len for profile in PROFILES)
 """The largest training context of any profile: the bound on the ``max_seq_len`` option."""

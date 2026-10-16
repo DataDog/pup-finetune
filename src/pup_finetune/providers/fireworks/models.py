@@ -11,7 +11,7 @@ Each :class:`ProfileSpec` names a Fireworks base model and the model family
 pinned revision come from the family, never from this table, so a profile cannot drift from
 the renderer that trains it. Adding a model is adding an entry here (plus a family when the
 model's chat template is new). :func:`build_profiles` checks the table when this module is
-imported: aliases and base models are unique and every family exists.
+imported: no two profiles share a name and every family exists.
 """
 
 from __future__ import annotations
@@ -54,15 +54,24 @@ SPECS: Final[tuple[ProfileSpec, ...]] = (
         supports_reasoning=True,
         notes="Qwen3.8 27B; reasoning history is preserved in training.",
     ),
+    ProfileSpec(
+        alias="glm-5p3-flash",
+        base_model="accounts/fireworks/models/glm-5p3-flash",
+        family="glm5_3",
+        max_seq_len=65_536,
+        supports_reasoning=True,
+        notes="GLM-5.3 Flash; it stops by emitting the next role tag.",
+    ),
 )
-"""Every supported model. Fireworks reports ``trainingContextLength`` for each, which preflight
-checks against ``max_seq_len``."""
+"""Every supported model. ``max_seq_len`` is the ``trainingContextLength`` Fireworks reports for
+the model; preflight refuses a model that reports less."""
 
 
 def build_profiles(specs: Iterable[ProfileSpec]) -> tuple[ModelProfile, ...]:
     """The :class:`ModelProfile` for each spec, with the tokenizer taken from its family.
 
-    Raises ``ValueError`` for a duplicate alias or base model, or an unknown family.
+    Raises ``ValueError`` for a name two profiles share (see
+    :attr:`~pup_finetune.providers.base.ModelProfile.names`), or an unknown family.
     """
     profiles: list[ModelProfile] = []
     names: set[str] = set()
@@ -73,24 +82,23 @@ def build_profiles(specs: Iterable[ProfileSpec]) -> tuple[ModelProfile, ...]:
                 f"Fireworks model {spec.alias!r} names unknown model family {spec.family!r}; "
                 f"known: {', '.join(FAMILIES)}"
             )
-        for name in (spec.alias, spec.base_model):
+        profile = ModelProfile(
+            provider=PROVIDER_NAME,
+            alias=spec.alias,
+            base_model=spec.base_model,
+            tokenizer_model=family.tokenizer_model,
+            tokenizer_revision=family.revision,
+            renderer=family.key,
+            max_seq_len=spec.max_seq_len,
+            default_lora_rank=spec.default_lora_rank,
+            supports_reasoning=spec.supports_reasoning,
+            notes=spec.notes,
+        )
+        for name in profile.names:
             if name in names:
                 raise ValueError(f"Fireworks model name {name!r} is used more than once")
             names.add(name)
-        profiles.append(
-            ModelProfile(
-                provider=PROVIDER_NAME,
-                alias=spec.alias,
-                base_model=spec.base_model,
-                tokenizer_model=family.tokenizer_model,
-                tokenizer_revision=family.revision,
-                renderer=family.key,
-                max_seq_len=spec.max_seq_len,
-                default_lora_rank=spec.default_lora_rank,
-                supports_reasoning=spec.supports_reasoning,
-                notes=spec.notes,
-            )
-        )
+        profiles.append(profile)
     return tuple(profiles)
 
 

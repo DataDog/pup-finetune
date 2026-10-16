@@ -563,8 +563,8 @@ pup finetune benchmark [OPTIONS] DATASET
 Examples:
 
 ```sh
-pup finetune benchmark ds --models qwen3p5-9b,glm-5p3-flash
-pup finetune benchmark ds --models qwen3p5-9b,glm-5p3-flash --max-cases 1
+pup finetune benchmark ds --models qwen3p5-9b,baseten/glm-5p3-flash
+pup finetune benchmark ds --models qwen3p5-9b,baseten/glm-5p3-flash --max-cases 1
 ```
 
 Safety: Paid with --confirm · sends test rows to each model's provider and to the judge · PUP_READ_ONLY: preview only unless offline.
@@ -625,7 +625,7 @@ pup finetune train [OPTIONS]
 Examples:
 
 ```sh
-pup finetune train --dataset ds --model qwen3p8-27b
+pup finetune train --dataset ds --model qwen3p5-9b
 pup finetune train --provider fireworks --model qwen3p8-27b --dataset ds --run-dir run --max-seq-len 8192 --detach
 ```
 

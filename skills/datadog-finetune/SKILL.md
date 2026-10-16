@@ -239,7 +239,7 @@ To choose the model, first compare candidates on the test split (paid; it previe
 `recommendation` names the one to fine-tune, or says a base model already meets the target:
 
 ```sh
-pup finetune benchmark datasets/my-agent --models qwen3p5-9b,glm-5p3-flash
+pup finetune benchmark datasets/my-agent --models qwen3p5-9b,baseten/glm-5p3-flash
 pup finetune train --dataset datasets/my-agent --model <MODEL> --detach
 pup finetune status ft-20261007183443-a8b181 --watch --timeout 90s
 ```
@@ -323,11 +323,11 @@ Check:
 | --- | --- | --- |
 | `qwen3p5-9b` | `Qwen/Qwen3.5-9B` | Supports reasoning |
 | `glm-5p3-flash` | `zai-org/GLM-5.3-Flash` | No reasoning |
+| `qwen3p8-27b` | `Qwen/Qwen3.8-27B` | Supports reasoning |
 
 - **Setup.** The `baseten` and `hf` extras and a key: `pup finetune auth login baseten`, or
-  read only, the default remote's key in `~/.trussrc`. These `--model`s select Baseten:
-  `pup finetune train --dataset datasets/my-agent --model qwen3p5-9b --detach`.
-  `--max-seq-len <n>` (at least 1024) caps the context; never pass `--lora-alpha`.
+  read only, the default remote's key in `~/.trussrc`. A model Fireworks offers too needs `--provider baseten`:
+  `pup finetune train --provider baseten --dataset datasets/my-agent --model glm-5p3-flash --detach`. `--max-seq-len <n>` (at least 1024) caps the context; never pass `--lora-alpha`.
 - **Billing.** `train`, `resume` and `evaluate` provision a dedicated Loops trainer (and
   samplers) that bills until the run is deactivated; every exit deactivates it. Never `kill -9`
   a pup-finetune process. On `could not deactivate Baseten run <id> (...); it may still bill`,

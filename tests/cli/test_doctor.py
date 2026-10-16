@@ -509,11 +509,12 @@ def test_check_preflights_the_named_provider_s_models(
     assert result.exit_code == 0, result.stderr
     report = report_of(result)
     names = [check["name"] for check in report["checks"]]
-    assert names[2:6] == [
+    assert names[2:7] == [
         "fireworks:key",
         "fireworks:sdk",
         "fireworks:renderer",
         "fireworks:model:qwen3p8-27b",
+        "fireworks:model:glm-5p3-flash",
     ]
     model = checks_of(result)["fireworks:model:qwen3p8-27b"]
     assert model["status"] == "pass"
@@ -521,7 +522,8 @@ def test_check_preflights_the_named_provider_s_models(
     assert model["label"] == "qwen3p8-27b can be fine-tuned on Fireworks"
     assert report["next_command"] is None
     assert [request.url.path for request in fireworks_api.requests] == [
-        "/v1/accounts/fireworks/models/qwen3p8-27b"
+        "/v1/accounts/fireworks/models/qwen3p8-27b",
+        "/v1/accounts/fireworks/models/glm-5p3-flash",
     ]
     assert API_KEY not in result.stdout + result.stderr
 

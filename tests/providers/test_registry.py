@@ -333,7 +333,7 @@ def test_importing_the_cli_and_inferring_a_provider_import_no_provider_module() 
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
     )
     report = json.loads(completed.stdout)
-    assert report["inferred"] == ["fireworks"]
+    assert report["inferred"] == ["baseten", "fireworks"]
     # Only the protocols module and the light packages that register provider API keys,
     # never a provider implementation.
     assert set(report["provider_modules"]) <= {

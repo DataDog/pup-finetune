@@ -272,7 +272,7 @@ Training runs in the key's own account (Fireworks refuses a key that sees severa
 records.
 
 Training on Baseten Loops is paid too: `--provider baseten --model qwen3p5-9b` (or
-`glm-5p3-flash`) needs the `baseten` extra and a Baseten API key (`BASETEN_API_KEY`, the OS
+`glm-5p3-flash` or `qwen3p8-27b`, which Fireworks offers too) needs the `baseten` extra and a Baseten API key (`BASETEN_API_KEY`, the OS
 keychain after `pup finetune auth login baseten`, or the default remote's key in
 `~/.trussrc`, read only). Its preview asks Baseten, read only, whether the workspace can train
 the model; `--confirm` starts a billed dedicated trainer, deactivated when the session ends.
@@ -822,7 +822,7 @@ Source lives under `src/pup_finetune/`.
   `--provider-option`s with (unknown keys refused, string values decoded as JSON). `fireworks/` is the Fireworks provider: its `__init__.py` only registers the
   `FIREWORKS_API_KEY` `CredentialSpec` (the registry imports it, so `auth` and `doctor` see
   the key without loading anything heavy; the validator lists accounts); `models.py` is the
-  profile table (`qwen3p8-27b`), each entry naming a rendering family that supplies its
+  profile table (`qwen3p8-27b`, `glm-5p3-flash`), each entry naming a rendering family that supplies its
   tokenizer and revision; `api.py` is a small read-only REST client over `httpx` (no SDK;
   `model_info`, `list_accounts`, injectable transport, redacted errors, 401/403 as
   `FireworksAuthError`, 404 as a missing model); `provider.py` has `FireworksProvider`
@@ -877,7 +877,8 @@ Source lives under `src/pup_finetune/`.
   session always deactivates its run and samplers. `baseten/__init__.py` only registers the
   `BASETEN_API_KEY` `CredentialSpec`, as Fireworks' does (falling back, read only, to the key
   of the default remote in `~/.trussrc`; the validator lists models). `baseten/provider.py`
-  has `BasetenProvider`: the `qwen3p5-9b` and `glm-5p3-flash` profiles (tokenizer pins from
+  has `BasetenProvider`: the `qwen3p5-9b`, `glm-5p3-flash` and `qwen3p8-27b` profiles, each
+  with its own context (tokenizer pins from
   their families), a read-only `preflight` (the SDK loads, and Loops' capabilities offer and
   enable the model with a limit of at least the `max_seq_len` option, else the profile's
   context), the family's HF renderer and the `max_seq_len` option (at least 1024; it

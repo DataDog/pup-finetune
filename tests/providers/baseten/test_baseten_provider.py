@@ -43,7 +43,7 @@ from pup_finetune.providers.baseten.provider import (
 )
 from pup_finetune.providers.fake import FAKE_PROFILE
 from pup_finetune.rendering.base import Renderer
-from pup_finetune.rendering.families import GLM5_3, QWEN3_5
+from pup_finetune.rendering.families import GLM5_3, QWEN3_5, QWEN3_8
 from pup_finetune.rendering.hf import ChatTokenizer
 from pup_finetune.runtime import Runtime
 from tests.fakes.baseten import Answer, BasetenTransport, FakeLoops, capabilities
@@ -54,10 +54,22 @@ from tests.providers.contract import ProviderContract, RendererContract
 KEY = SecretStr("synthetic-baseten-key")
 ENV = {"BASETEN_API_KEY": KEY.get_secret_value()}
 CAPABILITIES_ROUTE = "GET /v1/loops/capabilities"
-CAPABILITIES = capabilities(*(profile.base_model for profile in PROFILES))
+CAPABILITIES = {
+    "supported_models": [
+        entry
+        for profile in PROFILES
+        for entry in capabilities(
+            profile.base_model,
+            max_seq_len=profile.max_seq_len,
+            max_enabled_seq_len=profile.max_seq_len,
+            max_context_length=profile.max_seq_len,
+        )["supported_models"]
+    ]
+}
 QWEN = PROFILES[0]
 FAKE_TOKENIZERS: dict[str, Callable[[], ChatTokenizer]] = {
     "qwen3_5": lambda: FakeChatTokenizer(merge_newlines=True),
+    "qwen3_8": lambda: FakeChatTokenizer(merge_newlines=True),
     "glm5_3": lambda: FakeChatTokenizer(template=glm5_like),
 }
 """A fake tokenizer per renderer family, with a template like the family's."""
@@ -189,10 +201,11 @@ def test_building_the_provider_loads_no_sdk_tokenizer_or_key(tmp_path: Path) -> 
 
 def test_profiles_take_their_tokenizer_from_the_family() -> None:
     by_alias = {profile.alias: profile for profile in PROFILES}
-    assert set(by_alias) == {"qwen3p5-9b", "glm-5p3-flash"}
-    for alias, base_model, family in [
-        ("qwen3p5-9b", "Qwen/Qwen3.5-9B", QWEN3_5),
-        ("glm-5p3-flash", "zai-org/GLM-5.3-Flash", GLM5_3),
+    assert set(by_alias) == {"qwen3p5-9b", "glm-5p3-flash", "qwen3p8-27b"}
+    for alias, base_model, family, max_seq_len in [
+        ("qwen3p5-9b", "Qwen/Qwen3.5-9B", QWEN3_5, 131_072),
+        ("glm-5p3-flash", "zai-org/GLM-5.3-Flash", GLM5_3, 131_072),
+        ("qwen3p8-27b", "Qwen/Qwen3.8-27B", QWEN3_8, 262_144),
     ]:
         profile = by_alias[alias]
         assert profile.base_model == base_model
@@ -201,8 +214,9 @@ def test_profiles_take_their_tokenizer_from_the_family() -> None:
             family.revision,
             family.key,
         )
-        assert profile.max_seq_len == 131_072
+        assert profile.max_seq_len == max_seq_len
     assert by_alias["qwen3p5-9b"].supports_reasoning
+    assert by_alias["qwen3p8-27b"].supports_reasoning
     assert not by_alias["glm-5p3-flash"].supports_reasoning
 
 
@@ -210,7 +224,7 @@ def test_an_unknown_model_lists_the_known_aliases() -> None:
     provider, _ = provider_for()
     with pytest.raises(UsageError, match="unknown baseten model 'no-such-model'") as caught:
         provider.resolve_model("no-such-model")
-    assert caught.value.hint.startswith("known models: qwen3p5-9b, glm-5p3-flash;")
+    assert caught.value.hint.startswith("known models: qwen3p5-9b, glm-5p3-flash, qwen3p8-27b;")
 
 
 # --- preflight ---------------------------------------------------------------------------
@@ -389,7 +403,7 @@ def test_max_seq_len_is_decoded_and_normalized() -> None:
     assert normalized == {"max_seq_len": 4096}
     assert provider.validate_options(normalized) == normalized
     assert provider.options.max_seq_len == 4096
-    assert provider.validate_options({"max_seq_len": MAX_SEQ_LEN}) == {"max_seq_len": 131072}
+    assert provider.validate_options({"max_seq_len": MAX_SEQ_LEN}) == {"max_seq_len": 262_144}
 
 
 @pytest.mark.parametrize("value", ["1023", "-1", str(MAX_SEQ_LEN + 1), "4096.5", "true", '"4096"'])
