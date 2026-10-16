@@ -261,23 +261,23 @@ def triage_rows(
         reset=reset_triage,
         agreement=agreement,
     )
-    args = [*PROGRAM, "dataset", "triage", str(directory)]
+    labeling = [*PROGRAM, "dataset", "triage", str(directory)]
     if rubric is not None:
-        args += ["--rubric", str(rubric)]
+        labeling += ["--rubric", str(rubric)]
     for text in rules:
-        args += ["--rule", text]
-    args += ["--judges", ",".join(council)]
+        labeling += ["--rule", text]
+    labeling += ["--judges", ",".join(council)]
     if concurrency != triage.DEFAULT_CONCURRENCY:
-        args += ["--concurrency", str(concurrency)]
-    if agreement:
-        args.append("--agreement")
+        labeling += ["--concurrency", str(concurrency)]
     if allow_template_rubric and template_task is not None:
-        args.append("--allow-template-rubric")
-    every_row = list(args)
+        labeling.append("--allow-template-rubric")
+    every_row = [*labeling, "--agreement"] if agreement else list(labeling)
+    args = list(every_row)
     if rows is not None:
         args += ["--rows", str(rows)]
     if max_rows is not None:
         args += ["--max-rows", str(max_rows)]
+        labeling += ["--max-rows", str(max_rows)]
     rerun = [*args, "--reset-triage"] if reset_triage else args
     settings = {
         "rows_file": str(rows) if rows is not None else None,
@@ -324,7 +324,7 @@ def triage_rows(
     with open_clients(plan.judges) as clients:
         report = triage.run_triage(plan, clients, concurrency=concurrency, progress=info)
     if report.agreement is not None:
-        return _agreement_result(dataset, plan, report, report.agreement, criteria, args)
+        return _agreement_result(dataset, plan, report, report.agreement, criteria, args, labeling)
     counts = report.counts()
     summary = dataset.summary()
     complete = report.complete
@@ -397,16 +397,6 @@ def _row_ids(path: Path) -> frozenset[str]:
     )
 
 
-def _labeling_args(args: list[str]) -> list[str]:
-    """``args`` of an ``--agreement`` run as the triage that labels the rest: without
-    ``--agreement``, and without the ``--rows FILE`` that chose the labeled rows to compare."""
-    words = [word for word in args if word != "--agreement"]
-    if "--rows" in words:
-        at = words.index("--rows")
-        del words[at : at + 2]
-    return words
-
-
 def _agreement_result(
     dataset: DatasetDir,
     plan: triage.TriagePlan,
@@ -414,8 +404,11 @@ def _agreement_result(
     agreement: triage.Agreement,
     criteria: triage.Criteria,
     args: list[str],
+    labeling: list[str],
 ) -> dict[str, Any] | CommandResult:
-    """The result of an ``--agreement`` run: the council against the user's labels."""
+    """The result of an ``--agreement`` run: the council against the user's labels.
+    ``labeling`` is the triage that labels the rest: ``args`` without ``--agreement`` and
+    without the ``--rows FILE`` that chose the labeled rows to compare."""
     data: dict[str, Any] = {
         "dataset_dir": display_path(dataset.path),
         "mode": "agreement",
@@ -441,7 +434,7 @@ def _agreement_result(
             "(the votes so far are kept)"
         )
         return CommandResult(data, exit_code=1)
-    data["next_command"] = shlex.join([*_labeling_args(args), "--confirm"])
+    data["next_command"] = shlex.join([*labeling, "--confirm"])
     data["next_steps"] = [
         step(
             shlex.join([*args, "--reset-triage"]),

@@ -578,6 +578,21 @@ def test_rows_skips_the_rows_you_labeled_and_agreement_compares_only_those(
     assert "--rows" not in shlex.split(data["next_command"])
 
 
+def test_agreement_s_next_command_keeps_a_rule_that_reads_like_a_flag(
+    dataset: Path, chat: FakeChatApi, tmp_path: Path
+) -> None:
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(json.dumps({"id": "row-weather-001", "keep": True}) + "\n")
+    assert invoke("dataset", "label", str(dataset), "--file", str(labels)).exit_code == 0
+    args = ["dataset", "triage", str(dataset), "--rule=--agreement", "--max-rows", "3"]
+    compared = invoke(*args, "--agreement", "--confirm")
+    assert compared.exit_code == 0, compared.stderr
+    words = shlex.split(output(compared)["next_command"])
+    assert words[words.index("--rule") + 1] == "--agreement"
+    assert words.count("--agreement") == 1
+    assert words[words.index("--max-rows") + 1] == "3"
+
+
 def test_rows_naming_only_rows_you_labeled_offers_no_confirm(
     dataset: Path, chat: FakeChatApi, tmp_path: Path
 ) -> None:
