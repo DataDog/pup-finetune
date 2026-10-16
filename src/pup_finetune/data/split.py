@@ -242,19 +242,21 @@ class SplitGroups:
     limit: int
     """The most traces a request could be asked in and still join them
     (:func:`generic_limit`)."""
+    traces: int
+    """How many traces the rows are in."""
 
     def chained(self) -> list[TrainingRow]:
         """The rows of the largest group (the first such group) of at least
         :data:`CHAINED_MIN_TRACES` traces holding more than :data:`LARGE_GROUP_SHARE` of the
         rows, in a dataset of at least :data:`CHAINED_MIN_DATASET_TRACES` traces, or none."""
-        rows = [row for group in self.groups for row in group]
-        if len({split_key(row) for row in rows}) < CHAINED_MIN_DATASET_TRACES:
+        if self.traces < CHAINED_MIN_DATASET_TRACES:
             return []
+        rows = sum(len(group) for group in self.groups)
         chained = [
             group
             for group in self.groups
             if len({split_key(row) for row in group}) >= CHAINED_MIN_TRACES
-            and len(group) > LARGE_GROUP_SHARE * len(rows)
+            and len(group) > LARGE_GROUP_SHARE * rows
         ]
         return max(chained, key=len, default=[])
 
@@ -278,7 +280,8 @@ def split_groups(rows: Iterable[TrainingRow]) -> SplitGroups:
     for row in listed:
         if (request := request_key(row)) is not None:
             asked.setdefault(request, []).append(row)
-    limit = generic_limit(len({split_key(row) for row in listed}))
+    traces = len({split_key(row) for row in listed})
+    limit = generic_limit(traces)
     generic: list[list[str]] = []
     for request in sorted(asked):
         copies = asked[request]
@@ -291,7 +294,7 @@ def split_groups(rows: Iterable[TrainingRow]) -> SplitGroups:
     groups: dict[str, list[TrainingRow]] = {}
     for row in listed:
         groups.setdefault(find(split_key(row)), []).append(row)
-    return SplitGroups(list(groups.values()), generic, limit)
+    return SplitGroups(list(groups.values()), generic, limit, traces)
 
 
 def _most(counts: Counter[SplitName]) -> SplitName:

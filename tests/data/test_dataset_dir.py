@@ -31,6 +31,7 @@ from pup_finetune.data.schema import (
 from pup_finetune.data.split import SPLITS, SplitParams
 from pup_finetune.errors import StateError, UsageError
 from pup_finetune.storage import DirectoryLock
+from tests.fakes.text import letters
 
 ROWS_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "rows"
 TOOL_USE = ROWS_DIR / "tool_use.jsonl"
@@ -545,11 +546,6 @@ def test_summary_warns_about_small_splits(tmp_path: Path) -> None:
     summary = dataset.add([make_row("a", "one")], settings=params).summary
     assert summary["splits"] == {"train": 1, "validation": 0, "test": 0}
     assert len(summary["warnings"]) == 3
-
-
-def letters(n: int) -> str:
-    """``n`` in letters, so texts told apart by it are not copies (numbers fold to ``0``)."""
-    return "".join(chr(ord("a") + int(digit)) for digit in str(n))
 
 
 def single_traces(prefix: str, count: int) -> list[TrainingRow]:

@@ -868,6 +868,8 @@ argument prefix (or computes the answer with a `handler`) and records every call
 behind the pup calls `LLMObsDatasets` makes, with failures to inject.
 `tests/fakes/pushed.py` has `mark_pushed`, which writes the push receipt a complete push of
 every kept row would leave, so a real-provider `train` test runs on an imported dataset.
+`tests/fakes/text.py` has `letters`, a number spelled in letters, for row texts that must not
+be copies of each other (request grouping folds numbers to `0`).
 `tests/fakes/experiments.py` has `FakeExperimentsApi`, in-memory experiments and their events
 behind the pup calls `LLMObsExperiments` makes (failed and lost creates and event posts,
 delayed or capped indexing); it chains to the `api` handler installed before it, so it serves

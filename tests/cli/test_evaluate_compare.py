@@ -25,6 +25,7 @@ from pup_finetune.cli import app
 from pup_finetune.inference import ChatCompletion, ContextLimitError, JudgeConfig
 from pup_finetune.providers.base import ProviderAuthError, ProviderCapacityError
 from pup_finetune.providers.fake import FakeBackend, FakeSampler
+from tests.fakes.text import letters
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
 
@@ -317,11 +318,6 @@ def test_the_probe_runs_once_when_the_compare_model_is_attached(
     again = invoke(*args, "--confirm")
     assert again.exit_code == 0, again.stderr
     assert len(model.calls) == cases
-
-
-def letters(n: int) -> str:
-    """``n`` in letters, so texts told apart by it are not copies (numbers fold to ``0``)."""
-    return "".join(chr(ord("a") + int(digit)) for digit in str(n))
 
 
 def test_the_probe_sends_no_tool_when_no_test_case_has_tools(

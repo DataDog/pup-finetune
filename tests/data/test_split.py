@@ -34,6 +34,7 @@ from pup_finetune.data.split import (
     split_warnings,
 )
 from pup_finetune.errors import StateError, UsageError
+from tests.fakes.text import letters
 
 KEYS = [f"synthetic-trace-{i:04d}" for i in range(2000)]
 
@@ -277,11 +278,6 @@ SUBAGENT = (
 
 def booking(row_id: str, n: int, *, trace_id: str) -> TrainingRow:
     return make_row(row_id, BOOKING.format(n=n, d=n % 28 + 1), trace_id=trace_id)
-
-
-def letters(n: int) -> str:
-    """``n`` in letters, so texts told apart by it are not copies (numbers fold to ``0``)."""
-    return "".join(chr(ord("a") + int(digit)) for digit in str(n))
 
 
 def filler(count: int) -> list[TrainingRow]:
