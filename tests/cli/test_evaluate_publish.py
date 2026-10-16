@@ -298,6 +298,19 @@ def test_status_gives_the_push_first_steps_as_the_run_stands_now(
     assert output(preview)["preview"]["publish"]["status"] == "planned"
 
 
+def test_status_offers_no_next_command_while_the_push_receipt_is_unreadable(
+    fake: FakePup, experiments: FakeExperimentsApi, dataset: Path, run_dir: Path
+) -> None:
+    assert (
+        output(invoke("evaluate", str(run_dir), "--confirm"))["publication"]["status"] == "skipped"
+    )
+    (dataset / "push.json").write_text("{not json")
+    status = output(invoke("status", str(run_dir)))
+    assert status["next_command"] is None
+    (rerun,) = status["next_steps"]
+    assert "once its dataset can be read" in rerun["why"]
+
+
 def test_no_publish_skips_publishing_silently(
     fake: FakePup, experiments: FakeExperimentsApi, dataset: Path, run_dir: Path
 ) -> None:

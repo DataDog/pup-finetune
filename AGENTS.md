@@ -215,8 +215,8 @@ passed over, and the source says so. The defaults are `judge_models.EVALUATE_DEF
 OpenAI's, else the two Fireworks models. Previews name the judges and where they came from
 (`judge_source`, `judges_source`), triage's `next_command` pins `--judges` as evaluate's pins
 `--judge-model`, and `doctor`'s `ready` map reads the default from its own key and package
-checks. A preview whose judge or compare model has no key fails with the key's login hint
-(`usage`, exit 2). The test conftest clears every provider key variable (except in `live`
+checks. A preview whose judge or compare model has no key, or a malformed one, fails with
+the key's login hint (`usage`, exit 2). The test conftest clears every provider key variable (except in `live`
 tests), so the default tests see the Fireworks defaults. Anthropic judges need the `anthropic`
 extra (`uv sync --all-extras`; `uv sync` is exact, so a bare `uv sync --extra anthropic`
 removes the other extras):
@@ -680,10 +680,11 @@ Source lives under `src/pup_finetune/`.
   `evaluation/runner.py`'s `record_evaluation`; `status` names the pinned command that
   continues one, or `deploy` once one is complete, unless the missing push kept it
   unpublished (its `publication` is `skipped`): then the steps are built from the run as it
-  is now, by the same `_push_first` as after the evaluation (the dataset's current
-  `push.json`, the evaluation's pinned command, `deploy` unless the run is deployed, paths
-  from the current directory), with no next command while a push is needed, and once one
-  was made the evaluation's command, whose preview publishes it),
+  is now, by the same `_push_first` as after the evaluation, less its compare suggestion
+  (the dataset's current `push.json`, the evaluation's pinned command, `deploy` unless the
+  run is deployed, paths from the current directory), with no next command while a push is
+  needed or the receipt cannot be read, and once one was made the evaluation's command,
+  whose preview publishes it),
   `RunState`, which the loop reports into, and `execute_run`, which holds the directory lock
   while training and always writes `result.json`, also on Ctrl-C or SIGTERM (reported as
   `TrainingTerminated`, a `FinetuneError`). Any error during training leaves the run
