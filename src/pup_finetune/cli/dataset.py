@@ -506,7 +506,8 @@ def _next_by_state(
             "to start from)",
         )
         sample = command("dataset", "sample", directory, "--count", REVIEW_SAMPLE_SIZE)
-        pushing = push_step if push_step is not None and state.push != "not_pushed" else None
+        pushed_before = state.push != "not_pushed"
+        pushing = push_step if push_step is not None and pushed_before else None
         return {
             "next_command": None if sampled else sample,
             "next_steps": [

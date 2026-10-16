@@ -397,6 +397,16 @@ def _row_ids(path: Path) -> frozenset[str]:
     )
 
 
+def _labeling_args(args: list[str]) -> list[str]:
+    """``args`` of an ``--agreement`` run as the triage that labels the rest: without
+    ``--agreement``, and without the ``--rows FILE`` that chose the labeled rows to compare."""
+    words = [word for word in args if word != "--agreement"]
+    if "--rows" in words:
+        at = words.index("--rows")
+        del words[at : at + 2]
+    return words
+
+
 def _agreement_result(
     dataset: DatasetDir,
     plan: triage.TriagePlan,
@@ -424,10 +434,6 @@ def _agreement_result(
     }
     if (noisy := triage.noisy_agreement(len(plan.rows))) is not None:
         data["warnings"] = [noisy]
-    without = [word for word in args if word != "--agreement"]
-    if "--rows" in without:
-        at = without.index("--rows")
-        del without[at : at + 2]
     if report.failures:
         data["next_command"] = shlex.join([*args, "--confirm"])
         data["hint"] = (
@@ -435,7 +441,7 @@ def _agreement_result(
             "(the votes so far are kept)"
         )
         return CommandResult(data, exit_code=1)
-    data["next_command"] = shlex.join([*without, "--confirm"])
+    data["next_command"] = shlex.join([*_labeling_args(args), "--confirm"])
     data["next_steps"] = [
         step(
             shlex.join([*args, "--reset-triage"]),

@@ -319,6 +319,11 @@ def test_the_probe_runs_once_when_the_compare_model_is_attached(
     assert len(model.calls) == cases
 
 
+def letters(n: int) -> str:
+    """``n`` in letters, so texts told apart by it are not copies (numbers fold to ``0``)."""
+    return "".join(chr(ord("a") + int(digit)) for digit in str(n))
+
+
 def test_the_probe_sends_no_tool_when_no_test_case_has_tools(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -331,7 +336,7 @@ def test_the_probe_sends_no_tool_when_no_test_case_has_tools(
                     "messages": [
                         {
                             "role": "user",
-                            "content": f"Say {chr(97 + index % 26) * (1 + index // 26)}.",
+                            "content": f"Say {letters(index)}.",
                         },
                         {"role": "assistant", "content": f"The number is {index}."},
                     ],
