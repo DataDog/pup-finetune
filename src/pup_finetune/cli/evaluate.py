@@ -46,7 +46,7 @@ from pup_finetune.cli._presentation import (
 from pup_finetune.cli._views import evaluation_view
 from pup_finetune.errors import PAID_RUN, require_confirm, require_writable
 from pup_finetune.evaluation import runner
-from pup_finetune.judge_models import DEFAULT_JUDGE_MODEL, alias_of
+from pup_finetune.judge_models import BY_KEY
 
 RunDirArgument = Annotated[
     Path,
@@ -122,7 +122,12 @@ DOC = CommandDoc(
         "--out-dir. Tools are not executed, so the scores measure agreement with the "
         "recorded behavior, not task success. With --confirm, the judge is calibrated first, then every case is "
         "replayed; rerun the same command to continue an evaluation that stopped. A changed "
-        "--max-tokens, judge, seed or --max-cases needs a new --out-dir.",
+        "--max-tokens, judge, seed or --max-cases needs a new --out-dir. Without "
+        "--judge-model, the judge is the one the --out-dir holds an evaluation by, else "
+        "anthropic/claude-haiku-5-5 when an Anthropic credential resolves (ANTHROPIC_API_KEY, "
+        "the OS keychain or the Anthropic SDK's login), else openai/gpt-5.4-mini when an "
+        "OpenAI one does, else Fireworks' deepseek-v4p1-flash; the preview names it and "
+        "where it came from (judge_source).",
     ),
     examples=(
         "pup finetune evaluate run",
@@ -181,7 +186,7 @@ def evaluate(
             "--judge-model",
             metavar="MODEL",
             help="An alias (glm-5p3-flash), anthropic/MODEL, openai/MODEL or a Fireworks id. "
-            f"{default_note(alias_of(DEFAULT_JUDGE_MODEL))}",
+            f"{default_note(BY_KEY)}",
             show_default=False,
             rich_help_panel=MODELS,
         ),

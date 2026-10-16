@@ -32,7 +32,7 @@ from pup_finetune.providers.base import Provider
 from pup_finetune.providers.fireworks.provider import FireworksProvider
 from pup_finetune.runtime import Runtime
 from tests.fakes.fireworks_api import API_KEY, FakeFireworksApi
-from tests.fakes.keyring import LockedKeyring, MemoryKeyring
+from tests.fakes.keyring import CRASHED_HOLDING, CrashingKeyring, LockedKeyring
 from tests.fakes.pup import FAKE_BINARY, FakePup
 from tests.fakes.setup import ALL_PACKAGES, healthy_pup, installed_packages, no_provider_keys
 
@@ -159,8 +159,9 @@ def test_a_healthy_pup_is_ready_without_any_provider_key(use_pup: UsePup) -> Non
     assert report["next_command"] is None
     assert report["next_steps"] == [
         {
-            "command": "pup finetune dataset preview --ml-app <ML_APP> --from 7d",
-            "why": "read a sample of your Agent Observability traces, in memory",
+            "command": "pup finetune dataset pull <DIR> --ml-app <ML_APP> --from 7d",
+            "why": "pull your Agent Observability traces into a dataset directory, once "
+            "`pup llm-obs spans search` showed the spans and filter to read",
         },
         {
             "command": "pup finetune auth login fireworks",
@@ -180,7 +181,6 @@ def test_ready_says_which_steps_can_run(use_pup: UsePup) -> None:
     use_pup(healthy_pup().client())
     ready = report_of(invoke())["ready"]
     assert {name: step["ready"] for name, step in ready.items()} == {
-        "dataset preview": True,
         "dataset pull": True,
         "dataset show": True,
         "dataset push": True,
@@ -198,6 +198,27 @@ def test_ready_says_which_steps_can_run(use_pup: UsePup) -> None:
     assert ready["deploy on fireworks"]["blocked_by"] == ["fireworks:key"]
 
 
+def test_an_anthropic_key_makes_it_the_default_judges_and_readies_triage(
+    use_pup: UsePup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-synthetic-0000-test-key")
+    use_pup(healthy_pup().client())
+    ready = report_of(invoke())["ready"]
+    assert ready["dataset triage"] == {"ready": True, "blocked_by": []}
+    assert ready["evaluate on baseten"]["blocked_by"] == ["baseten:key"]
+
+
+def test_an_anthropic_key_without_its_sdk_leaves_the_default_judges_on_fireworks(
+    use_pup: UsePup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installed_packages(monkeypatch, ALL_PACKAGES - {"anthropic"})
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-synthetic-0000-test-key")
+    use_pup(healthy_pup().client())
+    ready = report_of(invoke())["ready"]
+    assert ready["dataset triage"]["blocked_by"] == ["fireworks:key"]
+    assert ready["evaluate on baseten"]["blocked_by"] == ["baseten:key", "fireworks:key"]
+
+
 def test_with_the_keys_set_every_step_is_ready(
     use_pup: UsePup, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -211,7 +232,7 @@ def test_with_the_keys_set_every_step_is_ready(
     assert (key["status"], key["label"]) == ("pass", "Fireworks key (FIREWORKS_API_KEY)")
     assert key["detail"] == "fireworks API key found (source: env)"
     assert [step["command"] for step in report["next_steps"]] == [
-        "pup finetune dataset preview --ml-app <ML_APP> --from 7d"
+        "pup finetune dataset pull <DIR> --ml-app <ML_APP> --from 7d"
     ]
     assert API_KEY not in result.stdout + result.stderr
 
@@ -247,7 +268,7 @@ def test_read_only_mode_blocks_push_and_paid_runs(
     assert ready["dataset push"]["blocked_by"] == ["read_only"]
     assert ready["train on fireworks"]["blocked_by"] == ["read_only"]
     assert ready["deploy on fireworks"]["blocked_by"] == ["read_only"]
-    assert ready["dataset preview"]["ready"] is True
+    assert ready["dataset pull"]["ready"] is True
     assert ready["dataset triage"]["ready"] is True
 
 
@@ -260,7 +281,7 @@ def test_the_ready_line_says_which_steps_read_only_mode_blocks(
     lines = invoke().stderr.splitlines()
     ready = next(line for line in lines if line.startswith("Ready: "))
     assert ready == (
-        "Ready: dataset preview, pull, show, triage.  Not ready: dataset push (read-only), "
+        "Ready: dataset pull, show, triage.  Not ready: dataset push (read-only), "
         "train on fireworks (read-only), evaluate on fireworks (read-only), deploy on "
         "fireworks (read-only), train on baseten (read-only), evaluate on baseten (read-only), "
         "deploy on baseten (read-only)."
@@ -297,7 +318,7 @@ def test_old_pup_fails_but_still_emits_the_report(use_pup: UsePup) -> None:
     assert "older than the minimum 1.10.7" in pup_check["detail"]
     assert pup_check["fix"] == "upgrade with `brew upgrade datadog/pack/pup`"
     assert report["checks"][1]["status"] == "pass"
-    assert report["ready"]["dataset preview"]["blocked_by"] == ["pup"]
+    assert report["ready"]["dataset pull"]["blocked_by"] == ["pup"]
 
 
 def test_missing_pup_fails_and_skips_auth(use_pup: UsePup, tmp_path: Path) -> None:
@@ -441,7 +462,7 @@ def test_a_named_provider_s_steps_are_the_only_ones_not_ready(
     result = invoke("--provider", "fireworks")
     ready = next(line for line in result.stderr.splitlines() if line.startswith("Ready: "))
     assert ready == (
-        "Ready: dataset preview, pull, show, push, triage.  Not ready: train on fireworks, "
+        "Ready: dataset pull, show, push, triage.  Not ready: train on fireworks, "
         "evaluate on fireworks, deploy on fireworks."
     )
     # The JSON keeps every step.
@@ -613,10 +634,10 @@ def test_the_checklist_follows_the_report_on_stderr(
         "--    Anthropic/OpenAI keys not set                only for anthropic/... or openai/... "
         "judges",
         "ok    Anthropic SDK installed                      anthropic/... judges",
-        "Ready: dataset preview, pull, show, push, triage.  Not ready: train on fireworks, "
+        "Ready: dataset pull, show, push, triage.  Not ready: train on fireworks, "
         "evaluate on fireworks, deploy on fireworks, train on baseten, evaluate on baseten, "
         "deploy on baseten.",
-        "Next: pup finetune dataset preview --ml-app <ML_APP> --from 7d",
+        "Next: pup finetune dataset pull <DIR> --ml-app <ML_APP> --from 7d",
     ]
 
 
@@ -628,7 +649,7 @@ def test_a_failing_doctor_still_prints_its_checklist(use_pup: UsePup, tmp_path: 
     assert lines[1].startswith("FAIL  pup not found")
     assert lines[2].startswith("      fix: install pup with `brew install datadog/pack/pup`")
     assert lines[3].startswith("skip  Datadog login not checked (no pup)")
-    assert lines[-2].startswith("Ready: dataset show.  Not ready: dataset preview, pull, push")
+    assert lines[-2].startswith("Ready: dataset show.  Not ready: dataset pull, push")
     assert lines[-1].startswith("Next: install pup with `brew install datadog/pack/pup`")
 
 
@@ -693,17 +714,10 @@ def test_a_locked_keychain_says_to_unlock_it_not_to_sign_in(
     assert result.stderr.splitlines()[-1] == f"Next: {key['fix']}"
 
 
-class _CrashingKeyring(MemoryKeyring):
-    """A keychain backend that fails with an error keyring does not define, quoting a key."""
-
-    def get_password(self, service: str, username: str) -> str | None:
-        raise RuntimeError(f"backend crashed holding {API_KEY}")
-
-
 def test_a_crashing_keychain_backend_does_not_crash_doctor(
     use_pup: UsePup, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(keyring.core, "_keyring_backend", _CrashingKeyring())
+    monkeypatch.setattr(keyring.core, "_keyring_backend", CrashingKeyring())
     use_pup(healthy_pup().client())
     result = invoke()
     assert result.exit_code == 0, result.stderr
@@ -714,10 +728,8 @@ def test_a_crashing_keychain_backend_does_not_crash_doctor(
         "Fireworks key unreadable",
         fix,
     )
-    assert key["detail"] == (
-        f"could not read the fireworks key from the OS keychain (RuntimeError); {fix}"
-    )
-    assert API_KEY not in result.stdout + result.stderr
+    assert key["detail"] == "could not read the fireworks key from the OS keychain (RuntimeError)"
+    assert CRASHED_HOLDING not in result.stdout + result.stderr
     assert "pup finetune auth login fireworks" not in [
         s["command"] for s in report_of(result)["next_steps"]
     ]

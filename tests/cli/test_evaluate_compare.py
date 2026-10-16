@@ -25,6 +25,7 @@ from pup_finetune.cli import app
 from pup_finetune.inference import ChatCompletion, ContextLimitError, JudgeConfig
 from pup_finetune.providers.base import ProviderAuthError, ProviderCapacityError
 from pup_finetune.providers.fake import FakeBackend, FakeSampler
+from tests.fakes.text import letters
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
 
@@ -279,7 +280,7 @@ def test_read_only_allows_an_offline_compare_and_refuses_a_paid_one(
         (ProviderAuthError("the API key is not valid (HTTP 401)", source="openai"), 1),
     ],
 )
-@pytest.mark.usefixtures("judge_keys")
+@pytest.mark.usefixtures("all_judge_keys")
 def test_a_compare_model_that_cannot_answer_is_never_attached(
     run_dir: Path, monkeypatch: pytest.MonkeyPatch, failure: Any, exit_code: int
 ) -> None:
@@ -334,7 +335,10 @@ def test_the_probe_sends_no_tool_when_no_test_case_has_tools(
                 {
                     "id": f"row-plain-{index:03d}",
                     "messages": [
-                        {"role": "user", "content": f"Say the number {index} in words."},
+                        {
+                            "role": "user",
+                            "content": f"Say {letters(index)}.",
+                        },
                         {"role": "assistant", "content": f"The number is {index}."},
                     ],
                 }
@@ -524,7 +528,7 @@ def without_tool_results(row: dict[str, Any]) -> dict[str, Any]:
     return {**row, "messages": [m for m in row["messages"] if m["role"] != "tool"]}
 
 
-@pytest.mark.usefixtures("judge_keys")
+@pytest.mark.usefixtures("all_judge_keys")
 def test_cases_the_compare_model_s_api_refuses_are_skipped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

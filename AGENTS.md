@@ -56,7 +56,14 @@ decide its `status` (and exit 1), unless `--provider` makes that provider's key 
 required; `--check` adds its live, read-only preflight per model. Everything else is offline.
 The top-level `ok` and each check's `ok` stay for one release.
 
-The offline dev loop trains end to end on the `fake` provider, with no network or credentials:
+The offline dev loop trains end to end on the `fake` provider, with no network or credentials.
+`train` and `benchmark` on a real provider read only a dataset that is in Datadog: every kept
+row pushed as it is now and no push in flight, or a `dataset fetch` directory
+(`curation/pipeline.py`'s `require_in_datadog`, with its reason and step from
+`Pipeline.push_gap`). Rows changed after the push are named, and their step fetches the
+dataset as Datadog holds it, naming the rows dropped or retired since the push that the
+fetch brings back. An offline provider (`ProviderInfo.offline`, the fake) is exempt, so this
+loop and the default tests train on an imported directory that was never pushed:
 
 ```sh
 export PUP_FINETUNE_DEV=1
@@ -116,20 +123,19 @@ training is not evaluated in its session (the evaluation would spend the session
 the cap). A budget-capped run still ends `completed`, so `evaluate` evaluates it on request;
 like a budget-capped run, a cancelled run is evaluated by `evaluate` on request (its best
 epoch; one cancelled before any epoch has nothing to evaluate). Evaluating a real run is paid
-and needs the judge's key (`FIREWORKS_API_KEY` for the default judge); the preview is free and allowed with
-`PUP_READ_ONLY` set, evaluating is not (an offline one, on the fake provider and judge and
-not published, is allowed: nothing leaves the machine; `train` and `resume` on the fake
-provider likewise). A changed `--max-tokens`, judge, seed or cap needs a
+and needs the judge's key (the default judge follows the keys there are; see below); the
+preview is free and allowed with `PUP_READ_ONLY` set, evaluating is not (an offline one, on the
+fake provider and judge and not published, is allowed: nothing leaves the machine; `train` and
+`resume` on the fake provider likewise). A changed `--max-tokens`, judge, seed or cap needs a
 new `--out-dir`. An evaluation whose pairs ended in errors (a sampler or judge outage) reports
 `complete_with_errors` with an error count and a `next_command` that retries them, and exits
 1 when a target has no verdict at all; a cancelled one reports `partial`.
 
 To build a dataset from your own Agent Observability traces (Datadog reads through pup, so
-both work with `PUP_READ_ONLY` set):
+both work with `PUP_READ_ONLY` set; test a filter with `pup llm-obs spans search` first):
 
 ```sh
-uv run pup-finetune dataset preview --ml-app my-app --from 7d   # in memory, writes nothing;
-                                     # next_command pulls into a new ./datasets/my-app
+pup llm-obs spans search --ml-app my-app --span-kind llm --from 7d --limit 50 --summary
 uv run pup-finetune dataset pull /tmp/ds --ml-app my-app --from 7d
 uv run pup-finetune dataset pull /tmp/ds   # rerun to resume: the frozen settings fill in
                                      # the flags (pages cached in /tmp/ds/raw)
@@ -159,30 +165,34 @@ first pull. The result's `window` holds the bounds read and whether they are the
 Every dataset command's result holds a `pipeline` block (`curation/pipeline.py`): `rows`
 (`accepted`, `kept`, `dropped`, `unlabeled`), `triage` (`none`, `incomplete`, `complete`; see
 `triage.triage_status`) and `push` (`status` `not_pushed`, `pushed`,
-`pushed_with_new_rows` or `unreadable`, and `pending`), which `cli/dataset.py`'s
-`dataset_next` turns into `next_command` and `next_steps`. A validation or test split far from
-its fraction in a dataset of fewer than 50 traces is a warning (`split.skew_warnings`, through
-`DatasetDir.summary`), which suggests more rows, never another seed.
+`pushed_with_new_rows`, `pushed_with_changed_rows` or `unreadable`, `pending` and `changed`),
+which `cli/dataset.py`'s `dataset_next` turns into `next_command` and `next_steps`. A
+validation or test split far from its fraction in a dataset of fewer than 50 traces is a
+warning (`split.skew_warnings`, through `DatasetDir.summary`), which suggests more rows, never
+another seed.
 
 `dataset push` is a remote write: with `PUP_READ_ONLY` set its `--confirm` is refused (the
 preview, built from local files, still runs). Push test data to the `pup-finetune-dev`
-project, never to a shared one.
+project, never to a shared one. A dataset's `next_steps` name `train` and `benchmark` only
+once every kept row is pushed; until then they name the push.
 
 `dataset triage` (`--rubric FILE` and/or `--rule TEXT`, repeated) has each judge model
-(`--judges m1,m2`; by default two Fireworks serverless models, with the Fireworks key) review
+(`--judges m1,m2`; by default chosen by the keys there are, see below) review
 each whole row and vote keep or drop: a strict majority of keep votes keeps a row, a tie
 drops it, a row missing a vote stays undecided. Votes go to `judgments.jsonl` as they arrive,
 so rerunning the same command resumes and retries only failed calls; the rubric hash and
 judges are frozen in `triage.json` once votes exist (`--reset-triage` discards them). Decided
 rows are labeled `by: judge`; rows the agent or a person labeled are skipped. A row a judge
 refuses as longer than its context window is dropped (`too_long`), never truncated, and its
-other calls are skipped. `--agreement` reviews the agent's and people's labeled rows instead,
-labels nothing, and reports the council's agreement with those labels (rate, Cohen's kappa,
-confusion counts, per judge, the disagreements), to check a rubric before labeling the rest. A label cannot be
-withdrawn, so judge labels the current votes do not back (after a reset with `--max-rows`, or
-on undecided rows) are reported as `stale_judge_labels`, and the triage stays `incomplete`
-until a run over every row replaces them. It is paid, so
-it needs `--confirm`, but it writes nothing to Datadog, so `PUP_READ_ONLY` does not block it.
+other calls are skipped. `--rows FILE` (row ids, one per line, blank lines ignored; not frozen)
+restricts the rows reviewed, before `--max-rows`, in both modes (`plan_triage`'s `only`); an id
+that is not an accepted row is a usage error. `--agreement` reviews the agent's and people's
+labeled rows instead, labels nothing, and reports the council's agreement with those labels
+(rate, Cohen's kappa, confusion counts, per judge, the disagreements), to check a rubric before
+labeling the rest. A label cannot be withdrawn, so judge labels the current votes do not back
+(after a reset with `--max-rows`, or on undecided rows) are reported as `stale_judge_labels`,
+and the triage stays `incomplete` until a run over every row replaces them. It is paid, so it
+needs `--confirm`, but it writes nothing to Datadog, so `PUP_READ_ONLY` does not block it.
 Tests replace the judges' clients (`cli/triage.py`'s `open_clients`) with a fake.
 
 Judges can run on Anthropic or OpenAI too: `--judge-model`, `--eval-judge-model` and each
@@ -192,10 +202,24 @@ login), `openai/<model>` (`OPENAI_API_KEY`), or otherwise a Fireworks model id s
 `judge_models.JUDGE_SHORT_NAMES`), and a triage council can mix them. An alias resolves to the
 full id, which previews print and `triage.json` and `evaluation.json` freeze. A judge on a
 reasoning model asks for the lowest reasoning effort the model takes (`low` on Anthropic and
-OpenAI; per model on Fireworks, `judges.FIREWORKS_REASONING`). A preview whose judge or
-compare model has no key, or a malformed one, fails with the key's login hint (`usage`, exit 2). Anthropic
-judges need the `anthropic` extra (`uv sync --all-extras`; `uv sync` is exact, so a bare
-`uv sync --extra anthropic` removes the other extras):
+OpenAI; per model on Fireworks, `judges.FIREWORKS_REASONING`). Without `--judge-model`
+(`--eval-judge-model`, `benchmark --judge-model`) or `--judges`, the judges are the ones the
+directory froze (an evaluation with results, `triage.json`), else a default by the credentials
+that resolve offline (environment variable, keychain, or the Anthropic SDK's login), for a
+provider whose judge package is installed; an Anthropic key without the `anthropic` package is
+passed over, and the source says so. The defaults are `judge_models.EVALUATE_DEFAULTS` and
+`TRIAGE_DEFAULTS`, picked by `judges.default_judges`: `evaluate` takes
+`anthropic/claude-haiku-5-5`, else `openai/gpt-5.4-mini`, else Fireworks'
+`deepseek-v4p1-flash`; triage takes Haiku and `gpt-5.4-mini` with both keys, Haiku and
+`anthropic/claude-sonnet-5-5` with Anthropic's, `gpt-5.4-mini` and `openai/gpt-6-astra` with
+OpenAI's, else the two Fireworks models. Previews name the judges and where they came from
+(`judge_source`, `judges_source`), triage's `next_command` pins `--judges` as evaluate's pins
+`--judge-model`, and `doctor`'s `ready` map reads the default from its own key and package
+checks. A preview whose judge or compare model has no key, or a malformed one, fails with
+the key's login hint (`usage`, exit 2). The test conftest clears every provider key variable (except in `live`
+tests), so the default tests see the Fireworks defaults. Anthropic judges need the `anthropic`
+extra (`uv sync --all-extras`; `uv sync` is exact, so a bare `uv sync --extra anthropic`
+removes the other extras):
 
 ```sh
 uv run pup-finetune auth login anthropic       # or openai; hidden prompt, OS keychain
@@ -222,7 +246,7 @@ uv run pup-finetune models list --provider fireworks --check  # plus the tokeniz
 
 Training on Fireworks is paid: it needs the API key and the Training SDK, which comes with the
 `fireworks` extra (`uv sync --all-extras`). Train only on synthetic
-rows while developing:
+rows, pushed to `pup-finetune-dev`, while developing:
 
 ```sh
 uv run pup-finetune train --provider fireworks --model qwen3p8-27b --dataset /tmp/ds \
@@ -334,7 +358,7 @@ Source lives under `src/pup_finetune/`.
   summary of each command (`SUMMARIES`, by command path), generated from the result mapping
   alone; `run_command` prints it, after the result's warnings, unless `PUP_FINETUNE_QUIET`
   is on. `dataset.py` has `dataset import`,
-  `preview`, `pull`, `show`, `sample`, `label` and `push`, and `dataset_next`, the next
+  `fetch`, `pull`, `show`, `sample`, `label` and `push`, and `dataset_next`, the next
   command and steps a dataset directory's state calls for (unlabeled: `dataset sample`;
   labeled: training steps, since the model is the user's to choose; the provider follows from
   it and the run directory defaults); `train.py` has `train` (`provider_for_model` infers
@@ -449,10 +473,13 @@ Source lives under `src/pup_finetune/`.
   provider's key (`CredentialSpec.needed_for`) and packages (`ProviderInfo.packages`, found
   with `find_spec`, never imported), the judge-only keys and the Anthropic SDK, the live
   `preflight_checks` for `--provider NAME --check`, and `ready_map` (each step, ready or
-  `blocked_by` which checks, `read_only` included).
+  `blocked_by` which checks, `read_only` included). It imports `judges` only inside its
+  functions (for `JUDGE_PACKAGES` and `pick_default`).
 - `credentials.py` - provider API keys (never Datadog's): a `CredentialSpec` registry, resolution
   from the environment variable, then the OS keychain (`keyring`), as `SecretStr`; `store` refuses
   when there is no OS keychain rather than writing a file. `auth login/status/logout` use it.
+  `key_source` is where a key would come from without reading it out, or a `KeyUnreadable`
+  when the lookup raised anything; `doctor`'s key checks and the default judges both use it.
 - `redaction.py` - masks resolved secrets and `Bearer` tokens in error output and logs.
 - `concurrency.py` - `DaemonPool`, worker threads for parallel remote calls that never hold
   up the process's exit, so Ctrl-C stops at once instead of waiting for a call in flight.
@@ -471,23 +498,27 @@ Source lives under `src/pup_finetune/`.
   provider, model, endpoint, credential, sampling settings and reasoning effort (`identity()`
   for resume checks, `spec` for the command line).
 - `judge_models.py` - judge model names with no imports, so help texts can use them: the
-  default judge and `JUDGE_SHORT_NAMES`, the short names of Fireworks judge models.
+  default judges by credential (`EVALUATE_DEFAULTS`, `TRIAGE_DEFAULTS`: ordered
+  `JudgeDefault` rows of the credentials a row needs and its judges; `BY_KEY` for help) and
+  `JUDGE_SHORT_NAMES`, the short names of Fireworks judge models.
 - `judges.py` - judges on any provider, no SDK import: `parse_judge` reads a spec by prefix
   (`anthropic/` or `openai/`; anything else is a Fireworks model id, an alias resolved) with the
   provider's defaults (`PROVIDERS`; the lowest reasoning effort each model takes,
-  `FIREWORKS_REASONING` per Fireworks model), `check_available` refuses a missing extra up front,
-  `require_key` a missing key (offline: the environment, the keychain, or the Anthropic SDK's
-  own login; the fake judge and compare model need none), which the `evaluate`, `train
-  --evaluate`, `benchmark` and `dataset triage` previews call for every model they would
-  call, so they never offer a `--confirm` that would fail on it (a read-only `evaluate`,
-  `train --evaluate` or `benchmark` preview, which offers none, warns instead: `warnings`),
-  and `open_client` and `open_clients` (one per provider) build the clients. A run opens
-  them up front, before anything is generated, so a malformed key, a missing SDK or a
-  locked keychain fails before anything is paid, but only those its preview checked: the
-  judge when the same count the preview showed (`EvalPlan.work`,
-  `BenchmarkPlan.judge_calls`) has a judge call left, so a complete evaluation or benchmark
-  rerun opens none, and in a triage council the judges with votes pending
-  (`TriagePlan.pending_judges`).
+  `FIREWORKS_REASONING` per Fireworks model), `default_judges` (and `pick_default`) the
+  default judges by credential with where they came from, `JUDGE_PACKAGES` the package a
+  judge provider needs (what `doctor` checks, a default requires and `check_available`
+  refuses a judge without, missing or broken, up front), `require_key` a missing key (offline:
+  the environment, the keychain, or the Anthropic SDK's own login; the fake judge and compare
+  model need none), which the `evaluate`, `train --evaluate`, `benchmark` and `dataset triage`
+  previews call for every model they would call, so they never offer a `--confirm` that would
+  fail on it (a read-only `evaluate`, `train --evaluate` or `benchmark` preview, which offers
+  none, warns instead of a missing key: `warnings`; an unreadable keychain still fails), and
+  `open_client` and `open_clients` (one per provider) build the clients. A run opens them up
+  front, before anything is generated, so a malformed key, a missing SDK or a locked keychain
+  fails before anything is paid, but only those its preview checked: the judge when the same
+  count the preview showed (`EvalPlan.work`, `BenchmarkPlan.judge_calls`) has a judge call
+  left, so a complete evaluation or benchmark rerun opens none, and in a triage council the
+  judges with votes pending (`TriagePlan.pending_judges`).
 - `anthropic_client.py` - `AnthropicChatClient`, the Anthropic judge (and compare model)
   client over the official SDK (the `anthropic` extra), the only module that imports
   `anthropic` (and its `httpx2`): the messages as `anthropic_messages.py` converts them,
@@ -530,10 +561,21 @@ Source lives under `src/pup_finetune/`.
   `jsonl.py` reads and writes rows and converts them to the provider form; `exclusions.py`
   records why a row was left out (`excluded.jsonl`), with `ExclusionCode`s for reasons the
   schema cannot see (conversion problems, dataset-level rules);
-  `split.py` assigns deterministic, persisted train/validation/test splits per trace;
+  `split.py` assigns deterministic, persisted train/validation/test splits per trace, one per
+  group of traces asking copies of one request (`request_key`: the user messages lowercased,
+  numbers as `0`, whitespace collapsed, hashed, `None` without user text; `split_groups`, a
+  union-find that joins every trace asking one request unless the request is generic, asked
+  in more traces than `generic_limit` (5% of the traces rounded up, and at least 5), which
+  joins nothing and is reported as `generic`; the summary warns about a group of 3 traces or
+  more holding more than 10% of the rows in a dataset of 50 traces or more
+  (`SplitGroups.chained`); `assign_splits`, which never moves a recorded trace;
+  `split_conflicts`, every group whose kept rows are in several splits, which the summary
+  counts);
   `dataset_dir.py` is the dataset directory (`settings.json`, `rows.jsonl`, `excluded.jsonl`,
-  `splits.json`, `summary.json`, `raw/`, a pull's page cache, and `push.json`, the receipt
-  `dataset push` writes) behind `dataset import`, `dataset pull` and `dataset show`;
+  `splits.json`, `summary.json`, `split_conflicts.jsonl` (drop labels for the kept copies
+  outside their group's split, written with the summary while there are any), `raw/`, a
+  pull's page cache, and `push.json`, the receipt `dataset push` writes) behind `dataset
+  import`, `dataset pull` and `dataset show`;
   `labels.py` has the keep/drop `Label` and the `labels.jsonl` format (append-only, last label
   per id wins, a reason required to drop; `DatasetDir.kept_rows` leaves dropped rows out of
   training and split exports).
@@ -546,8 +588,8 @@ Source lives under `src/pup_finetune/`.
   that run before conversion, in order, first failure wins (`span_error`; errored calls are kept
   with `--include-errors`); there is no `truncated_content` check, as the Export API gives no
   explicit truncation signal. `exclusions.py` also explains every code (`explain`). `pull.py` is
-  what `dataset preview` (in memory) and `dataset pull` (into a dataset, through its `raw/`
-  cache, with the settings frozen first) run, a relative time range resolved once (a re-run
+  what `dataset pull` runs (into a dataset, through its `raw/` cache, with the settings frozen
+  first; tests run `collect` in memory), a relative time range resolved once (a re-run
   reuses the frozen window, `resolve_window`): export a page at a time, check, convert, drop
   repeated conversations, and stop at `--target-count` rows or `--max-candidates` spans before
   fetching another page. Unreadable items are excluded as `unreadable_span` and count toward
@@ -576,17 +618,18 @@ Source lives under `src/pup_finetune/`.
   a timed-out write may still land); rows dropped after a push are reported as
   `stale_records`, not deleted, and kept rows whose record no longer matches the digest
   `push.json` saved for it (`record_digests`; none in older receipts) as `changed_records`,
-  not updated: a push only adds records.
+  not updated: a push only adds records (`compare_receipt` sorts the kept rows into pending,
+  changed and stale, for `plan_push` and `pipeline_state` both).
 - `curation/` - deciding which accepted rows to train on. `labels.py` has `apply_labels`
   (every id an accepted row, last label per id wins, repeats skipped, appended through
   `DatasetDir.append_labels`); `samples.py` picks a seeded, readable sample of rows for
-  review (`row_summary` is the brief form `dataset preview`'s samples share); `pipeline.py`
+  review (`row_summary` is a row's brief form); `pipeline.py`
   has `pipeline_state`, the `pipeline` block of every dataset result. `triage.py` is the judge council behind `dataset triage`: `Criteria` (rubric and/or
   rules, hashed), `build_messages` (the untrusted-data system prompt with the rubric, the
   whole row JSON-encoded in blocks), `parse_vote` (strict `{"keep", "reason"}`), `Vote`s in
   `judgments.jsonl` (counted only for the row content, rubric and judge they were cast for),
   `decide` (strict majority keeps, a tie drops, a missing vote is undecided, a `too_long`
-  vote drops), `plan_triage` (rows not labeled by the agent or a person, or with
+  vote drops), `plan_triage` (rows of `only` not labeled by the agent or a person, or with
   `agreement` only those, in a fixed pseudo-random order for `--max-rows`; settings frozen in
   `triage.json` once votes exist) and `run_triage` (a thread pool, votes appended as they
   arrive, failed calls reported and retried next run, a row's calls skipped once a judge
@@ -859,6 +902,10 @@ argument prefix (or computes the answer with a `handler`) and records every call
 `tests/fakes/llmobs.py` has `FakeExportApi`, the Export API search route served by cursor.
 `tests/fakes/datasets.py` has `FakeDatasetsApi`, in-memory projects, datasets and records
 behind the pup calls `LLMObsDatasets` makes, with failures to inject.
+`tests/fakes/pushed.py` has `mark_pushed`, which writes the push receipt a complete push of
+every kept row would leave, so a real-provider `train` test runs on an imported dataset.
+`tests/fakes/text.py` has `letters`, a number spelled in letters, for row texts that must not
+be copies of each other (request grouping folds numbers to `0`).
 `tests/fakes/experiments.py` has `FakeExperimentsApi`, in-memory experiments and their events
 behind the pup calls `LLMObsExperiments` makes (failed and lost creates and event posts,
 delayed or capped indexing); it chains to the `api` handler installed before it, so it serves

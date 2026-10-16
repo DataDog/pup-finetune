@@ -31,6 +31,7 @@ from pup_finetune.runtime import Runtime
 from pup_finetune.training import inputs as inputs_module
 from tests.fakes.fireworks import ACCOUNT, FakeFireworksTrainingClient
 from tests.fakes.fireworks_api import API_KEY, FakeFireworksApi
+from tests.fakes.pushed import mark_pushed
 from tests.fakes.tokenizer import FakeChatTokenizer
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
@@ -90,7 +91,7 @@ def dataset(tmp_path: Path) -> Path:
     path = tmp_path / "ds"
     result = invoke("dataset", "import", str(path), "--file", str(ROWS))
     assert result.exit_code == 0, result.stderr
-    return path
+    return mark_pushed(path)
 
 
 def train(dataset: Path, run_dir: Path, *extra: str) -> Result:

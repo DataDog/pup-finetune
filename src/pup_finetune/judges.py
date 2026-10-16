@@ -42,14 +42,14 @@ no reasoning effort, so it thinks as its provider's default does.
 from __future__ import annotations
 
 import difflib
-import importlib.util
-from collections.abc import Iterable, Iterator
+import os
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal, cast
 
-from pup_finetune import credentials
-from pup_finetune.errors import UsageError, install_hint
+from pup_finetune import credentials, providers
+from pup_finetune.errors import ExternalError, UsageError, install_hint
 from pup_finetune.http_common import bearer_key
 from pup_finetune.inference import (
     DEFAULT_JUDGE_BASE_URL,
@@ -58,13 +58,15 @@ from pup_finetune.inference import (
     JudgeConfig,
     JudgeProvider,
 )
-from pup_finetune.judge_models import JUDGE_SHORT_NAMES, resolve_alias
+from pup_finetune.judge_models import JUDGE_SHORT_NAMES, JudgeDefault, resolve_alias
+from pup_finetune.providers import Package
 
 if TYPE_CHECKING:
     from pup_finetune.anthropic_client import AnthropicChatClient
 
 __all__ = [
     "FIREWORKS_REASONING",
+    "JUDGE_PACKAGES",
     "JUDGE_SHORT_NAMES",
     "OPENAI_PLAIN_MODELS",
     "PROVIDERS",
@@ -75,11 +77,13 @@ __all__ = [
     "anthropic_client_class",
     "billing",
     "check_available",
+    "default_judges",
     "destination",
     "login_hint",
     "open_client",
     "open_clients",
     "parse_judge",
+    "pick_default",
     "recipient",
     "require_key",
 ]
@@ -100,6 +104,88 @@ SPEC_FORMS: Final = (
 """How a judge spec may be written, for help texts and errors."""
 
 ANTHROPIC_INSTALL_HINT: Final = install_hint("anthropic")
+
+JUDGE_PACKAGES: Final[dict[str, Package]] = {
+    "anthropic": Package(
+        key="sdk",
+        label="Anthropic SDK",
+        modules=("anthropic", "httpx2"),
+        extra="anthropic",
+        steps=(),
+        needed_for="anthropic/... judges",
+    ),
+}
+"""The optional package the judges of a provider need, by credential name."""
+
+
+def default_judges(
+    table: Sequence[JudgeDefault], *, env: Mapping[str, str] = os.environ
+) -> tuple[tuple[str, ...], str]:
+    """The judges of the first row of ``table`` whose providers all have a credential and
+    the package their judges need, and where the default came from, for a preview:
+    ``default: Anthropic credential (ANTHROPIC_API_KEY)``.
+
+    Resolving makes no network call: the environment variable, the OS keychain, or the
+    Anthropic SDK's own login (:func:`~pup_finetune.credentials.key_source`), and the
+    package found, never imported. A keychain that cannot be read counts as no credential,
+    so the default falls to the next row.
+    """
+    from pup_finetune import credentials
+
+    uninstalled: dict[str, str] = {}
+
+    def source(name: str) -> str | None:
+        found = credentials.key_source(name, env=env)
+        if not isinstance(found, str):
+            return None
+        package = JUDGE_PACKAGES.get(name)
+        if found is not None and package is not None:
+            missing = [module for module in package.modules if not providers.installed(module)]
+            if missing:
+                uninstalled[name] = missing[0]
+                return None
+        return found
+
+    row, found = pick_default(table, source)
+    return row.judges, _default_source(found, uninstalled)
+
+
+def pick_default(
+    table: Sequence[JudgeDefault], source: Callable[[str], str | None]
+) -> tuple[JudgeDefault, dict[str, str | None]]:
+    """The first row of ``table`` whose every credential has a ``source`` (where it
+    resolves from, ``None`` when it does not or cannot be used), and those sources."""
+    for row in table:
+        found = {name: source(name) for name in row.needs}
+        if all(found.values()):
+            return row, found
+    raise ValueError("a judge default table ends with a row that needs no credential")
+
+
+def _default_source(found: Mapping[str, str | None], uninstalled: Mapping[str, str]) -> str:
+    """Where a default came from: the credentials ``found`` (provider to source), and the
+    ones passed over in ``uninstalled`` (provider to the package its judges need, which is
+    not installed)."""
+    from pup_finetune import credentials
+
+    parts = []
+    for name, where in found.items():
+        spec = credentials.get_spec(name)
+        parts.append(f"{spec.label} credential ({credentials.shown_source(spec, str(where))})")
+    shown = (
+        f"default: {' and '.join(parts)}"
+        if parts
+        else "default: no Anthropic or OpenAI credential found"
+        if not uninstalled
+        else "default: no Anthropic or OpenAI judge available"
+    )
+    for name, package in uninstalled.items():
+        label = credentials.get_spec(name).label
+        shown += (
+            f"; the {label} credential is not used, as {label} judges need the "
+            f"'{package}' package, which is not installed"
+        )
+    return shown
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -259,10 +345,18 @@ def billing(
 
 def check_available(config: JudgeConfig, *, what: str = "judge") -> None:
     """Raise :class:`UsageError` with an install hint when ``config``'s judge needs a
-    package that is not installed (the ``anthropic`` extra), naming the model as ``what``
+    package (:data:`JUDGE_PACKAGES`) that is not installed, naming the model as ``what``
     (``judge``, or ``compare model``). Imports nothing."""
-    if config.provider == "anthropic" and importlib.util.find_spec("anthropic") is None:
-        raise _anthropic_missing(what)
+    package = JUDGE_PACKAGES.get(config.provider)
+    if package is None:
+        return
+    missing = [module for module in package.modules if not providers.installed(module)]
+    if missing:
+        raise UsageError(
+            f"{_name_and_host(config)[0]} {what}s need the '{missing[0]}' package, which is "
+            "not installed",
+            hint=package.fix,
+        )
 
 
 def login_hint(credential: str) -> str:
@@ -285,14 +379,17 @@ def require_key(
     if config.provider == "fake":
         return
     hint = login_hint(config.credential)
+    found = credentials.key_source(config.credential)
+    if isinstance(found, credentials.KeyUnreadable):
+        raise ExternalError(found.detail, hint=found.fix, source="the OS keychain")
     error: UsageError | None = None
-    if credentials.key_source(config.credential) is None:
+    if found is None:
         error = credentials.missing_key_error(
             config.credential, hint=hint, needed_by=f"the {what} {config.spec}"
         )
-    elif (found := credentials.lookup(config.credential)) is not None:
+    elif (key := credentials.lookup(config.credential)) is not None:
         try:
-            bearer_key(found.value, label=f"the {config.credential} API key", hint=hint)
+            bearer_key(key.value, label=f"the {config.credential} API key", hint=hint)
         except UsageError as malformed:
             error = malformed
     if error is None:

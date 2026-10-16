@@ -24,7 +24,7 @@ from typing import Any, Final
 from pup_finetune import credentials, providers
 from pup_finetune.doctor import CheckResult, error_detail, status_of, unexpected_detail
 from pup_finetune.errors import FinetuneError
-from pup_finetune.judge_models import DEFAULT_JUDGE_MODEL
+from pup_finetune.judge_models import EVALUATE_DEFAULTS, TRIAGE_DEFAULTS, JudgeDefault
 from pup_finetune.providers import Package, ProviderInfo, get_provider, provider_infos
 from pup_finetune.providers.base import Provider
 from pup_finetune.redaction import redact
@@ -32,7 +32,6 @@ from pup_finetune.runtime import Runtime
 
 __all__ = [
     "DATADOG_CHECKS",
-    "JUDGE_PACKAGES",
     "KEY_NOT_SET",
     "READ_ONLY",
     "judge_checks",
@@ -51,20 +50,6 @@ DATADOG_CHECKS: Final = ("pup", "datadog_auth")
 READ_ONLY: Final = "read_only"
 """What a step ``PUP_READ_ONLY`` refuses is blocked by, in :func:`ready_map`."""
 
-JUDGE_PACKAGES: Final[dict[str, Package]] = {
-    "anthropic": Package(
-        key="sdk",
-        label="Anthropic SDK",
-        modules=("anthropic",),
-        extra="anthropic",
-        steps=(),
-        needed_for="anthropic/... judges",
-    ),
-}
-"""The optional package each judge-only provider needs, by credential name."""
-
-_SOURCES: Final[dict[str, str]] = {"keychain": "keychain", "provider-config": "provider config"}
-
 
 def judge_credential(spec: str) -> str:
     """The credential a judge spec signs in with, by its prefix (see :mod:`pup_finetune.
@@ -73,18 +58,21 @@ def judge_credential(spec: str) -> str:
     return prefix if prefix in ("anthropic", "openai") else "fireworks"
 
 
-def _default_triage_judges() -> tuple[str, ...]:
-    from pup_finetune.curation.triage import DEFAULT_JUDGES
+def _default_judges(
+    table: Sequence[JudgeDefault], by_name: Mapping[str, CheckResult]
+) -> tuple[str, ...]:
+    """The judges a command defaults to by the checks that passed: a provider's key, and
+    the package its judges need (as :func:`pup_finetune.judges.default_judges` picks)."""
+    from pup_finetune.judges import JUDGE_PACKAGES, pick_default
 
-    return tuple(DEFAULT_JUDGES)
+    def source(name: str) -> str | None:
+        needed = [f"{name}:key"]
+        if (package := JUDGE_PACKAGES.get(name)) is not None:
+            needed.append(f"{name}:{package.key}")
+        passed = all((check := by_name.get(c)) is not None and check.ok for c in needed)
+        return "check" if passed else None
 
-
-def _shown_source(spec: credentials.CredentialSpec, source: str) -> str:
-    if source == "env":
-        return spec.env_var
-    if source.endswith("-sdk"):
-        return f"{spec.label} SDK login"
-    return _SOURCES.get(source, source)
+    return pick_default(table, source)[0].judges
 
 
 KEY_NOT_SET: Final = " key not set"
@@ -100,33 +88,15 @@ def key_check(spec: credentials.CredentialSpec, *, required: bool) -> CheckResul
     name = f"{spec.provider}:key"
     fix = credentials.login_hint(spec)
     needed_for = spec.needed_for or None
-    unreadable = f"{spec.label} key unreadable"
-    try:
-        source = credentials.key_source(spec.provider)
-    except FinetuneError as exc:
-        keychain_fix = f"unlock the OS keychain and retry, or set {spec.env_var}"
+    source = credentials.key_source(spec.provider)
+    if isinstance(source, credentials.KeyUnreadable):
         return CheckResult(
             name=name,
             status=status_of(False, required=required),
-            detail=redact(error_detail(exc)),
-            label=unreadable,
+            detail=source.detail,
+            label=f"{spec.label} key unreadable",
             needed_for=needed_for,
-            fix=redact(exc.hint) if exc.hint else keychain_fix,
-            required=required,
-        )
-    except Exception as exc:
-        # Never the error's message: a keychain backend's error may hold what it read.
-        keychain_fix = f"check that the OS keychain works and retry, or set {spec.env_var}"
-        return CheckResult(
-            name=name,
-            status=status_of(False, required=required),
-            detail=(
-                f"could not read the {spec.provider} key from the OS keychain "
-                f"({type(exc).__name__}); {keychain_fix}"
-            ),
-            label=unreadable,
-            needed_for=needed_for,
-            fix=keychain_fix,
+            fix=source.fix,
             required=required,
         )
     if source is None:
@@ -150,7 +120,7 @@ def key_check(spec: credentials.CredentialSpec, *, required: bool) -> CheckResul
         name=name,
         status="pass",
         detail=detail,
-        label=f"{spec.label} key ({_shown_source(spec, source)})",
+        label=f"{spec.label} key ({credentials.shown_source(spec, source)})",
         needed_for=needed_for,
         required=required,
     )
@@ -215,6 +185,8 @@ def _provider_credentials(runtime: Runtime) -> set[str]:
 def judge_checks(runtime: Runtime) -> list[CheckResult]:
     """The keys of the judge-only providers (every registered credential no training
     provider signs in with), then the packages their judges need. Never required."""
+    from pup_finetune.judges import JUDGE_PACKAGES
+
     specs = [
         spec
         for spec in credentials.all_specs()
@@ -335,23 +307,26 @@ def _step(blocked_by: Sequence[str]) -> dict[str, Any]:
 
 def ready_map(checks: Sequence[CheckResult], runtime: Runtime) -> dict[str, dict[str, Any]]:
     """Each step, whether it is ready, and the checks (or :data:`READ_ONLY`) blocking it:
-    the dataset steps on the Datadog checks, triage on its default judges' keys, train and
-    evaluate on each provider on its key and packages (evaluate on the default judge's key
-    too) and on a failed live preflight, and deploy (and undeploy) on each provider that
-    deploys on its key and the packages deploying needs. ``PUP_READ_ONLY`` blocks push and
-    every paid run or remote write that leaves the machine."""
+    the dataset steps on the Datadog checks, triage on its default judges' keys (the
+    defaults the passing key checks choose), train and evaluate on each provider on its key
+    and packages (evaluate on the default judge's key too) and on a failed live preflight,
+    and deploy (and undeploy) on each provider that deploys on its key and the packages
+    deploying needs. ``PUP_READ_ONLY`` blocks push and every paid run or remote write that
+    leaves the machine."""
     by_name = {check.name: check for check in checks}
     read_only = [READ_ONLY] if runtime.read_only else []
     datadog = _blocked(by_name, DATADOG_CHECKS)
-    triage_keys = dict.fromkeys(f"{judge_credential(j)}:key" for j in _default_triage_judges())
+    triage_keys = dict.fromkeys(
+        f"{judge_credential(j)}:key" for j in _default_judges(TRIAGE_DEFAULTS, by_name)
+    )
     steps: dict[str, dict[str, Any]] = {
-        "dataset preview": _step(datadog),
         "dataset pull": _step(datadog),
         "dataset show": _step([]),
         "dataset push": _step(datadog + read_only),
         "dataset triage": _step(_blocked(by_name, triage_keys)),
     }
-    judge_key = f"{judge_credential(DEFAULT_JUDGE_MODEL)}:key"
+    (judge,) = _default_judges(EVALUATE_DEFAULTS, by_name)
+    judge_key = f"{judge_credential(judge)}:key"
     for info in provider_infos(runtime):
         key = [f"{info.credential}:key"] if info.credential is not None else []
         paid = [] if info.offline else read_only

@@ -158,7 +158,7 @@ def test_the_debugging_table_covers_each_failure() -> None:
         "Error [settings_conflict]",  # frozen settings, evaluation identity
         "[not_a_run_dir]",  # the wrong directory
         "calibration",  # judge calibration
-        "push.json",  # publishing without a push receipt
+        "push.json",  # training on a dataset that is not in Datadog
         "times out",  # deployment timeouts
     ):
         assert any(term in row for row in rows), f"no debugging row mentions {term!r}"

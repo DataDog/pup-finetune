@@ -78,14 +78,10 @@ def test_label_applies_labels_and_emits_the_report(dataset: Path, tmp_path: Path
     assert (data["accepted"], data["kept"], data["dropped"]) == (len(FIXTURE_IDS), 13, 1)
     assert data["drop_reasons"] == [{"reason": "wrong tool", "count": 1}]
     assert sum(data["splits"].values()) == 13
-    # Training needs a model nobody chose yet (the provider follows from it, and the run
-    # directory defaults to runs/RUN_ID): steps only.
     quoted = shlex.quote(str(dataset))
     assert data["next_command"] is None
     assert [step["command"] for step in data["next_steps"]] == [
         "pup finetune models list",
-        f"pup finetune benchmark {quoted} --models <MODELS>",
-        f"pup finetune train --dataset {quoted} --model <MODEL>",
         f"pup finetune dataset push {quoted} --name <NAME>",
     ]
     assert FIXTURE_IDS[0] not in {row.id for row in DatasetDir(dataset).kept_rows()}

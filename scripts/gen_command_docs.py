@@ -367,7 +367,6 @@ def with_exclusions(text: str) -> str:
 
 
 _DATASET_STEPS = (
-    "dataset preview",
     "dataset pull",
     "dataset show",
     "dataset triage",
@@ -386,8 +385,9 @@ def requirement_rows() -> list[tuple[str, str, str, str]]:
     """
     from pup_finetune import credentials
     from pup_finetune.doctor import CheckResult
+    from pup_finetune.judges import JUDGE_PACKAGES
     from pup_finetune.providers import Package, provider_infos
-    from pup_finetune.readiness import DATADOG_CHECKS, JUDGE_PACKAGES, ready_map
+    from pup_finetune.readiness import DATADOG_CHECKS, ready_map
     from pup_finetune.runtime import Runtime
 
     runtime = Runtime()  # not development mode, not read-only

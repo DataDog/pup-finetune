@@ -17,6 +17,8 @@ from typer.testing import CliRunner, Result
 
 from pup_finetune.cli import app
 from pup_finetune.cli import dataset as dataset_cli
+from pup_finetune.curation.pipeline import require_in_datadog
+from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.push import PUSH_FILE
 from tests.fakes.datasets import FakeDataset, FakeDatasetsApi
 from tests.fakes.pup import FakePup
@@ -94,8 +96,9 @@ def test_a_pushed_dataset_fetches_back_to_the_same_rows_splits_and_records(
     assert receipt["dataset_id"] == remote.id
     assert receipt["record_ids"] == original["record_ids"]
     assert data["pipeline"]["push"]["status"] == "pushed"
-    # Curated in Datadog: the rows go straight to training.
     assert any("train --dataset" in step["command"] for step in data["next_steps"])
+    dataset = DatasetDir(target)
+    require_in_datadog(dataset, dataset.rows_by_split(), "train", directory=target, offline=False)
 
 
 def test_records_that_are_not_conversations_or_name_conflicting_splits_are_excluded(

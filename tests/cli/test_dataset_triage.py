@@ -27,9 +27,10 @@ from typer.testing import CliRunner, Result
 
 from pup_finetune.cli import app
 from pup_finetune.cli import triage as triage_cli
-from pup_finetune.curation.triage import DEFAULT_JUDGES, JUDGMENTS_FILE, rubric_template
+from pup_finetune.curation.triage import JUDGMENTS_FILE, rubric_template
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.inference import ChatClient, ChatCompleter
+from pup_finetune.judge_models import FIREWORKS_JUDGES as DEFAULT_JUDGES
 from tests.fakes.chat_api import API_KEY, BASE_URL, FakeChatApi, block
 
 pytestmark = pytest.mark.usefixtures("judge_keys")
@@ -126,8 +127,12 @@ def test_the_preview_counts_the_calls_and_calls_nothing(
     assert not {"rows_to_review", "rows_skipped_labeled"} & set(preview)  # under rows
     assert preview["approx_input_tokens"] > 0
     assert data["next_command"] == shlex.join(
-        ["pup", "finetune", "dataset", "triage", str(dataset), "--rubric", str(rubric), "--confirm"]
+        [
+            *("pup", "finetune", "dataset", "triage", str(dataset), "--rubric", str(rubric)),
+            *("--judges", ",".join(DEFAULT_JUDGES), "--confirm"),
+        ]
     )
+    assert preview["judges_source"] == "default: no Anthropic or OpenAI credential found"
     assert chat.requests == []
     assert not (dataset / JUDGMENTS_FILE).exists()
 
@@ -203,12 +208,9 @@ def test_triage_labels_rows_and_is_allowed_read_only(
     assert data["dropped"] > 0
     assert data["top_drop_reasons"] == [{"reason": "off topic", "count": data["dropped"]}]
     assert data["calls_made"] == rows * 3
-    # Every row is labeled now: training (and a push) are the steps; no command is guessed.
     assert data["next_command"] is None
     assert [step["command"] for step in data["next_steps"]] == [
         "pup finetune models list",
-        f"pup finetune benchmark {dataset} --models <MODELS>",
-        f"pup finetune train --dataset {dataset} --model <MODEL>",
         f"pup finetune dataset push {dataset} --name <NAME>",
     ]
     assert data["stale_judge_labels"] == 0
@@ -221,7 +223,7 @@ def test_triage_labels_rows_and_is_allowed_read_only(
             "unlabeled": 0,
         },
         "triage": "complete",
-        "push": {"status": "not_pushed", "pending": data["kept"]},
+        "push": {"status": "not_pushed", "pending": data["kept"], "changed": 0},
     }
     # The rubric is named as the preview names it.
     assert len(data["rubric_hash"]) == 12 and "rubric_sha256" not in data
@@ -245,7 +247,7 @@ def test_triage_labels_rows_and_is_allowed_read_only(
 def test_failed_calls_leave_rows_undecided_and_exit_1(dataset: Path, chat: FakeChatApi) -> None:
     chat.script += [httpx.Response(500), httpx.Response(500)]
     args = ["dataset", "triage", str(dataset), "--rule", "stay on topic"]
-    args += ["--concurrency", "1", "--confirm"]
+    args += ["--judges", ",".join(DEFAULT_JUDGES), "--concurrency", "1", "--confirm"]
     result = invoke(*args)
     assert result.exit_code == 1, result.stderr
     data = output(result)
@@ -316,6 +318,7 @@ def test_a_reset_sample_leaves_stale_judge_labels_and_asks_for_every_row(
     assert output(final)["pipeline"]["triage"] == "complete"
 
 
+@pytest.mark.usefixtures("all_judge_keys")
 def test_a_mixed_council_previews_every_provider_and_routes_each_judge(
     dataset: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -521,3 +524,120 @@ def test_the_card_names_the_rubric_file_the_rules_and_the_hash(
     rules_only = invoke("dataset", "triage", str(dataset), "--rule", "stay on topic")
     hash_shown = output(rules_only)["preview"]["rubric_hash"]
     assert f"  rubric    1 rule (hash {hash_shown})" in rules_only.stderr.splitlines()
+
+
+def row_file(tmp_path: Path, *row_ids: str) -> Path:
+    path = tmp_path / "rows.txt"
+    path.write_text("".join(f"{row_id}\n\n" for row_id in row_ids))  # blank lines are ignored
+    return path
+
+
+def test_rows_narrows_the_review_and_the_calls_previewed(
+    dataset: Path, chat: FakeChatApi, tmp_path: Path
+) -> None:
+    subset = row_file(tmp_path, "row-weather-001", "row-calendar-001", "row-calendar-002")
+    args = ["dataset", "triage", str(dataset), "--rule", "stay on topic"]
+    args += ["--judges", ",".join(DEFAULT_JUDGES), "--rows", str(subset)]
+    preview = output(invoke(*args))
+    assert preview["preview"]["rows"]["to_review"] == 3
+    assert preview["preview"]["judge_calls"] == 3 * len(DEFAULT_JUDGES)
+    assert preview["preview"]["settings"]["rows_file"] == str(subset)
+    assert preview["next_command"] == shlex.join(["pup", "finetune", *args, "--confirm"])
+    result = invoke(*args, "--confirm")
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["rows_reviewed"] == 3
+    labeled = {row_id for row_id, label in DatasetDir(dataset).labels().items()}
+    assert labeled == {"row-weather-001", "row-calendar-001", "row-calendar-002"}
+    rest = output(invoke("dataset", "triage", str(dataset), "--rule", "stay on topic"))
+    assert rest["preview"]["rows"]["to_review"] == accepted(dataset)
+    assert rest["preview"]["votes_reused"] == 3 * len(DEFAULT_JUDGES)
+    assert rest["preview"]["judge_calls_pending"] == (accepted(dataset) - 3) * len(DEFAULT_JUDGES)
+
+
+def test_rows_skips_the_rows_you_labeled_and_agreement_compares_only_those(
+    dataset: Path, chat: FakeChatApi, tmp_path: Path
+) -> None:
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(
+        "".join(
+            json.dumps({"id": row_id, "keep": keep, "reason": "synthetic"}) + "\n"
+            for row_id, keep in [
+                ("row-weather-001", True),
+                ("row-weather-003", False),
+                ("row-calendar-001", True),
+            ]
+        )
+    )
+    assert invoke("dataset", "label", str(dataset), "--file", str(labels)).exit_code == 0
+    subset = row_file(tmp_path, "row-weather-001", "row-calendar-001", "row-calendar-002")
+    args = ["dataset", "triage", str(dataset), "--rule", "stay on topic", "--rows", str(subset)]
+    preview = output(invoke(*args))["preview"]
+    assert (preview["rows"]["to_review"], preview["rows"]["skipped_labeled"]) == (1, 2)
+    compared = invoke(*args, "--agreement", "--confirm")
+    assert compared.exit_code == 0, compared.stderr
+    data = output(compared)
+    assert data["agreement"]["rows_compared"] == 2
+    assert "--rows" not in shlex.split(data["next_command"])
+
+
+def test_agreement_s_next_command_keeps_a_rule_that_reads_like_a_flag(
+    dataset: Path, chat: FakeChatApi, tmp_path: Path
+) -> None:
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(json.dumps({"id": "row-weather-001", "keep": True}) + "\n")
+    assert invoke("dataset", "label", str(dataset), "--file", str(labels)).exit_code == 0
+    args = ["dataset", "triage", str(dataset), "--rule=--agreement", "--max-rows", "3"]
+    compared = invoke(*args, "--agreement", "--confirm")
+    assert compared.exit_code == 0, compared.stderr
+    words = shlex.split(output(compared)["next_command"])
+    assert words[words.index("--rule") + 1] == "--agreement"
+    assert words.count("--agreement") == 1
+    assert words[words.index("--max-rows") + 1] == "3"
+
+
+def test_rows_naming_only_rows_you_labeled_offers_no_confirm(
+    dataset: Path, chat: FakeChatApi, tmp_path: Path
+) -> None:
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(json.dumps({"id": "row-weather-001", "keep": True}) + "\n")
+    assert invoke("dataset", "label", str(dataset), "--file", str(labels)).exit_code == 0
+    subset = row_file(tmp_path, "row-weather-001")
+    result = invoke("dataset", "triage", str(dataset), "--rule", "x", "--rows", str(subset))
+    assert result.exit_code == 2
+    data = output(result)
+    assert data["preview"]["rows"] == {"to_review": 0, "skipped_labeled": 1}
+    assert data["next_command"] is None
+    assert data["preview"]["refused"] == (
+        "there is no row to review: every row --rows names is labeled by you or the agent"
+    )
+    assert chat.requests == []
+
+
+def test_rows_naming_an_id_that_is_no_accepted_row_is_a_usage_error(
+    dataset: Path, chat: FakeChatApi, tmp_path: Path
+) -> None:
+    subset = row_file(tmp_path, "row-weather-001", "synthetic-missing-1", "synthetic-missing-2")
+    result = invoke("dataset", "triage", str(dataset), "--rule", "x", "--rows", str(subset))
+    assert result.exit_code == 2
+    assert result.stderr.startswith(
+        "Error [usage]: --rows names 2 ids that are not accepted rows of "
+        f"{dataset}: 'synthetic-missing-1', 'synthetic-missing-2'\n"
+    )
+    empty = tmp_path / "empty.txt"
+    empty.write_text("\n\n")
+    result = invoke("dataset", "triage", str(dataset), "--rule", "x", "--rows", str(empty))
+    assert result.exit_code == 2
+    assert "--rows names no row id" in result.stderr
+    assert chat.requests == []
+
+
+def test_agreement_on_rows_none_of_which_you_labeled_is_a_usage_error(
+    dataset: Path, chat: FakeChatApi, tmp_path: Path
+) -> None:
+    subset = row_file(tmp_path, "row-weather-001")
+    result = invoke(
+        "dataset", "triage", str(dataset), "--rule", "x", "--rows", str(subset), "--agreement"
+    )
+    assert result.exit_code == 2
+    assert "that --rows names carries a label" in result.stderr

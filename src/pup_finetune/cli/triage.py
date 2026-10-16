@@ -35,7 +35,7 @@ from pup_finetune.curation.pipeline import pipeline_state
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.display import display_path
 from pup_finetune.errors import UsageError, require_confirm
-from pup_finetune.judge_models import alias_of
+from pup_finetune.judge_models import BY_KEY
 from pup_finetune.next_steps import PROGRAM, step
 from pup_finetune.output import info
 
@@ -88,10 +88,15 @@ DOC = CommandDoc(
         "appended to DIR/judgments.jsonl as they arrive, so a rerun retries only failed "
         "calls. The rubric and the judges are frozen in DIR/triage.json once votes exist: "
         "change them in a new directory or with --reset-triage. Row content is sent to each "
-        "judge's provider: Fireworks serverless (the default judges), Anthropic or OpenAI, "
-        "with that provider's API key; the "
-        "preview names every one. --agreement measures the council against rows you "
-        "labeled first; --print-template prints a rubric to start from.",
+        "judge's provider, Anthropic, OpenAI or Fireworks serverless, with that provider's "
+        "API key; the preview names every one and where the council came from "
+        "(judges_source). Without --judges, the council is the one triage.json froze, else "
+        "anthropic/claude-haiku-5-5 and openai/gpt-5.4-mini when both credentials resolve, "
+        "anthropic/claude-haiku-5-5 and anthropic/claude-sonnet-5-5 with only Anthropic's, "
+        "openai/gpt-5.4-mini and openai/gpt-6-astra with only OpenAI's, else Fireworks' "
+        "deepseek-v4p1-flash and glm-5p3-flash. --agreement measures the council against rows you "
+        "labeled first; --rows FILE (one row id per line) reviews only those rows in either "
+        "mode, and is not frozen; --print-template prints a rubric to start from.",
     ),
     examples=(
         "pup finetune dataset triage --print-template > rubric.md",
@@ -160,7 +165,7 @@ def triage_rows(
             "--judges",
             metavar="M1,M2",
             help="Aliases (glm-5p3-flash), anthropic/MODEL, openai/MODEL or Fireworks ids. "
-            f"{default_note(', '.join(alias_of(judge) for judge in triage.DEFAULT_JUDGES))}",
+            f"{default_note(BY_KEY)}",
             show_default=False,
             rich_help_panel=JUDGES,
         ),
@@ -178,6 +183,19 @@ def triage_rows(
             min=1,
             metavar="N",
             help="Review a fixed sample of at most N rows.",
+            show_default=False,
+            rich_help_panel=RUN,
+        ),
+    ] = None,
+    rows: Annotated[
+        Path | None,
+        typer.Option(
+            "--rows",
+            metavar="FILE",
+            help="Review only these row ids, one per line.",
+            exists=True,
+            dir_okay=False,
+            readable=True,
             show_default=False,
             rich_help_panel=RUN,
         ),
@@ -227,31 +245,46 @@ def triage_rows(
     )
     if template_task is not None and confirm and not allow_template_rubric:
         raise UsageError(template_task, hint=template_hint)
-    council = triage.parse_judges(judges)
-    _check_available(council)
     require_dataset_dir(directory)
     dataset = DatasetDir(directory)
-    plan = triage.plan_triage(
-        dataset, criteria, council, max_rows=max_rows, reset=reset_triage, agreement=agreement
-    )
-    args = [*PROGRAM, "dataset", "triage", str(directory)]
-    if rubric is not None:
-        args += ["--rubric", str(rubric)]
-    for text in rules:
-        args += ["--rule", text]
     if judges is not None:
-        args += ["--judges", ",".join(council)]
+        council, council_source = triage.parse_judges(judges), triage.COUNCIL_GIVEN
+    else:
+        council, council_source = triage.default_council(dataset, reset=reset_triage)
+    _check_available(council)
+    plan = triage.plan_triage(
+        dataset,
+        criteria,
+        council,
+        max_rows=max_rows,
+        only=_row_ids(rows) if rows is not None else None,
+        reset=reset_triage,
+        agreement=agreement,
+    )
+    labeling = [*PROGRAM, "dataset", "triage", str(directory)]
+    if rubric is not None:
+        labeling += ["--rubric", str(rubric)]
+    for text in rules:
+        labeling += ["--rule", text]
+    labeling += ["--judges", ",".join(council)]
     if concurrency != triage.DEFAULT_CONCURRENCY:
-        args += ["--concurrency", str(concurrency)]
-    if agreement:
-        args.append("--agreement")
+        labeling += ["--concurrency", str(concurrency)]
     if allow_template_rubric and template_task is not None:
-        args.append("--allow-template-rubric")
-    every_row = list(args)
+        labeling.append("--allow-template-rubric")
+    every_row = [*labeling, "--agreement"] if agreement else list(labeling)
+    args = list(every_row)
+    if rows is not None:
+        args += ["--rows", str(rows)]
     if max_rows is not None:
         args += ["--max-rows", str(max_rows)]
+        labeling += ["--max-rows", str(max_rows)]
     rerun = [*args, "--reset-triage"] if reset_triage else args
-    settings = {"max_rows": max_rows, "concurrency": concurrency, "reset_triage": reset_triage}
+    settings = {
+        "rows_file": str(rows) if rows is not None else None,
+        "max_rows": max_rows,
+        "concurrency": concurrency,
+        "reset_triage": reset_triage,
+    }
     ctx = current_context()
     defaults_used = [
         name
@@ -263,6 +296,7 @@ def triage_rows(
         if not (ctx is not None and given(ctx, param))
     ]
     planned = plan.preview()
+    planned["judges_source"] = council_source
     planned["rubric_file"] = str(rubric) if rubric is not None else None
     preview = with_settings(planned, settings, defaults_used)
     refused = None
@@ -273,13 +307,16 @@ def triage_rows(
             # In the result too, not only on stderr: an agent reads why and what to change.
             preview["refused"] = refused
             preview["refused_hint"] = template_hint
-    require_confirm(
-        confirm,
-        preview,
-        shlex.join([*rerun, "--confirm"]),
-        refused=refused,
-        hint=template_hint if refused is not None else None,
-    )
+    hint = template_hint if refused is not None else None
+    if refused is None and not plan.rows:
+        among = "row --rows names" if rows is not None else "accepted row"
+        refused = "there is no row to review: " + (
+            f"every {among} is labeled by you or the agent"
+            if plan.skipped_labeled
+            else "the dataset has no accepted rows"
+        )
+        preview["refused"] = refused
+    require_confirm(confirm, preview, shlex.join([*rerun, "--confirm"]), refused=refused, hint=hint)
     info(
         f"triage: {len(plan.pending)} judge calls for {len(plan.rows)} rows "
         f"({plan.votes_reused} votes reused)"
@@ -288,7 +325,7 @@ def triage_rows(
     with open_clients(plan.pending_judges) as clients:
         report = triage.run_triage(plan, clients, concurrency=concurrency, progress=info)
     if report.agreement is not None:
-        return _agreement_result(dataset, plan, report, report.agreement, criteria, args)
+        return _agreement_result(dataset, plan, report, report.agreement, criteria, args, labeling)
     counts = report.counts()
     summary = dataset.summary()
     complete = report.complete
@@ -338,12 +375,11 @@ def triage_rows(
         )
     sampled = {row.id for row in plan.rows}
     if any(row_id not in sampled for row_id in report.stale_labels):
-        # Rows outside the --max-rows sample are judged only by a run over every row.
         args = every_row
     if report.stale_labels:
         hints.append(
             f"{len(report.stale_labels)} rows keep a judge label the current votes do not "
-            "back (from a discarded rubric, outside --max-rows, or left undecided); run "
+            "back (from a discarded rubric, outside --max-rows or --rows, or left undecided); run "
             "the next command to judge them again, or relabel them with `dataset label`"
         )
     state = pipeline_state(dataset, summary)
@@ -355,6 +391,13 @@ def triage_rows(
     return CommandResult(data, exit_code=1) if report.failures else data
 
 
+def _row_ids(path: Path) -> frozenset[str]:
+    """The row ids in ``path``, one per line; blank lines are ignored."""
+    return frozenset(
+        line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+    )
+
+
 def _agreement_result(
     dataset: DatasetDir,
     plan: triage.TriagePlan,
@@ -362,8 +405,11 @@ def _agreement_result(
     agreement: triage.Agreement,
     criteria: triage.Criteria,
     args: list[str],
+    labeling: list[str],
 ) -> dict[str, Any] | CommandResult:
-    """The result of an ``--agreement`` run: the council against the user's labels."""
+    """The result of an ``--agreement`` run: the council against the user's labels.
+    ``labeling`` is the triage that labels the rest: ``args`` without ``--agreement`` and
+    without the ``--rows FILE`` that chose the labeled rows to compare."""
     data: dict[str, Any] = {
         "dataset_dir": display_path(dataset.path),
         "mode": "agreement",
@@ -382,7 +428,6 @@ def _agreement_result(
     }
     if (noisy := triage.noisy_agreement(len(plan.rows))) is not None:
         data["warnings"] = [noisy]
-    without = [word for word in args if word != "--agreement"]
     if report.failures:
         data["next_command"] = shlex.join([*args, "--confirm"])
         data["hint"] = (
@@ -390,7 +435,7 @@ def _agreement_result(
             "(the votes so far are kept)"
         )
         return CommandResult(data, exit_code=1)
-    data["next_command"] = shlex.join([*without, "--confirm"])
+    data["next_command"] = shlex.join([*labeling, "--confirm"])
     data["next_steps"] = [
         step(
             shlex.join([*args, "--reset-triage"]),

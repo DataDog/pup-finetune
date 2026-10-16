@@ -261,7 +261,7 @@ def test_the_preview_repeats_only_the_settings_given(run_dir: Path) -> None:
     )
 
 
-@pytest.mark.usefixtures("judge_keys")
+@pytest.mark.usefixtures("all_judge_keys")
 def test_the_preview_names_the_judge_s_provider_and_pins_its_spec(run_dir: Path) -> None:
     result = invoke("evaluate", str(run_dir), "--judge-model", "anthropic/claude-opus-5-5")
     assert result.exit_code == 2, result.stderr
@@ -552,6 +552,21 @@ def test_a_failed_calibration_generates_nothing(
 
 
 @pytest.mark.usefixtures("judge_keys")
+def test_a_rerun_without_judge_model_keeps_the_judge_its_directory_holds(
+    run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    use_judge(monkeypatch, AlwaysPass())
+    judged = ["evaluate", str(run_dir), "--judge-model", "fireworks/some-judge"]
+    assert invoke(*judged, "--skip-calibration", "--confirm").exit_code == 0
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-synthetic-0000-test-key")
+    preview = output(invoke("evaluate", str(run_dir), "--skip-calibration"))["preview"]
+    assert (preview["judge_model"], preview["judge_source"]) == (
+        "fireworks/some-judge",
+        "evaluation directory",
+    )
+
+
+@pytest.mark.usefixtures("judge_keys")
 def test_skip_calibration_judges_without_checking(
     run_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -634,11 +649,14 @@ def test_a_second_ctrl_c_stops_at_once_with_how_to_continue(
 def test_the_fake_judge_is_for_development_only() -> None:
     with pytest.raises(UsageError, match="development"):
         runner_module.resolve_judge(FAKE_JUDGE_MODEL, provider="other", runtime=Runtime())
-    config = runner_module.resolve_judge(None, provider="other", runtime=Runtime())
+    config, source = runner_module.resolve_judge(None, provider="other", runtime=Runtime())
     assert config == JudgeConfig(reasoning_effort="none")
+    assert source == "default: no Anthropic or OpenAI credential found"
     dev = Runtime(dev_mode=True)
-    assert runner_module.resolve_judge(None, provider="fake", runtime=dev).model == FAKE_JUDGE_MODEL
-    assert runner_module.resolve_judge("fw/x-y", provider="fake", runtime=dev).model == "fw/x-y"
+    fake, source = runner_module.resolve_judge(None, provider="fake", runtime=dev)
+    assert (fake.model, source) == (FAKE_JUDGE_MODEL, "fake run")
+    given, source = runner_module.resolve_judge("fw/x-y", provider="fake", runtime=dev)
+    assert (given.model, source) == ("fw/x-y", "given")
 
 
 def test_signals_cancel_first_and_stop_at_once_second() -> None:
@@ -674,7 +692,7 @@ def test_train_previews_the_evaluation_calls(dataset: Path, tmp_path: Path) -> N
     assert not run.exists()
 
 
-@pytest.mark.usefixtures("judge_keys")
+@pytest.mark.usefixtures("all_judge_keys")
 def test_train_evaluate_names_every_recipient_the_judge_included(
     dataset: Path, tmp_path: Path
 ) -> None:

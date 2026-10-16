@@ -421,6 +421,8 @@ class EvalPlan:
     rendering: dict[str, Any]
     cases: list[ReplayCase]
     judge: JudgeConfig
+    judge_source: str
+    """Where the judge came from (see :func:`resolve_judge`)."""
     settings: EvalSettings
     publishing: Publishing
     runtime: Runtime
@@ -772,6 +774,7 @@ class EvalPlan:
                 else {}
             ),
             "judge_model": self.judge.spec,
+            "judge_source": self.judge_source,
             "judge_provider": self.judge.provider,
             "judge_endpoint": self.judge.base_url,
             "already_done": remaining["done"],
@@ -807,30 +810,70 @@ def _cases(count: int) -> str:
     return f"{count} case{'' if count == 1 else 's'}"
 
 
-def resolve_judge(judge_model: str | None, *, provider: str, runtime: Runtime) -> JudgeConfig:
-    """The judge for ``--judge-model``: the default judge, or for a ``fake`` run the fake one,
-    or the judge the spec names (:func:`pup_finetune.judges.parse_judge`).
+JUDGE_GIVEN: Final = "given"
+JUDGE_FROZEN: Final = "evaluation directory"
+JUDGE_FAKE_RUN: Final = "fake run"
+"""Where a judge came from (``judge_source``) when it is not a default by credential: the
+flag, the evaluation the output directory holds, or the fake judge of a fake run."""
+
+
+def resolve_judge(
+    judge_model: str | None,
+    *,
+    provider: str,
+    runtime: Runtime,
+    stored: str | None = None,
+) -> tuple[JudgeConfig, str]:
+    """The judge for ``--judge-model`` and where it came from (``judge_source``): the judge
+    the spec names (:func:`pup_finetune.judges.parse_judge`); without one, ``stored`` (the
+    judge an evaluation directory froze, so a rerun keeps it), for a ``fake`` run the fake
+    judge, else the default by the credentials that resolve
+    (:data:`~pup_finetune.judge_models.EVALUATE_DEFAULTS`).
 
     :data:`~pup_finetune.evaluation.fake_judge.FAKE_JUDGE_MODEL` is the offline judge, for
     development mode only. Raises :class:`UsageError` for an empty spec or an empty model
     after a provider prefix, and when a package the judge needs is not installed.
     """
     from pup_finetune.evaluation.fake_judge import FAKE_JUDGE_MODEL, fake_judge_config
-    from pup_finetune.inference import DEFAULT_JUDGE_MODEL
-    from pup_finetune.judges import check_available, parse_judge
+    from pup_finetune.judge_models import EVALUATE_DEFAULTS
+    from pup_finetune.judges import check_available, default_judges, parse_judge
 
+    source = JUDGE_GIVEN
+    if judge_model is None and stored is not None:
+        judge_model, source = stored, JUDGE_FROZEN
     if judge_model is None and provider == "fake":
-        judge_model = FAKE_JUDGE_MODEL
+        judge_model, source = FAKE_JUDGE_MODEL, JUDGE_FAKE_RUN
     if judge_model == FAKE_JUDGE_MODEL:
         if not runtime.dev_mode:
             raise UsageError(
                 "the fake judge is for development only",
                 hint="set PUP_FINETUNE_DEV=1, or pass another --judge-model",
             )
-        return fake_judge_config()
-    config = parse_judge(DEFAULT_JUDGE_MODEL if judge_model is None else judge_model)
+        return fake_judge_config(), source
+    if judge_model is None:
+        (judge_model,), source = default_judges(EVALUATE_DEFAULTS)
+    config = parse_judge(judge_model)
     check_available(config)
-    return config
+    return config, source
+
+
+def _stored(eval_dir: EvalDir) -> str | None:
+    """The judge ``eval_dir`` froze: its ``evaluation.json``'s, once it holds work (before,
+    another identity replaces it; see :meth:`~pup_finetune.evaluation.replay.EvalDir.replaces`)."""
+    return stored_judge(eval_dir.stored_identity()) if eval_dir.has_work() else None
+
+
+def stored_judge(identity: Mapping[str, Any] | None) -> str | None:
+    """The judge spec an ``evaluation.json`` (``identity``) froze, or ``None``."""
+    from pup_finetune.inference import JudgeConfig
+
+    judge = identity.get("judge") if identity is not None else None
+    if not isinstance(judge, Mapping):
+        return None
+    try:
+        return JudgeConfig.model_validate(judge).spec
+    except ValueError:
+        return None
 
 
 def plan_evaluation(
@@ -860,7 +903,12 @@ def plan_evaluation(
     from pup_finetune.evaluation.judge import check_judge_differs
     from pup_finetune.evaluation.replay import EvalDir
 
-    judge_config = resolve_judge(settings.judge_model, provider=provider, runtime=runtime)
+    judge_config, judge_source = resolve_judge(
+        settings.judge_model,
+        provider=provider,
+        runtime=runtime,
+        stored=_stored(EvalDir(settings.out_dir)),
+    )
     compare = resolve_compare(
         settings.compare_model,
         stored_compare(EvalDir(settings.out_dir).compare_path),
@@ -893,6 +941,7 @@ def plan_evaluation(
         rendering=dict(rendering),
         cases=cases,
         judge=judge_config,
+        judge_source=judge_source,
         settings=settings,
         publishing=plan_publishing(dataset, enabled=settings.publish, no_publish=no_publish),
         runtime=runtime,

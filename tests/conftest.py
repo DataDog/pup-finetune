@@ -140,8 +140,16 @@ JUDGE_KEYS: dict[str, str] = {
 
 @pytest.fixture
 def judge_keys(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A key for every judge provider in the environment, as after `auth login`: for tests
-    that preview paid judges or compare models whose clients they fake."""
+    """A Fireworks key in the environment, as after `auth login`: for tests that preview the
+    default (Fireworks) judges with faked clients. Anthropic and OpenAI keys would change the
+    default judges, so tests that name those judges use :func:`all_judge_keys`."""
+    monkeypatch.setenv("FIREWORKS_API_KEY", JUDGE_KEYS["FIREWORKS_API_KEY"])
+
+
+@pytest.fixture
+def all_judge_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A key for every judge provider in the environment: for tests that preview Anthropic or
+    OpenAI judges or compare models whose clients they fake."""
     for name, value in JUDGE_KEYS.items():
         monkeypatch.setenv(name, value)
 

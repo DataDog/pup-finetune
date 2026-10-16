@@ -87,12 +87,19 @@ class RunInputs:
         }
 
 
-def build_inputs(dataset: DatasetDir, renderer: Renderer, profile: ModelProfile) -> RunInputs:
-    """Render ``dataset``'s kept train and validation rows with ``renderer`` for ``profile``.
+def build_inputs(
+    dataset: DatasetDir,
+    renderer: Renderer,
+    profile: ModelProfile,
+    by_split: dict[SplitName, list[TrainingRow]] | None = None,
+) -> RunInputs:
+    """Render ``dataset``'s kept train and validation rows with ``renderer`` for ``profile``;
+    ``by_split`` is its :meth:`~DatasetDir.rows_by_split` when the caller read it already.
 
     Raises :class:`UsageError` when no training row is left to train on.
     """
-    return _render(dataset.path, dataset.rows_by_split(), renderer, profile)
+    rows = by_split if by_split is not None else dataset.rows_by_split()
+    return _render(dataset.path, rows, renderer, profile)
 
 
 def _render(

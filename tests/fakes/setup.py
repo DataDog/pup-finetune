@@ -27,7 +27,9 @@ import pytest
 from pup_finetune import credentials, providers
 from tests.fakes.pup import FakePup
 
-ALL_PACKAGES = frozenset({"fireworks", "tinker", "transformers", "baseten.loops", "anthropic"})
+ALL_PACKAGES = frozenset(
+    {"fireworks", "tinker", "transformers", "baseten.loops", "anthropic", "httpx2"}
+)
 """Every module the registered providers and judges check for."""
 
 AUTH_OK = {

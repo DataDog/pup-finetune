@@ -29,14 +29,15 @@ pup finetune doctor                  # what you can run now, and what to fix
 
 The agent shows you every paid or remote step before it runs, and waits for your yes.
 
-**By hand:** `dataset preview` → `dataset pull` → review (`dataset sample` and `dataset
-label`, or `dataset triage`) → `train` → `status` → `evaluate` → `deploy` → `undeploy`.
+**By hand:** `dataset pull` → review (`dataset sample` and `dataset label`, or `dataset
+triage`) → `dataset push` → `train` → `status` → `evaluate` → `deploy` → `undeploy`.
 
 ```sh
-pup finetune dataset preview --ml-app my-agent --from 7d
+pup llm-obs spans search --ml-app my-agent --span-kind llm --from 7d --limit 50 --summary
 pup finetune dataset pull datasets/my-agent --ml-app my-agent --from 7d
 pup finetune dataset sample datasets/my-agent --count 20
 pup finetune dataset label datasets/my-agent --file labels.jsonl
+pup finetune dataset push datasets/my-agent --name my-agent-sft
 pup finetune train --dataset datasets/my-agent --model qwen3p8-27b --detach
 pup finetune status --watch
 pup finetune evaluate ft-20261007183443-a8b181
@@ -57,8 +58,9 @@ what bills, then exit `2`. The preview's `next_command` runs it, with `--confirm
 | You have | Start at |
 | --- | --- |
 | An `ml_app` that sends LLM spans to Agent Observability | [Build a dataset](#build-a-dataset) |
-| Conversations as JSONL rows ([format](docs/data-format.md)) | `pup finetune dataset import datasets/my-agent --file rows.jsonl`, then [Train](#train) |
-| A dataset directory | [Train](#train) |
+| Conversations as JSONL rows ([format](docs/data-format.md)) | `pup finetune dataset import datasets/my-agent --file rows.jsonl`, then [Push the dataset](#push-the-dataset) |
+| A dataset directory | [Push the dataset](#push-the-dataset), then [Train](#train) |
+| A dataset in Agent Observability | `pup finetune dataset fetch`, then [Train](#train) |
 | A finished run | [Evaluate](#evaluate) or [Deploy](#deploy) |
 
 ### What each step needs
@@ -70,7 +72,7 @@ installs every extra. `evaluate` also uses the Datadog login to publish its expe
 <!-- BEGIN GENERATED: what each step needs (scripts/gen_command_docs.py) -->
 | Step | Datadog login | API key | Extra |
 | --- | --- | --- | --- |
-| `dataset preview`, `dataset pull` | yes | - | - |
+| `dataset pull` | yes | - | - |
 | `dataset import`, `show`, `sample`, `label`; `status`, `runs` | - | - | - |
 | `dataset triage` | - | `FIREWORKS_API_KEY` | - |
 | `dataset push` | yes | - | - |
@@ -93,17 +95,16 @@ under `files` hold the full record. `pup finetune help <command>` prints a comma
 
 ## Build a dataset
 
-`dataset preview` converts the spans in memory and writes nothing. Tune the filter with it,
-then pull:
+Look at the spans with pup first, and test a filter there, then pull:
 
 ```sh
-pup finetune dataset preview --ml-app my-agent --from 7d --span-name chat --tag env:prod
+pup llm-obs spans search --ml-app my-agent --span-kind llm --span-name chat --tags env:prod --from 7d --limit 50 --summary
 pup finetune dataset pull datasets/my-agent --ml-app my-agent --from 7d --span-name chat --tag env:prod
 pup finetune dataset show datasets/my-agent
 ```
 
-The preview shows sample rows (the first user message and the final answer), how many rows it
-would accept, and why it leaves the rest out. `--tag` repeats, and every tag must match.
+The pull reports how many rows it accepted, and why it left the rest out
+(`excluded_by_code`, with `exclusion_explanations`). `--tag` repeats, and every tag must match.
 `--query` takes a search query, and `--include-errors` keeps errored LLM calls. `--from` and
 `--to` take ISO 8601, epoch milliseconds (a bare number is milliseconds), or a relative time:
 `7d`, `24h`, `now-7d`, `now`.
@@ -134,16 +135,18 @@ pup finetune dataset triage datasets/my-agent --rubric rubric.md
 ```
 
 `--agreement` measures how often the council agrees with the rows you labeled, and labels
-nothing. With the two default judges, a row is kept only when both vote keep; add a third
-judge with `--judges` for a true majority. A row is dropped as soon as the votes cast decide
-it (one drop of two judges, two of three), so its remaining calls are not made, and a failed
-call does not leave it undecided.
+nothing. `--rows FILE` (one row id per line) reviews only those rows, in either mode. With a
+council of two judges, a row is kept only when both vote keep; add a third judge with
+`--judges` for a true majority. A row is dropped as soon as the votes cast decide it (one drop
+of two judges, two of three), so its remaining calls are not made, and a failed call does not
+leave it undecided.
 
 ### Push the dataset
 
-Pushing creates an Agent Observability dataset with one record per kept row. Training does not
-need it; publishing an evaluation as experiments does. The receipt, `push.json`, names the
-dataset, so a later push of new rows needs no flag.
+Pushing creates an Agent Observability dataset with one record per kept row. `train` and
+`benchmark` read only a dataset whose kept rows are all pushed, and an evaluation publishes
+its experiments on it. The receipt, `push.json`, names the dataset, so a later push of new
+rows needs no flag.
 
 ```sh
 pup finetune dataset push datasets/my-agent --name my-agent-sft
@@ -302,9 +305,14 @@ pup finetune auth logout fireworks
 A key is never a flag value, never printed and never written to a file. Without an OS
 keychain, use the environment variable.
 
-LLM judges grade `evaluate` and `dataset triage`. They run on Fireworks by default, with the
-same key. Name a judge `anthropic/<model>` or `openai/<model>` to judge on Anthropic or
-OpenAI with that provider's key, and a triage council can mix them:
+LLM judges grade `evaluate` and `dataset triage`. By default they follow the keys you have:
+`evaluate` judges with `anthropic/claude-haiku-5-5` when an Anthropic key (or the Anthropic
+SDK's login) is found, else `openai/gpt-5.4-mini` with an OpenAI key, else Fireworks'
+`deepseek-v4p1-flash`. The triage council is `claude-haiku-5-5` and `gpt-5.4-mini` with both
+keys, `claude-haiku-5-5` and `claude-sonnet-5-5` with Anthropic's, `gpt-5.4-mini` and
+`gpt-6-astra` with OpenAI's, else two Fireworks models. The preview names the judges and where
+the default came from, and a directory keeps the judges it was first judged with. Name a judge
+`anthropic/<model>` or `openai/<model>` to choose one, and a triage council can mix them:
 
 ```sh
 pup finetune evaluate ft-20261007183443-a8b181 --judge-model anthropic/claude-opus-5-5

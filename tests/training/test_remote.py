@@ -58,12 +58,16 @@ NOW = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
 TRANSFORMERS = importlib.metadata.version("transformers")
 
 
+DIGITS_AS_LETTERS = str.maketrans("0123456789", "abcdefghij")
+"""Requests that differ only in a number are copies of one, which share a split."""
+
+
 def _row(row_id: str) -> TrainingRow:
     return validate_row(
         {
             "id": row_id,
             "messages": [
-                {"role": "user", "content": f"question {row_id}"},
+                {"role": "user", "content": f"question {row_id.translate(DIGITS_AS_LETTERS)}"},
                 {"role": "assistant", "content": f"answer {row_id}"},
             ],
         }

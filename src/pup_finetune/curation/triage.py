@@ -50,7 +50,7 @@ from the agent or a person are not reviewed, and the labels are read again just 
 judge labels are recorded, so one written after planning is never overwritten either: that
 row is skipped. A label cannot be withdrawn, so a judge label
 that the current votes do not back (cast under a rubric ``reset`` discarded, on a row outside
-this ``max_rows`` sample, or on a row left undecided) is reported as stale
+this ``max_rows`` sample or ``only`` subset, or on a row left undecided) is reported as stale
 (:meth:`TriagePlan.stale_labels`), and the triage is not complete while any remains.
 
 **Agreement.** With ``agreement``, the council reviews the rows the agent or a person
@@ -81,7 +81,7 @@ from pup_finetune.concurrency import DaemonPool
 from pup_finetune.curation.labels import Label, LabelReport, apply_labels
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.schema import TrainingRow
-from pup_finetune.display import display_path
+from pup_finetune.display import counted, display_path
 from pup_finetune.errors import ExternalError, SettingsConflict, StateError, UsageError
 from pup_finetune.judge_models import alias_of
 from pup_finetune.providers.base import ProviderAuthError
@@ -104,7 +104,6 @@ TriageStatus = Literal["none", "incomplete", "complete", "unreadable"]
 
 __all__ = [
     "DEFAULT_CONCURRENCY",
-    "DEFAULT_JUDGES",
     "JUDGMENTS_FILE",
     "MIN_AGREEMENT_ROWS",
     "SETTINGS_FILE",
@@ -121,6 +120,7 @@ __all__ = [
     "Vote",
     "build_messages",
     "decide",
+    "default_council",
     "failures_shown",
     "has_template_task",
     "judge_config",
@@ -137,12 +137,6 @@ __all__ = [
     "triage_status",
 ]
 
-DEFAULT_JUDGES: Final = (
-    "accounts/fireworks/models/deepseek-v4p1-flash",
-    "accounts/fireworks/models/glm-5p3-flash",
-)
-"""Two Fireworks serverless models, billed per token with the Fireworks API key, served at
-the default judge endpoint (:data:`pup_finetune.inference.DEFAULT_JUDGE_BASE_URL`)."""
 DEFAULT_CONCURRENCY: Final = 4
 JUDGMENTS_FILE: Final = "judgments.jsonl"
 SETTINGS_FILE: Final = "triage.json"
@@ -256,8 +250,30 @@ class Criteria:
         return cls("\n\n".join(parts), "+".join(sources), len(cleaned))
 
 
-def parse_judges(value: str | None) -> tuple[str, ...]:
-    """``--judges m1,m2``: the judge specs, in order, without repeats; the defaults for None.
+COUNCIL_GIVEN: Final = "--judges"
+COUNCIL_FROZEN: Final = SETTINGS_FILE
+"""Where a council came from (``judges_source``) when it is not a default by credential."""
+
+
+def default_council(dataset: DatasetDir, *, reset: bool = False) -> tuple[tuple[str, ...], str]:
+    """The council a triage of ``dataset`` without ``--judges`` uses, and where it came from:
+    the judges ``triage.json`` froze (unless ``reset`` discards them), so a rerun keeps
+    them, else the default by the credentials that resolve
+    (:data:`~pup_finetune.judge_models.TRIAGE_DEFAULTS`)."""
+    from pup_finetune.judge_models import TRIAGE_DEFAULTS
+    from pup_finetune.judges import default_judges
+
+    path = dataset.path / SETTINGS_FILE
+    if not reset and path.exists():
+        stored = read_json(path)
+        frozen = stored.get("judges") if isinstance(stored, dict) else None
+        if isinstance(frozen, list) and frozen and all(isinstance(j, str) for j in frozen):
+            return tuple(frozen), COUNCIL_FROZEN
+    return default_judges(TRIAGE_DEFAULTS)
+
+
+def parse_judges(value: str) -> tuple[str, ...]:
+    """``--judges m1,m2``: the judge specs, in order, without repeats.
 
     Each is checked and written the one way :attr:`~pup_finetune.inference.JudgeConfig.spec`
     writes it, so the same judge is never two. Raises :class:`UsageError` for an empty model
@@ -265,8 +281,6 @@ def parse_judges(value: str | None) -> tuple[str, ...]:
     """
     from pup_finetune.judges import parse_judge
 
-    if value is None:
-        return DEFAULT_JUDGES
     specs = (parse_judge(part).spec for part in value.split(",") if part.strip())
     judges = tuple(dict.fromkeys(specs))
     if not judges:
@@ -442,10 +456,6 @@ def _review_order(row: TrainingRow) -> str:
     return hashlib.sha256(f"triage:{row.id}".encode()).hexdigest()
 
 
-def _rows(count: int) -> str:
-    return f"{count} row{'' if count == 1 else 's'}"
-
-
 @dataclass(slots=True)
 class TriagePlan:
     """What a triage of ``dataset`` reviews, and what it has already. See :func:`plan_triage`."""
@@ -563,15 +573,14 @@ class TriagePlan:
         names = ", ".join(alias_of(spec) for spec in self.judges)
         if self.references is None:
             action = (
-                f"have {len(self.judges)} judge{'' if len(self.judges) == 1 else 's'} "
-                f"({names}) vote keep or drop on {_rows(len(self.rows))}, and label the rows "
-                "a strict majority decides"
+                f"have {counted(len(self.judges), 'judge')} ({names}) vote keep or drop on "
+                f"{counted(len(self.rows), 'row')}, and label the rows a strict majority decides"
             )
         else:
             action = (
-                f"have {len(self.judges)} judge{'' if len(self.judges) == 1 else 's'} "
-                f"({names}) vote on the {_rows(len(self.rows))} you or the agent labeled, and "
-                "report how often they agree; nothing is labeled"
+                f"have {counted(len(self.judges), 'judge')} ({names}) vote on the "
+                f"{counted(len(self.rows), 'row')} you or the agent labeled, and report how "
+                "often they agree; nothing is labeled"
             )
         preview: dict[str, Any] = {
             "action": action,
@@ -625,7 +634,7 @@ class TriagePlan:
             preview["stale_judge_labels"] = stale
             preview["stale_judge_labels_note"] = (
                 f"{stale} rows outside this review keep a judge label the current votes do "
-                "not back; review every row (no --max-rows) to replace them"
+                "not back; review every row (no --max-rows or --rows) to replace them"
             )
         if self.reset:
             preview["reset"] = {
@@ -706,16 +715,19 @@ def plan_triage(
     judges: Sequence[str],
     *,
     max_rows: int | None = None,
+    only: frozenset[str] | None = None,
     reset: bool = False,
     agreement: bool = False,
 ) -> TriagePlan:
     """Plan a triage of ``dataset``'s accepted rows; reads only local files.
 
     The rows reviewed are those without a label by the agent or a person, or with
-    ``agreement`` exactly those (see the module docstring); ``max_rows`` caps them. Raises
+    ``agreement`` exactly those (see the module docstring); ``only`` (row ids, not frozen)
+    restricts them to a subset, and ``max_rows`` then caps them. Raises
     :class:`StateError` when votes exist under another rubric or other judges (see the module
     docstring) and ``reset`` is false, and :class:`UsageError` for a judge spec with an empty
-    model after its provider prefix, or with ``agreement`` when no row carries such a label.
+    model after its provider prefix, for an id in ``only`` that is not an accepted row, or
+    with ``agreement`` when no row (of ``only``) carries such a label.
     """
     for spec in judges:
         judge_config(spec)
@@ -736,12 +748,18 @@ def plan_triage(
         _check_frozen(dataset, settings, len(stored_votes))
     labels = dataset.labels()
     stored_rows = dataset.rows()
+    if only is not None:
+        _check_subset(dataset, only, {row.id for row in stored_rows})
     reviewable: list[TrainingRow] = []
     references: dict[str, Label] = {}
     judge_labels: dict[str, Label] = {}
     skipped = 0
     for row in stored_rows:
         label = labels.get(row.id)
+        if only is not None and row.id not in only:
+            if label is not None and label.by == "judge":
+                judge_labels[row.id] = label
+            continue
         if label is not None and label.by != "judge":
             references[row.id] = label
             if agreement:
@@ -754,9 +772,10 @@ def plan_triage(
         if not agreement:
             reviewable.append(row)
     if agreement and not reviewable:
+        among = " that --rows names" if only is not None else ""
         raise UsageError(
-            f"no row of {dataset.path} carries a label by you or the agent to compare the "
-            "council with",
+            f"no row of {dataset.path}{among} carries a label by you or the agent to compare "
+            "the council with",
             hint="label a sample first (`dataset sample`, then `dataset label --file`)",
         )
     reviewable.sort(key=_review_order)
@@ -786,6 +805,25 @@ def plan_triage(
         votes_sha256=votes_sha256,
         references={row.id: references[row.id] for row in rows} if agreement else None,
     )
+
+
+ROW_IDS_SHOWN = 3
+"""How many unknown ``--rows`` ids an error names."""
+
+
+def _check_subset(dataset: DatasetDir, only: frozenset[str], accepted: set[str]) -> None:
+    """A :class:`UsageError` naming a few ids of ``only`` that are not accepted rows."""
+    if not only:
+        raise UsageError("--rows names no row id", hint="list one accepted row id per line")
+    unknown = sorted(only - accepted)
+    if unknown:
+        shown = ", ".join(repr(row_id) for row_id in unknown[:ROW_IDS_SHOWN])
+        more = f" and {len(unknown) - ROW_IDS_SHOWN} more" if len(unknown) > ROW_IDS_SHOWN else ""
+        raise UsageError(
+            f"--rows names {len(unknown)} ids that are not accepted rows of {dataset.path}: "
+            f"{shown}{more}",
+            hint="list row ids as rows.jsonl (or `dataset sample`) shows them, one per line",
+        )
 
 
 def triage_status(dataset: DatasetDir) -> tuple[TriageStatus, str | None]:
@@ -981,10 +1019,10 @@ def noisy_agreement(rows: int) -> str | None:
     if rows >= MIN_AGREEMENT_ROWS:
         return None
     return (
-        f"the agreement is measured on {_rows(rows)} you or the agent labeled; on fewer than "
-        f"{MIN_AGREEMENT_ROWS} it is noisy (one row moves it by {round(100 / max(rows, 1))} "
-        "points), so label more rows (`dataset sample`, then `dataset label`) before "
-        "trusting it"
+        f"the agreement is measured on {counted(rows, 'row')} you or the agent labeled; on "
+        f"fewer than {MIN_AGREEMENT_ROWS} it is noisy (one row moves it by "
+        f"{round(100 / max(rows, 1))} points), so label more rows (`dataset sample`, then "
+        "`dataset label`) before trusting it"
     )
 
 

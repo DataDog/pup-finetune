@@ -20,12 +20,13 @@ from pup_finetune.cli import app
 from pup_finetune.curation.pipeline import pipeline_state
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.push import PUSH_FILE
+from tests.fakes.pushed import mark_pushed
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
 ROW_IDS = [json.loads(line)["id"] for line in ROWS.read_text().splitlines()]
 SKEW = (
     "validation has 5 of 14 rows (36%, 4 of 13 traces) though --validation-fraction is 0.1: "
-    "splits are assigned per trace, so small datasets vary; import more rows"
+    "splits are assigned per trace and request, so small datasets vary; import more rows"
 )
 
 runner = CliRunner()
@@ -57,7 +58,7 @@ def test_import_reports_the_pipeline_and_warns_about_the_skewed_split(imported: 
     assert data["pipeline"] == {
         "rows": {"accepted": 14, "kept": 14, "dropped": 0, "unlabeled": 14},
         "triage": "none",
-        "push": {"status": "not_pushed", "pending": 14},
+        "push": {"status": "not_pushed", "pending": 14, "changed": 0},
     }
     assert data["splits"] == {"train": 7, "validation": 5, "test": 2}
     assert SKEW in data["warnings"]
@@ -76,7 +77,7 @@ def test_show_reports_the_same_pipeline_and_the_warning() -> None:
 
 
 @pytest.mark.usefixtures("imported")
-def test_labels_move_the_pipeline_on_to_training_and_a_first_push(tmp_path: Path) -> None:
+def test_labels_move_the_pipeline_on_to_a_first_push_then_training(tmp_path: Path) -> None:
     labels = tmp_path / "labels.jsonl"
     labels.write_text(
         json.dumps({"id": ROW_IDS[0], "keep": False, "reason": "synthetic drop"})
@@ -90,15 +91,35 @@ def test_labels_move_the_pipeline_on_to_training_and_a_first_push(tmp_path: Path
     assert data["pipeline"] == {
         "rows": {"accepted": 14, "kept": 13, "dropped": 1, "unlabeled": 12},
         "triage": "none",
-        "push": {"status": "not_pushed", "pending": 13},
+        "push": {"status": "not_pushed", "pending": 13, "changed": 0},
     }
     assert data["next_command"] is None
     assert [step["command"] for step in data["next_steps"]] == [
         "pup finetune models list",
-        "pup finetune benchmark ds --models <MODELS>",
-        "pup finetune train --dataset ds --model <MODEL>",
         "pup finetune dataset push ds --name <NAME>",
     ]
+    mark_pushed(Path("ds"))
+    shown = output(invoke("show", "ds"))
+    assert [step["command"] for step in shown["next_steps"]] == [
+        "pup finetune models list",
+        "pup finetune benchmark ds --models <MODELS>",
+        "pup finetune train --dataset ds --model <MODEL>",
+    ]
+
+
+@pytest.mark.usefixtures("imported")
+def test_with_every_row_dropped_there_is_nothing_to_push_or_train_on(tmp_path: Path) -> None:
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(
+        "".join(
+            json.dumps({"id": row_id, "keep": False, "reason": "synthetic drop"}) + "\n"
+            for row_id in ROW_IDS
+        )
+    )
+    data = output(invoke("label", "ds", "--file", str(labels)))
+    assert data["pipeline"]["rows"]["kept"] == 0
+    commands = [step["command"] for step in data["next_steps"]]
+    assert not any(" push " in c or " train " in c or " benchmark " in c for c in commands)
 
 
 @pytest.mark.usefixtures("imported")
@@ -109,7 +130,7 @@ def test_an_unreadable_receipt_is_reported_not_guessed() -> None:
     result = invoke("sample", "ds", "--count", "1")
     assert result.exit_code == 0, result.stderr
     data = output(result)
-    assert data["pipeline"]["push"] == {"status": "unreadable", "pending": None}
+    assert data["pipeline"]["push"] == {"status": "unreadable", "pending": None, "changed": None}
     assert "pup finetune dataset show ds" in [step["command"] for step in data["next_steps"]]
     # The warning names the file and the problem.
     [warning] = [w for w in data["warnings"] if PUSH_FILE in w]

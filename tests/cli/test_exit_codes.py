@@ -28,7 +28,6 @@ from typer.testing import CliRunner, Result
 from pup_finetune.cli import app
 from pup_finetune.cli import dataset as dataset_cli
 from pup_finetune.cli import train as train_module
-from pup_finetune.datadog.spans import EXPORT_PATH
 from pup_finetune.errors import ERROR_CODES
 from pup_finetune.providers.base import Provider
 from pup_finetune.providers.fireworks.provider import FireworksProvider
@@ -38,6 +37,7 @@ from pup_finetune.training import inputs as inputs_module
 from tests.fakes.fireworks import FakeFireworksTrainingClient
 from tests.fakes.fireworks_api import API_KEY, FakeFireworksApi
 from tests.fakes.pup import FakePup
+from tests.fakes.pushed import mark_pushed
 from tests.fakes.tokenizer import FakeChatTokenizer
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
@@ -94,7 +94,7 @@ def template(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[Path, P
         assert trained.exit_code == 0, trained.stderr
         evaluated = _invoke("evaluate", str(run), "--no-publish", "--confirm")
         assert evaluated.exit_code == 0, evaluated.stderr
-    yield dataset, run
+    yield mark_pushed(dataset), run
 
 
 @pytest.fixture
@@ -143,9 +143,9 @@ def _locked_dataset(w: World) -> list[str]:
 
 
 def _pup_fails(w: World) -> list[str]:
-    fake = FakePup().on("api", EXPORT_PATH, returncode=1, stderr="Error: 500 Internal Error")
+    fake = FakePup().on("auth", "status", returncode=1, stderr="Error: 500 Internal Error")
     w.monkeypatch.setattr(dataset_cli, "Pup", fake.client)
-    return ["dataset", "preview", "--ml-app", "synthetic-app"]
+    return ["dataset", "pull", str(w.tmp / "pulled"), "--ml-app", "synthetic-app"]
 
 
 def _pup_interrupted(w: World) -> list[str]:
@@ -154,9 +154,9 @@ def _pup_interrupted(w: World) -> list[str]:
     def interrupt(_call: object) -> object:
         raise KeyboardInterrupt
 
-    fake = FakePup().on("api", EXPORT_PATH, handler=interrupt)
+    fake = FakePup().on("auth", "status", handler=interrupt)
     w.monkeypatch.setattr(dataset_cli, "Pup", fake.client)
-    return ["dataset", "preview", "--ml-app", "synthetic-app"]
+    return ["dataset", "pull", str(w.tmp / "pulled"), "--ml-app", "synthetic-app"]
 
 
 def _fireworks(failure: str) -> Callable[[World], list[str]]:

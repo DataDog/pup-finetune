@@ -533,6 +533,14 @@ def test_undeploy_deletes_and_is_idempotent(
     assert deployer.undeploy(endpoint) is False
 
 
+def test_undeploy_deletes_a_deployment_that_served_in_the_last_hour(
+    deployer: FireworksDeployer, sdk: FakeSdkFireworks
+) -> None:
+    endpoint = deployer.deploy(MODEL, OPTIONS)
+    assert deployer.undeploy(endpoint) is True
+    assert ("delete", {"deployment_id": OPTIONS.deployment_id, "ignore_checks": True}) in sdk.calls
+
+
 def test_undeploy_refuses_a_deployment_of_another_account(
     deployer: FireworksDeployer, sdk: FakeSdkFireworks
 ) -> None:

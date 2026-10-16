@@ -16,7 +16,7 @@ from contextlib import contextmanager
 import httpx
 import pytest
 
-from pup_finetune import judges
+from pup_finetune import judges, readiness
 from pup_finetune.errors import UsageError
 from pup_finetune.inference import (
     DEFAULT_JUDGE_BASE_URL,
@@ -25,10 +25,11 @@ from pup_finetune.inference import (
     ChatCompleter,
     JudgeConfig,
 )
-from pup_finetune.judge_models import JUDGE_SHORT_NAMES, alias_of
+from pup_finetune.judge_models import EVALUATE_DEFAULTS, JUDGE_SHORT_NAMES, alias_of
 from pup_finetune.judges import (
     ANTHROPIC_INSTALL_HINT,
     FIREWORKS_REASONING,
+    JUDGE_PACKAGES,
     anthropic_client_class,
     check_available,
     destination,
@@ -207,6 +208,23 @@ def test_a_missing_anthropic_extra_is_a_usage_error_with_the_install_hint(
         assert "pip install 'pup-finetune[anthropic]'" in ANTHROPIC_INSTALL_HINT
     with pytest.raises(UsageError, match="'anthropic' package"), open_client(config):
         pass
+
+
+def test_an_anthropic_sdk_without_httpx2_is_refused_in_the_preview_as_doctor_reports_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "httpx2", None)
+    with pytest.raises(
+        UsageError, match="need the 'httpx2' package, which is not installed"
+    ) as info:
+        check_available(parse_judge("anthropic/claude-opus-5-5"))
+    assert info.value.hint == ANTHROPIC_INSTALL_HINT
+    package = JUDGE_PACKAGES["anthropic"]
+    assert not readiness.package_check("anthropic", "Anthropic", package, required=False).ok
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
+    chosen, source = judges.default_judges(EVALUATE_DEFAULTS)
+    assert chosen == (DEFAULT_JUDGE_MODEL,)
+    assert source.endswith("Anthropic judges need the 'httpx2' package, which is not installed")
 
 
 def test_other_judges_need_no_extra(monkeypatch: pytest.MonkeyPatch) -> None:

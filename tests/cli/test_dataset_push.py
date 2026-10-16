@@ -267,7 +267,7 @@ def test_rows_changed_after_a_push_are_reported_with_a_warning(
     assert invoke("import", str(dataset), "--file", str(more)).exit_code == 0
     preview = output_json(push(dataset))["preview"]
     assert preview["changed_records"] == data["changed_records"]
-    assert any("changed after they were pushed" in w for w in preview["warnings"])
+    assert any("1 kept row changed after the push" in w for w in preview["warnings"])
 
 
 def test_the_preview_after_more_rows_were_added_shows_only_those(
@@ -364,11 +364,19 @@ def test_a_rerun_takes_the_dataset_from_the_receipt(tmp_path: Path, api: FakeDat
     assert invoke("import", str(directory), "--file", str(first)).exit_code == 0
     pushed = push(directory, "--confirm")
     assert pushed.exit_code == 0, pushed.stderr
-    assert output_json(pushed)["pipeline"]["push"] == {"status": "pushed", "pending": 0}
+    assert output_json(pushed)["pipeline"]["push"] == {
+        "status": "pushed",
+        "pending": 0,
+        "changed": 0,
+    }
 
     imported = output_json(invoke("import", str(directory), "--file", str(rest)))
     new_rows = len(rows) - 6
-    assert imported["pipeline"]["push"] == {"status": "pushed_with_new_rows", "pending": new_rows}
+    assert imported["pipeline"]["push"] == {
+        "status": "pushed_with_new_rows",
+        "pending": new_rows,
+        "changed": 0,
+    }
     flagless = f"pup finetune dataset push {directory}"
     assert flagless in [step["command"] for step in imported["next_steps"]]
 
@@ -386,7 +394,7 @@ def test_a_rerun_takes_the_dataset_from_the_receipt(tmp_path: Path, api: FakeDat
     assert confirmed.exit_code == 0, confirmed.stderr
     receipt = output_json(confirmed)
     assert (receipt["pushed"], receipt["records"]) == (new_rows, len(rows))
-    assert receipt["pipeline"]["push"] == {"status": "pushed", "pending": 0}
+    assert receipt["pipeline"]["push"] == {"status": "pushed", "pending": 0, "changed": 0}
     assert len(api.dataset_named(NAME).records) == len(rows)
 
     other = invoke("push", str(directory), "--name", "other")

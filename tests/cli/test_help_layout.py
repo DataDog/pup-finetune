@@ -157,7 +157,6 @@ def test_commands_are_listed_in_workflow_order() -> None:
     dataset = command.get_command(ctx, "dataset")
     dataset_ctx = dataset.make_context("dataset", [], parent=ctx, resilient_parsing=True)
     assert dataset.list_commands(dataset_ctx) == [
-        "preview",
         "pull",
         "import",
         "show",
@@ -196,10 +195,7 @@ def test_the_top_level_help_groups_commands_under_the_flow() -> None:
         "undeploy": EVALUATE_AND_SHIP,
     }
     text = " ".join(rendered(()).split())
-    assert (
-        "Flow: dataset preview -> dataset pull -> review -> benchmark -> train -> evaluate -> "
-        "deploy" in text
-    )
+    assert "Flow: dataset pull -> review -> dataset push -> train -> evaluate -> deploy" in text
 
 
 def test_train_groups_its_options_in_panels() -> None:
@@ -329,7 +325,7 @@ def test_every_example_runs_as_written(name: str, example: str) -> None:
 
 
 def test_the_example_checker_catches_mistakes() -> None:
-    assert example_problem("pup finetune dataset preview") is not None  # --ml-app missing
+    assert example_problem("pup finetune dataset preview") is not None
     assert example_problem("pup finetune train --bogus") is not None
     assert example_problem("pup finetune nope") is not None
     assert example_problem("pup finetune dataset label ./ds --file missing.jsonl") is None

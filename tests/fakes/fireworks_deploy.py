@@ -118,8 +118,14 @@ class _Deployments:
                 record["status"] = SimpleNamespace(message="replica failed to start")
         return SimpleNamespace(**record)
 
-    def delete(self, deployment_id: str) -> dict[str, Any]:
-        self._sdk.record("delete", deployment_id=deployment_id)
+    def delete(self, deployment_id: str, *, ignore_checks: bool = False) -> dict[str, Any]:
+        self._sdk.record("delete", deployment_id=deployment_id, ignore_checks=ignore_checks)
+        if deployment_id in self._sdk.records and not ignore_checks:
+            raise FakeSdkError(
+                "deployment has received inference requests in the last hour, pass "
+                "ignore_checks to skip this check",
+                status_code=400,
+            )
         if self._sdk.records.pop(deployment_id, None) is None:
             raise FakeSdkError("deployment not found", status_code=404)
         self._sdk.deleted.append(deployment_id)

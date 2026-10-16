@@ -28,7 +28,7 @@ from pup_finetune.cli._presentation import TRAIN, CommandDoc, Safety, default_no
 from pup_finetune.cli.train import provider_for_model
 from pup_finetune.errors import PAID_RUN, UsageError, require_confirm, require_writable
 from pup_finetune.evaluation import benchmark, runner
-from pup_finetune.judge_models import DEFAULT_JUDGE_MODEL, alias_of
+from pup_finetune.judge_models import BY_KEY
 
 SETTING_PARAMS: dict[str, tuple[str, ...]] = {
     "judge_model": ("judge_model",),
@@ -55,6 +55,7 @@ DOC = CommandDoc(
         "recorded assistant turn at a time, and score each with the tool-call metrics and the "
         "LLM judge evaluate uses. Without --confirm, previews the calls and where the data "
         "goes. The result ranks the models and recommends the one to fine-tune.",
+        "The dataset must be in Datadog, as for `train`. "
         "Each model runs in a session of its own, one after another, into OUT/<model>; rerun "
         "the same command to continue a benchmark that stopped. A model below "
         "--target-pass-rate is worth fine-tuning; one at or above it may need no training. "
@@ -159,7 +160,7 @@ def benchmark_command(
             "--judge-model",
             metavar="MODEL",
             help="An alias (glm-5p3-flash), anthropic/MODEL, openai/MODEL or a Fireworks id. "
-            f"{default_note(alias_of(DEFAULT_JUDGE_MODEL))}",
+            f"{default_note(BY_KEY)}",
             show_default=False,
             rich_help_panel=JUDGE,
         ),

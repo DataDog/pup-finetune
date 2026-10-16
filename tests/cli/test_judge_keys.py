@@ -30,7 +30,7 @@ from pup_finetune.errors import ExternalError
 from pup_finetune.evaluation.fake_judge import FakeJudge
 from pup_finetune.inference import ChatCompleter, ChatCompletion, JudgeConfig
 from tests.conftest import JUDGE_KEYS
-from tests.fakes.keyring import MemoryKeyring
+from tests.fakes.keyring import LockedKeyring, MemoryKeyring
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
 PAID = "openai/gpt-5.5"
@@ -227,6 +227,16 @@ def test_a_resumed_council_opens_only_the_judges_with_votes_left(
     assert resumed.exit_code == 0, resumed.stderr
     assert output(resumed)["status"] == "complete"
     assert opened == ["openai"]
+
+
+def test_a_read_only_preview_still_fails_on_a_locked_keychain(
+    run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PUP_READ_ONLY", "1")
+    monkeypatch.setattr(keyring.core, "_keyring_backend", LockedKeyring())
+    result = invoke("evaluate", str(run_dir), "--judge-model", PAID)
+    assert result.exit_code == 1, result.stderr
+    assert "Error [external]" in result.stderr
 
 
 def test_a_read_only_preview_warns_of_the_missing_key(

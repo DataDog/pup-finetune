@@ -6,8 +6,7 @@
 # Copyright 2026-present Datadog, Inc.
 """Training rows from Datadog: export LLM spans, check them, convert them, and stop in time.
 
-:func:`collect` is what ``dataset preview`` runs in memory and ``dataset pull`` runs into a
-dataset directory (:func:`pull`):
+:func:`collect` is what ``dataset pull`` runs into a dataset directory (:func:`pull`):
 
 1. Export the spans matching the query a page at a time
    (:func:`~pup_finetune.datadog.spans.iter_span_pages`), reading at most

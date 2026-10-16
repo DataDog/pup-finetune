@@ -4,7 +4,7 @@
 #
 # This product includes software developed at Datadog (https://www.datadoghq.com/).
 # Copyright 2026-present Datadog, Inc.
-"""`pup finetune dataset preview` and `dataset pull`, end to end over a fake Export API."""
+"""`pup finetune dataset pull`, end to end over a fake Export API."""
 
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
 
 @pytest.fixture(autouse=True)
 def _in_tmp_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Run in an empty directory: the preview's pull command names a new one under it."""
+    """Run in an empty directory, so a relative dataset directory lands under it."""
     monkeypatch.chdir(tmp_path)
 
 
@@ -93,10 +93,6 @@ def invoke(*args: str) -> Result:
 def output_json(result: Result) -> dict[str, Any]:
     data: dict[str, Any] = json.loads(result.stdout)
     return data
-
-
-def preview(*extra: str) -> Result:
-    return invoke("preview", "--ml-app", "synthetic-trip-planner", *extra)
 
 
 def pull(directory: Path, *extra: str) -> Result:
@@ -135,76 +131,23 @@ def serve(use_pup: UsePup, pages: list[dict[str, Any]]) -> FakeExportApi:
     return export
 
 
-# --- preview --------------------------------------------------------------------------------
+# --- what a pull reads and reports ---------------------------------------------------------
 
 
-def test_preview_reports_counts_samples_and_the_pull_command(api: FakeExportApi) -> None:
-    result = preview("--tag", "env:synthetic", "--span-name", "chat")
-    assert result.exit_code == 0, result.stderr
-    data = output_json(result)
-    assert data["query"]["filter"] == {
-        "span_kind": "llm",
-        "ml_app": "synthetic-trip-planner",
-        "span_name": "chat",
-        "tags": {"env": "synthetic"},
-        "from": WEEK_AGO_MS,
-        "to": NOW_MS,
-    }
-    assert (data["query"]["from_expr"], data["query"]["to_expr"]) == ("now-7d", "now")
-    assert data["time_range"] == {
-        "from_expr": "now-7d",
-        "to_expr": "now",
-        "from": WEEK_AGO_MS,
-        "to": NOW_MS,
-        "from_utc": "2025-12-25T00:00:00.000Z",
-        "to_utc": "2026-01-01T00:00:00.000Z",
-    }
-    # The export sends the same filter, with the epoch-ms bounds as the strings it accepts.
-    sent = api.requests[0]["data"]["attributes"]["filter"]
-    assert sent == {**data["query"]["filter"], "from": str(WEEK_AGO_MS), "to": str(NOW_MS)}
-    assert (data["query"]["reasoning"], data["query"]["include_errors"]) == ("omit", False)
-    assert data["limits"] == {"target_count": 200, "max_candidates": 5000}
-    assert (data["matched_spans"], data["traces"]) == (10, 6)
-    assert (data["accepted"], data["excluded"]) == (FIXTURE_ROWS, FIXTURE_EXCLUSIONS)
-    assert data["candidate_rows"] == FIXTURE_ROWS + FIXTURE_EXCLUSIONS
-    assert data["excluded_by_code"] == {
-        "no_assistant_message": 1,
-        "non_text_content": 1,
-        "span_error": 1,
-    }
-    assert sum(data["splits"].values()) == FIXTURE_ROWS
-    assert data["warnings"][0] == (
-        f"only {FIXTURE_ROWS} rows were accepted from every matching span, fewer than "
-        "--target-count 200; widen the filter or the time range for more"
-    )
-    agent = next(s for s in data["sample_accepted"] if s["id"].endswith("synthetic-span-0104"))
-    assert agent["tools_used"] == ["get_weather", "search_hotels", "summarize_options"]
-    assert agent["turns"] >= 2
-    assert len(data["sample_accepted"]) == FIXTURE_ROWS
-    assert {s["code"] for s in data["sample_excluded"]} == set(data["excluded_by_code"])
-    errored = next(s for s in data["sample_excluded"] if s["code"] == "span_error")
-    assert errored["trace_id"] == "synthetic-trace-0102"
-    assert errored["span_id"] == "synthetic-span-0201"
-    assert data["stats"]["stopped"] == "exhausted"
-    assert data["stats"]["pages_fetched"] == 2
-    # A new directory under ./datasets, and only the flags given (now-7d and now are the
-    # defaults).
-    assert data["next_command"] == (
-        "pup finetune dataset pull ./datasets/synthetic-trip-planner --ml-app "
-        "synthetic-trip-planner --span-name chat --tag env:synthetic"
-    )
-    assert api.requests[0]["data"]["attributes"]["options"] == {"include_attachments": True}
+def fresh(*extra: str) -> Result:
+    """A first pull into ``ds`` under the current directory."""
+    return pull(Path("ds"), *extra)
 
 
-def test_preview_explains_the_exclusion_codes(api: FakeExportApi) -> None:
-    data = output_json(preview())
+def test_a_pull_explains_the_exclusion_codes(api: FakeExportApi) -> None:
+    data = output_json(fresh())
     explanations = data["exclusion_explanations"]
     assert set(explanations) == set(data["excluded_by_code"])
     assert "--include-errors" in explanations["span_error"]
     assert all(isinstance(text, str) and text for text in explanations.values())
 
 
-def test_preview_explains_unstructured_tool_messages(use_pup: UsePup) -> None:
+def test_a_pull_explains_unstructured_tool_messages(use_pup: UsePup) -> None:
     text_protocol = span_item(
         "synthetic-span-1",
         input={
@@ -217,170 +160,49 @@ def test_preview_explains_unstructured_tool_messages(use_pup: UsePup) -> None:
         output={"messages": [{"role": "assistant", "content": "It is sunny."}]},
     )
     use_pup(FakeExportApi([page([text_protocol])]).install(FakePup()).client())
-    data = output_json(preview())
+    data = output_json(fresh())
     assert data["excluded_by_code"] == {"unstructured_tool_message": 1}
     assert "tool calls as text" in data["exclusion_explanations"]["unstructured_tool_message"]
 
 
-def test_preview_with_include_errors_keeps_errored_calls(api: FakeExportApi) -> None:
-    data = output_json(preview("--include-errors"))
+def test_a_pull_with_include_errors_keeps_errored_calls(api: FakeExportApi) -> None:
+    data = output_json(fresh("--include-errors"))
     assert "span_error" not in data["excluded_by_code"]
     assert data["excluded_by_code"]["no_assistant_message"] == 2
-    assert data["query"]["include_errors"] is True
-    assert data["next_command"].endswith(" --include-errors")
 
 
-def test_preview_writes_nothing(
-    api: FakeExportApi, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "existing.txt").write_text("untouched")
-    before = {path: path.stat().st_mtime_ns for path in tmp_path.rglob("*")}
-    result = preview()
-    assert result.exit_code == 0, result.stderr
-    assert {path: path.stat().st_mtime_ns for path in tmp_path.rglob("*")} == before
-
-
-def test_preview_stops_at_the_target_count(api: FakeExportApi) -> None:
-    data = output_json(preview("--target-count", "2"))
-    assert api.cursors == [None]
-    assert data["accepted"] == 2
-    assert data["stats"]["stopped"] == "target_count"
-    assert "--target-count 2" in data["next_command"]
-
-
-def test_preview_warns_when_max_candidates_stops_it_short(api: FakeExportApi) -> None:
-    data = output_json(preview("--max-candidates", "3"))
-    assert data["matched_spans"] == 3
-    assert data["stats"]["stopped"] == "max_candidates"
+def test_a_pull_warns_when_max_candidates_stops_it_short(api: FakeExportApi) -> None:
+    data = output_json(fresh("--max-candidates", "3"))
+    assert data["pull"]["matched_spans"] == 3
+    assert data["pull"]["stopped"] == "max_candidates"
     assert any("--max-candidates" in warning for warning in data["warnings"])
 
 
-def test_preview_passes_every_non_default_flag_to_the_pull_command(api: FakeExportApi) -> None:
-    flags = [
-        "--query",
-        "@status:ok env:synthetic",
-        "--from",
-        "1767225600000",
-        "--to",
-        "now-1d",
-        "--reasoning",
-        "preserve",
-        "--max-candidates",
-        "100",
-        "--seed",
-        "7",
-        "--validation-fraction",
-        "0.2",
-        "--test-fraction",
-        "0.0",
-    ]
-    data = output_json(preview(*flags))
-    assert data["query"]["filter"]["from"] == 1767225600000
-    assert data["query"]["filter"]["to"] == NOW_MS - DAY_MS
-    words = shlex.split(data["next_command"])
-    assert words[:5] == ["pup", "finetune", "dataset", "pull", "./datasets/synthetic-trip-planner"]
-    reparsed = dict(zip(words[5::2], words[6::2], strict=True))
-    assert reparsed == {
-        "--ml-app": "synthetic-trip-planner",
-        "--query": "@status:ok env:synthetic",
-        "--from": "1767225600000",
-        "--to": "now-1d",
-        "--max-candidates": "100",
-        "--reasoning": "preserve",
-        "--seed": "7",
-        "--validation-fraction": "0.2",
-        "--test-fraction": "0.0",
-    }
-
-
-def test_preview_names_a_new_directory_for_the_ml_app(api: FakeExportApi, tmp_path: Path) -> None:
-    (tmp_path / "datasets" / "synthetic-trip-planner").mkdir(parents=True)
-    (tmp_path / "datasets" / "synthetic-trip-planner-2").mkdir()
-    data = output_json(preview())
-    assert shlex.split(data["next_command"])[4] == "./datasets/synthetic-trip-planner-3"
-    result = invoke("preview", "--ml-app", " Trip Planner/EU ")
-    assert shlex.split(output_json(result)["next_command"])[4] == "./datasets/trip-planner-eu"
-
-
-def test_preview_s_pull_command_runs_as_written(api: FakeExportApi) -> None:
-    data = output_json(preview("--tag", "env:synthetic", "--target-count", "3"))
-    words = shlex.split(data["next_command"])
-    pulled = invoke(*words[3:])
-    assert pulled.exit_code == 0, pulled.stderr
-    # Relative to the current directory, which holds it.
-    assert output_json(pulled)["dataset_dir"] == str(Path(words[4]))
-    assert output_json(pulled)["accepted"] == 3
-
-
 def test_max_candidates_equal_to_every_span_is_not_a_short_read(api: FakeExportApi) -> None:
-    data = output_json(preview("--max-candidates", "10"))
-    assert data["matched_spans"] == 10
-    assert data["stats"]["stopped"] == "exhausted"
+    data = output_json(fresh("--max-candidates", "10"))
+    assert data["pull"]["matched_spans"] == 10
+    assert data["pull"]["stopped"] == "exhausted"
     assert not any("--max-candidates" in warning for warning in data["warnings"])
 
 
-def test_preview_warns_when_no_span_matched(use_pup: UsePup) -> None:
+def test_a_pull_warns_when_no_span_matched(use_pup: UsePup) -> None:
     serve(use_pup, [page([])])
-    data = output_json(preview())
-    assert data["matched_spans"] == 0
+    data = output_json(fresh())
+    assert data["pull"]["matched_spans"] == 0
     assert data["warnings"][0] == (
         "no LLM spans matched; check --ml-app, --span-name, --query, --tag and the time "
         "range (--from, --to)"
     )
 
 
-def test_a_preview_that_accepts_no_row_steps_to_widen_it_instead_of_a_pull(
-    use_pup: UsePup,
-) -> None:
-    serve(use_pup, [page([])])
-    result = preview("--span-name", "chat")
-    assert result.exit_code == 0, result.stderr
-    data = output_json(result)
-    assert data["accepted"] == 0
-    assert data["next_command"] is None
-    assert [step["command"] for step in data["next_steps"]] == [
-        "pup finetune dataset preview --ml-app synthetic-trip-planner --span-name chat --from 30d",
-        "pup finetune dataset preview --ml-app <ML_APP>",
-    ]
-    assert "no LLM span matched" in data["next_steps"][0]["why"]
-    assert "--span-name, --query and --tag" in data["next_steps"][1]["why"]
-    # Only why nothing was accepted; empty splits follow from that alone.
-    assert data["warnings"] == [
-        "no LLM spans matched; check --ml-app, --span-name, --query, --tag and the time "
-        "range (--from, --to)"
-    ]
-    assert "split is empty" not in result.stderr
-    # The widened preview runs as written.
-    widened = invoke(*shlex.split(data["next_steps"][0]["command"])[3:])
-    assert widened.exit_code == 0, widened.stderr
-
-
-def test_a_preview_whose_spans_all_errored_steps_to_include_errors(use_pup: UsePup) -> None:
-    errored = conversation("synthetic-span-1", "synthetic-trace-1", "Q?", "A.", status="error")
-    serve(use_pup, [page([errored])])
-    data = output_json(preview("--from", "60d"))
-    assert (data["accepted"], data["next_command"]) == (0, None)
-    commands = [step["command"] for step in data["next_steps"]]
-    assert commands[0] == (
-        "pup finetune dataset preview --ml-app synthetic-trip-planner --from 60d --include-errors"
-    )
-    # 60 days is past the 30 a widened preview suggests, so the earlier --from is the user's.
-    assert (
-        commands[1] == "pup finetune dataset preview --ml-app synthetic-trip-planner --from <FROM>"
-    )
-    assert "every span read was excluded" in data["next_steps"][1]["why"]
-    assert not any("split" in warning for warning in data["warnings"])
-
-
-def test_preview_warns_about_unreadable_spans_and_excludes_them(use_pup: UsePup) -> None:
+def test_a_pull_warns_about_unreadable_spans_and_excludes_them(use_pup: UsePup) -> None:
     good = conversation("synthetic-span-1", "synthetic-trace-1", "Hello?", "Hi.")
     serve(use_pup, [page([good, {"id": "synthetic-span-2", "attributes": {}}])])
-    data = output_json(preview())
-    assert data["matched_spans"] == 1
+    data = output_json(fresh())
+    assert data["pull"]["matched_spans"] == 1
     assert data["excluded_by_code"] == {"unreadable_span": 1}
     assert "unreadable_span" in data["exclusion_explanations"]
-    assert data["stats"]["unreadable_spans"] == 1
+    assert data["pull"]["unreadable_spans"] == 1
     assert (
         "1 spans could not be read and were skipped (excluded as unreadable_span)"
         in data["warnings"]
@@ -388,10 +210,10 @@ def test_preview_warns_about_unreadable_spans_and_excludes_them(use_pup: UsePup)
     assert not any("no LLM spans matched" in warning for warning in data["warnings"])
 
 
-def test_preview_blames_unreadable_spans_when_none_could_be_read(use_pup: UsePup) -> None:
+def test_a_pull_blames_unreadable_spans_when_none_could_be_read(use_pup: UsePup) -> None:
     serve(use_pup, [page(["not an object", {"id": "synthetic-span-2", "attributes": {}}])])
-    data = output_json(preview())
-    assert data["matched_spans"] == 0
+    data = output_json(fresh())
+    assert data["pull"]["matched_spans"] == 0
     assert data["warnings"][0] == (
         "none of the 2 spans returned could be read (they lack the fields of an LLM span, "
         "such as a trace id), so there was nothing to convert"
@@ -399,92 +221,41 @@ def test_preview_blames_unreadable_spans_when_none_could_be_read(use_pup: UsePup
     assert not any("no LLM spans matched" in warning for warning in data["warnings"])
 
 
-def test_preview_samples_at_most_five_rows_and_one_exclusion_per_code_first(
-    use_pup: UsePup,
-) -> None:
-    accepted = [
-        conversation(f"synthetic-span-{n}", f"synthetic-trace-{n}", f"Question {n}?", "Answer.")
-        for n in range(8)
-    ]
-    errored = [
-        conversation(f"synthetic-span-e{n}", f"synthetic-trace-e{n}", "Q?", "A.", status="error")
-        for n in range(3)
-    ]
-    no_output = [
-        span_item(
-            f"synthetic-span-o{n}",
-            f"synthetic-trace-o{n}",
-            input={"messages": [SYSTEM, {"role": "user", "content": f"Hello {n}?"}]},
-        )
-        for n in range(2)
-    ]
-    image = span_item(
-        "synthetic-span-i",
-        "synthetic-trace-i",
-        input={
-            "messages": [
-                {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]}
-            ]
-        },
-        output={"messages": [{"role": "assistant", "content": "A picture."}]},
-    )
-    items = [*accepted, *errored, *no_output, image, "not an object"]
-    serve(use_pup, [page(items)])
-    data = output_json(preview())
-    assert data["accepted"] == 8
-    assert data["excluded_by_code"] == {
-        "no_assistant_message": 2,
-        "non_text_content": 1,
-        "span_error": 3,
-        "unreadable_span": 1,
-    }
-    assert len(data["sample_accepted"]) == 5
-    sample = data["sample_excluded"]
-    assert len(sample) == 5
-    assert [entry["code"] for entry in sample[:4]] == [
-        "span_error",
-        "no_assistant_message",
-        "non_text_content",
-        "unreadable_span",
-    ]
-
-
 @pytest.mark.parametrize("bad", ["env", "env:", ":synthetic"])
 def test_a_malformed_tag_is_a_usage_error(api: FakeExportApi, bad: str) -> None:
-    result = preview("--tag", bad)
+    result = fresh("--tag", bad)
     assert result.exit_code == 2
     assert "KEY:VALUE" in result.stderr
     assert api.requests == []
 
 
 def test_a_tag_given_two_values_is_a_usage_error(api: FakeExportApi) -> None:
-    result = preview("--tag", "env:a", "--tag", "env:b")
+    result = fresh("--tag", "env:a", "--tag", "env:b")
     assert result.exit_code == 2
     assert "twice" in result.stderr
 
 
-def test_ml_app_is_required(api: FakeExportApi) -> None:
-    result = invoke("preview")
+def test_there_is_no_dataset_preview(api: FakeExportApi) -> None:
+    result = invoke("preview", "--ml-app", "synthetic-trip-planner")
     assert result.exit_code == 2
-    # Typer styles usage errors on CI (GITHUB_ACTIONS), which splits option names.
-    assert "--ml-app" in _ANSI.sub("", result.stderr)
+    assert "No such command 'preview'" in _ANSI.sub("", result.stderr)
+    assert api.requests == []
 
 
 def test_pup_auth_failures_surface_with_the_pup_hint(use_pup: UsePup) -> None:
-    fake = FakePup().on("api", EXPORT_PATH, returncode=1, stderr="Error: 401 Unauthorized")
-    use_pup(fake.client())
-    result = preview()
+    fake = FakePup().on("auth", "status", returncode=1, stderr="Error: 401 Unauthorized")
+    use_pup(fake.on("api", EXPORT_PATH, returncode=1, stderr="Error: 401 Unauthorized").client())
+    result = fresh()
     assert result.exit_code == 1
     assert "401 Unauthorized" in result.stderr
     assert "pup auth login" in result.stderr
     assert result.stdout == ""
 
 
-def test_preview_and_pull_are_allowed_read_only(
+def test_a_pull_is_allowed_read_only(
     api: FakeExportApi, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("PUP_READ_ONLY", "true")
-    assert preview().exit_code == 0
     result = pull(tmp_path / "ds")
     assert result.exit_code == 0, result.stderr
 
@@ -692,11 +463,11 @@ def test_pull_into_an_imported_dataset_is_rejected(api: FakeExportApi, tmp_path:
 def test_a_time_that_is_no_accepted_form_is_a_usage_error_before_anything_is_frozen(
     api: FakeExportApi, tmp_path: Path, bad: str
 ) -> None:
-    for result in (preview("--from", bad), pull(tmp_path / "ds", "--from", bad)):
-        assert result.exit_code == 2
-        assert result.stderr.startswith(f"Error [usage]: cannot read --from {bad!r}\n")
-        assert "ISO 8601" in result.stderr and "7d, 24h" in result.stderr
-        assert "resume" not in result.stderr
+    result = pull(tmp_path / "ds", "--from", bad)
+    assert result.exit_code == 2
+    assert result.stderr.startswith(f"Error [usage]: cannot read --from {bad!r}\n")
+    assert "ISO 8601" in result.stderr and "7d, 24h" in result.stderr
+    assert "resume" not in result.stderr
     assert api.requests == []
     assert not (tmp_path / "ds").exists()  # nothing frozen to poison the directory
 
@@ -705,7 +476,7 @@ def test_a_time_that_is_no_accepted_form_is_a_usage_error_before_anything_is_fro
 def test_a_bare_number_too_small_for_epoch_ms_is_refused_before_anything_is_frozen(
     api: FakeExportApi, tmp_path: Path, bare: str
 ) -> None:
-    for result in (preview("--from", bare), pull(tmp_path / "ds", "--to", bare)):
+    for result in (pull(tmp_path / "ds", "--from", bare), pull(tmp_path / "ds", "--to", bare)):
         assert result.exit_code == 2
         assert "Error [usage]: --" in result.stderr
         assert "too small for epoch milliseconds" in result.stderr
@@ -787,7 +558,7 @@ def test_absolute_times_are_sent_unchanged(api: FakeExportApi, tmp_path: Path) -
 def test_an_unreadable_relative_time_is_a_usage_error(
     api: FakeExportApi, tmp_path: Path, bad: str
 ) -> None:
-    for result in (preview("--from", bad), pull(tmp_path / "ds", "--to", bad)):
+    for result in (pull(tmp_path / "ds", "--from", bad), pull(tmp_path / "ds", "--to", bad)):
         assert result.exit_code == 2
         assert "Error [usage]: cannot read --" in result.stderr
     assert api.requests == []
@@ -906,24 +677,6 @@ def test_a_pull_stopped_by_max_candidates_steps_to_a_flagless_one_reading_furthe
     assert step["command"] == "pup finetune dataset pull ds --max-candidates 6"
     further = invoke(*shlex.split(step["command"])[3:])
     assert further.exit_code == 0, further.stderr
-
-
-def test_preview_samples_show_the_first_user_and_final_assistant_messages(
-    use_pup: UsePup,
-) -> None:
-    long_question = "Synthetic question " + "x" * 400
-    serve(use_pup, [page([conversation("s1", "t1", long_question, "Synthetic answer.")])])
-    (sample,) = output_json(preview())["sample_accepted"]
-    assert set(sample) == {
-        "id",
-        "turns",
-        "tools_used",
-        "first_user_message",
-        "final_assistant_message",
-    }
-    assert sample["first_user_message"].startswith("Synthetic question x")
-    assert len(sample["first_user_message"]) == 300
-    assert sample["final_assistant_message"] == "Synthetic answer."
 
 
 def test_a_rerun_keeps_the_last_target_and_a_review_s_drops_are_replaced(

@@ -84,7 +84,7 @@ A synthetic example, formatted over several lines here (a file holds one row per
 
 ## From an LLM span to a row
 
-`dataset preview` and `dataset pull` read LLM spans through the Agent Observability Export
+`dataset pull` reads LLM spans through the Agent Observability Export
 API. Each span becomes one conversation: its input messages followed by its output messages
 ([`src/pup_finetune/data/convert.py`](../src/pup_finetune/data/convert.py)).
 
@@ -100,11 +100,24 @@ API. Each span becomes one conversation: its input messages followed by its outp
 A content list is joined when every part is text. An assistant message with neither content
 nor tool calls is dropped. Within a trace, a conversation that is a prefix or a duplicate of
 another is dropped, so each sub-agent keeps its own row. A row's split comes from its trace,
-so every row of a trace lands in the same split. In a dataset of fewer than 50 traces, a
-validation or test split more than twice its fraction, or 10 or more points off it, is
-warned about (`validation has 5 of 14 rows (36%, 4 of 13 traces) though
---validation-fraction is 0.1 ...`): splits are assigned per trace, so small datasets vary,
-and pulling more rows evens them out (the seed of a dataset is frozen).
+so every row of a trace lands in the same split, and copies of one request share it too: rows
+whose user messages are the same once lowercased, with numbers as `0` and whitespace collapsed,
+join their traces into one group, and a group gets one split. A request asked in more traces
+than 5% of them (rounded up) and more than 5 is generic and joins nothing: a fixed prompt many
+conversations share, such as "Summarize the above", keeps a split per trace, with a warning
+naming some of its rows. Groups have no size cap, so in a dataset of 50 traces or more, a
+group of 3 traces or more holding more than 10% of the rows is warned about with a few of its
+rows: its traces are likely chained through requests they share. A trace keeps its split once assigned; a new trace joining copies already in two splits
+takes the split holding most of their kept rows. Whenever the kept rows of a group are in more
+than one split (copies recorded apart before they were grouped), the summary's
+`split_conflicts` counts the groups and the rows outside their group's split, names up to 10 of
+them per split, and names `split_conflicts.jsonl`, a drop label for each of them that `dataset
+label --file` takes (the result's first next step). `split_groups` in a dataset's summary is
+how many groups its traces form. In a dataset of fewer than 50 traces, a validation or test
+split more than twice its fraction, or 10 or more points off it, is warned about (`validation
+has 5 of 14 rows (36%, 4 of 13 traces) though --validation-fraction is 0.1 ...`): splits are
+assigned per trace and request, so small datasets vary, and pulling more rows evens them out
+(the seed of a dataset is frozen).
 
 `--from` and `--to` take ISO 8601, epoch milliseconds (a bare number is milliseconds, while
 pup reads one as seconds; one below 10^11, such as `1728000000` or `20261001`, is refused
@@ -161,8 +174,9 @@ content. Keep it out of version control.
 | `rows.jsonl` | The accepted rows, one canonical row per line. Never rewritten by labeling. |
 | `excluded.jsonl` | One `{"code", "detail", "row_id", "trace_id", "span_id", "line_sha256"}` per excluded row (fields that do not apply are left out). |
 | `labels.jsonl` | Keep/drop decisions appended by `dataset label` and `dataset triage`: `{"id", "keep", "reason", "by", "at"}`, where `by` is `manual` (recorded with `dataset label`) or `judge` (decided by the `dataset triage` council; triage never relabels a manual row). Older files that say `agent` or `human` read as `manual`. The last label of an id wins, a reason is required to drop, and a dropped row never trains and is never pushed. |
-| `splits.json` | The split of every trace and the frozen seed and fractions. A trace never changes split once assigned. |
+| `splits.json` | The split of every trace (one per group of traces and copies of one request) and the frozen seed and fractions. A trace never changes split once assigned. |
 | `summary.json` | Counts, splits and warnings, rewritten after every change. |
+| `split_conflicts.jsonl` | While a group of copies has kept rows in more than one split, a drop label (`{"id", "keep": false, "reason"}`) for each kept row outside the split holding most of the group, for `dataset label --file`; rewritten with `summary.json`, and removed once there are none. |
 | `raw/` | For a Datadog pull, the Export API pages it read, so a rerun resumes without fetching them again. |
 | `pull_limits.json` | For a Datadog pull, the last pull's `--target-count` and `--max-candidates`, which a rerun without them continues toward. Not frozen. |
 | `judgments.jsonl`, `triage.json` | For `dataset triage`, every judge vote (`{"row_id", "row_sha256", "judge", "criteria_sha256", "keep", "reason", "at"}`, plus `"too_long": true` when the judge refused the row as longer than its context window, which drops it) and the frozen rubric hash, judges and the settings they are called with. |
@@ -257,17 +271,24 @@ Every dataset command's result (`import`, `pull`, `show`, `sample`, `label`, `tr
 {
   "rows": {"accepted": 14, "kept": 13, "dropped": 1, "unlabeled": 12},
   "triage": "incomplete",
-  "push": {"status": "pushed_with_new_rows", "pending": 3}
+  "push": {"status": "pushed_with_new_rows", "pending": 3, "changed": 0}
 }
 ```
 
 `triage` is `none` before any triage, `complete` once every row has a label and every judge
 label is backed by the votes under the frozen rubric and judges, `unreadable` when
 `triage.json` or `judgments.jsonl` cannot be read, and `incomplete` otherwise (for example
-after `--max-rows`). `push.status` is `not_pushed` without `push.json`, `pushed`
-when it lists every kept row, `pushed_with_new_rows` when `pending` kept rows are not pushed
-yet, and `unreadable` (with `pending` null) when `push.json` cannot be read. An `unreadable`
-part comes with a warning in the result that names the file and the problem.
+after `--max-rows`). `push.status` is `not_pushed` without `push.json`, `pushed` when it lists
+every kept row as it is now, `pushed_with_new_rows` when `pending` kept rows are not pushed yet
+(or a push did not finish), `pushed_with_changed_rows` when `changed` kept rows differ from the
+records pushed for them (a push only adds records, so the dataset holds them as they were
+pushed: the gate names up to 5 of them, and its step fetches that dataset into a new directory
+to train on what Datadog holds; the fetch also brings back the records of rows dropped or
+retired since the push, which the step counts and names up to 5 of, to drop again with
+`dataset label`), and
+`unreadable` (with `pending` and `changed` null) when `push.json` cannot be read. `train` and
+`benchmark` on a real provider read only a `pushed` dataset. An `unreadable` part comes with a
+warning in the result that names the file and the problem.
 
 ## What a command prints, and what its files keep
 

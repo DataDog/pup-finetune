@@ -27,11 +27,11 @@ from __future__ import annotations
 import os
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 from pydantic import SecretStr
 
-from pup_finetune.errors import ExternalError, UsageError
+from pup_finetune.errors import ExternalError, FinetuneError, UsageError
 from pup_finetune.redaction import RedactingFilter, install_log_redaction, redact, register_secret
 
 if TYPE_CHECKING:
@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 __all__ = [
     "KEYCHAIN_SERVICE",
     "CredentialSpec",
+    "KeyUnreadable",
     "RedactingFilter",
     "ResolvedCredential",
     "Source",
@@ -58,12 +59,26 @@ __all__ = [
     "register_secret",
     "resolve",
     "sdk_login_source",
+    "shown_source",
     "store",
 ]
 
 KEYCHAIN_SERVICE = "pup-finetune"
 
 Source = Literal["env", "keychain", "provider-config"]
+
+_SHOWN: Final[dict[str, str]] = {"keychain": "keychain", "provider-config": "provider config"}
+
+
+def shown_source(spec: CredentialSpec, source: str) -> str:
+    """How a key found at ``source`` (a :data:`Source`, or ``<provider>-sdk`` from
+    :func:`key_source`) reads to the user: its environment variable, ``keychain``,
+    ``provider config``, or ``Anthropic SDK login``."""
+    if source == "env":
+        return spec.env_var
+    if source.endswith("-sdk"):
+        return f"{spec.label} SDK login"
+    return _SHOWN.get(source, source)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -408,13 +423,30 @@ def delete(provider: str, *, keyring_backend: KeyringBackend | None = None) -> b
     return deleted
 
 
-def key_source(provider: str, *, env: Mapping[str, str] = os.environ) -> str | None:
-    """Where ``provider``'s key would come from (:data:`Source`), ``<provider>-sdk`` when only
-    its SDK can sign in on its own, or ``None`` when nothing would. Never returns the key.
+@dataclass(frozen=True, slots=True)
+class KeyUnreadable:
+    """Why a key could not be looked up (a locked or failing keychain), never what was read,
+    and what to do about it."""
 
-    Raises :class:`ExternalError` when the keychain cannot be read (e.g. it is locked).
+    detail: str
+    fix: str
+
+
+def key_source(provider: str, *, env: Mapping[str, str] = os.environ) -> str | KeyUnreadable | None:
+    """Where ``provider``'s key would come from (:data:`Source`), ``<provider>-sdk`` when only
+    its SDK can sign in on its own, ``None`` when nothing would, or :class:`KeyUnreadable`
+    when looking failed. Never returns the key and never raises.
     """
-    found = lookup(provider, env=env)
-    if found is not None:
-        return found.source
-    return sdk_login_source(provider, env=env)
+    spec = get_spec(provider)
+    try:
+        found = lookup(provider, env=env)
+        return found.source if found is not None else sdk_login_source(provider, env=env)
+    except FinetuneError as exc:
+        fix = exc.hint or f"unlock the OS keychain and retry, or set {spec.env_var}"
+        return KeyUnreadable(redact(exc.message), redact(fix))
+    except Exception as exc:
+        # Never the error's message: a keychain backend's error may hold what it read.
+        return KeyUnreadable(
+            f"could not read the {spec.provider} key from the OS keychain ({type(exc).__name__})",
+            f"check that the OS keychain works and retry, or set {spec.env_var}",
+        )
