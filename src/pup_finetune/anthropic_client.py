@@ -7,13 +7,18 @@
 """Chat completions from Anthropic's Messages API, through the official SDK.
 
 This is the only module that imports the ``anthropic`` SDK (the ``anthropic`` extra); it is
-loaded only when an Anthropic judge is used (:func:`pup_finetune.judges.open_client`). The SDK
-1.x is built on ``httpx2``: nothing from the ``httpx`` package is ever passed to it.
+loaded only when an Anthropic judge or compare model is used
+(:func:`pup_finetune.judges.open_client`). The SDK 1.x is built on ``httpx2``: nothing from
+the ``httpx`` package is ever passed to it.
 
-:class:`AnthropicChatClient` answers :class:`~pup_finetune.inference.ChatCompleter` calls:
+:class:`AnthropicChatClient` answers :class:`~pup_finetune.inference.ChatCompleter` calls,
+whose messages and tools are in the OpenAI form:
 
-- A leading system message becomes the top-level ``system``; the other messages are sent as
-  they are, as text. ``model`` is the bare model id and ``max_tokens`` the judge's limit,
+- The messages become the top-level ``system`` and alternating turns, with tool calls and
+  their results as ``tool_use`` and ``tool_result`` blocks
+  (:func:`~pup_finetune.anthropic_messages.anthropic_messages`, which the compare target's
+  skip rule checks too). ``tools`` become Anthropic tools (``input_schema`` from
+  ``parameters``). ``model`` is the bare model id and ``max_tokens`` the caller's limit,
   which thinking shares on current models.
 - No sampling parameter (``temperature``, ``top_p``, ``top_k``) is ever sent: current models
   reject them.
@@ -24,13 +29,15 @@ loaded only when an Anthropic judge is used (:func:`pup_finetune.judges.open_cli
   none is given.
 - The models with server-side refusal fallbacks (:data:`FALLBACK_MODELS`) are called through
   the beta Messages API with ``fallbacks="default"``, so a declined request is retried on
-  the fallback model the API picks for the refusal's category.
+  the fallback model the API picks for the refusal's category. A compare model is opened
+  with ``fallbacks=False``: its answers must be its own.
 
 The answer maps back to a :class:`~pup_finetune.inference.ChatCompletion`: the text blocks
-concatenated (``thinking`` and ``fallback`` blocks are ignored), the usage, the model that
-answered, and ``stop_reason`` as ``finish_reason`` (``end_turn`` is ``stop``, ``max_tokens``
-and ``model_context_window_exceeded`` are ``length``, ``refusal`` stays ``refusal``, anything
-else passes through).
+concatenated (``thinking`` and ``fallback`` blocks are ignored), its ``tool_use`` blocks as
+OpenAI ``tool_calls`` (``arguments`` the input as a JSON string), the usage, the model that
+answered, and ``stop_reason`` as ``finish_reason`` (``end_turn`` is ``stop``, ``tool_use`` is
+``tool_calls``, ``max_tokens`` and ``model_context_window_exceeded`` are ``length``,
+``refusal`` stays ``refusal``, anything else passes through).
 
 Errors are the SDK's typed exceptions, after its own retries (``max_retries`` is set
 explicitly): a rejected key, or a failed SDK sign-in (``CredentialsError``,
@@ -52,6 +59,7 @@ when the client is built is a :class:`~pup_finetune.errors.UsageError` with the 
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from collections.abc import Mapping, Sequence
@@ -62,6 +70,7 @@ import anthropic
 from pydantic import SecretStr
 
 from pup_finetune import credentials
+from pup_finetune.anthropic_messages import anthropic_messages
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.http_common import DETAIL_LIMIT, bearer_key
 from pup_finetune.inference import (
@@ -71,7 +80,7 @@ from pup_finetune.inference import (
     JudgeConfig,
     is_context_limit,
 )
-from pup_finetune.judges import PROVIDERS
+from pup_finetune.judges import PROVIDERS, login_hint
 from pup_finetune.providers.base import ProviderAuthError, ProviderCapacityError, TransientError
 from pup_finetune.redaction import redact
 
@@ -117,6 +126,7 @@ STRUCTURED_OUTPUT_MODELS: Final = EFFORT_MODELS | frozenset(
 _DATED: Final = re.compile(r"^(?P<base>.+?)-\d{8}$")
 _FINISH_REASONS: Final = {
     "end_turn": "stop",
+    "tool_use": "tool_calls",
     "max_tokens": "length",
     "model_context_window_exceeded": "length",
     "refusal": "refusal",
@@ -163,7 +173,8 @@ class AnthropicChatClient:
     ``api_key`` ``None`` lets the SDK sign in on its own (see the module docstring).
     ``client`` replaces the SDK client (tests pass a fake, or an SDK client on a mock
     transport); ``timeout_s`` bounds each attempt and ``max_attempts`` counts the SDK's
-    retries in. Use it as a context manager, or call :meth:`close`.
+    retries in; ``fallbacks`` ``False`` never asks for server-side refusal fallbacks. Use it
+    as a context manager, or call :meth:`close`.
     """
 
     def __init__(
@@ -174,6 +185,7 @@ class AnthropicChatClient:
         client: SdkClient | None = None,
         timeout_s: float = DEFAULT_TIMEOUT_S,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        fallbacks: bool = True,
     ) -> None:
         if max_attempts < 1:
             raise ValueError(f"max_attempts must be at least 1, got {max_attempts}")
@@ -199,6 +211,7 @@ class AnthropicChatClient:
                 ) from exc
             client = cast(SdkClient, built)
         self._client = client
+        self._fallbacks = fallbacks
 
     @classmethod
     def for_judge(
@@ -207,8 +220,10 @@ class AnthropicChatClient:
         *,
         env: Mapping[str, str] | None = None,
         client: SdkClient | None = None,
+        timeout_s: float | None = None,
+        fallbacks: bool = True,
     ) -> AnthropicChatClient:
-        """A client for ``config``'s judge, with the key of its credential.
+        """A client for ``config``'s judge (or compare model), with the key of its credential.
 
         The key comes from :func:`pup_finetune.credentials.lookup` (the environment, then
         the keychain; ``env`` replaces the environment). Without one, the client is built
@@ -217,13 +232,22 @@ class AnthropicChatClient:
         :func:`~pup_finetune.credentials.resolve` would.
         """
         environment = os.environ if env is None else env
+        timeout_s = DEFAULT_TIMEOUT_S if timeout_s is None else timeout_s
         found = credentials.lookup(config.credential, env=environment)
         if found is not None:
-            return cls(found.value, base_url=config.base_url, client=client)
+            return cls(
+                found.value,
+                base_url=config.base_url,
+                client=client,
+                timeout_s=timeout_s,
+                fallbacks=fallbacks,
+            )
         if credentials.sdk_login_source(config.credential, env=environment) is None:
             raise credentials.missing_key_error(config.credential, hint=_login_hint())
         credentials.register_sdk_secrets(config.credential, env=environment)
-        return cls(None, base_url=config.base_url, client=client)
+        return cls(
+            None, base_url=config.base_url, client=client, timeout_s=timeout_s, fallbacks=fallbacks
+        )
 
     def __enter__(self) -> Self:
         return self
@@ -269,14 +293,13 @@ class AnthropicChatClient:
         """One message from ``model``, mapped as the module docstring says.
 
         ``temperature`` is ignored (current models reject it); ``max_tokens`` is required by
-        the API, so it defaults to the Anthropic judge's limit. ``tools`` are not supported:
-        judges call none.
+        the API, so it defaults to the Anthropic judge's limit.
         """
         del temperature  # never sent: current models reject sampling parameters
-        if tools:
-            raise UsageError("the Anthropic judge client does not send tools")
         what = f"a message from {model}"
         params = self._params(messages, model=model, max_tokens=max_tokens)
+        if tools:
+            params["tools"] = [_anthropic_tool(tool) for tool in tools]
         base = _base_model(model)
         output_config: dict[str, Any] = {}
         if base in EFFORT_MODELS:
@@ -286,7 +309,7 @@ class AnthropicChatClient:
         if output_config:
             params["output_config"] = output_config
         try:
-            if base in FALLBACK_MODELS:
+            if self._fallbacks and base in FALLBACK_MODELS:
                 message = self._client.beta.messages.create(
                     **params, betas=[FALLBACK_BETA], fallbacks="default"
                 )
@@ -299,20 +322,14 @@ class AnthropicChatClient:
     def _params(
         self, messages: Sequence[Mapping[str, Any]], *, model: str, max_tokens: int | None
     ) -> dict[str, Any]:
-        system: list[str] = []
-        rest = list(messages)
-        while rest and rest[0].get("role") == "system":
-            system.append(_text(rest.pop(0).get("content")))
+        system, turns = anthropic_messages(messages)
         params: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens if max_tokens is not None else _DEFAULT_MAX_TOKENS,
-            "messages": [
-                {"role": str(message.get("role")), "content": _text(message.get("content"))}
-                for message in rest
-            ],
+            "messages": turns,
         }
-        if system:
-            params["system"] = "\n\n".join(system)
+        if system is not None:
+            params["system"] = system
         return params
 
     # --- errors -----------------------------------------------------------------------
@@ -380,22 +397,35 @@ class AnthropicChatClient:
 
 def _login_hint() -> str:
     """How a user signs in to Anthropic: our key, or the SDK's own login."""
-    spec = credentials.get_spec(SOURCE)
-    return f"{credentials.login_hint(spec)}, or sign in with `ant auth login`"
+    return login_hint(SOURCE)
 
 
-def _text(content: object) -> str:
-    """A message's content as text: a string as it is, the text of text parts."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, Sequence):
-        parts = [
-            str(part.get("text", ""))
-            for part in content
-            if isinstance(part, Mapping) and part.get("type") == "text"
-        ]
-        return "".join(parts)
-    return "" if content is None else str(content)
+def _anthropic_tool(tool: Mapping[str, Any]) -> dict[str, Any]:
+    """An OpenAI function tool as an Anthropic tool."""
+    function = tool.get("function")
+    function = function if isinstance(function, Mapping) else tool
+    parameters = function.get("parameters")
+    return {
+        "name": str(function.get("name", "")),
+        "description": str(function.get("description") or ""),
+        "input_schema": dict(parameters) if parameters else {"type": "object", "properties": {}},
+    }
+
+
+def _tool_calls(blocks: Sequence[Any]) -> list[dict[str, Any]]:
+    """The ``tool_use`` blocks of an answer as OpenAI tool calls."""
+    return [
+        {
+            "id": str(getattr(block, "id", "")),
+            "type": "function",
+            "function": {
+                "name": str(getattr(block, "name", "")),
+                "arguments": json.dumps(getattr(block, "input", None) or {}, ensure_ascii=False),
+            },
+        }
+        for block in blocks
+        if getattr(block, "type", None) == "tool_use"
+    ]
 
 
 def _detail(exc: anthropic.AnthropicError) -> str:
@@ -414,11 +444,15 @@ def _detail(exc: anthropic.AnthropicError) -> str:
 
 def _completion(message: Any, model: str) -> ChatCompletion:
     """The SDK's message as a :class:`~pup_finetune.inference.ChatCompletion`."""
+    blocks = list(getattr(message, "content", None) or [])
     texts = [
         str(getattr(block, "text", "") or "")
-        for block in getattr(message, "content", None) or []
+        for block in blocks
         if getattr(block, "type", None) == "text"
     ]
+    answer: dict[str, Any] = {"role": "assistant", "content": "".join(texts)}
+    if calls := _tool_calls(blocks):
+        answer["tool_calls"] = calls
     usage: dict[str, Any] = {}
     raw_usage = getattr(message, "usage", None)
     prompt = getattr(raw_usage, "input_tokens", None)
@@ -432,7 +466,7 @@ def _completion(message: Any, model: str) -> ChatCompletion:
     stop = getattr(message, "stop_reason", None)
     answered = getattr(message, "model", None)
     return ChatCompletion(
-        message={"role": "assistant", "content": "".join(texts)},
+        message=answer,
         usage=usage,
         model=answered if isinstance(answered, str) and answered else model,
         finish_reason=_FINISH_REASONS.get(stop, stop) if isinstance(stop, str) else None,

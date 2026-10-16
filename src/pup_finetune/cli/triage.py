@@ -284,7 +284,8 @@ def triage_rows(
         f"triage: {len(plan.pending)} judge calls for {len(plan.rows)} rows "
         f"({plan.votes_reused} votes reused)"
     )
-    with open_clients(plan.judges) as clients:
+    # Only the judges with votes left: a resumed council needs no other's key.
+    with open_clients(plan.pending_judges) as clients:
         report = triage.run_triage(plan, clients, concurrency=concurrency, progress=info)
     if report.agreement is not None:
         return _agreement_result(dataset, plan, report, report.agreement, criteria, args)

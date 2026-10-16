@@ -153,6 +153,16 @@ def test_the_system_message_is_top_level_and_no_sampling_parameter_is_sent() -> 
     assert sdk.closed
 
 
+def test_every_system_message_joins_the_top_level_system() -> None:
+    sdk = FakeSdk()
+    later = [*MESSAGES, {"role": "assistant", "content": "Yes."}]
+    later += [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "Why?"}]
+    chat(sdk).complete(later, model="claude-haiku-4-5")
+    (params,) = sdk.messages.calls
+    assert params["system"] == "You judge.\n\nBe brief."
+    assert [turn["role"] for turn in params["messages"]] == ["user", "assistant", "user"]
+
+
 def test_max_tokens_defaults_to_the_anthropic_judge_limit() -> None:
     sdk = FakeSdk()
     chat(sdk).complete(MESSAGES[1:], model="claude-haiku-4-5")
@@ -167,9 +177,142 @@ def test_text_parts_are_sent_as_text() -> None:
     assert sdk.messages.calls[0]["messages"] == [{"role": "user", "content": "Is it ok?"}]
 
 
-def test_tools_are_refused() -> None:
-    with pytest.raises(UsageError, match="does not send tools"):
-        chat(FakeSdk()).complete(MESSAGES, model="claude-opus-5-5", tools=[{"type": "function"}])
+WEATHER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Current conditions for a city.",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+    },
+}
+
+
+def call(call_id: str, city: str) -> dict[str, Any]:
+    arguments = json.dumps({"city": city})
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": "get_weather", "arguments": arguments},
+    }
+
+
+TOOL_TURNS = [
+    {"role": "system", "content": "You answer about the weather."},
+    {"role": "user", "content": "Weather in Northvale and Eastport?"},
+    {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [call("c1", "Northvale"), call("c2", "Eastport")],
+    },
+    {"role": "tool", "tool_call_id": "c1", "content": "14C, rain"},
+    {"role": "tool", "tool_call_id": "c2", "content": "20C, sun"},
+    {
+        "role": "assistant",
+        "content": "Rain in Northvale, sun in Eastport.",
+        "reasoning_content": "x",
+    },
+    {"role": "user", "content": "And tomorrow?"},
+]
+
+
+def test_tools_and_tool_turns_are_sent_as_anthropic_blocks() -> None:
+    sdk = FakeSdk()
+    chat(sdk).complete(TOOL_TURNS, model="claude-opus-5-5", tools=[WEATHER_TOOL], max_tokens=100)
+    (params,) = sdk.calls
+    assert params["system"] == "You answer about the weather."
+    assert params["tools"] == [
+        {
+            "name": "get_weather",
+            "description": "Current conditions for a city.",
+            "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}},
+        }
+    ]
+    assert params["messages"] == [
+        {"role": "user", "content": "Weather in Northvale and Eastport?"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "c1",
+                    "name": "get_weather",
+                    "input": {"city": "Northvale"},
+                },
+                {
+                    "type": "tool_use",
+                    "id": "c2",
+                    "name": "get_weather",
+                    "input": {"city": "Eastport"},
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "c1", "content": "14C, rain"},
+                {"type": "tool_result", "tool_use_id": "c2", "content": "20C, sun"},
+            ],
+        },
+        {"role": "assistant", "content": "Rain in Northvale, sun in Eastport."},
+        {"role": "user", "content": "And tomorrow?"},
+    ]
+
+
+def tool_use(block_id: str, city: str) -> SimpleNamespace:
+    return SimpleNamespace(type="tool_use", id=block_id, name="get_weather", input={"city": city})
+
+
+def test_a_tool_use_answer_is_an_openai_tool_call_that_round_trips() -> None:
+    answer = message(text("Checking."), tool_use("toolu_1", "Northvale"), stop_reason="tool_use")
+    sdk = FakeSdk(lambda params: answer)
+    result = chat(sdk).complete(TOOL_TURNS[:2], model="claude-opus-5-5", tools=[WEATHER_TOOL])
+    assert result.finish_reason == "tool_calls"
+    assert result.message == {
+        "role": "assistant",
+        "content": "Checking.",
+        "tool_calls": [
+            {
+                "id": "toolu_1",
+                "type": "function",
+                "function": {"name": "get_weather", "arguments": '{"city": "Northvale"}'},
+            }
+        ],
+    }
+    following = [
+        *TOOL_TURNS[:2],
+        result.message,
+        {"role": "tool", "tool_call_id": "toolu_1", "content": "14C"},
+    ]
+    chat(sdk).complete(following, model="claude-opus-5-5", tools=[WEATHER_TOOL])
+    assert sdk.calls[-1]["messages"][1:] == [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Checking."},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "get_weather",
+                    "input": {"city": "Northvale"},
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "14C"}],
+        },
+    ]
+
+
+def test_tool_arguments_that_are_not_a_json_object_are_kept_raw() -> None:
+    sdk = FakeSdk()
+    broken = {"id": "c9", "type": "function", "function": {"name": "f", "arguments": "{oops"}}
+    turns = [
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "content": "", "tool_calls": [broken]},
+    ]
+    chat(sdk).complete(turns, model="claude-haiku-4-5")
+    assert sdk.calls[0]["messages"][1]["content"][0]["input"] == {"_raw": "{oops"}
 
 
 @pytest.mark.parametrize("model", sorted(FALLBACK_MODELS))
@@ -184,6 +327,29 @@ def test_models_with_fallbacks_use_the_beta_api_with_default_fallbacks(model: st
         "effort": "low",
         "format": {"type": "json_schema", "schema": VERDICT_SCHEMA},
     }
+
+
+def test_a_compare_model_never_asks_for_fallbacks_and_a_judge_still_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pup_finetune.evaluation.compare import CompareTarget, open_compare_sampler
+    from pup_finetune.evaluation.runner import open_judge_client
+
+    sdk = FakeSdk()
+    monkeypatch.setattr(anthropic, "Anthropic", lambda **kwargs: sdk)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", API_KEY)
+    config = parse_judge("anthropic/claude-opus-5-5")
+    target = CompareTarget(config=config, source="flag")
+    with open_compare_sampler(target, [], seed=0) as sampler:
+        sampler.generate(MESSAGES, [], max_tokens=100)
+    (compared,) = sdk.messages.calls
+    assert "fallbacks" not in compared
+    assert "betas" not in compared
+    assert sdk.beta.messages.calls == []
+    with open_judge_client(config, calls=1) as client:
+        client.complete(MESSAGES, model=config.model, max_tokens=100)
+    (judged,) = sdk.beta.messages.calls
+    assert judged["fallbacks"] == "default"
 
 
 @pytest.mark.parametrize("model", sorted(EFFORT_MODELS - FALLBACK_MODELS))
@@ -543,3 +709,45 @@ def test_the_requested_reasoning_effort_is_the_output_effort() -> None:
     unknown = FakeSdk()
     chat(unknown).complete(MESSAGES, model="claude-3-haiku", reasoning_effort="low")
     assert "output_config" not in unknown.messages.calls[0]
+
+
+def test_the_real_sdk_client_sends_tools_and_reads_a_tool_use_answer() -> None:
+    seen: list[httpx2.Request] = []
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(
+            200,
+            json={
+                "id": "msg_synthetic",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-haiku-4-5",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_01", "name": "get_weather",
+                     "input": {"city": "Northvale"}},
+                ],
+                "stop_reason": "tool_use",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 40, "output_tokens": 12},
+            },
+        )  # fmt: skip
+
+    sdk = anthropic.Anthropic(
+        api_key=API_KEY,
+        http_client=httpx2.Client(transport=httpx2.MockTransport(handle)),
+        max_retries=0,
+    )
+    with AnthropicChatClient(SecretStr(API_KEY), client=sdk) as client:
+        result = client.complete(TOOL_TURNS, model="claude-haiku-4-5", tools=[WEATHER_TOOL])
+    assert result.message["tool_calls"] == [
+        {
+            "id": "toolu_01",
+            "type": "function",
+            "function": {"name": "get_weather", "arguments": '{"city": "Northvale"}'},
+        }
+    ]
+    assert result.finish_reason == "tool_calls"
+    body = json.loads(seen[0].content)
+    assert body["tools"][0]["name"] == "get_weather"
+    assert body["messages"][2]["content"][1]["type"] == "tool_result"

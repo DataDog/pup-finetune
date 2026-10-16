@@ -216,6 +216,37 @@ one is assigned by its trace. A record that is not a conversation is excluded as
 `split_conflict`. The fetch also writes the dataset's `push.json`, with every row's record,
 so `evaluate` publishes onto that dataset and `dataset push` has nothing to send.
 
+## The evaluation directory
+
+An evaluation directory (`RUN_DIR/eval` by default) holds `evaluation.json` (the identity a
+rerun must match), `generations.jsonl` and `results.jsonl` (one line per target and case,
+appended; the last line of a pair wins), `calibration.json` and `summary.json`, and, once
+published, `experiments.json` and `published.json`.
+
+With `evaluate --compare-model`, `compare.json` records the compare target, written once it
+has answered one short probe and never changed: `{"spec", "model": {"provider", "model",
+"base_url", "credential", "temperature", "max_tokens", "reasoning_effort"}}`, where
+`max_tokens` is 16000. A rerun resolves the spec again and refuses a directory whose
+`compare.json` no longer matches. Its pairs go into the same files with `"target": "compare"`;
+`evaluation.json` is unchanged.
+
+`summary.json` has, per target under `targets`, the judge pass rate, every metric, errors by
+stage, `errors_too_long` (requests longer than a context window, no retry fixes them) and
+`errors_too_long_by_stage` (the same requests by the stage that sent them: `generation` for
+the target's own model, `judge` for the judge),
+`truncated` (generations cut off at their limit) and `refused` (answers the provider refused).
+With base and tuned, `paired` and `tuned_minus_base`; with a compare target,
+`tuned_minus_compare` (`judge_pass_rate`, `ci95`, `n_cases`, `n_trajectories`, `resamples`,
+`seed`, and its own `paired` counts), over the cases the compare model was sent. Each target
+also has `skipped`, the cases it did not replay, in none of its rates: `0` for base and
+tuned, and for the compare model the cases whose conversation its API refuses every time.
+The `evaluate` preview counts those by reason under `compare.skipped_by_reason`:
+`no_messages` (nothing to send before the action), `starts_on_assistant` (on Anthropic, a
+conversation whose first turn is the assistant's), `unanswered_tool_call` (a tool call with
+no tool result right after it), `orphan_tool_result` (a tool result with no call right
+before it) and `ends_on_assistant` (on Anthropic, a conversation that ends on an assistant
+turn).
+
 ## Where a dataset stands
 
 Every dataset command's result (`import`, `pull`, `show`, `sample`, `label`, `triage` and
@@ -253,7 +284,7 @@ is:
 | --- | --- | --- |
 | `train`, `resume` | How the run ended (`status`), the best epoch and its validation loss, each epoch's losses (`best: true` on the best one), the promoted model, the deployable checkpoint's name, the elapsed seconds and what next. | `files.result` (`result.json`: every checkpoint with its URI, and each epoch's checkpoints and tokens) and `files.epochs` (`epochs.json`). |
 | `status` | The phase, epoch and step against their maximums, the last training loss, the validation losses, the best epoch, the elapsed time and ETA, the promoted model, what next; `resume_mode` only for a resumable run, and `worker` (`pid`, `state`: `running`, `starting`, `stale` or `exited`, `heartbeat_age_s`, `log`) only when the run has a worker or is training. | `files.state` (`state.json`), `files.epochs` and `files.result` (`null` until the run has one). |
-| `evaluate` | `headline` (the judge pass rate of `base` and `tuned`, their `delta` with its `ci95`, the paired `wins`, `regressions` and `ties`, and the numbers of `cases` and `trajectories`), each metric's rate per target, the errors per target, the publication and the caveat. | `files.summary` (`summary.json`: per target the judge's passes, every metric's `n`, `passed` and `rate`, the agreement per trajectory, tokens and errors by stage; the paired counts; the bootstrap's resamples and seed) and `files.results` (`results.jsonl`, one line per judged pair). |
+| `evaluate` | `judge_model` and `compare_model` (`null` without one), `headline` (the judge pass rate of `base` and `tuned`, and `compare` with a compare target, their `delta` with its `ci95`, the paired `wins`, `regressions` and `ties`, `tuned_minus_compare` with a compare target, with the cases it `skipped`, and the numbers of `cases` and `trajectories`), each metric's rate per target, the errors per target, the publication and the caveat. | `files.summary` (`summary.json`: per target the judge's passes, every metric's `n`, `passed` and `rate`, the agreement per trajectory, tokens and errors by stage; the paired counts; the bootstrap's resamples and seed) and `files.results` (`results.jsonl`, one line per judged pair). |
 
 Under pup, `--output table` (or `csv`) without a `--jq` filter shows the rows of a list:
 `models list` one row per model, `auth status` per provider, `doctor` per check and

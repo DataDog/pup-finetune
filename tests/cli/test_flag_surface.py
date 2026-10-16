@@ -211,6 +211,7 @@ def test_max_seq_len_over_the_model_s_context_is_refused(dataset: Path, tmp_path
 # --- judge aliases -----------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("judge_keys")
 @pytest.mark.parametrize("flag", ["--judge-model"])
 def test_evaluate_previews_a_judge_alias_as_its_full_id(run_dir: Path, flag: str) -> None:
     full = "accounts/fireworks/models/glm-5p3-flash"
@@ -221,6 +222,7 @@ def test_evaluate_previews_a_judge_alias_as_its_full_id(run_dir: Path, flag: str
     assert f"--judge-model {full}" in data["next_command"]
 
 
+@pytest.mark.usefixtures("judge_keys")
 def test_train_evaluate_previews_a_judge_alias_as_its_full_id(
     dataset: Path, tmp_path: Path
 ) -> None:

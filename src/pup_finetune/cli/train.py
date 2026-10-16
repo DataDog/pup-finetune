@@ -71,7 +71,7 @@ from pup_finetune.cli._views import (
     train_view,
 )
 from pup_finetune.data.dataset_dir import DatasetDir
-from pup_finetune.display import display_path, quoted
+from pup_finetune.display import display_path, joined, quoted
 from pup_finetune.errors import (
     PAID_RUN,
     FinetuneError,
@@ -640,10 +640,6 @@ def _remote_sync(run: RunDir) -> RemoteSync | None:
     return sync_remote(run, remote_jobs(provider))
 
 
-def _joined(names: Sequence[str]) -> str:
-    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
-
-
 def provider_for_model(model: str, given: str | None, runtime: Runtime) -> tuple[str, str]:
     """The provider ``train`` uses for ``--model`` and where it came from: ``given``
     (``--provider``), else the one provider whose profiles name the alias ``model``
@@ -657,7 +653,7 @@ def provider_for_model(model: str, given: str | None, runtime: Runtime) -> tuple
         return found[0], f"inferred from --model {model}"
     if found:
         raise UsageError(
-            f"{model} is offered by {_joined(found)}; pass --provider",
+            f"{model} is offered by {joined(found)}; pass --provider",
             hint=f"for example --provider {found[0]}",
         )
     known = "; ".join(
@@ -1100,7 +1096,8 @@ def train(
         )
         return _remote_started(run, run_id, record, upload, notes)
     if plan is not None:
-        with evaluation.open_judge_client(plan.judge) as client:
+        calls = plan.work(None).judge_calls
+        with evaluation.open_judge_client(plan.judge, calls=calls) as client:
             # Before anything is trained: a judge that fails calibration stops the run here.
             # A run no epoch of which can finish is never evaluated: calibrating would only
             # spend judge calls (the preview warned).
@@ -1376,7 +1373,8 @@ def run_next(
     A running run is watched, a stale one cancelled. A completed run with a model
     (``promoted``: a promoted model or a deployable checkpoint) goes on as
     :func:`~pup_finetune.evaluation.runner.next_after_training` says: evaluated (a free
-    preview), its recorded evaluation continued, or, once that is complete, deployed. So
+    preview), its recorded evaluation continued, or, once that is complete, deployed (with
+    no next command and the evaluation's steps while the missing push kept it unpublished). So
     does a cancelled one whose best epoch was promoted, with resuming it as a step. A
     completed run without one (no epoch finished, e.g. under a token budget below one
     epoch) has no next command: the step trains a new run. Anything else (interrupted,
@@ -1394,9 +1392,13 @@ def run_next(
             )
         )
     elif phase == "completed":
-        next_command = evaluation.next_after_training(path)
+        after = evaluation.next_after_training(path)
+        next_command = after["next_command"]
+        steps += after["next_steps"]
     elif phase == "cancelled" and promoted:
-        next_command = evaluation.next_after_training(path)
+        after = evaluation.next_after_training(path)
+        next_command = after["next_command"]
+        steps += after["next_steps"]
         steps.append(
             step(resume_command(path), "to train the remaining epochs (paid; it previews first)")
         )

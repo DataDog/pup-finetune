@@ -20,15 +20,16 @@ from typing import Any
 
 import pytest
 
-from pup_finetune.errors import ExternalError, StateError
+from pup_finetune.errors import ExternalError, SettingsConflict, StateError
+from pup_finetune.evaluation.bootstrap import paired_bootstrap_ci
 from pup_finetune.evaluation.cases import ReplayCase
+from pup_finetune.evaluation.compare import attach_compare, stored_compare
 from pup_finetune.evaluation.judge import Judgment
 from pup_finetune.evaluation.replay import (
     CAVEAT,
     EvalDir,
     PairKey,
     evaluation_identity,
-    paired_bootstrap_ci,
     remaining_work,
     run_replay,
     summarize,
@@ -55,6 +56,7 @@ def make_case(row: str, index: int) -> ReplayCase:
 
 
 CASES = [make_case(row, index) for row in ("row-a", "row-b", "row-c") for index in (1, 3)]
+WITH_COMPARE = dict.fromkeys(("base", "tuned", "compare"), CASES)
 
 
 def identity(
@@ -198,7 +200,8 @@ def test_a_rerun_skips_the_completed_pairs(tmp_path: Path) -> None:
     assert again.complete
     assert base.calls == tuned.calls == []
     assert judge.calls == 0
-    assert remaining_work(EvalDir(out), CASES) == {"done": 12, "generate": 0, "judge": 0}
+    left = remaining_work(EvalDir(out), {"base": CASES, "tuned": CASES})
+    assert left == {target: {"done": 6, "generate": 0, "judge": 0} for target in ("base", "tuned")}
     # Nothing left to generate: no sampler is needed at all.
     assert replay(out, {}, Judge()).complete
 
@@ -210,7 +213,10 @@ def test_a_rerun_does_only_what_is_missing(tmp_path: Path) -> None:
     outcome = replay(out, {"base": ScriptedSampler(), "tuned": first}, judge)
     assert outcome.complete  # every pair has a result, two of them errors
     assert outcome.summary["errors"] == {"base": 1, "tuned": 2}
-    assert remaining_work(EvalDir(out), CASES) == {"done": 9, "generate": 1, "judge": 3}
+    assert remaining_work(EvalDir(out), {"base": CASES, "tuned": CASES}) == {
+        "base": {"done": 5, "generate": 0, "judge": 1},
+        "tuned": {"done": 4, "generate": 1, "judge": 2},
+    }
 
     base, tuned, judge = ScriptedSampler(), ScriptedSampler(), Judge()
     again = replay(out, {"base": base, "tuned": tuned}, judge)
@@ -793,3 +799,138 @@ def test_a_live_publisher_starts_before_the_first_pair_and_is_offered_results(
     assert live.offered and max(live.offered) <= 2 * len(CASES)
     assert live.published
     assert outcome.link == "https://example.invalid/compare"
+
+
+# --- a third target -----------------------------------------------------------------------
+
+
+def _three_target_store(tmp_path: Path) -> tuple[dict[PairKey, Any], dict[PairKey, Any]]:
+    samplers = {
+        "base": ScriptedSampler(knows=[q(CASES[0])]),
+        "tuned": ScriptedSampler(knows=[q(case) for case in CASES[:4]]),
+        "compare": ScriptedSampler(knows=[q(case) for case in CASES[1:6]]),
+    }
+    run_replay(
+        CASES,
+        samplers,
+        Judge(),
+        out_dir=tmp_path / "eval",
+        identity=identity(),
+        replays=WITH_COMPARE,
+        compare=compare_identity(),
+    )
+    eval_dir = EvalDir(tmp_path / "eval")
+    return eval_dir.read_results(), eval_dir.read_generations()
+
+
+def test_a_compare_target_adds_its_own_comparison_and_changes_no_other(tmp_path: Path) -> None:
+    results, generations = _three_target_store(tmp_path)
+    two = summarize(CASES, results, generations, seed=0)
+    three = summarize(CASES, results, generations, seed=0, replays=WITH_COMPARE)
+    assert three["paired"] == two["paired"]
+    assert three["tuned_minus_base"] == two["tuned_minus_base"]
+    assert "tuned_minus_compare" not in two
+    # The compare target in place of base gives the same comparison.
+    as_base = {
+        ("base", case_id): result for (target, case_id), result in results.items()
+        if target == "compare"
+    } | {key: result for key, result in results.items() if key[0] == "tuned"}  # fmt: skip
+    swapped = summarize(CASES, as_base, generations, seed=0)
+    assert three["tuned_minus_compare"] == {
+        **swapped["tuned_minus_base"],
+        "paired": swapped["paired"],
+    }
+    assert three["tuned_minus_compare"]["paired"]["regressions"] == 2
+
+
+def compare_identity(model: str = "compare/model", max_tokens: int = 100) -> dict[str, Any]:
+    config = JudgeConfig(model=model, max_tokens=max_tokens)
+    return {"spec": model, "model": config.identity()}
+
+
+def test_the_compare_target_is_frozen_when_attached(tmp_path: Path) -> None:
+    eval_dir = EvalDir(tmp_path / "eval")
+    eval_dir.create()
+    attach_compare(eval_dir.compare_path, None)
+    assert stored_compare(eval_dir.compare_path) is None
+    attach_compare(eval_dir.compare_path, compare_identity())
+    attach_compare(eval_dir.compare_path, compare_identity())
+    assert stored_compare(eval_dir.compare_path) == compare_identity()
+    # Another model is refused with no compare pair at all.
+    with pytest.raises(SettingsConflict, match="compares with compare/model, not other/model"):
+        attach_compare(eval_dir.compare_path, compare_identity("other/model"))
+
+
+def test_a_plan_without_the_attached_compare_target_is_refused(tmp_path: Path) -> None:
+    samplers = {"base": ScriptedSampler(), "tuned": ScriptedSampler(), "compare": ScriptedSampler()}
+    out = tmp_path / "eval"
+    run_replay(CASES, samplers, Judge(), out_dir=out, identity=identity(),
+               replays=WITH_COMPARE, compare=compare_identity())  # fmt: skip
+    summary_before = EvalDir(out).summary_path.read_bytes()
+    with pytest.raises(SettingsConflict, match="planned without"):
+        run_replay(CASES, {}, Judge(), out_dir=out, identity=identity())
+    assert EvalDir(out).summary_path.read_bytes() == summary_before
+
+
+def test_the_compare_target_samples_with_its_own_token_limit(tmp_path: Path) -> None:
+    seen: dict[str, set[int]] = {}
+
+    class Limits(ScriptedSampler):
+        def __init__(self, name: str) -> None:
+            super().__init__()
+            self.name = name
+
+        def generate(
+            self, messages: list[ChatMessage], tools: list[ToolSpec], *, max_tokens: int
+        ) -> Generation:
+            seen.setdefault(self.name, set()).add(max_tokens)
+            return super().generate(messages, tools, max_tokens=max_tokens)
+
+    samplers = {name: Limits(name) for name in ("base", "tuned", "compare")}
+    run_replay(CASES, samplers, Judge(), out_dir=tmp_path / "eval", identity=identity(max_tokens=64),
+               replays=WITH_COMPARE, compare=compare_identity(max_tokens=16000))  # fmt: skip
+    assert seen == {"base": {64}, "tuned": {64}, "compare": {16000}}
+
+
+def test_a_new_identity_without_work_retires_the_compare_target(tmp_path: Path) -> None:
+    eval_dir = EvalDir(tmp_path / "eval")
+    eval_dir.create()
+    eval_dir.check_identity(identity())
+    attach_compare(eval_dir.compare_path, compare_identity())
+    eval_dir.check_identity(identity(seed=5))
+    assert stored_compare(eval_dir.compare_path) is None
+
+
+def test_a_target_replays_only_its_own_cases(tmp_path: Path) -> None:
+    knows = [q(case) for case in CASES]
+    samplers = {
+        "base": ScriptedSampler(),
+        "tuned": ScriptedSampler(knows=knows),
+        "compare": ScriptedSampler(knows=knows),
+    }
+    replays = {"base": CASES, "tuned": CASES, "compare": CASES[2:]}
+    outcome = run_replay(
+        CASES, samplers, Judge(), out_dir=tmp_path / "eval", identity=identity(),
+        replays=replays, compare=compare_identity(),
+    )  # fmt: skip
+    assert outcome.complete
+    assert len(samplers["compare"].calls) == len(CASES) - 2
+    assert len(samplers["tuned"].calls) == len(CASES)
+    summary = outcome.summary
+    compared = summary["targets"]["compare"]
+    assert (compared["skipped"], compared["pending"]) == (2, 0)
+    assert compared["judge_pass"] == {"rate": 1.0, "passed": 4, "n": 4}
+    # tuned minus compare pairs only the cases both answered.
+    versus = summary["tuned_minus_compare"]
+    assert (versus["n_cases"], versus["paired"]["pending"]) == (4, 0)
+    assert summary["targets"]["tuned"]["skipped"] == 0
+    assert summary["tuned_minus_base"]["n_cases"] == len(CASES)
+    assert ("compare", CASES[0].id) not in EvalDir(tmp_path / "eval").read_results()
+
+
+def test_a_target_replays_only_cases_the_evaluation_holds(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="does not hold"):
+        run_replay(
+            CASES[:2], {}, Judge(), out_dir=tmp_path, identity=identity(CASES[:2]),
+            replays={"base": CASES[:2], "tuned": CASES},
+        )  # fmt: skip

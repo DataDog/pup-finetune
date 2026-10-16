@@ -60,7 +60,13 @@ from pup_finetune.providers.base import (
 from pup_finetune.redaction import redact
 from pup_finetune.runs import error_json
 from pup_finetune.runtime import Runtime
-from pup_finetune.storage import DirectoryLock, atomic_write_json, canonical_json, finite_json
+from pup_finetune.storage import (
+    DirectoryLock,
+    atomic_write_json,
+    canonical_json,
+    finite_json,
+    identity_changes,
+)
 
 if TYPE_CHECKING:
     from pup_finetune.evaluation.cases import ReplayCase
@@ -177,7 +183,7 @@ class BenchmarkPlan:
         Raises :class:`SettingsConflict` when its directory holds work done under other
         settings, which ``--confirm`` would refuse.
         """
-        from pup_finetune.evaluation.replay import EvalDir, identity_changes, remaining_work
+        from pup_finetune.evaluation.replay import EvalDir, remaining_work
 
         eval_dir = EvalDir(self.model_dir(candidate))
         stored = eval_dir.stored_identity()
@@ -191,7 +197,7 @@ class BenchmarkPlan:
                     hint="benchmark into a new directory: pass a new --out-dir",
                 )
             return {"done": 0, "generate": len(self.cases), "judge": len(self.cases)}
-        return remaining_work(eval_dir, self.cases, (candidate.target,))
+        return remaining_work(eval_dir, {candidate.target: self.cases})[candidate.target]
 
     def split_warnings(self) -> list[str]:
         """A warning when the test split is too small for the intervals to separate models."""
@@ -201,6 +207,12 @@ class BenchmarkPlan:
             f"the test split holds only {self.trajectories} conversations, so the confidence "
             "intervals are wide: pull more rows for a firmer choice"
         ]
+
+    def judge_calls(self) -> int:
+        """The judge calls a run would still make: calibration's and every candidate's.
+        The preview counts them and execution opens the judge only when one is left."""
+        remaining = sum(self.remaining(candidate)["judge"] for candidate in self.candidates)
+        return remaining + self.calibration_calls()
 
     def calibration_calls(self) -> int:
         if self.settings.skip_calibration or self._calibrated():
@@ -254,7 +266,7 @@ class BenchmarkPlan:
         """The calls the benchmark makes; work ``--out-dir`` already holds is left out."""
         from pup_finetune.evaluation.replay import CAVEAT
         from pup_finetune.judges import billing as judge_billing
-        from pup_finetune.judges import destination
+        from pup_finetune.judges import destination, require_key
 
         settings = self.settings
         models: list[dict[str, Any]] = []
@@ -276,6 +288,11 @@ class BenchmarkPlan:
                 }
             )
         calibration = self.calibration_calls()
+        warnings = self.split_warnings()
+        if judge_calls + calibration:
+            # --confirm would fail on a key nothing provides: fail now, never offer it. A
+            # read-only preview offers none, so it only warns.
+            require_key(self.judge, warnings=warnings if self.runtime.read_only else None)
         billing = [
             get_provider(name, self.runtime).sampling_billing(
                 SamplingUsage(calls=calls, max_tokens_per_call=settings.max_tokens)
@@ -324,7 +341,7 @@ class BenchmarkPlan:
             f"{', '.join(sorted(calls_by_provider))} to generate and to {judged_at} to judge",
             "data_recipients": self.recipients(),
             "caveat": CAVEAT,
-            "warnings": self.split_warnings(),
+            "warnings": warnings,
         }
 
 
@@ -484,7 +501,7 @@ def _replay_model(
             concurrency=plan.settings.concurrency,
             cancel=cancel,
             on_progress=EvaluationProgress(),
-            targets=(candidate.target,),
+            replays={candidate.target: plan.cases},
         )
 
     info(f"benchmarking {candidate.target} on {candidate.provider}")
@@ -508,20 +525,18 @@ def execute(plan: BenchmarkPlan) -> dict[str, Any]:
     cancel = threading.Event()
     errors: dict[str, dict[str, Any]] = {}
     EvalDir(plan.out_dir).create()
-    with (
-        DirectoryLock(plan.out_dir),
-        cancel_on_signals(cancel),
-        open_judge_client(plan.judge) as client,
-    ):
-        calibration = _calibration(plan, client)
-        if calibration is not None and not calibration.get("ok"):
-            return _calibration_failed(plan, calibration)
-        for candidate in plan.candidates:
-            if cancel.is_set():
-                break
-            error = _replay_model(plan, candidate, client, cancel)
-            if error is not None:
-                errors[candidate.target] = error
+    with DirectoryLock(plan.out_dir), cancel_on_signals(cancel):
+        calls = plan.judge_calls()
+        with open_judge_client(plan.judge, calls=calls) as client:
+            calibration = _calibration(plan, client)
+            if calibration is not None and not calibration.get("ok"):
+                return _calibration_failed(plan, calibration)
+            for candidate in plan.candidates:
+                if cancel.is_set():
+                    break
+                error = _replay_model(plan, candidate, client, cancel)
+                if error is not None:
+                    errors[candidate.target] = error
     board = leaderboard(plan, errors)
     result = _result(plan, board, calibration=calibration, cancelled=cancel.is_set())
     atomic_write_json(plan.out_dir / RESULT_FILE, finite_json(result))
@@ -573,12 +588,17 @@ def _by_trajectory(cases: Sequence[ReplayCase], values: Mapping[str, float]) -> 
 def _entry(
     plan: BenchmarkPlan, candidate: Candidate, error: Mapping[str, Any] | None
 ) -> dict[str, Any]:
-    from pup_finetune.evaluation.replay import EvalDir, paired_bootstrap_ci, summarize
+    from pup_finetune.evaluation.bootstrap import paired_bootstrap_ci
+    from pup_finetune.evaluation.replay import EvalDir, summarize
 
     eval_dir = EvalDir(plan.model_dir(candidate))
     results, generations = eval_dir.read_results(), eval_dir.read_generations()
     target = summarize(
-        plan.cases, results, generations, seed=plan.settings.seed, targets=(candidate.target,)
+        plan.cases,
+        results,
+        generations,
+        seed=plan.settings.seed,
+        replays={candidate.target: plan.cases},
     )["targets"][candidate.target]
     passes = _ok_passes(plan, candidate)
     interval = paired_bootstrap_ci(
@@ -621,7 +641,7 @@ def leaderboard(
     given), each with its gap to the best: the mean paired difference over the cases both
     passed through the judge, with a 95% bootstrap CI over trajectories. A model is within
     noise of the best when that CI reaches 0 or there are too few cases for one."""
-    from pup_finetune.evaluation.replay import paired_bootstrap_ci
+    from pup_finetune.evaluation.bootstrap import paired_bootstrap_ci
 
     errors = errors or {}
     entries = [

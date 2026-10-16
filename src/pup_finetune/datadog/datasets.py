@@ -14,9 +14,11 @@
 - Records are added with ``pup llm-obs datasets records-add --confirm``. Without ``--confirm``
   the endpoint only previews; callers run this after their own ``--confirm`` gate. They are
   listed with ``pup llm-obs datasets records-all``, which pages through every record in one
-  call and takes no cursor; a listing it reports ``truncated``, or that reached its page cap,
-  is refused as :class:`RecordsListTruncated` rather than read as the whole dataset. Items it
-  cannot read are counted in :attr:`RecordsListing.unreadable`, not dropped silently.
+  call and takes no cursor, :data:`RECORDS_ALL_PAGE_SIZE` records a page; a listing it reports
+  ``truncated``, that reached its page cap, or that lists one record twice (the dataset changed
+  while it was read) is refused as :class:`RecordsListTruncated` rather than read as the whole
+  dataset. Items it cannot read are counted in :attr:`RecordsListing.unreadable`, not dropped
+  silently.
 
 Lists are read page by page (``meta.after``) until the name is found. Creating is idempotent
 by name: when a create call fails or its response cannot be read, the project or dataset is
@@ -47,6 +49,9 @@ RECORDS_LIST_TIMEOUT_SECONDS = 600.0
 RECORDS_ALL_MAX_PAGES = 200
 """The pages after which ``records-all`` stops, with only a warning on stderr: a listing of
 this many pages may be missing records although it reports ``truncated: false``."""
+RECORDS_ALL_PAGE_SIZE = 1000
+"""Records a ``records-all`` page holds; at pup's default of 100 the page cap stops every
+listing of a dataset over 20,000 records."""
 
 _SOURCE = "Agent Observability"
 
@@ -199,12 +204,20 @@ class LLMObsDatasets:
     def list_records(self, dataset_id: str) -> RecordsListing:
         """Every record of the dataset, through ``records-all``, and how many items were unreadable.
 
-        Raises :class:`RecordsListTruncated` when the response is marked ``truncated`` or
-        fetched :data:`RECORDS_ALL_MAX_PAGES` pages, since records missing from it would be
-        taken for records the dataset does not hold.
+        Raises :class:`RecordsListTruncated` when the response is marked ``truncated``,
+        fetched :data:`RECORDS_ALL_MAX_PAGES` pages or lists a record twice, since records
+        missing from it would be taken for records the dataset does not hold.
         """
         data = self._pup.run_json(
-            ["llm-obs", "datasets", "records-all", "--dataset-id", dataset_id],
+            [
+                "llm-obs",
+                "datasets",
+                "records-all",
+                "--dataset-id",
+                dataset_id,
+                "--limit",
+                str(RECORDS_ALL_PAGE_SIZE),
+            ],
             timeout=RECORDS_LIST_TIMEOUT_SECONDS,
         )
         items = data.get("records") if isinstance(data, dict) else None
@@ -220,12 +233,20 @@ class LLMObsDatasets:
                 source=_SOURCE,
             )
         found: list[DatasetRecord] = []
+        seen: set[str] = set()
         unreadable = 0
         for item in items:
             record = _dataset_record(item)
             if record is None:
                 unreadable += 1
+            elif record.id in seen:
+                raise RecordsListTruncated(
+                    f"records-all listed record {record.id} of dataset {dataset_id} twice: the "
+                    "dataset changed while it was read, so other records may be missing",
+                    source=_SOURCE,
+                )
             else:
+                seen.add(record.id)
                 found.append(record)
         return RecordsListing(found, unreadable)
 

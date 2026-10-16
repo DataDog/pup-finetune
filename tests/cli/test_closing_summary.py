@@ -135,7 +135,7 @@ def test_evaluate_prints_its_warning_then_one_summary_line(run_dir: Path) -> Non
         "evaluation complete: 4 cases from 2 test conversations; judge fake-judge, calibration "
         "passed; judge agreement: base 0%, tuned 25%, tuned - base +25 pts (95% CI "
         f"0 to +50); 1 win, 0 regressions, 3 ties, 0 errors; {CAVEAT}; not published (see the "
-        f"warning above). Next: pup finetune deploy {run_dir}"
+        "warning above)"
     )
     assert "18:03:16 calibration passed: 12/12 checks" in result.stderr
     assert "18:03:16 evaluated 8/8 pairs (100%): 1 judged pass, 7 judged fail, 0 errors" in (
@@ -178,6 +178,17 @@ def test_a_preview_prints_its_card_then_its_warnings_then_the_next_line(
     assert lines[len(card) : -1] == warnings
     assert lines[-1] == f"Next: {data['next_command']}"
     assert "\x1b" not in result.stderr  # off a terminal: plain text
+
+
+def test_the_evaluation_cards_count_one_turn_in_the_singular(run_dir: Path, tmp_path: Path) -> None:
+    dataset = Path(str(json.loads((run_dir / "run.json").read_text())["dataset_dir"]))
+    previews = (
+        invoke("evaluate", str(run_dir), "--max-cases", "1"),
+        invoke("benchmark", str(dataset), "--models", "fake-model", "--max-cases", "1"),
+    )
+    for preview in previews:
+        assert preview.exit_code == 2, preview.stderr
+        assert " 1 turn per conversation" in preview.stderr
 
 
 def test_quiet_turns_off_the_summary_but_not_the_warnings(
@@ -256,7 +267,6 @@ def test_on_a_terminal_evaluate_shows_the_table(run_dir: Path) -> None:
         "paired: 1 win, 0 regressions, 3 ties, 0 errors",
         CAVEAT,
         "not published (see the warning above)",
-        f"next: pup finetune deploy {run_dir}",
     ]
     assert lines[start - 1].startswith("warning: the evaluation was not published")
 
@@ -432,6 +442,56 @@ def test_a_calibration_failure_says_nothing_was_evaluated() -> None:
         )
 
 
+def test_each_comparison_counts_the_errors_of_its_own_two_targets() -> None:
+    result = {
+        "status": "complete_with_errors",
+        "judge_model": "j",
+        "calibration": {"ok": True},
+        "errors": {"base": 1, "tuned": 2, "compare": 4},
+        "headline": {
+            "judge_pass_rate": {"base": 0.5, "tuned": 0.75, "compare": 0.5, "delta": 0.25},
+            "paired": {"wins": 1, "regressions": 0, "ties": 3},
+            "tuned_minus_compare": {"delta": 0.25, "wins": 1, "regressions": 0, "ties": 3},
+            "cases": 4,
+            "trajectories": 2,
+        },
+    }
+    found = summarize("evaluate", result)
+    assert found is not None
+    (base_line,) = [line for line in found.lines if line.startswith("tuned - base")]
+    (compare_line,) = [line for line in found.lines if line.startswith("tuned - compare")]
+    assert base_line.endswith("3 ties, 3 errors")
+    assert compare_line.endswith("3 ties, 6 errors")
+
+
+def test_a_published_comparison_lists_its_three_experiments_as_a_sentence() -> None:
+    result = {
+        "status": "complete",
+        "judge_model": "j",
+        "calibration": {"ok": True},
+        "headline": {
+            "judge_pass_rate": {"base": 0.5, "tuned": 0.75, "compare": 0.5, "delta": 0.25},
+            "paired": {"wins": 1, "regressions": 0, "ties": 3},
+            "tuned_minus_compare": {"delta": 0.25, "wins": 1, "regressions": 0, "ties": 3},
+            "cases": 4,
+            "trajectories": 2,
+        },
+        "publication": {
+            "status": "published",
+            "experiments": {
+                target: {"name": f"pup-finetune-{target}-r"}
+                for target in ("base", "tuned", "compare")
+            },
+        },
+    }
+    found = summarize("evaluate", result)
+    assert found is not None
+    assert found.lines[-1] == (
+        "published as experiments pup-finetune-base-r, pup-finetune-tuned-r and "
+        "pup-finetune-compare-r"
+    )
+
+
 def test_a_detached_train_names_its_worker_and_log() -> None:
     result = {
         "status": "started",
@@ -511,6 +571,7 @@ def _ends_with_its_summary(command: str, result: Result) -> dict[str, Any]:
     return data
 
 
+@pytest.mark.usefixtures("judge_keys")
 def test_the_dataset_commands_end_with_their_summaries(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

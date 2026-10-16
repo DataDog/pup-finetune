@@ -24,7 +24,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
-from pup_finetune.display import loss_text
+from pup_finetune.display import joined, loss_text
 from pup_finetune.redaction import redact
 from pup_finetune.runtime import Runtime
 
@@ -394,11 +394,11 @@ def _difference(rates: Mapping[str, Any]) -> str:
     return text
 
 
-def _paired(headline: Mapping[str, Any], errors: object) -> str:
-    paired = headline.get("paired") or {}
-    failed = sum(int(count) for count in errors.values()) if isinstance(errors, Mapping) else 0
+def _verdicts(paired: Mapping[str, Any], errors: object, targets: Sequence[str]) -> str:
+    """One comparison's paired verdicts, and the errors of the two ``targets`` it compares."""
+    failed = sum(int(errors.get(name, 0)) for name in targets) if isinstance(errors, Mapping) else 0
     return (
-        f"paired: {_n(paired.get('wins', 0), 'win')}, "
+        f"{_n(paired.get('wins', 0), 'win')}, "
         f"{_n(paired.get('regressions', 0), 'regression')}, "
         f"{_n(paired.get('ties', 0), 'tie')}, {_n(failed, 'error')}"
     )
@@ -418,7 +418,7 @@ def _publication(result: Mapping[str, Any]) -> str | None:
             for entry in experiments.values()
             if isinstance(entry, Mapping) and entry.get("name")
         ]
-        found = "published as experiments " + " and ".join(names) if names else "published"
+        found = "published as experiments " + joined(names) if names else "published"
         return found + compare
     line = {
         "skipped": "not published (see the warning above)",
@@ -468,8 +468,11 @@ def _evaluation_parts(result: Mapping[str, Any], *, compact: bool) -> Summary:
     )
     base, tuned = _agreement(rates.get("base")), _agreement(rates.get("tuned"))
     difference = _difference(rates)
-    paired = _paired(headline_data, result.get("errors"))
+    verdicts = _verdicts(headline_data.get("paired") or {}, result.get("errors"), ("base", "tuned"))
+    paired = "paired: " + verdicts
     publication = _publication(result)
+    if isinstance(headline_data.get("tuned_minus_compare"), Mapping):
+        return _compared_parts(result, headline, verdicts, publication)
     agreement = f"judge agreement: base {base}, tuned {tuned}, tuned - base {difference}"
     if compact:
         lines = [headline, agreement, paired, CAVEAT]
@@ -481,11 +484,32 @@ def _evaluation_parts(result: Mapping[str, Any], *, compact: bool) -> Summary:
             paired,
             CAVEAT,
         ]
-    parts = [headline, agreement, paired.removeprefix("paired: "), CAVEAT]
+    parts = [headline, agreement, verdicts, CAVEAT]
     if publication is not None:
         lines.append(publication)
         parts.append(publication)
     return Summary(tuple(lines), "; ".join(parts))
+
+
+def _compared_parts(
+    result: Mapping[str, Any], headline: str, verdicts: str, publication: str | None
+) -> Summary:
+    """An evaluation with a compare target: each target's judge agreement, then each
+    comparison with its paired verdicts (``verdicts`` is base against tuned)."""
+    headline_data = result["headline"]
+    rates: Mapping[str, Any] = headline_data["judge_pass_rate"]
+    versus: Mapping[str, Any] = headline_data["tuned_minus_compare"]
+    names = [name for name in rates if name not in ("delta", "ci95")]
+    found = [
+        headline,
+        "judge agreement: " + ", ".join(f"{name} {_agreement(rates[name])}" for name in names),
+        f"tuned - base: {_difference(rates)}; {verdicts}",
+        f"tuned - compare: {_difference(versus)}; "
+        + _verdicts(versus, result.get("errors"), ("tuned", "compare")),
+        CAVEAT,
+        *([publication] if publication is not None else []),
+    ]
+    return Summary(tuple(found), "; ".join(found))
 
 
 def evaluate_summary(result: Mapping[str, Any]) -> Summary | None:
@@ -1069,12 +1093,18 @@ def _evaluate_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
     settings = preview.get("settings") or {}
     publish = preview.get("publish") or {}
     headline = f"evaluate run {preview.get('run_id')} with judge {settings.get('judge_model')}"
+    compare = preview.get("compare")
+    if isinstance(compare, Mapping):
+        headline += f", comparing with {compare.get('model')}"
     detail = (
         f"at most {_count(settings.get('max_tokens'))} tokens per generation, "
-        f"{settings.get('max_cases')} turns per conversation, seed "
+        f"{_n(settings.get('max_cases'), 'turn')} per conversation, seed "
         f"{settings.get('seed')}"
     )
-    publishes = "2 experiments to Datadog" if publish.get("status") == "planned" else "nothing"
+    if isinstance(compare, Mapping):
+        detail += f" ({_count(compare.get('max_tokens'))} for the compare model)"
+    experiments = len(publish.get("experiments") or [])
+    publishes = f"{experiments} experiments to Datadog" if experiments else "nothing"
     rows = [
         _row("data", _evaluation_calls(preview)),
         _row("settings", detail),
@@ -1094,7 +1124,7 @@ def _benchmark_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
     headline = f"benchmark {models} with judge {settings.get('judge_model')}"
     detail = (
         f"at most {_count(settings.get('max_tokens'))} tokens per generation, "
-        f"{settings.get('max_cases')} turns per conversation, target pass rate "
+        f"{_n(settings.get('max_cases'), 'turn')} per conversation, target pass rate "
         f"{_percent(settings.get('target_pass_rate'))}"
     )
     rows = [

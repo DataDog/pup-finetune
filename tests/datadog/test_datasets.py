@@ -14,6 +14,7 @@ import pytest
 
 from pup_finetune.datadog.datasets import (
     RECORDS_ALL_MAX_PAGES,
+    RECORDS_ALL_PAGE_SIZE,
     DatasetInfo,
     DatasetRecord,
     LLMObsDatasets,
@@ -285,7 +286,15 @@ def test_list_records_reads_ids_and_metadata(
     assert client.list_records(dataset.id) == RecordsListing(
         [DatasetRecord(dataset.record_ids[0], {"row_id": "r-1"}, input={})]
     )
-    assert fake.last.args == ("llm-obs", "datasets", "records-all", "--dataset-id", dataset.id)
+    assert fake.last.args == (
+        "llm-obs",
+        "datasets",
+        "records-all",
+        "--dataset-id",
+        dataset.id,
+        "--limit",
+        str(RECORDS_ALL_PAGE_SIZE),
+    )
 
 
 def test_list_records_counts_unreadable_items(fake: FakePup, client: LLMObsDatasets) -> None:
@@ -340,6 +349,17 @@ def test_list_records_refuses_a_listing_that_reached_the_page_cap(
     below = {**capped, "pages_fetched": RECORDS_ALL_MAX_PAGES - 1}
     fake.on("llm-obs", "datasets", "records-all", json=below)
     assert client.list_records("d1") == RecordsListing([DatasetRecord("rec-1", {"row_id": "r-1"})])
+
+
+def test_list_records_refuses_a_listing_that_repeats_a_record(
+    fake: FakePup, client: LLMObsDatasets
+) -> None:
+    good = {"id": "rec-1", "attributes": {"metadata": {"row_id": "r-1"}}}
+    fake.on(
+        "llm-obs", "datasets", "records-all", json={"records": [good, good], "pages_fetched": 2}
+    )
+    with pytest.raises(RecordsListTruncated, match=r"listed record rec-1 of dataset d1 twice"):
+        client.list_records("d1")
 
 
 def test_add_records_needs_records(client: LLMObsDatasets) -> None:

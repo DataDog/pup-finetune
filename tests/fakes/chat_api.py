@@ -40,21 +40,23 @@ def completion(
     model: str = MODEL,
     finish_reason: str = "stop",
     usage: dict[str, Any] | None = None,
+    tool_calls: list[dict[str, Any]] | None = None,
+    refusal: str | None = None,
 ) -> httpx.Response:
-    """A successful chat completion whose first choice says ``content``."""
+    """A successful chat completion whose first choice says ``content`` (and makes
+    ``tool_calls``, or declines with ``refusal``, when given)."""
+    message: dict[str, Any] = {"role": "assistant", "content": content}
+    if tool_calls is not None:
+        message["tool_calls"] = tool_calls
+    if refusal is not None:
+        message["refusal"] = refusal
     return httpx.Response(
         200,
         json={
             "id": "cmpl-synthetic",
             "object": "chat.completion",
             "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {"role": "assistant", "content": content},
-                    "finish_reason": finish_reason,
-                }
-            ],
+            "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
             "usage": usage
             if usage is not None
             else {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},

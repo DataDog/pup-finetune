@@ -296,8 +296,6 @@ def recorded_evaluation_view(found: RecordedEvaluation | None) -> dict[str, Any]
 
 # --- evaluate ----------------------------------------------------------------------------
 
-TARGETS: Final = ("base", "tuned")
-
 
 def evaluation_view(result: Mapping[str, Any]) -> dict[str, Any]:
     """What an evaluation prints: its headline, each metric's rate per target, the errors,
@@ -325,17 +323,18 @@ def evaluation_view(result: Mapping[str, Any]) -> dict[str, Any]:
         "status": result.get("status"),
         "run_id": result.get("run_id"),
         "judge_model": result.get("judge_model"),
+        "compare_model": result.get("compare_model"),
         "headline": headline(summary),
         "metrics": {
             name: {
                 target: (((targets.get(target) or {}).get("metrics") or {}).get(name) or {}).get(
                     "rate"
                 )
-                for target in TARGETS
+                for target in targets
             }
             for name in names
         },
-        "errors": {name: int((summary.get("errors") or {}).get(name, 0)) for name in TARGETS},
+        "errors": {name: int((summary.get("errors") or {}).get(name, 0)) for name in targets},
         "pending": result.get("pending"),
         "calibration": result.get("calibration"),
         "tuned_checkpoint": checkpoint_name(result.get("tuned_checkpoint")),

@@ -499,7 +499,10 @@ after `--reset-triage`. `JudgeConfig.provider` is part of the
 judge's identity, so a judge on another provider never reuses earlier judgments or votes, and
 `JudgeConfig.spec` writes the judge back the one way commands pin it. `open_client` builds
 the client for a judge, and `open_clients` one client per provider for a council that mixes
-them; every client answers the one `ChatCompleter.complete` call, which takes an optional
+them. A run opens them before anything is generated, so a key the client refuses fails
+before anything is paid, but only those with calls left by the count its preview showed, so
+a rerun with nothing left to judge needs no key; every client answers the one
+`ChatCompleter.complete` call, which takes an optional
 `response_schema` for a JSON answer and an optional `reasoning_effort`. A request longer than
 the model's context window is a `ContextLimitError` on every provider (`is_context_limit`
 reads each one's error answer), which no retry fixes.
@@ -513,7 +516,9 @@ reads each one's error answer), which no retry fixes.
   is complete.
 - **Anthropic** uses the official SDK (the `anthropic` extra) in
   [`anthropic_client.py`](../src/pup_finetune/anthropic_client.py), the only module that
-  imports it: the leading system message becomes `system`, no sampling parameter is sent,
+  imports it: the messages become `system` and alternating turns through
+  [`anthropic_messages.py`](../src/pup_finetune/anthropic_messages.py) (every system message
+  joins `system`), which the compare model's skip rule checks too, no sampling parameter is sent,
   `output_config.format` carries the verdict's JSON schema on models with structured outputs,
   `output_config.effort` is the judge's effort on models with effort levels, and the models with
   server-side refusal fallbacks are called through the beta API with `fallbacks="default"`.

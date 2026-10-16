@@ -121,7 +121,7 @@ class FailsOnce(FakeJudge):
 
 def use_judge(monkeypatch: pytest.MonkeyPatch, judge: ChatCompleter) -> None:
     @contextmanager
-    def opened(config: JudgeConfig) -> Iterator[ChatCompleter]:
+    def opened(config: JudgeConfig, **options: Any) -> Iterator[ChatCompleter]:
         yield judge
 
     monkeypatch.setattr(runner_module, "open_judge_client", opened)
@@ -163,6 +163,8 @@ def test_evaluate_publishes_two_experiments_and_a_rerun_sends_nothing_new(
     assert publish["dataset_id"] == receipt["dataset_id"]
     run_id = json.loads((run_dir / "run.json").read_text())["run_id"]
     assert publish["experiments"] == [f"pup-finetune-{t}-{run_id}" for t in ("base", "tuned")]
+    spans = preview["preview"]["trajectories"] + preview["preview"]["cases"]
+    assert publish["spans_per_experiment"] == {"base": spans, "tuned": spans}
     assert "Datadog" in preview["preview"]["data_destination"]
     assert preview["preview"]["data_recipients"][-1] == (
         "test cases, generated answers and scores -> Datadog (experiments)"
@@ -229,11 +231,12 @@ def test_without_a_push_receipt_the_evaluation_is_not_published(
     assert any("dataset push" in warning for warning in data["warnings"])
     assert fake.calls == []
     assert (run_dir / "eval" / "summary.json").is_file()
-    # Publishing is optional: the next command is the deploy preview, and the steps say how to
-    # publish (push the dataset, with a name only the user can pick, then rerun the evaluation,
-    # which reuses every result).
-    assert data["next_command"] == f"pup finetune deploy {run_dir}"
-    push_step, rerun_step = data["next_steps"]
+    # Not published: no next command; the steps push the dataset (with a name only the user
+    # can pick) and rerun the evaluation, which reuses every result, or deploy unpublished.
+    assert data["next_command"] is None
+    push_step, rerun_step, deploy_step, compare_step = data["next_steps"]
+    assert deploy_step["command"] == f"pup finetune deploy {run_dir}"
+    assert "--compare-model <MODEL>" in compare_step["command"]
     dataset = Path(str(json.loads((run_dir / "run.json").read_text())["dataset_dir"]))
     assert push_step["command"] == f"pup finetune dataset push {dataset} --name <NAME>"
     assert rerun_step["command"] == (
@@ -250,7 +253,62 @@ def test_without_a_push_receipt_the_evaluation_is_not_published(
     assert (run_dir / "eval" / "generations.jsonl").read_text() == generations
     # Complete and published: deploying is next (a free preview).
     assert published["next_command"] == f"pup finetune deploy {run_dir}"
-    assert published["next_steps"] == []
+    assert [step["command"] for step in published["next_steps"]] == [
+        f"pup finetune evaluate {run_dir} --judge-model fake-judge --compare-model <MODEL>"
+    ]
+
+
+def test_status_gives_the_push_first_steps_as_the_run_stands_now(
+    fake: FakePup,
+    experiments: FakeExperimentsApi,
+    dataset: Path,
+    run_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    evaluated = output(invoke("evaluate", str(run_dir), "--confirm"))
+    assert evaluated["publication"]["status"] == "skipped"
+    assert shlex.split(evaluated["next_steps"][0]["command"])[4] == "ds"
+
+    def steps() -> list[list[str]]:
+        status = output(invoke("status", str(run_dir)))
+        assert status["next_command"] is None
+        return [shlex.split(step["command"]) for step in status["next_steps"]]
+
+    # From another directory, every path is the run's and the dataset's from there.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    pushing, again, deploy = steps()
+    assert pushing == ["pup", "finetune", "dataset", "push", str(dataset), "--name", "<NAME>"]
+    assert again[:4] == ["pup", "finetune", "evaluate", str(run_dir)]
+    assert again[-1] == "--confirm"
+    assert deploy == ["pup", "finetune", "deploy", str(run_dir)]
+    # Deployed: no deploy step.
+    deployed = invoke("deploy", str(run_dir), "--confirm")
+    assert deployed.exit_code == 0, deployed.stderr
+    assert steps() == [pushing, again]
+    # Pushed later: the evaluation's own command is next, and its preview publishes it.
+    push(dataset)
+    status = output(invoke("status", str(run_dir)))
+    assert status["next_steps"] == []
+    preview = invoke(*shlex.split(status["next_command"])[2:])
+    assert preview.exit_code == 2, preview.stderr
+    assert output(preview)["preview"]["publish"]["status"] == "planned"
+
+
+def test_status_offers_no_next_command_while_the_push_receipt_is_unreadable(
+    fake: FakePup, experiments: FakeExperimentsApi, dataset: Path, run_dir: Path
+) -> None:
+    assert (
+        output(invoke("evaluate", str(run_dir), "--confirm"))["publication"]["status"] == "skipped"
+    )
+    (dataset / "push.json").write_text("{not json")
+    status = output(invoke("status", str(run_dir)))
+    assert status["next_command"] is None
+    (rerun,) = status["next_steps"]
+    assert "once its dataset can be read" in rerun["why"]
 
 
 def test_no_publish_skips_publishing_silently(
@@ -339,8 +397,8 @@ def test_an_unfinished_push_is_not_published(
     assert reason in data["publication"]["reason"]
     assert experiments_calls(fake) == 0
     assert experiments.experiments == {}
-    # The push to finish is known: the same dataset and project. Deploying needs none of it.
-    assert data["next_command"] == f"pup finetune deploy {run_dir}"
+    # The push to finish is known: the same dataset and project.
+    assert data["next_command"] is None
     assert data["next_steps"][0]["command"] == (
         f"pup finetune dataset push {dataset.resolve()} --name synthetic-replay "
         "--project pup-finetune"
@@ -375,7 +433,7 @@ def test_a_test_row_changed_after_its_push_is_not_published(
     assert result.exit_code == 0, result.stderr
     assert output(result)["publication"]["status"] == "skipped"
     assert experiments_calls(fake) == 0
-    (step, _) = output(result)["next_steps"]
+    (step, _, _, _) = output(result)["next_steps"]
     assert step["command"] == f"pup finetune dataset push {dataset.resolve()} --name <NAME>"
     assert "push.json aside" in step["why"]
 
@@ -456,3 +514,51 @@ def test_a_cancel_while_publishing_is_continued_by_the_rerun(
     for experiment in experiments.experiments.values():
         span_ids = [span["span_id"] for span in experiment.spans]
         assert len(span_ids) == len(set(span_ids))
+
+
+def test_attaching_a_compare_model_publishes_one_more_experiment_in_the_same_comparison(
+    fake: FakePup,
+    datasets: FakeDatasetsApi,
+    experiments: FakeExperimentsApi,
+    dataset: Path,
+    run_dir: Path,
+) -> None:
+    fake.on("auth", "status", json={"authenticated": True, "site": "datadoghq.com"})
+    push(dataset)
+    first = invoke("evaluate", str(run_dir), "--confirm")
+    assert first.exit_code == 0, first.stderr
+    published = output(first)["publication"]["experiments"]
+    spans = {item.id: list(item.spans) for item in experiments.experiments.values()}
+    posts = events_posts(fake)
+
+    preview = output(invoke("evaluate", str(run_dir), "--compare-model", "fake-compare"))
+    run_id = json.loads((run_dir / "run.json").read_text())["run_id"]
+    assert preview["preview"]["publish"]["experiments"] == [
+        f"pup-finetune-{target}-{run_id}" for target in ("base", "tuned", "compare")
+    ]
+    assert "publish three experiments" in preview["preview"]["action"]
+    result = invoke(*shlex.split(preview["next_command"])[2:])
+    assert result.exit_code == 0, result.stderr
+    publication = output(result)["publication"]
+    assert publication["status"] == "published"
+    assert len(experiments.experiments) == 3
+    for target in ("base", "tuned"):
+        entry = publication["experiments"][target]
+        assert entry["experiment_id"] == published[target]["experiment_id"]
+        assert entry["submitted"] == 0
+        assert (
+            experiments.experiments[entry["experiment_id"]].spans == spans[entry["experiment_id"]]
+        )
+    compare = publication["experiments"]["compare"]
+    created = experiments.experiments[compare["experiment_id"]]
+    assert created.name == f"pup-finetune-compare-{run_id}"
+    config = created.attributes["config"]
+    assert config["compare_model"] == "fake-compare"
+    assert config["provider"] == "fake"
+    assert config["max_tokens"] == 16000
+    assert "base_model" not in config and "checkpoint" not in config
+    assert "the compare model (fake-compare)" in created.attributes["description"]
+    assert compare["submitted"] == compare["spans"] > 0
+    assert events_posts(fake) > posts
+    ids = [publication["experiments"][t]["experiment_id"] for t in ("base", "tuned", "compare")]
+    assert f"experimentIds={','.join(ids)}&" in publication["comparison_url"]

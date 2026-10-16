@@ -22,6 +22,13 @@ holds, all ``0600``:
   failed (``status`` ``error``), appended as soon as it is known. The last line of a pair
   wins.
 - ``summary.json`` - :func:`summarize`, rewritten at the end of every run, partial or not.
+- ``compare.json`` - with ``evaluate --compare-model``, the identity of the compare target
+  (:func:`~pup_finetune.evaluation.compare.attach_compare`): written before its first pair,
+  and the same for every later run, so a compare target is never changed or dropped once
+  attached. Its pairs go into the same files, under the target ``compare``;
+  ``evaluation.json`` is unchanged, so a compare target can be added to a complete
+  evaluation without redoing base and tuned. A target may replay fewer cases than the
+  evaluation holds (``replays``): the compare model skips those its API refuses.
 
 A rerun skips the pairs whose result is ``ok``, reuses a stored generation for a pair that
 still needs a judgment, and retries the pairs that failed. A generation that fails after the
@@ -46,7 +53,6 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
-import random
 import threading
 import time
 from collections import Counter, defaultdict
@@ -55,11 +61,13 @@ from concurrent.futures import FIRST_COMPLETED, Future, wait
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final, Literal, Protocol, get_args, runtime_checkable
+from typing import Any, Final, Literal, Protocol, runtime_checkable
 
 from pup_finetune.concurrency import DaemonPool
 from pup_finetune.errors import SettingsConflict, StateError
+from pup_finetune.evaluation.bootstrap import BOOTSTRAP_RESAMPLES, paired_bootstrap_ci
 from pup_finetune.evaluation.cases import ReplayCase
+from pup_finetune.evaluation.compare import attach_compare
 from pup_finetune.evaluation.judge import Judgment
 from pup_finetune.evaluation.metrics import aggregate, score_case
 from pup_finetune.inference import JudgeConfig
@@ -71,14 +79,16 @@ from pup_finetune.storage import (
     atomic_write_json,
     canonical_json,
     finite_json,
+    identity_changes,
     make_private_dir,
     parse_jsonl_line,
     read_json,
 )
 
 __all__ = [
-    "BOOTSTRAP_RESAMPLES",
     "CAVEAT",
+    "COMPARE",
+    "COMPARE_FILE",
     "METRICS_VERSION",
     "TARGETS",
     "EvalDir",
@@ -87,18 +97,24 @@ __all__ = [
     "PairKey",
     "Publisher",
     "ReplaySummary",
+    "Replays",
     "Target",
     "cases_sha256",
     "evaluation_identity",
-    "identity_changes",
-    "paired_bootstrap_ci",
     "remaining_work",
     "run_replay",
     "summarize",
 ]
 
-Target = Literal["base", "tuned"]
-TARGETS: tuple[Target, ...] = get_args(Target)
+Target = Literal["base", "tuned", "compare"]
+TARGETS: Final[tuple[Target, ...]] = ("base", "tuned")
+"""The targets every evaluation replays."""
+COMPARE: Final[Target] = "compare"
+"""The target ``evaluate --compare-model`` adds: another model, replayed and judged alike."""
+
+Replays = Mapping[str, Sequence[ReplayCase]]
+"""The cases each target replays, by target, in the targets' order: some or all of the
+evaluation's cases."""
 
 METRICS_VERSION: Final = "1"
 """Bumped whenever a metric or the summary's math changes meaning; part of the identity."""
@@ -108,15 +124,12 @@ CAVEAT: Final = (
     "not executed, so they do not measure task success."
 )
 
-BOOTSTRAP_RESAMPLES: Final = 2000
-MIN_CLUSTERS_FOR_CI: Final = 2
-"""The fewest trajectories with a paired case for which a confidence interval is reported."""
-
 IDENTITY_FILE: Final = "evaluation.json"
 GENERATIONS_FILE: Final = "generations.jsonl"
 RESULTS_FILE: Final = "results.jsonl"
 SUMMARY_FILE: Final = "summary.json"
 CALIBRATION_FILE: Final = "calibration.json"
+COMPARE_FILE: Final = "compare.json"
 
 _POLL_S: Final = 0.1
 LIVE_PUBLISH_INTERVAL_S: Final = 30.0
@@ -177,15 +190,6 @@ def evaluation_identity(
     }
 
 
-def identity_changes(stored: Mapping[str, Any], wanted: Mapping[str, Any]) -> list[str]:
-    """The keys of two :func:`evaluation_identity` records that differ, sorted."""
-    return sorted(
-        key
-        for key in set(stored) | set(wanted)
-        if canonical_json(stored.get(key)) != canonical_json(wanted.get(key))
-    )
-
-
 # --- the evaluation directory -------------------------------------------------------------
 
 
@@ -220,6 +224,10 @@ class EvalDir:
     def calibration_path(self) -> Path:
         return self.path / CALIBRATION_FILE
 
+    @property
+    def compare_path(self) -> Path:
+        return self.path / COMPARE_FILE
+
     def lock(self) -> DirectoryLock:
         """The directory's lock: one evaluation writes in a directory at a time."""
         return DirectoryLock(self.path)
@@ -241,7 +249,8 @@ class EvalDir:
 
         Raises :class:`StateError` naming what changed, with a hint to use a new
         ``--out-dir``. A directory with no generation or result yet (e.g. only a failed
-        calibration) takes the new identity instead, and forgets its calibration.
+        calibration) takes the new identity instead, and forgets its calibration and its
+        compare target.
         """
         wanted = finite_json(dict(identity))
         if not self.identity_path.exists():
@@ -252,8 +261,9 @@ class EvalDir:
             raise StateError(f"{self.identity_path}: expected a JSON object")
         if canonical_json(stored) == canonical_json(wanted):
             return
-        if not self.has_work():
+        if self.replaces(identity):
             self.calibration_path.unlink(missing_ok=True)
+            self.compare_path.unlink(missing_ok=True)
             atomic_write_json(self.identity_path, wanted)
             return
         changed = identity_changes(stored, wanted)
@@ -261,6 +271,16 @@ class EvalDir:
             f"{self.path} holds an evaluation with other settings "
             f"(changed: {', '.join(changed)}), so its results cannot be reused",
             hint="pass a new --out-dir to evaluate with these settings",
+        )
+
+    def replaces(self, identity: Mapping[str, Any]) -> bool:
+        """Whether :meth:`check_identity` takes ``identity`` in place of another one stored,
+        dropping the calibration and the compare target: the directory has no work yet."""
+        stored = self.stored_identity()
+        return (
+            stored is not None
+            and canonical_json(stored) != canonical_json(finite_json(dict(identity)))
+            and not self.has_work()
         )
 
     def stored_identity(self) -> dict[str, Any] | None:
@@ -304,24 +324,27 @@ class EvalDir:
 
 
 def remaining_work(
-    eval_dir: EvalDir, cases: Sequence[ReplayCase], targets: Sequence[str] = TARGETS
-) -> dict[str, int]:
-    """What a run in ``eval_dir`` would still do: ``{"done", "generate", "judge"}`` pairs.
+    eval_dir: EvalDir, replays: Mapping[str, Sequence[ReplayCase]]
+) -> dict[str, dict[str, int]]:
+    """What a run in ``eval_dir`` would still do for each target of ``replays`` (the cases
+    each target replays): its ``{"done", "generate", "judge"}`` pairs.
 
     ``done`` pairs have an ``ok`` result; every other pair is judged, and generated too
     unless a generation is stored. Reads only, without the lock: for previews.
     """
     generations, results = eval_dir.read_generations(), eval_dir.read_results()
-    done = generate = judge = 0
-    for case in cases:
-        for target in targets:
+    found: dict[str, dict[str, int]] = {}
+    for target, cases in replays.items():
+        done = generate = judge = 0
+        for case in cases:
             key = (target, case.id)
             if results.get(key, {}).get("status") == "ok":
                 done += 1
                 continue
             judge += 1
             generate += key not in generations
-    return {"done": done, "generate": generate, "judge": judge}
+        found[target] = {"done": done, "generate": generate, "judge": judge}
+    return found
 
 
 def _read_lines(path: Path) -> list[dict[str, Any]]:
@@ -494,7 +517,7 @@ class _Replay:
         samplers: Mapping[str, Sampler],
         judge_fn: JudgeFn,
         *,
-        max_tokens: int,
+        max_tokens: Mapping[str, int],
         cancel: threading.Event,
     ) -> None:
         self.eval_dir = eval_dir
@@ -526,13 +549,11 @@ class _Replay:
             append(record)
             return True
 
-    def todo(
-        self, cases: Sequence[ReplayCase], targets: Sequence[str]
-    ) -> list[tuple[str, ReplayCase]]:
+    def todo(self, replays: Replays) -> list[tuple[str, ReplayCase]]:
         return [
             (target, case)
+            for target, cases in replays.items()
             for case in cases
-            for target in targets
             if self.results.get((target, case.id), {}).get("status") != "ok"
         ]
 
@@ -551,7 +572,7 @@ class _Replay:
                 generation = self.samplers[target].generate(
                     [dict(message) for message in case.prefix],
                     [dict(tool) for tool in case.tools],
-                    max_tokens=self.max_tokens,
+                    max_tokens=self.max_tokens[target],
                 )
             except Exception as exc:
                 result = _result_record(target, case, error=_error_json("generation", exc))
@@ -597,10 +618,11 @@ def run_replay(
     cancel: threading.Event | None = None,
     publisher: Publisher | None = None,
     on_progress: ProgressSink | None = None,
-    targets: Sequence[str] = TARGETS,
+    replays: Replays | None = None,
+    compare: Mapping[str, Any] | None = None,
 ) -> ReplaySummary:
-    """Replay ``cases`` with the ``base`` and ``tuned`` samplers (or ``targets``'s) into
-    ``out_dir``.
+    """Replay ``cases`` with the ``base`` and ``tuned`` samplers, or each target of
+    ``replays`` on its cases, into ``out_dir``.
 
     ``identity`` is :func:`evaluation_identity` for these cases (checked against
     ``evaluation.json``, see :meth:`EvalDir.check_identity`); each generation is capped at
@@ -613,7 +635,11 @@ def run_replay(
     ``publisher`` gets the evaluation once every pair has a result, and what it reports is
     the outcome's ``publication``; a :class:`LivePublisher` also starts before the first pair
     (its link is the outcome's ``link``) and publishes finished rows as the pairs run.
-    Returns the summary also written to ``summary.json``.
+    ``compare`` is the compare target's identity, given exactly when :data:`COMPARE` is one
+    of the targets: checked against ``compare.json`` under the lock, before any pair or
+    publication (:func:`~pup_finetune.evaluation.compare.attach_compare`), and its
+    ``model.max_tokens`` caps the compare target's generations. Returns the summary also
+    written to ``summary.json``.
     """
     max_tokens, seed = identity.get("max_tokens"), identity.get("seed")
     if concurrency < 1:
@@ -624,15 +650,24 @@ def run_replay(
         raise ValueError(f"the identity's seed must be an integer, got {seed!r}")
     if len({case.id for case in cases}) != len(cases):
         raise ValueError("case ids must be unique")
+    replays = replays if replays is not None else dict.fromkeys(TARGETS, cases)
+    if not {case.id for some in replays.values() for case in some} <= {c.id for c in cases}:
+        raise ValueError("a target replays a case the evaluation does not hold")
     if identity.get("cases_sha256") != cases_sha256(cases):
         raise ValueError("identity does not describe these cases")
+    if (COMPARE in replays) != (compare is not None):
+        raise ValueError("a compare identity is given exactly when compare is a target")
+    limits = dict.fromkeys(replays, max_tokens)
+    if compare is not None:
+        limits[COMPARE] = int(compare["model"]["max_tokens"])
     cancel = cancel if cancel is not None else threading.Event()
     eval_dir = EvalDir(out_dir)
     eval_dir.create()
     with eval_dir.lock():
         eval_dir.check_identity(identity)
-        replay = _Replay(eval_dir, samplers, judge_fn, max_tokens=max_tokens, cancel=cancel)
-        todo = replay.todo(cases, targets)
+        attach_compare(eval_dir.compare_path, compare)
+        replay = _Replay(eval_dir, samplers, judge_fn, max_tokens=limits, cancel=cancel)
+        todo = replay.todo(replays)
         missing = sorted(
             {
                 target
@@ -658,11 +693,9 @@ def run_replay(
             on_progress=on_progress,
             on_tick=publish_ready if live is not None else None,
         )
-        summary = summarize(cases, replay.results, replay.generations, seed=seed, targets=targets)
+        summary = summarize(cases, replay.results, replay.generations, seed=seed, replays=replays)
         eval_dir.write_summary(summary)
-        pending = sum(
-            1 for case in cases for target in targets if (target, case.id) not in replay.results
-        )
+        pending = sum(target["pending"] for target in summary["targets"].values())
         outcome = ReplaySummary(
             summary=summary,
             pending=pending,
@@ -765,45 +798,6 @@ def _run_pool(
 # --- the summary --------------------------------------------------------------------------
 
 
-def _quantile(values: Sequence[float], q: float) -> float:
-    """The ``q`` quantile of sorted ``values``, interpolating linearly between ranks."""
-    position = q * (len(values) - 1)
-    low = int(position)
-    high = min(low + 1, len(values) - 1)
-    return values[low] + (values[high] - values[low]) * (position - low)
-
-
-def paired_bootstrap_ci(
-    clusters: Sequence[Sequence[float]],
-    *,
-    seed: int,
-    resamples: int = BOOTSTRAP_RESAMPLES,
-    level: float = 0.95,
-) -> tuple[float, float] | None:
-    """A percentile bootstrap CI of the mean paired difference, resampling whole clusters.
-
-    Each cluster holds one trajectory's per-case differences (tuned minus base, each ``-1``,
-    ``0`` or ``1``). A resample draws as many clusters as there are, with replacement, and
-    takes the mean over all their cases, so the cases of one trajectory move together.
-    Seeded with ``seed``: the same input gives the same interval. ``None`` with fewer than
-    :data:`MIN_CLUSTERS_FOR_CI` non-empty clusters.
-    """
-    kept = [list(cluster) for cluster in clusters if cluster]
-    if len(kept) < MIN_CLUSTERS_FOR_CI or resamples < 1:
-        return None
-    sums = [sum(cluster) for cluster in kept]
-    counts = [len(cluster) for cluster in kept]
-    rng = random.Random(seed)  # noqa: S311 - a reproducible resample, not crypto
-    size = len(kept)
-    stats: list[float] = []
-    for _ in range(resamples):
-        picks = [rng.randrange(size) for _ in range(size)]
-        stats.append(sum(sums[i] for i in picks) / sum(counts[i] for i in picks))
-    stats.sort()
-    tail = (1.0 - level) / 2.0
-    return _quantile(stats, tail), _quantile(stats, 1.0 - tail)
-
-
 def _rate(passed: int, n: int) -> dict[str, Any]:
     return {"rate": passed / n if n else None, "passed": passed, "n": n}
 
@@ -818,10 +812,12 @@ def _target_summary(
     cases: Sequence[ReplayCase],
     results: Mapping[PairKey, Mapping[str, Any]],
     generations: Mapping[PairKey, Mapping[str, Any]],
+    *,
+    skipped: int,
 ) -> dict[str, Any]:
     ok: list[Mapping[str, Any]] = []
     errors: Counter[str] = Counter()
-    too_long = 0
+    too_long: Counter[str] = Counter()
     pending = 0
     for case in cases:
         result = results.get((target, case.id))
@@ -834,7 +830,7 @@ def _target_summary(
             stage = error.get("stage") if isinstance(error, Mapping) else None
             errors[str(stage or "unknown")] += 1
             if isinstance(error, Mapping) and error.get("type") == "ContextLimitError":
-                too_long += 1
+                too_long[str(stage or "unknown")] += 1
     unanswered: Counter[str] = Counter()
     for result in ok:
         judgment = result.get("judgment")
@@ -846,7 +842,7 @@ def _target_summary(
         by_trajectory[str(result.get("row_id"))].append(_passed(result))
     means = [sum(values) / len(values) for values in by_trajectory.values()]
     tokens = {"prompt_tokens": 0, "completion_tokens": 0, "generations": 0}
-    truncated = 0
+    truncated = refused = 0
     for case in cases:
         generation = generations.get((target, case.id))
         if generation is not None:
@@ -854,16 +850,20 @@ def _target_summary(
             tokens["completion_tokens"] += int(generation.get("completion_tokens") or 0)
             tokens["generations"] += 1
             truncated += generation.get("stop_reason") == "length"
+            refused += generation.get("stop_reason") == "refusal"
     return {
         "completed": len(ok),
         "errors": sum(errors.values()),
         "errors_by_stage": dict(sorted(errors.items())),
-        "errors_too_long": too_long,
+        "errors_too_long": sum(too_long.values()),
+        "errors_too_long_by_stage": dict(sorted(too_long.items())),
         "pending": pending,
+        "skipped": skipped,
         "judge_pass": _rate(sum(_passed(result) for result in ok), len(ok)),
         "judge_no_verdict": sum(unanswered.values()),
         "judge_no_verdict_by_error": dict(sorted(unanswered.items())),
         "truncated": truncated,
+        "refused": refused,
         "metrics": aggregate(result.get("metrics") or {} for result in ok),
         "trajectory_agreement": {
             "mean": sum(means) / len(means) if means else None,
@@ -879,25 +879,33 @@ def summarize(
     generations: Mapping[PairKey, Mapping[str, Any]],
     *,
     seed: int,
-    targets: Sequence[str] = TARGETS,
+    replays: Replays | None = None,
 ) -> dict[str, Any]:
     """``summary.json`` for ``cases`` from the last result of each pair; strict JSON.
 
-    Per target: the judge pass rate and every metric's (:func:`~pup_finetune.evaluation.
-    metrics.aggregate`) over its ``ok`` results, the mean over trajectories of each
-    trajectory's judge pass rate, the errors by stage, the judge answers that held no
-    verdict (``judge_no_verdict``, by :attr:`~pup_finetune.evaluation.judge.Judgment.error`:
-    they count as failures, as the judge module decides) and the generated tokens. ``paired``
-    compares the judge verdicts of the cases both targets have an ``ok`` result for (wins:
-    only tuned passes; regressions: only base passes; ties: the same verdict), and counts the
-    cases where both or one target failed with an error, or one is still pending.
-    ``tuned_minus_base`` is the mean paired difference of the judge pass (``null`` without
-    paired cases) with a 95% paired bootstrap CI over trajectories
-    (:func:`paired_bootstrap_ci`, ``null`` when too few). Other ``targets`` get no
-    ``paired`` or ``tuned_minus_base``. ``truncated`` counts a target's generations cut off
-    at ``max_tokens``, which fail.
+    Per target of ``replays`` (``base`` and ``tuned`` on every case by default), over its
+    own cases (it counts the others as ``skipped``, in none of its rates): the judge pass
+    rate and every metric's (:func:`~pup_finetune.evaluation.metrics.aggregate`) over its
+    ``ok`` results, the mean over trajectories of each trajectory's judge pass rate, the
+    errors by stage, the judge answers that held no verdict (``judge_no_verdict``, by
+    :attr:`~pup_finetune.evaluation.judge.Judgment.error`: they count as failures, as the
+    judge module decides) and the generated tokens. With ``base`` and ``tuned`` among the
+    targets, ``paired`` compares their judge verdicts on the cases both have an ``ok``
+    result for (wins: only tuned passes; regressions: only base passes; ties: the same
+    verdict), and counts the cases where both or one target failed with an error, or one is
+    still pending; ``tuned_minus_base`` is the mean paired difference of the judge pass
+    (``null`` without paired cases) with a 95% paired bootstrap CI over trajectories
+    (:func:`~pup_finetune.evaluation.bootstrap.paired_bootstrap_ci`, ``null`` when too few).
+    With ``tuned`` and :data:`COMPARE`, ``tuned_minus_compare`` is the same comparison over
+    the compare target's cases, its ``paired`` counts inside it. ``truncated`` counts a
+    target's generations cut off at its ``max_tokens`` and ``refused`` those the model
+    refused (a refusal is judged as an answer).
     """
-    by_target = {target: _target_summary(target, cases, results, generations) for target in targets}
+    replays = replays if replays is not None else dict.fromkeys(TARGETS, cases)
+    by_target = {
+        target: _target_summary(target, some, results, generations, skipped=len(cases) - len(some))
+        for target, some in replays.items()
+    }
     complete = all(summary["pending"] == 0 for summary in by_target.values())
     head: dict[str, Any] = {
         "status": "complete" if complete else "partial",
@@ -905,47 +913,59 @@ def summarize(
         "n_trajectories": len({case.row_id for case in cases}),
         "targets": by_target,
     }
+    compared: dict[str, Any] = {}
+    if "base" in replays and "tuned" in replays:
+        paired, difference = _paired(replays["base"], results, "tuned", "base", seed=seed)
+        compared |= {"paired": paired, "tuned_minus_base": difference}
+    if "tuned" in replays and COMPARE in replays:
+        paired, difference = _paired(replays[COMPARE], results, "tuned", COMPARE, seed=seed)
+        compared["tuned_minus_compare"] = {**difference, "paired": paired}
     tail: dict[str, Any] = {
-        "errors": {target: by_target[target]["errors"] for target in targets},
-        "tokens": {target: by_target[target]["tokens"] for target in targets},
+        "errors": {target: summary["errors"] for target, summary in by_target.items()},
+        "tokens": {target: summary["tokens"] for target, summary in by_target.items()},
         "metrics_version": METRICS_VERSION,
         "caveat": CAVEAT,
     }
-    if tuple(targets) != TARGETS:
-        return finite_json({**head, **tail})
+    return finite_json({**head, **compared, **tail})
+
+
+def _paired(
+    cases: Sequence[ReplayCase],
+    results: Mapping[PairKey, Mapping[str, Any]],
+    first: str,
+    second: str,
+    *,
+    seed: int,
+) -> tuple[dict[str, int], dict[str, Any]]:
+    """``first`` against ``second``, case by case: the paired verdict counts (a win is a case
+    only ``first`` passes), and the mean difference of the judge pass, ``first`` minus
+    ``second``, with its paired bootstrap CI."""
     paired: Counter[str] = Counter(
         {"wins": 0, "regressions": 0, "ties": 0, "both_error": 0, "one_error": 0, "pending": 0}
     )
     clusters: dict[str, list[float]] = defaultdict(list)
     for case in cases:
-        base, tuned = results.get(("base", case.id)), results.get(("tuned", case.id))
-        if base is None or tuned is None:
+        one, two = results.get((first, case.id)), results.get((second, case.id))
+        if one is None or two is None:
             paired["pending"] += 1
             continue
-        base_ok, tuned_ok = base.get("status") == "ok", tuned.get("status") == "ok"
-        if not base_ok and not tuned_ok:
+        one_ok, two_ok = one.get("status") == "ok", two.get("status") == "ok"
+        if not one_ok and not two_ok:
             paired["both_error"] += 1
             continue
-        if not (base_ok and tuned_ok):
+        if not (one_ok and two_ok):
             paired["one_error"] += 1
             continue
-        difference = int(_passed(tuned)) - int(_passed(base))
+        difference = int(_passed(one)) - int(_passed(two))
         paired["wins" if difference > 0 else "regressions" if difference < 0 else "ties"] += 1
         clusters[case.row_id].append(float(difference))
     differences = [value for cluster in clusters.values() for value in cluster]
     interval = paired_bootstrap_ci(list(clusters.values()), seed=seed)
-    return finite_json(
-        {
-            **head,
-            "paired": {"n": len(differences), **paired},
-            "tuned_minus_base": {
-                "judge_pass_rate": sum(differences) / len(differences) if differences else None,
-                "ci95": None if interval is None else list(interval),
-                "n_cases": len(differences),
-                "n_trajectories": len(clusters),
-                "resamples": BOOTSTRAP_RESAMPLES,
-                "seed": seed,
-            },
-            **tail,
-        }
-    )
+    return {"n": len(differences), **paired}, {
+        "judge_pass_rate": sum(differences) / len(differences) if differences else None,
+        "ci95": None if interval is None else list(interval),
+        "n_cases": len(differences),
+        "n_trajectories": len(clusters),
+        "resamples": BOOTSTRAP_RESAMPLES,
+        "seed": seed,
+    }

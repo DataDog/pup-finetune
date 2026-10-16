@@ -361,11 +361,16 @@ def judge(
 
 
 def check_judge_differs(
-    config: JudgeConfig, base_model: str, tuned_models: Iterable[str] = ()
+    config: JudgeConfig,
+    base_model: str,
+    tuned_models: Iterable[str] = (),
+    *,
+    compare: JudgeConfig | None = None,
 ) -> None:
     """Raise :class:`UsageError` when the judge model is ``base_model``, the model being
-    trained, or one of ``tuned_models``, the names of the run's tuned model (its model id,
-    and the provider's name for it once promoted), which the evaluation grades too.
+    trained, one of ``tuned_models``, the names of the run's tuned model (its model id,
+    and the provider's name for it once promoted), or the ``compare`` model, which the
+    evaluation grades too.
 
     Only the judge's model id counts, not its provider prefix. Names compare without case;
     a bare id (``qwen3p8-27b``) matches a full resource name
@@ -381,6 +386,12 @@ def check_judge_differs(
                 "evaluation grades",
                 hint=hint,
             )
+    if compare is not None and _same_model(config.model, compare.model):
+        raise UsageError(
+            f"the judge model {config.spec!r} is the compare model, which the evaluation grades",
+            hint="pick a different --judge-model or --compare-model: a model should not grade "
+            "its own outputs",
+        )
 
 
 def _same_model(first: str, second: str) -> bool:

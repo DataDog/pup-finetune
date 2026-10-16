@@ -4,7 +4,7 @@
 #
 # This product includes software developed at Datadog (https://www.datadoghq.com/).
 # Copyright 2026-present Datadog, Inc.
-"""How values read in what a command prints: paths and floats.
+"""How values read in what a command prints: paths, floats and lists.
 
 Only stdout results and hints use these; the files a command writes keep their values as
 they are (absolute paths in ``run.json``, unrounded losses in ``epochs.json``).
@@ -22,7 +22,7 @@ from __future__ import annotations
 import math
 import os
 import shlex
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final
 
@@ -32,6 +32,7 @@ __all__ = [
     "SIGNIFICANT_DIGITS",
     "UNROUNDED",
     "display_path",
+    "joined",
     "loss_text",
     "quoted",
     "rounded_floats",
@@ -52,7 +53,8 @@ MEASUREMENTS: Final = frozenset(
         "val_losses",
         "best_val_loss",
         "last_train_loss",
-        # rates and their comparison (a metric's or the judge's ``base`` and ``tuned``)
+        # rates and their comparison (a metric's or the judge's ``base``, ``tuned`` and
+        # ``compare``)
         "rate",
         "kappa",
         "base",
@@ -60,6 +62,8 @@ MEASUREMENTS: Final = frozenset(
         "delta",
         "ci95",
         "tuned_minus_base",
+        "compare",
+        "tuned_minus_compare",
         # times, ages and spend
         "elapsed",
         "elapsed_s",
@@ -125,6 +129,11 @@ def word(value: object) -> str:
 def quoted(value: object) -> str:
     """:func:`word`, shell-quoted: a path or value to paste into a hint's command."""
     return shlex.quote(word(value))
+
+
+def joined(items: Sequence[str]) -> str:
+    """``items`` as a sentence lists them: ``a``, ``a and b``, ``a, b and c``."""
+    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
 
 
 def _resolved(path: Path) -> Path | None:

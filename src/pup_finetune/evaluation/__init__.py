@@ -15,7 +15,8 @@ substitute for the reference, and calibrates that judge first
 (:mod:`pup_finetune.evaluation.fake_judge` is an offline judge for development).
 :mod:`pup_finetune.evaluation.replay` replays every case with the base and the tuned model,
 resumably, and summarizes the comparison; :mod:`pup_finetune.evaluation.targets` makes those
-two samplers from a training session. Tools are never executed, so replay measures
+two samplers from a training session, and :mod:`pup_finetune.evaluation.compare` the third,
+the compare model of ``evaluate --compare-model``. Tools are never executed, so replay measures
 agreement with the recorded behavior, not task success. Evaluation is provider-neutral:
 nothing here imports a provider SDK or client; it samples through the
 :class:`~pup_finetune.providers.base.Sampler` protocol, and the judge talks to its endpoint
@@ -37,6 +38,7 @@ import importlib
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from pup_finetune.evaluation.bootstrap import paired_bootstrap_ci
     from pup_finetune.evaluation.cases import (
         ReplayCase,
         build_cases,
@@ -74,7 +76,6 @@ if TYPE_CHECKING:
         Publisher,
         ReplaySummary,
         evaluation_identity,
-        paired_bootstrap_ci,
         run_replay,
         summarize,
     )
@@ -102,7 +103,7 @@ _EXPORTS: dict[str, str] = {
     "check_judge_differs": "pup_finetune.evaluation.judge",
     "evaluation_identity": "pup_finetune.evaluation.replay",
     "has_visible_action": "pup_finetune.evaluation.cases",
-    "paired_bootstrap_ci": "pup_finetune.evaluation.replay",
+    "paired_bootstrap_ci": "pup_finetune.evaluation.bootstrap",
     "parallel_call_set_match": "pup_finetune.evaluation.metrics",
     "reference_arguments_match": "pup_finetune.evaluation.metrics",
     "row_cases": "pup_finetune.evaluation.cases",

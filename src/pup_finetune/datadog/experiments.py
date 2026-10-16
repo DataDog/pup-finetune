@@ -20,7 +20,8 @@ metrics (``pup api v2/llm-obs/v1/experiments/<id>/events``):
   tools in, the generated message out and the recorded message expected; its metrics are a
   boolean per deterministic metric that applies and ``judge_pass``, with the judge's reason.
   A case that ended in an error is an ``error`` span with its message and no metric, as it
-  counts in no rate of the local summary.
+  counts in no rate of the local summary. A case a target did not replay (the compare model
+  skips those its API refuses) has no span in its experiment, nor a row with only such cases.
 
 Metrics are stamped with the time they are submitted, since the API refuses timestamps more
 than a day old. At most :data:`SPANS_PER_REQUEST` spans go in one request, with their
@@ -83,7 +84,8 @@ from pup_finetune.datadog.jsonapi import JSON_API, object_id, private_json_file
 from pup_finetune.datadog.pup import DEFAULT_TIMEOUT_SECONDS, Pup
 from pup_finetune.errors import ExternalError, StateError, require_writable
 from pup_finetune.evaluation.cases import ReplayCase
-from pup_finetune.evaluation.replay import METRICS_VERSION, TARGETS, PairKey
+from pup_finetune.evaluation.replay import COMPARE, METRICS_VERSION, TARGETS, PairKey, Replays
+from pup_finetune.inference import JudgeConfig
 from pup_finetune.redaction import redact
 from pup_finetune.runtime import Runtime
 from pup_finetune.storage import atomic_write_json, canonical_json, finite_json, read_json
@@ -312,7 +314,10 @@ class PublishSettings:
     evaluation into another directory has the same ``eval_key`` but its own nonces, so a
     lookup for one directory's create never finds another's experiment. ``records`` maps
     each test row id to its dataset record (``input``, ``expected_output``, ``metadata``),
-    as pushed.
+    as pushed. ``compare`` is the compare model, when the evaluation has one: its experiment
+    comes last (:attr:`targets`) and records that model; base and tuned are described the
+    same way with or without it. ``replays`` holds the cases each target replayed, when not
+    every one (the compare model skips those its API refuses).
     """
 
     eval_key: str
@@ -324,6 +329,17 @@ class PublishSettings:
     max_tokens: int
     push: PushState
     records: Mapping[str, Mapping[str, Any]]
+    compare: JudgeConfig | None = None
+    replays: Replays = field(default_factory=dict)
+
+    @property
+    def targets(self) -> tuple[str, ...]:
+        """The experiments' targets in order: base, tuned, then compare when there is one."""
+        return (*TARGETS, COMPARE) if self.compare is not None else TARGETS
+
+    def replayed(self, target: str, cases: Sequence[ReplayCase]) -> Sequence[ReplayCase]:
+        """The cases ``target`` replayed: its :attr:`replays`, else every one of ``cases``."""
+        return self.replays.get(target, cases)
 
     @property
     def dataset_id(self) -> str:
@@ -344,7 +360,32 @@ class PublishSettings:
 
     def experiment_attributes(self, target: str, nonce: str) -> dict[str, Any]:
         """The body attributes of ``target``'s experiment create, marked with ``nonce``."""
-        model = self.base_model if target == "base" else f"{self.base_model}, tuned"
+        config: dict[str, Any]
+        if target == COMPARE:
+            if self.compare is None:
+                raise ValueError("an evaluation without a compare model has no compare experiment")
+            model = self.compare.spec
+            config = {
+                "provider": self.compare.provider,
+                "compare_model": self.compare.spec,
+                "target": target,
+                "run_id": self.run_id,
+                "judge_model": self.judge_model,
+                "max_tokens": self.compare.max_tokens,
+                "metrics_version": METRICS_VERSION,
+            }
+        else:
+            model = self.base_model if target == "base" else f"{self.base_model}, tuned"
+            config = {
+                "provider": self.provider,
+                "base_model": self.base_model,
+                "target": target,
+                "run_id": self.run_id,
+                "checkpoint": self.tuned_checkpoint if target == "tuned" else None,
+                "judge_model": self.judge_model,
+                "max_tokens": self.max_tokens,
+                "metrics_version": METRICS_VERSION,
+            }
         attributes: dict[str, Any] = {
             "name": experiment_name(target, self.run_id),
             "description": (
@@ -354,16 +395,7 @@ class PublishSettings:
             ),
             "dataset_id": self.dataset_id,
             "project_id": self.push.project_id,
-            "config": {
-                "provider": self.provider,
-                "base_model": self.base_model,
-                "target": target,
-                "run_id": self.run_id,
-                "checkpoint": self.tuned_checkpoint if target == "tuned" else None,
-                "judge_model": self.judge_model,
-                "max_tokens": self.max_tokens,
-                "metrics_version": METRICS_VERSION,
-            },
+            "config": config,
             "metadata": {"tags": self.tags(target)},
             "ensure_unique": True,
             "run_count": 1,
@@ -611,10 +643,11 @@ def build_span_groups(
 ) -> list[SpanGroup]:
     """The spans and metrics of ``target``'s experiment: one :class:`SpanGroup` per row.
 
-    Every case must have a result. ``fallback_ns`` times a case whose records hold no time.
+    Every case ``target`` replayed (:meth:`PublishSettings.replayed`) must have a result; a
+    row with none has no span. ``fallback_ns`` times a case whose records hold no time.
     """
     by_row: dict[str, list[ReplayCase]] = {}
-    for case in cases:
+    for case in settings.replayed(target, cases):
         by_row.setdefault(case.row_id, []).append(case)
     return [
         _row_group(
@@ -730,7 +763,7 @@ class ExperimentsPublisher:
         )
         try:
             experiments = {
-                target: self._experiment(target, report["warnings"]) for target in TARGETS
+                target: self._experiment(target, report["warnings"]) for target in settings.targets
             }
             self._set_link(list(experiments.values()))
             report["comparison_url"] = self.link
@@ -768,7 +801,7 @@ class ExperimentsPublisher:
         """
         require_writable(self.runtime, "publishing the evaluation as experiments")
         try:
-            experiments = [self._experiment(target, []) for target in TARGETS]
+            experiments = [self._experiment(target, []) for target in self.settings.targets]
         except (ExternalError, _PublishCancelled):
             self._live_failed = True
             return None
@@ -806,11 +839,11 @@ class ExperimentsPublisher:
         """
         if self._live_failed or self.cancel.is_set():
             return
-        by_row: dict[str, list[ReplayCase]] = {}
-        for case in cases:
-            by_row.setdefault(case.row_id, []).append(case)
         try:
-            for target in TARGETS:
+            for target in self.settings.targets:
+                by_row: dict[str, list[ReplayCase]] = {}
+                for case in self.settings.replayed(target, cases):
+                    by_row.setdefault(case.row_id, []).append(case)
                 ready = [
                     case
                     for row in by_row.values()

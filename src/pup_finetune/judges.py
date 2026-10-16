@@ -48,7 +48,9 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal, cast
 
+from pup_finetune import credentials
 from pup_finetune.errors import UsageError, install_hint
+from pup_finetune.http_common import bearer_key
 from pup_finetune.inference import (
     DEFAULT_JUDGE_BASE_URL,
     ChatClient,
@@ -74,10 +76,12 @@ __all__ = [
     "billing",
     "check_available",
     "destination",
+    "login_hint",
     "open_client",
     "open_clients",
     "parse_judge",
     "recipient",
+    "require_key",
 ]
 
 RemoteProvider = Literal["fireworks", "anthropic", "openai"]
@@ -159,7 +163,7 @@ _PREFIXED_PROVIDERS: Final[frozenset[str]] = frozenset({"anthropic", "openai"})
 """The providers a judge spec names by prefix; any other spec is a Fireworks model id."""
 
 
-def parse_judge(spec: str) -> JudgeConfig:
+def parse_judge(spec: str, *, what: str = "judge") -> JudgeConfig:
     """The judge ``spec`` names (see the module docstring), with its provider's defaults.
 
     ``anthropic/<model>`` and ``openai/<model>`` name those providers (the prefix in any
@@ -167,21 +171,22 @@ def parse_judge(spec: str) -> JudgeConfig:
     be an alias of one (:data:`JUDGE_SHORT_NAMES`), resolved to the id, so a mistyped alias is
     never sent to a paid run. The reasoning effort is the lowest the model takes (see the
     module docstring). Raises :class:`UsageError` for an empty spec, an empty model after a
-    provider prefix, or an unknown alias (with the closest known one).
+    provider prefix, or an unknown alias (with the closest known one), naming the spec as
+    ``what`` (``judge``, or ``compare model`` for ``--compare-model``).
     """
     text = spec.strip()
     if not text:
-        raise UsageError("the judge model is empty", hint=f"name it as {SPEC_FORMS}")
+        raise UsageError(f"the {what} is empty", hint=f"name it as {SPEC_FORMS}")
     prefix, slash, rest = text.partition("/")
     provider: RemoteProvider
     if slash and prefix.lower() in _PREFIXED_PROVIDERS:
         provider, model = cast(RemoteProvider, prefix.lower()), rest.strip()
         if not model:
-            raise UsageError(f"the judge model {text!r} has no model after {prefix}/")
+            raise UsageError(f"the {what} {text!r} has no model after {prefix}/")
     elif slash:
         provider, model = "fireworks", text
     else:
-        provider, model = "fireworks", _known_alias(text)
+        provider, model = "fireworks", _known_alias(text, what)
     defaults = PROVIDERS[provider]
     effort = defaults.reasoning_effort
     if provider == "fireworks":
@@ -199,16 +204,16 @@ def parse_judge(spec: str) -> JudgeConfig:
     )
 
 
-def _known_alias(text: str) -> str:
+def _known_alias(text: str, what: str) -> str:
     """The Fireworks model id the alias ``text`` stands for; raises :class:`UsageError`
-    naming the closest alias when it is none."""
+    naming the closest alias when it is none (and the spec as ``what``)."""
     if text in JUDGE_SHORT_NAMES:
         return resolve_alias(text)
     close = difflib.get_close_matches(text, list(JUDGE_SHORT_NAMES), n=1)
     mean = f"did you mean {close[0]}? " if close else ""
     raise UsageError(
-        f"unknown judge {text!r}: a judge without a '/' must be one of the aliases",
-        hint=f"{mean}name the judge as {UNKNOWN_JUDGE_FORMS}",
+        f"unknown {what} {text!r}: a {what} without a '/' must be one of the aliases",
+        hint=f"{mean}name the {what} as {UNKNOWN_JUDGE_FORMS}",
     )
 
 
@@ -231,65 +236,120 @@ def recipient(config: JudgeConfig) -> str:
     return f"{name} {host}"
 
 
-def billing(config: JudgeConfig, calls: int, *, input_tokens: int | None = None) -> str:
-    """What ``calls`` calls to ``config``'s judge bill, in one sentence for a preview: the
+def billing(
+    config: JudgeConfig, calls: int, *, input_tokens: int | None = None, what: str = "judge"
+) -> str:
+    """What ``calls`` calls to ``config``'s model bill, in one sentence for a preview: the
     provider bills per token at its own rates, which pup-finetune does not know.
 
-    ``input_tokens`` is a rough estimate of the tokens the calls send, when known.
+    ``input_tokens`` is a rough estimate of the tokens the calls send, when known; ``what``
+    names the calls (``judge``, or ``compare-model`` for the compare target).
     """
     sent = f", about {input_tokens:,} input tokens in all (approximate)" if input_tokens else ""
-    what = f"{calls:,} calls{sent}, at most {config.max_tokens:,} output tokens each"
+    counted = f"{calls:,} calls{sent}, at most {config.max_tokens:,} output tokens each"
     if config.provider == "fake":
-        return f"the fake judge is offline and bills nothing: {what}"
+        model = "judge" if what == "judge" else "compare model"
+        return f"the fake {model} is offline and bills nothing: {counted}"
     name, _ = _name_and_host(config)
     return (
-        f"{name} bills each judge call per token at its own rates, which pup-finetune does "
-        f"not know: {what}"
+        f"{name} bills each {what} call per token at its own rates, which pup-finetune does "
+        f"not know: {counted}"
     )
 
 
-def check_available(config: JudgeConfig) -> None:
+def check_available(config: JudgeConfig, *, what: str = "judge") -> None:
     """Raise :class:`UsageError` with an install hint when ``config``'s judge needs a
-    package that is not installed (the ``anthropic`` extra). Imports nothing."""
+    package that is not installed (the ``anthropic`` extra), naming the model as ``what``
+    (``judge``, or ``compare model``). Imports nothing."""
     if config.provider == "anthropic" and importlib.util.find_spec("anthropic") is None:
-        raise _anthropic_missing()
+        raise _anthropic_missing(what)
 
 
-def _anthropic_missing() -> UsageError:
+def login_hint(credential: str) -> str:
+    """How a user signs in to the provider of the ``credential`` a judge uses: our key, or
+    for Anthropic the SDK's own login."""
+    hint = credentials.login_hint(credentials.get_spec(credential))
+    return f"{hint}, or sign in with `ant auth login`" if credential == "anthropic" else hint
+
+
+def require_key(
+    config: JudgeConfig, *, what: str = "judge", warnings: list[str] | None = None
+) -> None:
+    """Raise the missing key's :class:`UsageError`, with its login hint, when nothing would
+    sign ``config``'s model in: no key in the environment or the keychain and, for Anthropic,
+    no login of the SDK's own. Offline: no call is made. The fake judge and compare model
+    need no key; ``what`` names the model in the message. A key that is there but malformed
+    is refused the same way, as opening its client would refuse it. With ``warnings`` (a
+    read-only preview, which offers no ``--confirm`` to fail), the error is appended there
+    instead."""
+    if config.provider == "fake":
+        return
+    hint = login_hint(config.credential)
+    error: UsageError | None = None
+    if credentials.key_source(config.credential) is None:
+        error = credentials.missing_key_error(
+            config.credential, hint=hint, needed_by=f"the {what} {config.spec}"
+        )
+    elif (found := credentials.lookup(config.credential)) is not None:
+        try:
+            bearer_key(found.value, label=f"the {config.credential} API key", hint=hint)
+        except UsageError as malformed:
+            error = malformed
+    if error is None:
+        return
+    if warnings is None:
+        raise error
+    warnings.append(f"{error.message}: {error.hint}")
+
+
+def _anthropic_missing(what: str = "judge") -> UsageError:
     return UsageError(
-        "Anthropic judges need the 'anthropic' package, which is not installed",
+        f"Anthropic {what}s need the 'anthropic' package, which is not installed",
         hint=ANTHROPIC_INSTALL_HINT,
     )
 
 
-def anthropic_client_class() -> type[AnthropicChatClient]:
+def anthropic_client_class(*, what: str = "judge") -> type[AnthropicChatClient]:
     """:class:`~pup_finetune.anthropic_client.AnthropicChatClient`, imported now; a
-    :class:`UsageError` with an install hint when the ``anthropic`` extra is missing."""
+    :class:`UsageError` with an install hint naming the model as ``what`` when the
+    ``anthropic`` extra is missing."""
     try:
         from pup_finetune.anthropic_client import AnthropicChatClient
     except ModuleNotFoundError as exc:
         if exc.name is not None and exc.name.split(".", 1)[0] in ("anthropic", "httpx2"):
-            raise _anthropic_missing() from exc
+            raise _anthropic_missing(what) from exc
         raise
     return AnthropicChatClient
 
 
 @contextmanager
-def open_client(config: JudgeConfig) -> Iterator[ChatCompleter]:
+def open_client(
+    config: JudgeConfig,
+    *,
+    timeout_s: float | None = None,
+    fallbacks: bool = True,
+    what: str = "judge",
+) -> Iterator[ChatCompleter]:
     """The client for ``config``'s judge, with the key of its credential. Closed on exit.
 
     Fireworks and OpenAI judges get a :class:`~pup_finetune.inference.ChatClient` (with
     OpenAI's request policy for OpenAI), Anthropic judges an
-    :class:`~pup_finetune.anthropic_client.AnthropicChatClient`. Raises :class:`UsageError`
-    when no key is configured, or a package the judge needs is missing.
+    :class:`~pup_finetune.anthropic_client.AnthropicChatClient`; ``timeout_s`` replaces the
+    client's limit per attempt, and ``fallbacks`` ``False`` turns off Anthropic's
+    server-side refusal fallbacks, which answer with another model. Raises
+    :class:`UsageError` when no key is configured, or a package the judge needs is missing
+    (naming the model as ``what``).
     """
     if config.provider == "anthropic":
-        with anthropic_client_class().for_judge(config) as client:
+        opened = anthropic_client_class(what=what).for_judge(
+            config, timeout_s=timeout_s, fallbacks=fallbacks
+        )
+        with opened as client:
             yield client
         return
     if config.provider not in ("fireworks", "openai"):
         raise UsageError(f"no client serves {config.provider} judges")
-    with ChatClient.for_judge(config) as chat:
+    with ChatClient.for_judge(config, timeout_s=timeout_s) as chat:
         yield chat
 
 

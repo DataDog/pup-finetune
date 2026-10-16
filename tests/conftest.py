@@ -18,6 +18,7 @@ from typing import Any
 import keyring.core
 import pytest
 
+import pup_finetune.providers  # noqa: F401 - registers every provider's credential spec
 from pup_finetune import credentials, judge_credentials, next_steps, output
 from tests.fakes.keyring import OS_KEYCHAIN_FAKES, FailKeyring
 
@@ -118,6 +119,31 @@ PROGRESS_TIME = datetime(2026, 10, 7, 18, 3, 16)
 def _fixed_progress_time(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stamp progress lines with :data:`PROGRESS_TIME`, so tests can assert them exactly."""
     monkeypatch.setattr(output, "_now", lambda: PROGRESS_TIME)
+
+
+@pytest.fixture(autouse=True)
+def _no_provider_keys(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear every registered provider key variable, so a key in the developer's shell
+    passes no test that fails in CI; ``live`` tests keep them."""
+    if request.node.get_closest_marker("live") is not None:
+        return
+    for spec in credentials.all_specs():
+        monkeypatch.delenv(spec.env_var, raising=False)
+
+
+JUDGE_KEYS: dict[str, str] = {
+    "FIREWORKS_API_KEY": "fw-test-key",
+    "ANTHROPIC_API_KEY": "sk-ant-test-key",
+    "OPENAI_API_KEY": "sk-test-key",
+}
+
+
+@pytest.fixture
+def judge_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A key for every judge provider in the environment, as after `auth login`: for tests
+    that preview paid judges or compare models whose clients they fake."""
+    for name, value in JUDGE_KEYS.items():
+        monkeypatch.setenv(name, value)
 
 
 @pytest.fixture(autouse=True)
