@@ -324,24 +324,27 @@ class EvalDir:
 
 
 def remaining_work(
-    eval_dir: EvalDir, cases: Sequence[ReplayCase], targets: Sequence[str] = TARGETS
-) -> dict[str, int]:
-    """What a run in ``eval_dir`` would still do: ``{"done", "generate", "judge"}`` pairs.
+    eval_dir: EvalDir, replays: Mapping[str, Sequence[ReplayCase]]
+) -> dict[str, dict[str, int]]:
+    """What a run in ``eval_dir`` would still do for each target of ``replays`` (the cases
+    each target replays): its ``{"done", "generate", "judge"}`` pairs.
 
     ``done`` pairs have an ``ok`` result; every other pair is judged, and generated too
     unless a generation is stored. Reads only, without the lock: for previews.
     """
     generations, results = eval_dir.read_generations(), eval_dir.read_results()
-    done = generate = judge = 0
-    for case in cases:
-        for target in targets:
+    found: dict[str, dict[str, int]] = {}
+    for target, cases in replays.items():
+        done = generate = judge = 0
+        for case in cases:
             key = (target, case.id)
             if results.get(key, {}).get("status") == "ok":
                 done += 1
                 continue
             judge += 1
             generate += key not in generations
-    return {"done": done, "generate": generate, "judge": judge}
+        found[target] = {"done": done, "generate": generate, "judge": judge}
+    return found
 
 
 def _read_lines(path: Path) -> list[dict[str, Any]]:

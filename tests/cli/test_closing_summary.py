@@ -180,6 +180,17 @@ def test_a_preview_prints_its_card_then_its_warnings_then_the_next_line(
     assert "\x1b" not in result.stderr  # off a terminal: plain text
 
 
+def test_the_evaluation_cards_count_one_turn_in_the_singular(run_dir: Path, tmp_path: Path) -> None:
+    dataset = Path(str(json.loads((run_dir / "run.json").read_text())["dataset_dir"]))
+    previews = (
+        invoke("evaluate", str(run_dir), "--max-cases", "1"),
+        invoke("benchmark", str(dataset), "--models", "fake-model", "--max-cases", "1"),
+    )
+    for preview in previews:
+        assert preview.exit_code == 2, preview.stderr
+        assert " 1 turn per conversation" in preview.stderr
+
+
 def test_quiet_turns_off_the_summary_but_not_the_warnings(
     run_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

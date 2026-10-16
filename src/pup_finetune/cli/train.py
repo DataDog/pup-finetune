@@ -1101,7 +1101,8 @@ def train(
         )
         return _remote_started(run, run_id, record, upload, notes)
     if plan is not None:
-        with evaluation.open_judge_client(plan.judge) as client:
+        calls = plan.work(None).judge_calls
+        with evaluation.open_judge_client(plan.judge, calls=calls) as client:
             # Before anything is trained: a judge that fails calibration stops the run here.
             # A run no epoch of which can finish is never evaluated: calibrating would only
             # spend judge calls (the preview warned).

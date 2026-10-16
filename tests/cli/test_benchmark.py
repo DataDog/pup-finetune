@@ -175,7 +175,7 @@ def test_a_judge_that_fails_calibration_stops_before_any_generation(
     dataset: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     @contextmanager
-    def always_pass(config: Any) -> Iterator[AlwaysPass]:
+    def always_pass(config: Any, **options: Any) -> Iterator[AlwaysPass]:
         yield AlwaysPass()
 
     monkeypatch.setattr(benchmark_module, "open_judge_client", always_pass)

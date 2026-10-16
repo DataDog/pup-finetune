@@ -102,7 +102,7 @@ if TYPE_CHECKING:
     from pup_finetune.evaluation.compare import CompareTarget
     from pup_finetune.evaluation.judge import Judgment
     from pup_finetune.evaluation.replay import EvalDir, Publisher, ReplaySummary
-    from pup_finetune.inference import ChatCompleter, JudgeConfig
+    from pup_finetune.inference import ChatCompleter, ChatCompletion, JudgeConfig
 
 __all__ = [
     "CALIBRATION_CASES",
@@ -117,6 +117,7 @@ __all__ = [
     "SPEND_POLL_S",
     "EvalPlan",
     "EvalSettings",
+    "EvalWork",
     "EvaluateAfterTraining",
     "Publishing",
     "RecordedEvaluation",
@@ -387,6 +388,29 @@ def evaluate_words(
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class EvalWork:
+    """What an evaluation would still do (:meth:`EvalPlan.work`)."""
+
+    by_target: dict[str, dict[str, int]]
+    """Each target's ``{"done", "generate", "judge"}`` pairs."""
+    calibration: int
+    """The judge calls calibration makes: none once one passed in the directory."""
+    probe: bool
+    """Whether the compare model answers one call before it is attached."""
+
+    @property
+    def judge_calls(self) -> int:
+        return sum(counts["judge"] for counts in self.by_target.values()) + self.calibration
+
+    @property
+    def trained(self) -> int:
+        """The generations base and tuned make, in the training provider's session."""
+        from pup_finetune.evaluation.replay import TARGETS
+
+        return sum(self.by_target[target]["generate"] for target in TARGETS)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class EvalPlan:
     """What an evaluation of one run replays, with which judge, into which directory."""
 
@@ -407,6 +431,25 @@ class EvalPlan:
     differ from the defaults, and the judge (see :meth:`evaluate_command`)."""
     compare: CompareTarget | None = None
     """The compare model: ``--compare-model``'s, else the one the directory has attached."""
+    compare_skips: Mapping[str, str] = field(init=False)
+    """The cases the compare model's API refuses, by case id, with the reason; none
+    without a compare model (:func:`~pup_finetune.evaluation.compare.compare_skips`)."""
+    replays: dict[str, list[ReplayCase]] = field(init=False)
+    """The cases each target replays: every one for base and tuned, and for the compare
+    model those its API takes (:attr:`compare_skips`)."""
+
+    def __post_init__(self) -> None:
+        from pup_finetune.evaluation.compare import compare_skips
+        from pup_finetune.evaluation.replay import COMPARE
+
+        skips = (
+            {} if self.compare is None else compare_skips(self.cases, self.compare.config.provider)
+        )
+        replays = dict.fromkeys(self.targets, self.cases)
+        if self.compare is not None:
+            replays[COMPARE] = [case for case in self.cases if case.id not in skips]
+        object.__setattr__(self, "compare_skips", skips)
+        object.__setattr__(self, "replays", replays)
 
     @property
     def targets(self) -> tuple[str, ...]:
@@ -414,28 +457,6 @@ class EvalPlan:
         from pup_finetune.evaluation.replay import COMPARE, TARGETS
 
         return (*TARGETS, COMPARE) if self.compare is not None else TARGETS
-
-    @property
-    def compare_skips(self) -> Mapping[str, str]:
-        """The cases the compare model's API refuses, by case id, with the reason; none
-        without a compare model (:func:`~pup_finetune.evaluation.compare.compare_skips`)."""
-        from pup_finetune.evaluation.compare import compare_skips
-
-        if self.compare is None:
-            return {}
-        return compare_skips(self.cases, self.compare.config.provider)
-
-    @property
-    def replays(self) -> dict[str, list[ReplayCase]]:
-        """The cases each target replays: every one for base and tuned, and for the compare
-        model those its API takes (:attr:`compare_skips`)."""
-        from pup_finetune.evaluation.replay import COMPARE
-
-        found = dict.fromkeys(self.targets, self.cases)
-        if self.compare is not None:
-            skips = self.compare_skips
-            found[COMPARE] = [case for case in self.cases if case.id not in skips]
-        return found
 
     @property
     def compare_identity(self) -> dict[str, Any] | None:
@@ -587,26 +608,19 @@ class EvalPlan:
         if conflict is not None:
             raise conflict
 
-    def preview(self, *, tuned: str, tuned_checkpoint: CheckpointRef | None) -> dict[str, Any]:
-        """The calls the evaluation makes. With ``tuned_checkpoint`` (a standalone run), what
-        ``--out-dir`` already holds under the same settings is left out of the counts."""
-        from pup_finetune.datadog.experiments import experiment_name
-        from pup_finetune.evaluation.compare import require_sent, skipped_warning
-        from pup_finetune.evaluation.replay import CAVEAT, COMPARE, EvalDir, remaining_work
+    def work(self, tuned_checkpoint: CheckpointRef | None) -> EvalWork:
+        """What the evaluation would still do: everything, or with ``tuned_checkpoint`` (a
+        standalone run) less what ``--out-dir`` already holds under the same settings. The
+        preview counts it and execution opens the judge only when it has a judge call left.
 
-        settings = self.settings
-        warnings: list[str] = []
-        targets = self.targets
-        replays = self.replays
-        skips = Counter(self.compare_skips.values())
-        if self.compare is not None:
-            # --confirm would attach a model that answers nothing: fail now, never offer it.
-            require_sent(skips, spec=self.compare.spec, cases=len(self.cases))
-            if skipped := skipped_warning(skips, spec=self.compare.spec, cases=len(self.cases)):
-                warnings.append(skipped)
+        Raises the :class:`SettingsConflict` ``--confirm`` would raise for a directory that
+        holds work under other settings, or another compare model.
+        """
+        from pup_finetune.evaluation.replay import EvalDir, remaining_work
+
         by_target = {
             target: {"done": 0, "generate": len(cases), "judge": len(cases)}
-            for target, cases in replays.items()
+            for target, cases in self.replays.items()
         }
         calibration = self.calibration_calls()
         eval_dir = EvalDir(self.out_dir)
@@ -629,15 +643,34 @@ class EvalPlan:
             )
         if reusing:
             self._refuse_another_compare(eval_dir)
-            by_target = {
-                target: remaining_work(eval_dir, cases, (target,))
-                for target, cases in replays.items()
-            }
+            by_target = remaining_work(eval_dir, self.replays)
             if (eval_dir.read_calibration() or {}).get("ok"):
                 calibration = 0
+        return EvalWork(by_target=by_target, calibration=calibration, probe=probe)
+
+    def preview(self, *, tuned: str, tuned_checkpoint: CheckpointRef | None) -> dict[str, Any]:
+        """The calls the evaluation makes. With ``tuned_checkpoint`` (a standalone run), what
+        ``--out-dir`` already holds under the same settings is left out of the counts."""
+        from pup_finetune.datadog.experiments import experiment_name
+        from pup_finetune.evaluation.compare import require_sent, skipped_warning
+        from pup_finetune.evaluation.replay import CAVEAT, COMPARE
+
+        settings = self.settings
+        warnings: list[str] = []
+        targets = self.targets
+        replays = self.replays
+        skips = Counter(self.compare_skips.values())
+        if self.compare is not None:
+            # --confirm would attach a model that answers nothing: fail now, never offer it.
+            require_sent(skips, spec=self.compare.spec, cases=len(self.cases))
+            if skipped := skipped_warning(skips, spec=self.compare.spec, cases=len(self.cases)):
+                warnings.append(skipped)
+        work = self.work(tuned_checkpoint)
+        by_target = {target: dict(counts) for target, counts in work.by_target.items()}
+        calibration = work.calibration
         from pup_finetune.judges import destination as judge_destination
 
-        if probe:
+        if work.probe:
             by_target[COMPARE]["generate"] += 1
         remaining = {
             key: sum(counts[key] for counts in by_target.values())
@@ -696,7 +729,7 @@ class EvalPlan:
         if self.compare is not None and compared:
             models.append(
                 f"{self.compare.spec} (after one call that checks it answers)"
-                if probe
+                if work.probe
                 else self.compare.spec
             )
             billing.append(self.compare.billing(compared))
@@ -919,19 +952,30 @@ def plan_evaluation(
 # --- the judge ----------------------------------------------------------------------------
 
 
+class _NoJudgeCall:
+    """The judge of a run with no judge call left (:attr:`EvalWork.judge_calls`)."""
+
+    def complete(self, *args: Any, **kwargs: Any) -> ChatCompletion:
+        raise AssertionError("the judge was called with no judge call left")
+
+
 @contextmanager
-def open_judge_client(config: JudgeConfig) -> Iterator[ChatCompleter]:
-    """The client for ``config``'s judge: the offline fake judge, or the provider's client
-    with the key of its credential, opened on its first call
-    (:func:`pup_finetune.judges.open_lazily`), so a run with nothing left to judge needs no
-    key. Closed on exit."""
+def open_judge_client(config: JudgeConfig, *, calls: int) -> Iterator[ChatCompleter]:
+    """The client for ``config``'s judge, opened now, before anything is generated, with
+    the key of its credential (:func:`pup_finetune.judges.open_client`), so a malformed key,
+    a missing package or an unreadable keychain fails before anything is paid; the offline
+    fake judge; or, with no ``calls`` left, none, so a rerun with nothing left to judge
+    needs no key. Closed on exit."""
     from pup_finetune.evaluation.fake_judge import FakeJudge
-    from pup_finetune.judges import open_lazily
+    from pup_finetune.judges import open_client
 
     if config.provider == "fake":
         yield FakeJudge()
         return
-    with open_lazily(config) as client:
+    if not calls:
+        yield _NoJudgeCall()
+        return
+    with open_client(config) as client:
         yield client
 
 
@@ -1270,25 +1314,13 @@ def _replay_next(
     evaluation's rerun reuses every result, so it makes no new model calls), or deploy it
     unpublished.
     """
-    steps: list[dict[str, str]] = []
     rerun = plan.evaluate_command()
-    deploy = deploy_command(plan.run_dir)
-    push = _push_first(plan, publication.get("status"))
-    if push is not None:
-        steps.append(push)
-        if status == "complete":
-            why = (
-                "then rerun the evaluation to publish it: every result is reused, so it "
-                "makes no new model calls (it writes to Datadog: ask the user)"
-            )
-        else:
-            why = (
-                "then rerun the evaluation: it finishes the cases left and publishes it "
-                "(paid: ask the user)"
-            )
-        steps.append(step(shlex.join([*rerun, "--confirm"]), why))
-        if status == "complete" and deploy is not None:
-            steps.append(step(deploy, "or deploy the tuned model unpublished (a free preview)"))
+    pushing = (
+        _push_first(plan.publishing, shlex.join(rerun), plan.run_dir, complete=status == "complete")
+        if publication.get("status") == "skipped"
+        else []
+    )
+    steps = list(pushing)
     if status == "complete" and plan.compare is None:
         compared = evaluate_words(
             plan.run_dir,
@@ -1309,15 +1341,34 @@ def _replay_next(
     if retry:
         next_command: str | None = shlex.join(rerun)
     else:
-        next_command = None if push is not None else deploy
+        next_command = None if pushing else deploy_command(plan.run_dir)
     return {"next_command": next_command, "next_steps": steps}
 
 
-def _push_first(plan: EvalPlan, publication: object) -> dict[str, str] | None:
-    """The ``dataset push`` step an evaluation whose publication is ``publication`` waits
-    for: the missing push kept it unpublished, so its next step pushes the dataset and no
-    deploy is its next command, after it and in ``status`` alike. ``None`` otherwise."""
-    return plan.publishing.push_step() if publication == "skipped" else None
+def _push_first(
+    publishing: Publishing, rerun: str, run_dir: Path, *, complete: bool
+) -> list[dict[str, str]]:
+    """The steps of an evaluation the missing push kept unpublished, after it and in
+    ``status`` alike: push the dataset, then rerun the evaluation (``rerun`` with
+    ``--confirm``), or, once it is complete, deploy it unpublished while the run has no
+    deployment. None when ``publishing`` needs no push."""
+    push = publishing.push_step()
+    if push is None:
+        return []
+    if complete:
+        why = (
+            "then rerun the evaluation to publish it: every result is reused, so it makes no "
+            "new model calls (it writes to Datadog: ask the user)"
+        )
+    else:
+        why = (
+            "then rerun the evaluation: it finishes the cases left and publishes it (paid: "
+            "ask the user)"
+        )
+    steps = [push, step(f"{rerun} --confirm", why)]
+    if complete and (deploy := deploy_command(run_dir)) is not None:
+        steps.append(step(deploy, "or deploy the tuned model unpublished (a free preview)"))
+    return steps
 
 
 def deploy_command(run_dir: Path) -> str | None:
@@ -1456,17 +1507,14 @@ def record_evaluation(plan: EvalPlan, outcome: Mapping[str, Any]) -> None:
     published = str(publication.get("status")) if isinstance(publication, Mapping) else None
     summary = outcome.get("summary")
     settings = _settings_record(plan)
-    complete = _is_complete(status, published)
     entry = {
         "settings": settings,
         "status": status,
-        "complete": complete,
+        "complete": _is_complete(status, published),
         "publication": published,
         "headline": headline(summary) if isinstance(summary, Mapping) else None,
         "recorded_at": utcnow().isoformat(timespec="seconds").replace("+00:00", "Z"),
     }
-    if complete and _push_first(plan, published) is not None:
-        entry["awaits_push"] = {"next_steps": list(outcome.get("next_steps") or [])}
     run = RunDir(plan.run_dir)
     try:
         record = run.read_evaluations() or {}
@@ -1496,9 +1544,6 @@ class RecordedEvaluation:
     headline: dict[str, Any] | None
     settings: EvalSettings
     judge_model: str
-    awaits_push: list[dict[str, str]] | None = None
-    """A complete evaluation the missing push kept unpublished: the steps its result gave
-    (push the dataset, then rerun it to publish, or deploy it unpublished)."""
 
     def command(self, run_dir: Path) -> str:
         """The ``evaluate`` command that continues it (a free preview), every setting
@@ -1556,8 +1601,6 @@ def _recorded(run_dir: Path, entry: object) -> RecordedEvaluation | None:
         return None
     found_headline = entry.get("headline")
     publication = entry.get("publication")
-    awaits = entry.get("awaits_push")
-    steps = awaits.get("next_steps") if isinstance(awaits, Mapping) else None
     return RecordedEvaluation(
         out_dir=out_dir,
         status=str(entry.get("status")),
@@ -1566,9 +1609,6 @@ def _recorded(run_dir: Path, entry: object) -> RecordedEvaluation | None:
         headline=dict(found_headline) if isinstance(found_headline, Mapping) else None,
         settings=values,
         judge_model=str(settings["judge_model"]),
-        awaits_push=[dict(item) for item in steps if isinstance(item, Mapping)]
-        if isinstance(steps, list)
-        else None,
     )
 
 
@@ -1577,15 +1617,39 @@ def next_after_training(run_dir: Path) -> dict[str, Any]:
     (a free preview) when it was never evaluated; the recorded evaluation's own command while
     it is not complete (every setting pinned, so it continues that evaluation); once it is,
     ``deploy`` (a free preview, ``None`` while the run is deployed), unless the missing push
-    kept it unpublished: then, as after the evaluation, no next command, and its steps."""
+    kept it unpublished (:func:`_unpublished_next`)."""
     found = recorded_evaluation(run_dir)
     if found is None:
         return {"next_command": command("evaluate", run_dir), "next_steps": []}
     if not found.complete:
         return {"next_command": found.command(run_dir), "next_steps": []}
-    if found.awaits_push is not None:
-        return {"next_command": None, "next_steps": found.awaits_push}
+    if found.publication == "skipped":
+        return _unpublished_next(run_dir, found)
     return {"next_command": deploy_command(run_dir), "next_steps": []}
+
+
+def _unpublished_next(run_dir: Path, found: RecordedEvaluation) -> dict[str, Any]:
+    """What follows a complete evaluation the missing push kept unpublished, read from the
+    run and its dataset as they are now: while the dataset still needs a push, no next
+    command and the steps the evaluation gave (:func:`_push_first`); once it is pushed, the
+    evaluation's own command, which previews publishing it, or deploying it unpublished.
+    A dataset or push receipt it cannot read gets that command too, whose preview reports
+    it."""
+    rerun = found.command(run_dir)
+    try:
+        dataset = DatasetDir(Path(str(RunDir(run_dir).manifest()["dataset_dir"])))
+        publishing = plan_publishing(dataset, enabled=True)
+    except (FinetuneError, KeyError):
+        return {"next_command": rerun, "next_steps": []}
+    pushing = _push_first(publishing, rerun, run_dir, complete=True)
+    if pushing:
+        return {"next_command": None, "next_steps": pushing}
+    deploy = deploy_command(run_dir)
+    unpublished = "or deploy the tuned model unpublished (a free preview)"
+    return {
+        "next_command": rerun,
+        "next_steps": [] if deploy is None else [step(deploy, unpublished)],
+    }
 
 
 SPEND_POLL_S: Final = 0.5
@@ -1818,9 +1882,10 @@ class StandaloneEvaluation:
 
         plan = self.plan
         cancel = threading.Event()
+        work = plan.work(self.training)
         with ExitStack() as stack:
-            client = stack.enter_context(open_judge_client(plan.judge))
-            compare, target = self._open_compare(stack), plan.compare
+            client = stack.enter_context(open_judge_client(plan.judge, calls=work.judge_calls))
+            compare, target = self._open_compare(stack, work), plan.compare
             check = (
                 None
                 if compare is None or target is None
@@ -1832,7 +1897,7 @@ class StandaloneEvaluation:
             record_evaluation(plan, {"status": "running"})
             try:
                 with cancel_on_signals(cancel):
-                    result = self._replay(client, compare, cancel, report)
+                    result = self._replay(client, compare, cancel, report, work)
                 record_evaluation(plan, result)
                 return result
             except KeyboardInterrupt:
@@ -1842,18 +1907,14 @@ class StandaloneEvaluation:
                     "its next_command continues it",
                 ) from None
 
-    def _open_compare(self, stack: ExitStack) -> Sampler | None:
+    def _open_compare(self, stack: ExitStack, work: EvalWork) -> Sampler | None:
         """The compare model's sampler when it has cases left to generate, opened on
         ``stack`` before anything is written or any training session opens."""
         from pup_finetune.evaluation.compare import open_compare_sampler
-        from pup_finetune.evaluation.replay import COMPARE, EvalDir, remaining_work
+        from pup_finetune.evaluation.replay import COMPARE
 
         plan = self.plan
-        eval_dir = EvalDir(plan.out_dir)
-        if (
-            plan.compare is None
-            or not remaining_work(eval_dir, plan.replays[COMPARE], (COMPARE,))["generate"]
-        ):
+        if plan.compare is None or not work.by_target[COMPARE]["generate"]:
             return None
         return stack.enter_context(
             open_compare_sampler(plan.compare, plan.cases, seed=plan.settings.seed)
@@ -1865,19 +1926,19 @@ class StandaloneEvaluation:
         compare: Sampler | None,
         cancel: threading.Event,
         report: Mapping[str, Any] | None,
+        work: EvalWork,
     ) -> dict[str, Any]:
         """Replay with the samplers of the targets that have cases left to generate: a
         training session only for base and tuned, and ``compare``, already open, for the
         compare model."""
-        from pup_finetune.evaluation.replay import COMPARE, TARGETS, EvalDir, remaining_work
+        from pup_finetune.evaluation.replay import COMPARE
         from pup_finetune.evaluation.targets import run_samplers
 
         plan = self.plan
-        trained = remaining_work(EvalDir(plan.out_dir), plan.cases, TARGETS)["generate"]
         samplers: dict[str, Sampler] = {}
         tuned_sampler = None
         with ExitStack() as stack:
-            if trained:
+            if work.trained:
                 targets = stack.enter_context(run_samplers(self.provider, self.run, self.result))
                 samplers |= targets.samplers
                 tuned_sampler = targets.tuned_checkpoint

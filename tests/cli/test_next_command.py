@@ -218,7 +218,7 @@ def test_following_next_command_from_a_dataset_to_a_deployment(
     monkeypatch: pytest.MonkeyPatch, dataset: Path, tmp_path: Path, raised: list[BaseException]
 ) -> None:
     @contextmanager
-    def fake_judge(config: Any) -> Iterator[ChatCompleter]:
+    def fake_judge(config: Any, **options: Any) -> Iterator[ChatCompleter]:
         yield FakeJudge()
 
     monkeypatch.setattr(runner_module, "open_judge_client", fake_judge)

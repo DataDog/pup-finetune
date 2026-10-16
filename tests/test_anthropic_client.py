@@ -347,7 +347,7 @@ def test_a_compare_model_never_asks_for_fallbacks_and_a_judge_still_does(
     assert "fallbacks" not in compared
     assert "betas" not in compared
     assert sdk.beta.messages.calls == []
-    with open_judge_client(config) as client:
+    with open_judge_client(config, calls=1) as client:
         client.complete(MESSAGES, model=config.model, max_tokens=100)
     (judged,) = sdk.beta.messages.calls
     assert judged["fallbacks"] == "default"

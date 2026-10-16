@@ -255,7 +255,8 @@ With base and tuned, `paired` and `tuned_minus_base`; with a compare target,
 also has `skipped`, the cases it did not replay, in none of its rates: `0` for base and
 tuned, and for the compare model the cases whose conversation its API refuses every time.
 The `evaluate` preview counts those by reason under `compare.skipped_by_reason`:
-`no_messages` (nothing to send before the action), `unanswered_tool_call` (a tool call with
+`no_messages` (nothing to send before the action), `starts_on_assistant` (on Anthropic, a
+conversation whose first turn is the assistant's), `unanswered_tool_call` (a tool call with
 no tool result right after it), `orphan_tool_result` (a tool result with no call right
 before it) and `ends_on_assistant` (on Anthropic, a conversation that ends on an assistant
 turn).
