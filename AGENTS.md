@@ -933,7 +933,8 @@ delayed or capped indexing); it chains to the `api` handler installed before it,
 one `FakePup` with `FakeDatasetsApi`.
 `tests/fakes/tokenizer.py` has `FakeChatTokenizer`, a character-level chat tokenizer with a
 Qwen3.8-like Python template (optionally merging `\n\n` across the prompt boundary) or a
-GLM-5-like one (`glm5_like`); its `render_tokens` encodes the rendered text whole.
+GLM-5-like one (`glm5_like`), and extra special tokens (`DEEPSEEK_SPECIALS`) for a fake behind
+an encoder; its `render_tokens` encodes the rendered text whole.
 `tests/fakes/chat_api.py` has `FakeChatApi`, an OpenAI-compatible chat completions endpoint
 (scripted responses or errors first, then an answer function) and `matching_judge`.
 `tests/fakes/fireworks_api.py` has `FakeFireworksApi`, the Fireworks model and account routes

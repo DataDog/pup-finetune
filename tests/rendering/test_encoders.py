@@ -11,11 +11,17 @@ it to DeepSeek's own encoder and test vectors at the pinned revision."""
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 import pytest
 
+from pup_finetune.rendering import ChatMessage, RendererError, RendererErrorCode
 from pup_finetune.rendering.encoders import ENCODERS, DeepSeekV4Encoder, get_encoder
+from pup_finetune.rendering.families import DEEPSEEK_V4
+from pup_finetune.rendering.hf import HFChatTemplateRenderer
+from pup_finetune.training.datums import build_examples
+from tests.fakes.tokenizer import DEEPSEEK_SPECIALS, FakeChatTokenizer
 
 ENCODER = DeepSeekV4Encoder()
 BOS, EOS = "<｜begin▁of▁sentence｜>", "<｜end▁of▁sentence｜>"
@@ -93,3 +99,39 @@ def test_encoders_are_registered_by_name() -> None:
     assert set(ENCODERS) == {"deepseek_v4"}
     with pytest.raises(KeyError, match="known: deepseek_v4"):
         get_encoder("nope")
+
+
+def deepseek_renderer() -> HFChatTemplateRenderer:
+    """The ``deepseek_v4`` family behind a fake tokenizer: DeepSeek's specials are one id."""
+    return DEEPSEEK_V4.renderer(tokenizer=FakeChatTokenizer(specials=DEEPSEEK_SPECIALS))
+
+
+TWO_TURNS: list[ChatMessage] = [
+    {"role": "user", "content": "Hi."},
+    {"role": "assistant", "content": "Hello."},
+    {"role": "user", "content": "Bye."},
+    {"role": "assistant", "content": "Goodbye."},
+]
+
+
+def test_the_renderer_tokenizes_the_encoder_s_text_and_names_it_in_its_identity() -> None:
+    r = deepseek_renderer()
+    prompt = r.generation_prompt_tokens(TWO_TURNS[:1], [])
+    assert r.decode(prompt) == f"{BOS}{USER}Hi.{ASSISTANT}<think>"
+    assert len(prompt) == 1 + 1 + len("Hi.") + 1 + 1
+    pinned = f"pup_finetune.rendering.encoders:deepseek_v4@{DeepSeekV4Encoder.version}"
+    assert r.identity()["chat_template_sha256"] == hashlib.sha256(pinned.encode()).hexdigest()
+    assert [r.decode([token]) for token in r.stop_token_ids] == [EOS]
+
+
+def test_without_tools_a_row_training_every_turn_falls_back_to_per_turn() -> None:
+    r = deepseek_renderer()
+    with pytest.raises(RendererError) as excinfo:
+        r.supervised_example(TWO_TURNS, [])
+    assert excinfo.value.code == RendererErrorCode.NOT_PREFIX_STABLE
+    first, second = r.per_turn_examples(TWO_TURNS, [])
+    assert f"{USER}Hi.{ASSISTANT}<think></think>Hello." in r.decode(first.input_tokens)
+    assert f"{USER}Hi.{ASSISTANT}</think>Hello.{EOS}" in r.decode(second.input_tokens)
+    result = build_examples([{"messages": TWO_TURNS, "tools": []}], r, max_seq_len=4096)
+    assert result.rejected == []
+    assert result.examples[0].examples == (first, second)

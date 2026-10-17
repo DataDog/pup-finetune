@@ -12,6 +12,7 @@ Each special token is one id and every other character is its own id (its code p
     tokenizer = FakeChatTokenizer(merge_newlines=True)  # "\\n\\n" encodes as one token
     tokenizer = FakeChatTokenizer(template=role_tag_template)  # any template function
     tokenizer = FakeChatTokenizer(template=glm5_like)  # GLM-5-like, role tags as stops
+    tokenizer = FakeChatTokenizer(specials=DEEPSEEK_SPECIALS)  # more special tokens
 
 :func:`qwen3_8_like` follows the real Qwen3.8 template: ``<|im_start|>role\\n...<|im_end|>\\n``
 turns, ``<think>`` blocks on assistant turns (kept in history unless the template argument
@@ -67,11 +68,18 @@ class FakeChatTokenizer:
         merge_newlines: bool = False,
         template: Template | None = None,
         template_name: str = "fake-qwen3.8-like-v1",
+        specials: Sequence[str] = (),
     ) -> None:
         self.merge_newlines = merge_newlines
         self.template = template or qwen3_8_like
         self.template_name = template_name
         self.calls: list[dict[str, Any]] = []
+        self.specials = (*SPECIAL_TOKENS, *specials)
+        self.ids = {
+            **SPECIAL_IDS,
+            **{token: DOUBLE_NEWLINE_ID + 1 + index for index, token in enumerate(specials)},
+        }
+        self.text_of = {**_TEXT_OF, **{token_id: token for token, token_id in self.ids.items()}}
 
     @property
     def chat_template(self) -> str:
@@ -119,9 +127,9 @@ class FakeChatTokenizer:
         ids: list[int] = []
         position = 0
         while position < len(text):
-            special = next((t for t in SPECIAL_TOKENS if text.startswith(t, position)), None)
+            special = next((t for t in self.specials if text.startswith(t, position)), None)
             if special is not None:
-                ids.append(SPECIAL_IDS[special])
+                ids.append(self.ids[special])
                 position += len(special)
             elif self.merge_newlines and text.startswith("\n\n", position):
                 ids.append(DOUBLE_NEWLINE_ID)
@@ -132,10 +140,10 @@ class FakeChatTokenizer:
         return ids
 
     def decode(self, token_ids: Sequence[int]) -> str:
-        return "".join(_TEXT_OF.get(token) or chr(token) for token in token_ids)
+        return "".join(self.text_of.get(token) or chr(token) for token in token_ids)
 
     def token_id(self, token: str) -> int | None:
-        return SPECIAL_IDS.get(token)
+        return self.ids.get(token)
 
 
 def _arguments(call: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -264,3 +272,12 @@ def glm5_like(
     if add_generation_prompt:
         parts.append("<|assistant|><think>")
     return "".join(parts)
+
+
+DEEPSEEK_SPECIALS: tuple[str, ...] = (
+    "<｜begin▁of▁sentence｜>",  # noqa: RUF001 - DeepSeek spells them with U+FF5C
+    "<｜end▁of▁sentence｜>",  # noqa: RUF001
+    "<｜User｜>",  # noqa: RUF001
+    "<｜Assistant｜>",  # noqa: RUF001
+)
+"""DeepSeek-V4's special tokens, for a fake behind its chat encoder."""
