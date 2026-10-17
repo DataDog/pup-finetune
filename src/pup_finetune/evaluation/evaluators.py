@@ -240,6 +240,12 @@ class EvaluatorSet:
     def offline(self) -> bool:
         return all(judge.config.provider == "fake" for judge in self.judges)
 
+    @property
+    def pinned(self) -> Path | None:
+        """The spec a command repeats: only one ``--evaluators`` loaded. A stored set
+        continues without it, and its file may since list evaluators no preview showed."""
+        return self.spec if self.source == "flag" else None
+
     def record(self) -> dict[str, Any]:
         """``evaluators.json`` for these evaluators alone."""
         return {

@@ -592,7 +592,7 @@ class EvalPlan:
 
     @property
     def evaluators_spec(self) -> Path | None:
-        return None if self.evaluators is None else self.evaluators.spec
+        return None if self.evaluators is None else self.evaluators.pinned
 
     @property
     def evaluator_names(self) -> list[str]:

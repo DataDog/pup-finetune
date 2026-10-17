@@ -517,3 +517,26 @@ def test_evaluators_attach_per_model_and_one_added_later_opens_no_session(
     stored = json.loads((dataset / "benchmark" / "calibration.json").read_text())
     assert stored["evaluators"]["polite"]["ok"] is True
     assert "ranked by all" in result.stderr
+
+
+def test_a_stored_set_s_command_runs_only_the_evaluators_it_previewed(
+    dataset: Path, tmp_path: Path
+) -> None:
+    spec_dir = tmp_path / "spec"
+    shutil.copytree(ROWS.parent.parent / "evaluators", spec_dir)
+    spec = spec_dir / "checks.toml"
+    spec.write_text('[[evaluator]]\nname = "no_card_numbers"\ntype = "check"\nfile = "checks.py"\n')
+    args = ("benchmark", str(dataset), "--models", "fake-model")
+    assert invoke(*args, "--evaluators", str(spec), "--confirm").exit_code == 0
+    spec.write_text(
+        spec.read_text() + '[[evaluator]]\nname = "text_when_expected"\ntype = "check"\n'
+        'file = "checks.py"\nfunction = "answers_in_text"\n'
+    )
+    preview = output(invoke(*args))
+    assert [item["name"] for item in preview["preview"]["evaluators"]["items"]] == [
+        "no_card_numbers"
+    ]
+    assert "--evaluators" not in preview["next_command"]
+    assert rerun(preview["next_command"]).exit_code == 0
+    stored = json.loads((dataset / "benchmark" / "fake-model" / "evaluators.json").read_text())
+    assert [item["name"] for item in stored["evaluators"]] == ["no_card_numbers"]

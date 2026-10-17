@@ -372,7 +372,7 @@ class BenchmarkPlan:
         if settings.max_rows is not None:
             words += ["--max-rows", str(settings.max_rows)]
         words += ["--judge-model", self.judge.spec]
-        spec = None if self.evaluators is None else self.evaluators.spec
+        spec = None if self.evaluators is None else self.evaluators.pinned
         if spec is not None and spec.is_file():
             words += ["--evaluators", display_path(spec)]
         if settings.concurrency != defaults.concurrency:

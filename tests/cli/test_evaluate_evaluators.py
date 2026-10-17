@@ -193,6 +193,36 @@ def test_a_complete_evaluation_offers_the_evaluators_step(evaluated: Path) -> No
     assert "nothing is generated again" in found["why"]
 
 
+def grow(spec: Path, marker: Path) -> None:
+    spec.with_name("more.py").write_text(
+        f"def short_answer(case, candidate):\n    open({str(marker)!r}, 'w').close()\n"
+        "    return True\n"
+    )
+    spec.write_text(
+        spec.read_text()
+        + '[[evaluator]]\nname = "short_answer"\ntype = "check"\nfile = "more.py"\n'
+    )
+
+
+def test_a_stored_set_s_command_runs_only_the_evaluators_it_previewed(
+    run_dir: Path, spec: Path
+) -> None:
+    args = ("evaluate", str(run_dir), "--no-publish")
+    assert invoke(*args, "--evaluators", str(spec), "--confirm").exit_code == 0
+    marker = spec.with_name("ran")
+    grow(spec, marker)
+    preview = output(invoke(*args, "--compare-model", "fake-compare"))
+    assert preview["preview"]["evaluators"]["source"] == "evaluation directory"
+    assert "--evaluators" not in preview["next_command"]
+    result = rerun(preview["next_command"])
+    assert result.exit_code == 0, result.stderr
+    assert not marker.exists()
+    stored = json.loads((run_dir / "eval" / "evaluators.json").read_text())
+    assert [item["name"] for item in stored["evaluators"]] == [
+        "polite", "no_card_numbers", "text_when_expected"
+    ]  # fmt: skip
+
+
 def test_a_changed_rubric_conflicts_and_a_renamed_one_scores(
     run_dir: Path, spec: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
