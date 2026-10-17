@@ -558,15 +558,18 @@ def benchmark_summary(result: Mapping[str, Any]) -> Summary | None:
         f"benchmark {what}: {_n(len(board), 'model')} on {_n(result.get('cases'), 'case')} from "
         f"{_n(result.get('trajectories'), 'test conversation')}; judge {result.get('judge_model')}"
     )
+    ranked = (result.get("recommendation") or {}).get("headline")
+    if isinstance(ranked, str) and ranked != "judge":
+        headline += f", ranked by {ranked}"
     width = max(len(str(entry.get("model"))) for entry in board) + 2
     rows = []
     for entry in board:
         ci = entry.get("ci95")
         interval = f" [{_percent(ci[0])}, {_percent(ci[1])}]" if isinstance(ci, list) else ""
         gap = entry.get("gap_to_best")
-        if isinstance(gap, Mapping) and isinstance(gap.get("judge_pass_rate"), int | float):
+        if isinstance(gap, Mapping) and isinstance(gap.get("pass_rate"), int | float):
             noise = ", within noise" if entry.get("within_noise_of_best") else ""
-            interval += f"  {_points(-float(gap['judge_pass_rate']))} vs best{noise}"
+            interval += f"  {_points(-float(gap['pass_rate']))} vs best{noise}"
         elif entry.get("status") == "error":
             interval = f"  {_error_text(entry.get('error')) or 'error'}"
         flaws = [
@@ -579,9 +582,8 @@ def benchmark_summary(result: Mapping[str, Any]) -> Summary | None:
         ]
         if flaws:
             interval += f"  {', '.join(flaws)}"
-        rows.append(
-            f"{entry.get('model')!s:<{width}}{_percent(entry.get('judge_pass_rate'))}{interval}"
-        )
+        rate = entry.get("headline_pass_rate", entry.get("judge_pass_rate"))
+        rows.append(f"{entry.get('model')!s:<{width}}{_percent(rate)}{interval}")
     recommendation = result.get("recommendation") or {}
     verdict = {
         "fine_tune": f"recommended: fine-tune {recommendation.get('model')}",

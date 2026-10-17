@@ -27,6 +27,7 @@ from pup_finetune.evaluation.benchmark import (
     sample_conversations,
 )
 from pup_finetune.evaluation.cases import ReplayCase, cases_from_dataset
+from pup_finetune.evaluation.evaluators import CheckEvaluator, EvaluatorSet
 from pup_finetune.evaluation.fake_judge import fake_judge_config
 from pup_finetune.evaluation.replay import EvalDir
 from pup_finetune.providers.fake import FAKE_PROFILE, FakeProvider
@@ -199,6 +200,7 @@ def entry(model: str, rate: float | None, *, close: bool | None = None) -> dict[
         "model": model,
         "provider": "fake",
         "judge_pass_rate": rate,
+        "headline_pass_rate": rate,
         "within_noise_of_best": close,
     }
 
@@ -255,3 +257,32 @@ def test_the_session_context_fits_the_longest_case(
     [settings] = provider.backend().session_settings
     assert settings["max_seq_len"] == longest + plan.settings.max_tokens
     assert settings["max_seq_len"] < candidate.profile.max_seq_len
+
+
+def test_the_headline_evaluator_ranks_the_models_and_drives_the_recommendation(
+    plan: BenchmarkPlan,
+) -> None:
+    short = CheckEvaluator(name="short", file=Path("checks.py"), function="short", file_sha256="0")
+    evaluators = EvaluatorSet(evaluators=(short,), headline="short", spec=None, source="flag")
+    plan = dataclasses.replace(plan, evaluators=evaluators)
+    judged_worse, judged_better = plan.candidates
+    for candidate, passed in ((judged_worse, False), (judged_better, True)):
+        eval_dir = EvalDir(plan.model_dir(candidate))
+        eval_dir.create()
+        for case in plan.cases:
+            line = result(candidate.target, case, passed)
+            line["evaluators"] = {"short": {"status": "ok", "passed": not passed}}
+            eval_dir.append_result(line)
+
+    board = leaderboard(plan)
+
+    assert [entry["model"] for entry in board] == ["fake-model", "fake-b"]
+    assert (board[0]["headline_pass_rate"], board[0]["judge_pass_rate"]) == (1.0, 0.0)
+    assert board[0]["evaluators"] == {"short": 1.0, "all": 0.0}
+    gap = board[1]["gap_to_best"]
+    assert (gap["pass_rate"], "judge_pass_rate" in gap) == (1.0, False)
+    found = benchmark_module._result(plan, board, calibration=None, cancelled=False)
+    recommendation = found["recommendation"]
+    assert (recommendation["model"], recommendation["headline"]) == ("fake-model", "short")
+    assert (recommendation["pass_rate"], recommendation["verdict"]) == (1.0, "base_meets_target")
+    assert "passes short" in recommendation["reason"]

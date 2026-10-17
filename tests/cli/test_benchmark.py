@@ -484,3 +484,36 @@ def test_a_benchmark_made_before_reuse_neither_loads_its_renderer_nor_warns(
     assert result.exit_code == 0, result.stderr
     assert not [line for line in output(result)["warnings"] if "not shared" in line]
     assert not (dataset / "replay_cache").exists()
+
+
+def test_evaluators_attach_per_model_and_one_added_later_opens_no_session(
+    dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec_dir = tmp_path / "spec"
+    shutil.copytree(ROWS.parent.parent / "evaluators", spec_dir)
+    spec = spec_dir / "evals.toml"
+    args = ("benchmark", str(dataset), "--models", "fake-model")
+    assert invoke(*args, "--confirm").exit_code == 0
+
+    def no_session(*_: Any, **__: Any) -> Any:
+        raise AssertionError("no session may open")
+
+    monkeypatch.setattr(FakeBackend, "open_session", no_session)
+    preview = output(invoke(*args, "--evaluators", str(spec)))
+    shown = preview["preview"]
+    assert (shown["generation_calls"], shown["judge_calls"]) == (0, 0)
+    assert shown["evaluators"]["headline"] == "all"
+    assert shown["settings"]["headline"] == "all"
+    assert "and score each with polite, no_card_numbers and text_when_expected" in shown["action"]
+    assert f"--evaluators {spec}" in preview["next_command"]
+    result = rerun(preview["next_command"])
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    (entry,) = data["leaderboard"]
+    assert set(entry["evaluators"]) == {"polite", "no_card_numbers", "text_when_expected", "all"}
+    assert entry["headline_pass_rate"] == entry["evaluators"]["all"]
+    assert data["recommendation"]["headline"] == "all"
+    assert (dataset / "benchmark" / "fake-model" / "evaluators.json").is_file()
+    stored = json.loads((dataset / "benchmark" / "calibration.json").read_text())
+    assert stored["evaluators"]["polite"]["ok"] is True
+    assert "ranked by all" in result.stderr

@@ -533,7 +533,7 @@ Safety: Free · reads Datadog · PUP_READ_ONLY: allowed.
 
 Replay each held-out test conversation of a dataset with several base models, one recorded assistant turn at a time, and score each with the tool-call metrics and the LLM judge evaluate uses. Without --confirm, previews the calls and where the data goes. The result ranks the models and recommends the one to fine-tune.
 
-The dataset must be in Datadog, as for `train`. Each model runs in a session of its own, one after another, into OUT/&lt;model&gt;; rerun the same command to continue a benchmark that stopped. A model below --target-pass-rate is worth fine-tuning; one at or above it may need no training. Models within noise of the best are named, so the cheapest to serve can be chosen. --max-rows replays a seeded sample of the test conversations instead, for a quicker, cheaper comparison. Tools are not executed, so the scores measure agreement with the recorded behavior, not task success. Base answers from another evaluation or benchmark of the same dataset, made under the same settings, are reused from DATASET/replay_cache, together with their judgments when the judge is the same, and a model with every answer reused opens no session; --no-reuse makes them again.
+The dataset must be in Datadog, as for `train`. Each model runs in a session of its own, one after another, into OUT/&lt;model&gt;; rerun the same command to continue a benchmark that stopped. A model below --target-pass-rate is worth fine-tuning; one at or above it may need no training. Models within noise of the best are named, so the cheapest to serve can be chosen. --max-rows replays a seeded sample of the test conversations instead, for a quicker, cheaper comparison. Tools are not executed, so the scores measure agreement with the recorded behavior, not task success. Base answers from another evaluation or benchmark of the same dataset, made under the same settings, are reused from DATASET/replay_cache, together with their judgments when the judge is the same, and a model with every answer reused opens no session; --no-reuse makes them again. --evaluators FILE adds your own LLM judges and Python checks to each model's directory, as for evaluate, and the spec's headline (judge, an evaluator or all) ranks the models and meets --target-pass-rate.
 
 ```
 pup finetune benchmark [OPTIONS] DATASET
@@ -547,7 +547,7 @@ pup finetune benchmark [OPTIONS] DATASET
 | --- | --- | --- | --- |
 | **Models** | | | |
 | `--models` | `M1,M2` | required | Base models to compare, comma-separated (see models list). |
-| `--target-pass-rate` | `RATE (0.0<=x<=1.0)` | `0.9` | Judge pass rate at which a base model needs no fine-tuning. |
+| `--target-pass-rate` | `RATE (0.0<=x<=1.0)` | `0.9` | Headline pass rate at which a base model needs no fine-tuning. |
 | **Cases** | | | |
 | `--max-cases` | `N (x>=1)` | `2` | Turns replayed per conversation. |
 | `--max-rows` | `N (x>=1)` | all | Test conversations to sample and replay. |
@@ -555,6 +555,7 @@ pup finetune benchmark [OPTIONS] DATASET
 | `--seed` | `N (x>=0)` | `0` | Seed for picking cases and the bootstrap. |
 | **Judge** | | | |
 | `--judge-model` | `MODEL` | by key: Anthropic, OpenAI, else Fireworks | An alias (glm-5p3-flash), anthropic/MODEL, openai/MODEL or a Fireworks id. |
+| `--evaluators` | `FILE` |  | More judges and Python checks, from a TOML file. |
 | `--skip-calibration` |  |  | Do not check the judge on known answers first. |
 | **Run** | | | |
 | `--out-dir` | `DIR` | DATASET/benchmark | Output directory. |
