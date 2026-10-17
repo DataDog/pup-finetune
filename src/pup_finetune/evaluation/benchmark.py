@@ -31,14 +31,14 @@ import statistics
 import threading
 from collections import defaultdict
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.display import display_path
-from pup_finetune.errors import ExternalError, SettingsConflict, UsageError
+from pup_finetune.errors import ExternalError, FinetuneError, SettingsConflict, UsageError
 from pup_finetune.evaluation.runner import (
     CALIBRATION_CASES,
     DEFAULT_CONCURRENCY,
@@ -149,7 +149,8 @@ class BenchmarkPlan:
     """How many test conversations ``--max-rows`` sampled from; ``None`` when it cut none."""
     inputs: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     """What each model's answers are sampled under, by model, from its full renderer
-    identity; read only when the store exists."""
+    identity; read only when the store exists, and not for a model whose renderer cannot
+    load."""
     keys: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
     """Each model's answer key per case in the dataset's store, by model and case id, from
     :attr:`inputs`."""
@@ -499,7 +500,8 @@ def plan_benchmark(
     package, a judge that is one of the models, or a test split with no case. With
     ``max_rows``, the cases are those of :func:`sample_conversations`. Unless
     ``settings.reuse`` is off, the dataset's store of base results is read here, once: each
-    model's renderer is loaded for the keys only when the store exists.
+    model's renderer is loaded for the keys only when the store exists, and a model whose
+    renderer cannot load reuses nothing (its run records the error).
     """
     from pup_finetune.curation.pipeline import require_in_datadog
     from pup_finetune.evaluation.cases import build_cases
@@ -566,7 +568,10 @@ def plan_benchmark(
         return plan
     if not store_path(dataset_dir).exists():
         return replace(plan, reuse=ReuseIndex(store_path(dataset_dir)))
-    inputs = {candidate.target: _inputs(plan, candidate) for candidate in candidates}
+    inputs: dict[str, Mapping[str, Any]] = {}
+    for candidate in candidates:
+        with suppress(ExternalError):
+            inputs[candidate.target] = _inputs(plan, candidate)
     keys = {
         target: {case.id: generation_key(found, case) for case in cases}
         for target, found in inputs.items()
@@ -574,6 +579,7 @@ def plan_benchmark(
     wanted = [
         Wanted(c.target, cases, keys[c.target], EvalDir(plan.model_dir(c)).read_generations())
         for c in candidates
+        if c.target in keys
     ]
     return replace(
         plan, inputs=inputs, keys=keys, reuse=ReuseIndex.load(dataset_dir, judge, wanted)
@@ -691,22 +697,28 @@ def _share(
     warnings: list[str],
 ) -> None:
     """Add ``candidate``'s own answers and verdicts, sampled under ``inputs`` (loaded now
-    when ``None``), to the dataset's store; a warning when they could not be."""
+    when ``None``), to the dataset's store; a warning when they could not be. A directory
+    made before stamps shares nothing, so its renderer is not loaded."""
     from pup_finetune.evaluation.replay import EvalDir
-    from pup_finetune.evaluation.reuse import export_target
+    from pup_finetune.evaluation.reuse import export_target, not_shared, stamped
 
     eval_dir = EvalDir(plan.model_dir(candidate))
-    if not eval_dir.has_work():
+    if not eval_dir.has_work() or not stamped(eval_dir):
         return
-    warning = export_target(
-        plan.dataset_dir,
-        eval_dir,
-        candidate.target,
-        plan.cases,
-        inputs if inputs is not None else _inputs(plan, candidate),
-        plan.judge,
-        {"command": "benchmark", "run_id": None},
-    )
+    try:
+        inputs = inputs if inputs is not None else _inputs(plan, candidate)
+    except (FinetuneError, OSError) as exc:
+        warning: str | None = not_shared(exc)
+    else:
+        warning = export_target(
+            plan.dataset_dir,
+            eval_dir,
+            candidate.target,
+            plan.cases,
+            inputs,
+            plan.judge,
+            {"command": "benchmark", "run_id": None},
+        )
     if warning is not None and warning not in warnings:
         warnings.append(warning)
 

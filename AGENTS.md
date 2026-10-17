@@ -799,8 +799,8 @@ Source lives under `src/pup_finetune/`.
   others still run; each model first copies what it takes from the dataset's store, so one
   with every answer reused opens no session, and shares its own answers after, a complete
   one included; `BenchmarkPlan.inputs` and `keys`, from each model's full renderer identity,
-  are read at plan time only when the store exists), `leaderboard` (judge pass rate with a
-  bootstrap CI
+  are read at plan time only when the store exists, and not for a model whose renderer
+  cannot load), `leaderboard` (judge pass rate with a bootstrap CI
   over trajectories, each model's paired gap to the best and its answers `truncated` at
   `--max-tokens` or `unparseable`, each a warning) and `recommend` (`fine_tune`,
   `base_meets_target` at `--target-pass-rate`, or `no_result`; models within noise of the

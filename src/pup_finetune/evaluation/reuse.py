@@ -62,6 +62,7 @@ __all__ = [
     "not_shared",
     "plan_target",
     "stamp",
+    "stamped",
     "store_path",
     "verdict_key",
 ]
@@ -339,6 +340,11 @@ def stamp(eval_dir: EvalDir, inputs: Mapping[str, Any]) -> None:
     before stamps gets none."""
     if not eval_dir.read_generations():
         atomic_write_json(eval_dir.path / STAMP_FILE, finite_json(dict(inputs)))
+
+
+def stamped(eval_dir: EvalDir) -> bool:
+    """Whether ``eval_dir`` has a :func:`stamp`."""
+    return (eval_dir.path / STAMP_FILE).exists()
 
 
 def _made_under(eval_dir: EvalDir, inputs: Mapping[str, Any], *, legacy: bool) -> bool:

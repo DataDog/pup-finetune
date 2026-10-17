@@ -26,7 +26,7 @@ from pup_finetune.evaluation import benchmark as benchmark_module
 from pup_finetune.evaluation.fake_judge import FakeJudge
 from pup_finetune.inference import ChatCompletion
 from pup_finetune.providers.base import Sampler
-from pup_finetune.providers.fake import FakeBackend, FakeRenderer
+from pup_finetune.providers.fake import FakeBackend, FakeProvider, FakeRenderer
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
 
@@ -424,3 +424,52 @@ def test_a_rerun_after_a_renderer_change_shares_nothing(
     again = invoke(*args)
     assert again.exit_code == 0, again.stderr
     assert store.read_text() == before
+
+
+def unloadable(self: FakeProvider, profile: Any) -> Any:
+    raise ExternalError("the tokenizer of fake-model cannot be loaded", source="huggingface")
+
+
+def test_a_model_whose_renderer_cannot_load_is_an_error_entry(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert invoke("benchmark", str(dataset), "--models", "fake-model", "--confirm").exit_code == 0
+    monkeypatch.setattr(FakeProvider, "renderer", unloadable)
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--out-dir", str(dataset / "b2"))
+    preview = invoke(*args)
+    assert preview.exit_code == 2, preview.stderr
+    assert output(preview)["preview"]["models"][0]["reused"] == {"generations": 0, "verdicts": 0}
+    result = invoke(*args, "--confirm")
+    assert result.exit_code == 1, result.stderr
+    [entry] = output(result)["leaderboard"]
+    assert entry["error"]["message"].endswith("the tokenizer of fake-model cannot be loaded")
+    assert (dataset / "b2" / "benchmark.json").exists()
+
+
+def test_a_complete_rerun_whose_renderer_cannot_load_only_warns(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--confirm")
+    assert invoke(*args).exit_code == 0
+    shutil.rmtree(dataset / "replay_cache")
+    monkeypatch.setattr(FakeProvider, "renderer", unloadable)
+    result = invoke(*args)
+    assert result.exit_code == 0, result.stderr
+    assert output(result)["warnings"][-1] == (
+        "base results were not shared: the tokenizer of fake-model cannot be loaded; the next "
+        "run of this command shares them"
+    )
+
+
+def test_a_benchmark_made_before_reuse_neither_loads_its_renderer_nor_warns(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--confirm")
+    assert invoke(*args).exit_code == 0
+    (dataset / "benchmark" / "fake-model" / "reuse.json").unlink()
+    shutil.rmtree(dataset / "replay_cache")
+    monkeypatch.setattr(FakeProvider, "renderer", unloadable)
+    result = invoke(*args)
+    assert result.exit_code == 0, result.stderr
+    assert not [line for line in output(result)["warnings"] if "not shared" in line]
+    assert not (dataset / "replay_cache").exists()
