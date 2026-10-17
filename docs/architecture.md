@@ -382,7 +382,9 @@ provider, and talks to models only through the `Sampler` protocol.
   ones) under the store's lock, tried once: a busy or unwritable store is a warning. It
   shares only when the directory's `reuse.json`, written before its first answer, holds the
   key's current inputs, so a directory resumed after an upgrade never shares old answers
-  under new keys. `benchmark` shares its models' answers the same way, keyed on each model's
+  under new keys; an evaluation directory made before `reuse.json` shares as version 1
+  (`REUSE_VERSION`), since its identity pins every other input, and a benchmark one shares
+  nothing. `benchmark` shares its models' answers the same way, keyed on each model's
   full renderer identity, so evaluating the model it recommends reuses the base side; a
   benchmark model with every answer reused opens no session, and a rerun of a complete one
   shares what an earlier run could not. There is no age limit: the preview shows the oldest

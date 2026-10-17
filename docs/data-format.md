@@ -239,7 +239,10 @@ appended; the last line of a pair wins), `calibration.json` and `summary.json`, 
 published, `experiments.json` and `published.json`. `reuse.json`, written before the first
 answer, records what its base answers are sampled under (every input of their
 `replay_cache` key but the case); they are shared to the dataset's `replay_cache` only while
-it matches, so a directory resumed after an upgrade that changes them shares none.
+it matches, so a directory resumed after an upgrade that changes them shares none. An
+evaluation directory made before `reuse.json` shares as one made under the first release
+that writes it (its `evaluation.json` pins every other input); a benchmark model directory
+made before it shares nothing.
 
 With `evaluate --compare-model`, `compare.json` records the compare target, written once it
 has answered one short probe and never changed: `{"spec", "model": {"provider", "model",
