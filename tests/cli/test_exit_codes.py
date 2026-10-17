@@ -142,6 +142,23 @@ def _locked_dataset(w: World) -> list[str]:
     return ["dataset", "import", str(copy), "--file", str(ROWS)]
 
 
+def _hand_edited(w: World, edit: Callable[[dict[str, Any]], dict[str, Any]]) -> Path:
+    """A copy of the dataset with ``edit`` of a test-split row appended to its rows.jsonl."""
+    copy = w.tmp / "ds"
+    shutil.copytree(w.dataset, copy)
+    splits = json.loads((copy / "splits.json").read_text())["assignments"]
+    rows = [json.loads(line) for line in (copy / "rows.jsonl").read_text().splitlines()]
+    row = next(r for r in rows if splits[r.get("source", {}).get("trace_id", r["id"])] == "test")
+    with (copy / "rows.jsonl").open("a") as handle:
+        handle.write(json.dumps(edit(row)) + "\n")
+    return copy
+
+
+def _repeated_row_id(w: World) -> list[str]:
+    copy = _hand_edited(w, lambda row: row)
+    return ["benchmark", str(copy), "--models", "fake-model", "--judge-model", "fake-judge"]
+
+
 def _pup_fails(w: World) -> list[str]:
     fake = FakePup().on("auth", "status", returncode=1, stderr="Error: 500 Internal Error")
     w.monkeypatch.setattr(dataset_cli, "Pup", fake.client)
@@ -231,6 +248,7 @@ MISTAKES: list[tuple[str, Setup, int, str]] = [
     # Something outside failed, or local state is broken: exit 1.
     ("a dataset another process is using", _locked_dataset, 1, "lock_busy"),
     ("an unreadable state.json", _corrupt_state, 1, "state"),
+    ("a row id repeated in rows.jsonl by hand", _repeated_row_id, 1, "state"),
     ("pup fails", _pup_fails, 1, "external"),
     (
         "the provider crashes mid-run",

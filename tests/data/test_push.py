@@ -904,3 +904,16 @@ def test_plan_push_counts_by_split_and_writes_nothing(dataset: DatasetDir) -> No
     assert len(plan.pending) == FIRST
     assert plan.pending_by_split() == plan.kept_by_split
     assert sum(plan.kept_by_split.values()) == FIRST
+
+
+def test_plan_push_refuses_a_repeated_row_id_before_building_records(
+    dataset: DatasetDir, fake: FakePup
+) -> None:
+    line = dataset.rows_path.read_text().splitlines()[0]
+    with dataset.rows_path.open("a") as handle:
+        handle.write(line + "\n")
+    with pytest.raises(StateError, match="on more than one line"):
+        plan_push(dataset, project=PROJECT, name=NAME)
+    with pytest.raises(StateError, match="on more than one line"):
+        push(dataset, fake)
+    assert records_add_calls(fake) == 0

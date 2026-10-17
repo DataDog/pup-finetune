@@ -662,6 +662,24 @@ def test_isolation_is_checked_on_read(tmp_path: Path) -> None:
         dataset.export_split_files(tmp_path / "out")
 
 
+def append_line(dataset: DatasetDir, row: TrainingRow) -> None:
+    """Append ``row`` to ``rows.jsonl`` as a hand edit would."""
+    with dataset.rows_path.open("a") as handle:
+        handle.write(json.dumps(row.model_dump(mode="json", exclude_none=True)) + "\n")
+
+
+@pytest.mark.parametrize("text", ["one", "changed"])
+def test_a_repeated_row_id_is_a_state_error(tmp_path: Path, text: str) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    dataset.add([make_row("a", "one", trace_id="t1")], settings=IMPORT)
+    append_line(dataset, make_row("a", text, trace_id="t1"))
+    with pytest.raises(StateError, match="row id 'a' is on more than one line") as raised:
+        dataset.rows()
+    assert "dataset import" in str(raised.value.hint)
+    with pytest.raises(StateError, match="on more than one line"):
+        dataset.add([], settings=IMPORT)
+
+
 # --- export -----------------------------------------------------------------------------
 
 

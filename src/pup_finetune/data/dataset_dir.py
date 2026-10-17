@@ -194,13 +194,22 @@ class DatasetDir:
         return SplitAssignments.load(self.splits_path, self.split_params())
 
     def rows(self) -> list[TrainingRow]:
-        """Every accepted row, in the order it was added."""
+        """Every accepted row, in the order it was added; an id on two lines raises
+        :class:`StateError`."""
         if not self.rows_path.exists():
             return []
         try:
-            return list(read_rows(self.rows_path))
+            rows = list(read_rows(self.rows_path))
         except RowError as exc:
             raise StateError(f"stored row is invalid: {exc}") from exc
+        counts = Counter(row.id for row in rows)
+        if repeated := next((row_id for row_id, count in counts.items() if count > 1), None):
+            raise StateError(
+                f"{self.rows_path}: row id {repeated!r} is on more than one line",
+                hint="a row id names one row: remove the extra line, or import the edited rows "
+                "(with new ids) into a new directory with `dataset import`",
+            )
+        return rows
 
     def labels(self) -> dict[str, Label]:
         """The label in force per row id: the last one recorded. Empty without labels."""
