@@ -1384,12 +1384,18 @@ def test_agreement_reports_the_checks_apart_from_the_council(tmp_path: Path) -> 
     assert (dataset.path / "labels.jsonl").read_text() == labels_before
 
 
-def test_a_check_that_raises_names_the_row_and_writes_nothing(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("body", "problem"),
+    [("return row['missing']", "KeyError"), ('return False, "\\ud800"', "lone surrogate")],
+)
+def test_a_check_that_raises_names_the_row_and_writes_nothing(
+    tmp_path: Path, body: str, problem: str
+) -> None:
     dataset = make_dataset(tmp_path)
-    broken = checks_file(tmp_path, "def broken(row):\n    return row['missing']\n")
+    broken = checks_file(tmp_path, f"def broken(row):\n    {body}\n")
     with pytest.raises(UsageError, match="the check broken failed on the row row-") as caught:
         plan_triage(dataset, RUBRIC, (J1,), checks=broken)
-    assert "KeyError" in str(caught.value)
+    assert problem in str(caught.value)
     assert not (dataset.path / "labels.jsonl").exists()
 
 

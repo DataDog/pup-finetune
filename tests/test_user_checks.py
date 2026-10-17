@@ -94,6 +94,11 @@ def test_any_other_answer_is_a_check_error(answer: Any) -> None:
         call("c", lambda: answer)
 
 
+def test_a_reason_utf8_cannot_encode_is_a_check_error() -> None:
+    with pytest.raises(CheckError, match=r"check c: returned a reason with a lone surrogate"):
+        call("c", lambda: (False, "\ud800 nope"))
+
+
 def test_an_exception_becomes_a_redacted_check_error() -> None:
     register_secret("sk-test-secret-0001")
 
