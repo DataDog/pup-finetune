@@ -435,3 +435,18 @@ def test_train_evaluate_names_the_evaluate_command_that_shares_a_busy_store(
     assert shared.exit_code == 0, shared.stderr
     base = [line for line in lines(run / "eval" / "generations.jsonl") if line["target"] == "base"]
     assert len(lines(store / "generations.jsonl")) == len(base) > 0
+
+
+def test_train_evaluate_shares_its_base_results_and_stamps_its_evaluation(
+    dataset: Path, tmp_path: Path
+) -> None:
+    run = tmp_path / "run"
+    result = train(dataset, run, "--evaluate", "--eval-no-publish")
+    assert result.exit_code == 0, result.stderr
+    base = [line for line in lines(run / "eval" / "generations.jsonl") if line["target"] == "base"]
+    store = dataset / "replay_cache"
+    answers = lines(store / "generations.jsonl")
+    assert len(answers) == len(lines(store / "verdicts.jsonl")) == len(base) > 0
+    source = {"command": "evaluate", "run_id": output(result)["run_id"]}
+    assert all(line["source"] == source for line in answers)
+    assert (run / "eval" / "reuse.json").exists()
