@@ -686,13 +686,19 @@ def triage_summary(result: Mapping[str, Any]) -> Summary:
     """``dataset triage``: kept, dropped, undecided and too long, or with ``--agreement`` how
     often the council agreed with the labels (and Cohen's kappa), or with ``--checks`` alone
     the rows they failed."""
+    against = _checks_against(result.get("agreement"))
     if result.get("mode") == "checks":
         checks = result.get("checks") or {}
-        labels = checks.get("labels") or {}
-        headline = (
-            f"checks: {checks.get('failed', 0)} of {_n(checks.get('rows_checked', 0), 'row')} "
-            f"failed, {labels.get('applied', 0)} newly labeled drop"
-        )
+        rows = _n(checks.get("rows_checked", 0), "row" if against is None else "labeled row")
+        headline = f"checks: {checks.get('failed', 0)} of {rows} failed, "
+        if against is not None:
+            return _summary(
+                headline + "nothing labeled",
+                [against],
+                brief=[against],
+                next_command=result.get("next_command"),
+            )
+        headline += f"{(checks.get('labels') or {}).get('applied', 0)} newly labeled drop"
         stale = result.get("stale_check_labels")
         details = [f"{_n(stale, 'check label')} the checks no longer back"] if stale else []
         return _summary(headline, details, next_command=result.get("next_command"))
@@ -715,12 +721,17 @@ def triage_summary(result: Mapping[str, Any]) -> Summary:
             f"{agreement.get('rows_too_long', 0)} too long"
         )
         return _summary(
-            headline, [apart, calls], brief=[apart], next_command=result.get("next_command")
+            headline,
+            [apart, calls, *([against] if against is not None else [])],
+            brief=[apart],
+            next_command=result.get("next_command"),
         )
     headline = (
         f"triage {status}: {result.get('kept', 0)} kept, {result.get('dropped', 0)} dropped, "
         f"{result.get('undecided', 0)} undecided, {result.get('too_long', 0)} too long"
     )
+    if isinstance(checks := result.get("checks"), Mapping):
+        headline += f", {checks.get('failed', 0)} dropped by checks"
     details = [calls]
     reasons = [
         f"{entry.get('reason')} ({entry.get('count')})"
@@ -732,6 +743,19 @@ def triage_summary(result: Mapping[str, Any]) -> Summary:
     if stale := result.get("stale_judge_labels"):
         details.append(f"{_n(stale, 'judge label')} the votes no longer back")
     return _summary(headline, details, brief=[calls], next_command=result.get("next_command"))
+
+
+def _checks_against(agreement: object) -> str | None:
+    """With ``--agreement`` and ``--checks``: each check's failed rows, and how many of them
+    were labeled drop; ``None`` otherwise."""
+    checks = agreement.get("checks") if isinstance(agreement, Mapping) else None
+    if not isinstance(checks, Mapping):
+        return None
+    return "checks against your labels: " + ", ".join(
+        f"{name} fails {_n(entry.get('failed'), 'row')} ({entry.get('agree', 0)} labeled drop)"
+        for name, entry in checks.items()
+        if isinstance(entry, Mapping)
+    )
 
 
 def push_summary(result: Mapping[str, Any]) -> Summary:
@@ -1197,16 +1221,20 @@ def _triage_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
         _row("data", data),
         _row("judges", shown),
         _row("rubric", _criteria(preview)),
-        _row(
-            "checks",
-            f"{checks.get('failed')} of {_n(checks.get('rows_checked'), 'row')} fail: labeled "
-            "drop, never judged",
-        )
+        _row("checks", _checks_card(checks, preview.get("mode") == "agreement"))
         if isinstance(checks, Mapping)
         else None,
         _row("sends", _sends(preview)),
         _row("bills", _bills(preview.get("billing")) or "nothing: the judges run offline"),
     ]
+
+
+def _checks_card(checks: Mapping[str, Any], agreement: bool) -> str:
+    """What the checks do to the rows they fail: labeled drop, or with ``--agreement``
+    compared with the labels apart; never judged either way."""
+    rows = _n(checks.get("rows_checked"), "labeled row" if agreement else "row")
+    done = "compared with your labels apart" if agreement else "labeled drop"
+    return f"{checks.get('failed')} of {rows} fail: {done}, never judged"
 
 
 def _criteria(preview: Mapping[str, Any]) -> str:

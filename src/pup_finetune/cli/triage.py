@@ -478,9 +478,14 @@ def _checks_result(
     if plan.references is not None:
         data["agreement"] = {"checks": plan.check_agreement()}
     merge_next(data, dataset_next(dataset, directory, summary=summary))
-    council = template(*args[len(PROGRAM) :], "--rubric", "<RUBRIC_FILE>")
-    why = "have the judge council review the rows the checks pass (paid; it previews first)"
-    data["next_steps"].insert(0, step(council, why))
+    if plan.rows:
+        council = template(*args[len(PROGRAM) :], "--rubric", "<RUBRIC_FILE>")
+        why = (
+            "measure the judge council against your labels on the rows the checks pass"
+            if plan.references is not None
+            else "have the judge council review the rows the checks pass"
+        )
+        data["next_steps"].insert(0, step(council, f"{why} (paid; it previews first)"))
     if stale:
         data["hint"] = (
             f"{len(stale)} rows keep a check label every check now passes, and a label is never "

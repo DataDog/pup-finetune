@@ -421,6 +421,46 @@ def test_triage_agreement_reports_the_rate_and_kappa() -> None:
     )
 
 
+CHECKS_AGREEMENT = {
+    "declares_tools": {"failed": 1, "agree": 1},
+    "no_tool_errors": {"failed": 2, "agree": 0},
+}
+
+
+def test_a_triage_with_checks_counts_the_rows_they_dropped() -> None:
+    result = {**EXAMPLES["dataset triage"], "checks": {"failed": 4, "rows_checked": 22}}
+    found = summarize("dataset triage", result)
+    assert found is not None
+    assert found.lines[0] == (
+        "triage complete: 12 kept, 3 dropped, 1 undecided, 2 too long, 4 dropped by checks"
+    )
+
+
+def test_an_agreement_with_checks_compares_each_check_with_the_labels() -> None:
+    against = (
+        "checks against your labels: declares_tools fails 1 row (1 labeled drop), "
+        "no_tool_errors fails 2 rows (0 labeled drop)"
+    )
+    alone = {
+        "mode": "checks",
+        "checks": {"failed": 2, "rows_checked": 3, "labels": {"applied": 0, "unchanged": 0}},
+        "agreement": {"checks": CHECKS_AGREEMENT},
+        "next_command": None,
+    }
+    found = summarize("dataset triage", alone)
+    assert found is not None
+    assert found.line == f"checks: 2 of 3 labeled rows failed, nothing labeled; {against}"
+    council = {
+        "mode": "agreement",
+        "status": "complete",
+        "agreement": {"rows_compared": 1, "rows_agreed": 1, "checks": CHECKS_AGREEMENT},
+        "next_command": None,
+    }
+    found = summarize("dataset triage", council)
+    assert found is not None
+    assert against in found.lines
+
+
 def test_a_calibration_failure_says_nothing_was_evaluated() -> None:
     for command in ("evaluate", "train"):
         found = summarize(command, _calibration_failed())

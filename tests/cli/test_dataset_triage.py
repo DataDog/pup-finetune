@@ -718,6 +718,7 @@ def test_checks_run_first_and_the_council_judges_only_the_rest(
     data = output(result)
     assert data["rows_reviewed"] == rows - 3
     assert data["checks"]["labels"] == {"applied": 3, "unchanged": 0}
+    assert "too long, 3 dropped by checks;" in result.stderr
     judged = {
         json.loads(line)["row_id"] for line in (dataset / JUDGMENTS_FILE).read_text().splitlines()
     }
@@ -765,8 +766,12 @@ def test_agreement_reports_the_checks_apart_from_the_council(
     )
     assert invoke("dataset", "label", str(dataset), "--file", str(labels)).exit_code == 0
     args = ["dataset", "triage", str(dataset), "--rule", "stay on topic"]
-    args += ["--checks", str(ROW_CHECKS), "--agreement", "--confirm"]
-    result = invoke(*args)
+    args += ["--checks", str(ROW_CHECKS), "--agreement"]
+    preview = invoke(*args)
+    assert preview.exit_code == 2, preview.stderr
+    card = "  checks    2 of 3 labeled rows fail: compared with your labels apart, never judged"
+    assert card in preview.stderr
+    result = invoke(*args, "--confirm")
     assert result.exit_code == 0, result.stderr
     agreement = output(result)["agreement"]
     assert agreement["rows_compared"] == 1
@@ -777,6 +782,10 @@ def test_agreement_reports_the_checks_apart_from_the_council(
     alone = invoke("dataset", "triage", str(dataset), "--checks", str(ROW_CHECKS), "--agreement")
     assert alone.exit_code == 0, alone.stderr
     assert output(alone)["agreement"]["checks"] == agreement["checks"]
+    assert "checks: 2 of 3 labeled rows failed, nothing labeled; checks against" in alone.stderr
+    council = output(alone)["next_steps"][0]
+    assert council["command"].endswith(" --agreement --rubric <RUBRIC_FILE>")
+    assert council["why"].startswith("measure the judge council against your labels")
     assert {label.by for label in DatasetDir(dataset).labels().values()} == {"manual"}
 
 
@@ -793,6 +802,9 @@ def test_an_agreement_whose_labeled_rows_all_fail_a_check_is_refused(
     assert result.stderr.startswith("Error [usage]: the checks fail every row labeled by you")
     assert chat.requests == []
     assert not (dataset / "triage.json").exists()
+    alone = invoke("dataset", "triage", str(dataset), "--checks", str(ROW_CHECKS), "--agreement")
+    assert alone.exit_code == 0, alone.stderr
+    assert not any("--rubric" in entry["command"] for entry in output(alone)["next_steps"])
 
 
 def test_a_check_that_raises_fails_the_preview_before_any_call(
