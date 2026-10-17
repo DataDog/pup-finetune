@@ -291,7 +291,8 @@ The evaluation directory then holds `evaluators.json`: `{"evaluators": [...], "h
 "spec"}`, each evaluator `{"name", "type": "judge", "rubric_sha256", "rubric", "model"}`
 (`model` as in `compare.json`) or `{"name", "type": "check", "function", "file_sha256",
 "file"}`. Evaluators are added, never changed or dropped: a changed rubric, model or check
-file (its whole sha256) is a `settings_conflict`. Each line of `results.jsonl` gains
+file (its whole sha256) is a `settings_conflict`, while the same ones attached from a spec
+elsewhere take its `file` paths. Each line of `results.jsonl` gains
 `evaluators`, by name: `{"status": "ok" | "not_applicable" | "error", "passed", "reason",
 "raw", "no_verdict", "error"}`. `calibration.json` gains `evaluators`, each judge's report on
 its examples. `summary.json` gains, per target, `evaluators.<name>` and `evaluators.all`

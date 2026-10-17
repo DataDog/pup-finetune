@@ -551,7 +551,9 @@ def attach_evaluators(path: Path, wanted: EvaluatorSet | None) -> None:
     conflict = evaluators_conflict(stored, wanted, out_dir=path.parent)
     if conflict is not None:
         raise conflict
-    kept = list(stored["evaluators"]) if stored is not None else []
+    current = {evaluator.name: evaluator.record() for evaluator in wanted.evaluators}
+    # The identity is unchanged, so its file and rubric follow the spec now attaching it.
+    kept = [current.get(item.get("name"), item) for item in (stored or {}).get("evaluators", [])]
     known = {item.get("name") for item in kept}
     record = {
         **wanted.record(),

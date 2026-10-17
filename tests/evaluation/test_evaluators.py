@@ -170,6 +170,21 @@ def test_a_changed_or_dropped_evaluator_is_a_conflict_with_a_free_out_dir(
     assert "--out-dir" in str(caught.value.hint) and "eval-2" in str(caught.value.hint)
 
 
+def test_attaching_again_from_a_moved_spec_records_its_files(
+    spec_dir: Path, runtime: Runtime, tmp_path: Path
+) -> None:
+    path = tmp_path / "eval" / "evaluators.json"
+    path.parent.mkdir()
+    attach_evaluators(path, load_spec(write(spec_dir, CHECK), judge=JUDGE, runtime=runtime))
+    moved = tmp_path / "moved"
+    spec_dir.rename(moved)
+    attach_evaluators(path, load_spec(moved / "evals.toml", judge=JUDGE, runtime=runtime))
+    stored = stored_evaluators(path)
+    assert stored is not None and stored["evaluators"][0]["file"] == str(moved / "checks.py")
+    found = resolve_evaluators(None, stored, judge=JUDGE, runtime=runtime)
+    assert found is not None and found.checks[0].module is not None
+
+
 def test_a_changed_check_file_is_a_conflict(
     spec_dir: Path, runtime: Runtime, tmp_path: Path
 ) -> None:
