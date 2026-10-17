@@ -169,12 +169,14 @@ def evaluation_identity(
     rendering: Mapping[str, Any],
     seed: int,
     max_cases_per_trajectory: int | None,
+    reuse: bool = True,
 ) -> dict[str, Any]:
     """What ``evaluation.json`` records: everything that changes a generation or a score.
 
     ``tuned_checkpoint`` is the training checkpoint whose weights the tuned target samples
     (the sampler checkpoint made from it differs per session, the weights do not), and
-    ``rendering`` the run's renderer identity.
+    ``rendering`` the run's renderer identity. ``reuse`` is recorded only when off, so a
+    directory made before it existed still resumes.
     """
     return {
         "run_id": run_id,
@@ -188,6 +190,7 @@ def evaluation_identity(
         "metrics_version": METRICS_VERSION,
         "seed": seed,
         "max_cases_per_trajectory": max_cases_per_trajectory,
+        **({} if reuse else {"reuse": False}),
     }
 
 
@@ -851,9 +854,11 @@ def _target_summary(
     means = [sum(values) / len(values) for values in by_trajectory.values()]
     tokens = {"prompt_tokens": 0, "completion_tokens": 0, "generations": 0}
     truncated = refused = 0
+    reused = {"generations": 0, "verdicts": sum(bool(result.get("reused")) for result in ok)}
     for case in cases:
         generation = generations.get((target, case.id))
         if generation is not None:
+            reused["generations"] += "reused_from" in generation
             tokens["prompt_tokens"] += int(generation.get("prompt_tokens") or 0)
             tokens["completion_tokens"] += int(generation.get("completion_tokens") or 0)
             tokens["generations"] += 1
@@ -878,6 +883,7 @@ def _target_summary(
             "n_trajectories": len(means),
         },
         "tokens": tokens,
+        "reused": reused,
     }
 
 
@@ -917,7 +923,8 @@ def summarize(
     With ``tuned`` and :data:`COMPARE`, ``tuned_minus_compare`` is the same comparison over
     the compare target's cases, its ``paired`` counts inside it. ``truncated`` counts a
     target's generations cut off at its ``max_tokens`` and ``refused`` those the model
-    refused (a refusal is judged as an answer).
+    refused (a refusal is judged as an answer); ``reused`` the answers and verdicts copied
+    from the dataset's store (:mod:`~pup_finetune.evaluation.reuse`).
     """
     replays = replays if replays is not None else dict.fromkeys(TARGETS, cases)
     by_target = {

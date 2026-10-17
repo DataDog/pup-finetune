@@ -367,6 +367,21 @@ provider, and talks to models only through the `Sampler` protocol.
   case, as the judge decides, and the summary counts those per target
   (`judge_no_verdict`). Ctrl-C or SIGTERM stops new pairs from starting and keeps what
   finished. The directory is made `0700` even when it already existed.
+- **Reuse** ([`reuse.py`](../src/pup_finetune/evaluation/reuse.py)). Base answers are shared
+  across the evaluations of one dataset through a content-addressed store in the dataset
+  directory, `replay_cache/`, since runs and their evaluation directories can live anywhere
+  and a case id does not prove a case's content. An answer's key hashes what the base model
+  is sent and how (provider, base model, context, renderer identity, `max_tokens`, prefix,
+  tools); a verdict's hashes the judge's settings and its exact request. Base sampling is
+  greedy on pinned weights, so the seed only picks cases and is left out. The plan reads the
+  store once, so the preview and the run agree; after calibration passes, the run copies the
+  matching answers and verdicts into its directory, and the ordinary resume skips them. The
+  samplers are chosen from the directory after that copy, so a base model with every answer
+  reused costs no base sampler (on Baseten, one less GPU deployment). After the replay, the
+  run adds its own base answers and its verdicts with a judge answer (never tuned or compare
+  ones) under the store's lock, tried once: a busy or unwritable store is a warning. There
+  is no age limit: the preview shows the oldest answer reused, and `--no-reuse`, frozen in
+  `evaluation.json` only when set, makes them again.
 - **Summary** (`summary.json`). Per target, the judge pass rate, every metric's rate and the
   mean of per-trajectory agreement. Across targets, the cases both answered are compared
   verdict by verdict (wins, regressions, ties), and `tuned_minus_base` is the mean paired

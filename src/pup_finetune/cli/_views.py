@@ -302,7 +302,8 @@ def evaluation_view(result: Mapping[str, Any]) -> dict[str, Any]:
     the publication and where ``summary.json`` and ``results.jsonl`` are.
 
     ``tuned_checkpoint`` names the sampler checkpoint the tuned target sampled (``None``
-    when nothing was generated), which no file records.
+    when nothing was generated), which no file records. ``reused`` lists the targets that
+    took answers or verdicts from the dataset's store, with how many.
 
     Only a replayed evaluation (one with a ``summary``) is slimmed; a calibration failure,
     or an evaluation ``train --evaluate`` skipped or that failed, prints as it is.
@@ -336,6 +337,11 @@ def evaluation_view(result: Mapping[str, Any]) -> dict[str, Any]:
         },
         "errors": {name: int((summary.get("errors") or {}).get(name, 0)) for name in targets},
         "pending": result.get("pending"),
+        "reused": {
+            name: dict(target["reused"])
+            for name, target in targets.items()
+            if any((target.get("reused") or {}).values())
+        },
         "calibration": result.get("calibration"),
         "tuned_checkpoint": checkpoint_name(result.get("tuned_checkpoint")),
         "publication": result.get("publication"),

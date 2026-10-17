@@ -112,7 +112,9 @@ two minutes (one budget for both experiments) are a warning. Tests serve it with
 
 `evaluate` on a fake run uses the offline fake judge (`--judge-model fake-judge`, dev mode
 only), and the fake's tuned checkpoint calls the tools its training data called, so the
-result shows a positive `headline.judge_pass_rate.delta` (`tuned_minus_base` in `summary.json`). `train ... --evaluate --confirm` evaluates in the
+result shows a positive `headline.judge_pass_rate.delta` (`tuned_minus_base` in `summary.json`).
+Evaluating a second run of the same dataset reuses the first one's base answers and verdicts
+from `/tmp/ds/replay_cache` (the preview's `reuse`; `--no-reuse` makes them again). `train ... --evaluate --confirm` evaluates in the
 training session right after promotion instead (foreground only; `--eval-out-dir`, which must
 be new or empty and is checked before training, `--eval-max-cases`,
 `--eval-judge-model`, `--eval-concurrency`, `--eval-max-tokens`, `--eval-seed` and
@@ -802,7 +804,18 @@ Source lives under `src/pup_finetune/`.
   The package exports its names lazily, so importing the runner (the CLI does, for every
   command) loads no judge client. `targets.py` makes the two samplers from a session: the live training
   session's best sampler checkpoint, or the best training checkpoint loaded and saved again
-  as an `ev...` sampler checkpoint in a new session (`run_samplers`).
+  as an `ev...` sampler checkpoint in a new session (`run_samplers`), only for the targets
+  with a case left to generate (`targets`). `reuse.py` is the dataset's store of base
+  results, `DATASET/replay_cache` (`generations.jsonl` by `generation_key`: provider, base
+  model, context, renderer identity, `max_tokens`, prefix and tools; `verdicts.jsonl` by
+  `verdict_key`: the judge's identity and exact request; append-only, first line of a key
+  wins): `ReuseIndex.load` reads it once at plan time (`EvalPlan.reuse`, `None` with
+  `--no-reuse`), `plan_target` is what a target takes (the preview's `reuse` block and
+  `EvalWork.reused`), `import_target` copies it in after calibration passed
+  (`prepare_eval_dir`; answers get `reused_from`, results `reused`), and `export_target`
+  adds the run's own base answers and verdicts with a judge answer after the replay
+  (`share_base`), under the store's lock tried once (a busy one is a warning). Only base
+  answers are shared; `evaluation.json` records `"reuse": false` only with `--no-reuse`.
 - `providers/` - the provider seam. `base.py` has the neutral types (`ModelProfile`,
   `TrainSpec`, `CheckpointRef`, `StepMetrics`, ...) and the `Provider`, `TrainingBackend`,
   `TrainingSession` and `Sampler` protocols; `__init__.py` is the lazy registry

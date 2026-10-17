@@ -246,6 +246,15 @@ compare them (`publication.comparison_url`), and fill in as cases finish. Replay
 agreement with the recorded behavior, not task success. Rerun the command to continue an
 evaluation; other settings need a new `--out-dir`.
 
+Base answers are shared within a dataset: `evaluate` and `train --evaluate` keep the base
+model's answers and their judgments in `DATASET/replay_cache`, and a later evaluation of the
+same dataset reuses those made with the same base model, renderer, `--max-tokens` and context
+(judgments only with the same judge). Only the tuned model's
+answers are then paid for, and no base sampler starts. The preview shows what is reused, from
+which runs and since when (`reuse`); the result counts it per model (`reused`). Every run on
+the dataset then shares one base sample, so their deltas compare directly but share its
+noise. `--no-reuse` makes the answers again; deleting the directory only costs new answers.
+
 A generation cut off at `--max-tokens` fails, so the result counts them per model
 (`headline.truncated`) and warns. A reasoning base model can spend the whole budget thinking
 while a tuned model that learned to answer directly does not: raise `--max-tokens` before
@@ -334,6 +343,8 @@ A rerun with nothing left to judge needs no judge key.
 ## Data handling
 
 Dataset and run directories hold trace content: conversations, tool calls and tool results.
+A dataset's `replay_cache` also holds base model answers to its test conversations and the
+judge's reasons, like an evaluation directory.
 `pup-finetune` creates them with `0700` permissions and their files with `0600`. When it
 creates `runs/` or `datasets/` in the working directory, it adds a `.gitignore` there so they
 stay out of version control.

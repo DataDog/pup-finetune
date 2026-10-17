@@ -65,6 +65,7 @@ SETTING_PARAMS: dict[str, tuple[str, ...]] = {
     "seed": ("seed",),
     "calibration": ("skip_calibration",),
     "publish": ("no_publish",),
+    "reuse": ("no_reuse",),
 }
 """Each setting of an evaluation preview, and the parameters that set it."""
 
@@ -127,7 +128,10 @@ DOC = CommandDoc(
         "anthropic/claude-haiku-5-5 when an Anthropic credential resolves (ANTHROPIC_API_KEY, "
         "the OS keychain or the Anthropic SDK's login), else openai/gpt-5.4-mini when an "
         "OpenAI one does, else Fireworks' deepseek-v4p1-flash; the preview names it and "
-        "where it came from (judge_source).",
+        "where it came from (judge_source). Base answers from another evaluation of the "
+        "same dataset, made under the same settings, are reused from "
+        "DATASET/replay_cache, together with their judgments when the judge is the same; "
+        "--no-reuse makes them again.",
     ),
     examples=(
         "pup finetune evaluate run",
@@ -237,6 +241,14 @@ def evaluate(
             rich_help_panel=RUN,
         ),
     ] = False,
+    no_reuse: Annotated[
+        bool,
+        typer.Option(
+            "--no-reuse",
+            help="Do not reuse base results of other runs.",
+            rich_help_panel=RUN,
+        ),
+    ] = False,
     confirm: Annotated[
         bool,
         typer.Option(
@@ -263,6 +275,7 @@ def evaluate(
         skip_calibration=skip_calibration,
         publish=not no_publish,
         compare_model=compare_model,
+        reuse=not no_reuse,
     )
     evaluation = runner.plan_standalone(runtime, run_dir, settings)
     # PUP_READ_ONLY refuses paid and remote runs, not one that never leaves the machine.

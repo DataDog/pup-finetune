@@ -222,6 +222,12 @@ MISTAKES: list[tuple[str, Setup, int, str]] = [
         "settings_conflict",
     ),
     ("evaluate again with other settings", _wrong_judge_settings, 2, "settings_conflict"),
+    (
+        "evaluate again without reuse",
+        lambda w: ["evaluate", str(w.run), "--no-publish", "--no-reuse"],
+        2,
+        "settings_conflict",
+    ),
     # The wrong phase.
     ("resume a completed run", lambda w: ["resume", str(w.run), "--confirm"], 2, "wrong_phase"),
     ("cancel a completed run", lambda w: ["cancel", str(w.run), "--confirm"], 2, "wrong_phase"),
