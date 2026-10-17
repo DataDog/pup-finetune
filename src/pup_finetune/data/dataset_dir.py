@@ -233,7 +233,9 @@ class DatasetDir:
     def rows_by_split(self) -> dict[SplitName, list[TrainingRow]]:
         """The kept rows grouped by split; every split is present, possibly empty. Two kept
         rows holding one conversation raise :class:`StateError`."""
-        by_split = _group_by_split(self.kept_rows(), self.splits(), where=self.splits_path)
+        by_split = _group_by_split(
+            self.kept_rows(), self.splits(), where=self.splits_path, repair=self._source_command()
+        )
         check_distinct(by_split)
         return by_split
 
@@ -257,7 +259,9 @@ class DatasetDir:
         labels = self.labels()
         kept = self._kept(rows, labels)
         splits = self.splits()
-        by_split = _group_by_split(kept, splits, where=self.splits_path)
+        by_split = _group_by_split(
+            kept, splits, where=self.splits_path, repair=self._source_command()
+        )
         excluded = _reconcile(self.excluded(), (), accepted_ids={row.id for row in rows})
         by_code = Counter(str(record.get("code")) for record in excluded)
         counts = {split: len(by_split[split]) for split in SPLITS}
@@ -292,6 +296,12 @@ class DatasetDir:
             ],
         }
         return summary, conflicts
+
+    def _source_command(self) -> str:
+        """The command that built the dataset, which repairs it when rerun."""
+        source = self.settings().get("source")
+        kind = source.get("kind") if isinstance(source, Mapping) else None
+        return SOURCE_COMMANDS.get(str(kind), "dataset import")
 
     def _more_rows(self) -> str:
         """What a skew warning advises: more rows, from the command that built the dataset."""
@@ -431,7 +441,10 @@ class DatasetDir:
                 splits.assignments[key] = split
             dropped = {row_id for row_id, label in self.labels().items() if not label.keep}
             assign_splits(all_rows, splits, dropped=dropped)
-            check_isolation(_group_by_split(all_rows, splits, where=self.splits_path))
+            repair = SOURCE_COMMANDS[settings.source]
+            check_isolation(
+                _group_by_split(all_rows, splits, where=self.splits_path, repair=repair)
+            )
             records = _reconcile(
                 self.excluded(), excluded, accepted_ids={row.id for row in all_rows}
             )
@@ -686,15 +699,17 @@ def _unknown_label_warnings(unknown: Sequence[str]) -> list[str]:
 
 
 def _group_by_split(
-    rows: Iterable[TrainingRow], splits: SplitAssignments, *, where: Path
+    rows: Iterable[TrainingRow], splits: SplitAssignments, *, where: Path, repair: str
 ) -> dict[SplitName, list[TrainingRow]]:
+    """``rows`` by split; ``repair`` is the command that assigns a row without one."""
     grouped: dict[SplitName, list[TrainingRow]] = {split: [] for split in SPLITS}
     for row in rows:
         split = splits.get(split_key(row))
         if split is None:
             raise StateError(
                 f"{where}: row {row.id!r} has no split assignment",
-                hint="re-run the import to repair the dataset directory",
+                hint=f"remove it from {ROWS_FILE}, or rerun `{repair}` into this directory, "
+                "which assigns it a split",
             )
         grouped[split].append(row)
     return grouped

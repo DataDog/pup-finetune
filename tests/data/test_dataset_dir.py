@@ -19,7 +19,7 @@ import pytest
 from pup_finetune.curation.labels import apply_labels
 from pup_finetune.data import dataset_dir
 from pup_finetune.data import jsonl as jsonl_module
-from pup_finetune.data.dataset_dir import DatasetDir, DatasetSettings, read_import_file
+from pup_finetune.data.dataset_dir import DatasetDir, DatasetSettings, SourceKind, read_import_file
 from pup_finetune.data.exclusions import Exclusion, ExclusionCode
 from pup_finetune.data.jsonl import read_rows, to_provider_dict
 from pup_finetune.data.labels import Label
@@ -704,6 +704,27 @@ def test_a_reimport_does_not_adopt_a_hand_added_copy(tmp_path: Path) -> None:
     dataset.add([], settings=IMPORT)  # assigns the copy its group's split
     with pytest.raises(StateError, match="hold the same conversation in the"):
         dataset.rows_by_split()
+
+
+@pytest.mark.parametrize(
+    ("source", "command"),
+    [
+        ("import", "dataset import"),
+        ("datadog", "dataset pull"),
+        ("datadog_dataset", "dataset fetch"),
+    ],
+)
+def test_the_no_split_hint_names_the_command_that_built_it(
+    tmp_path: Path, source: SourceKind, command: str
+) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    dataset.add([make_row("a", "one", trace_id="t1")], settings=DatasetSettings(source))
+    data = json.loads(dataset.splits_path.read_text())
+    data["assignments"].pop("t1")
+    dataset.splits_path.write_text(json.dumps(data))
+    with pytest.raises(StateError, match="row 'a' has no split assignment") as raised:
+        dataset.rows_by_split()
+    assert f"rerun `{command}` into this directory" in str(raised.value.hint)
 
 
 def test_labels_of_unknown_ids_warn(tmp_path: Path) -> None:
