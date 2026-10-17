@@ -168,6 +168,8 @@ _FLAGS: dict[str, str] = {
     "patience": "--patience",
     "min_delta": "--min-delta",
     "learning_rate": "--learning-rate",
+    "lr_schedule": "--lr-schedule",
+    "warmup_fraction": "--warmup-fraction",
     "batch_size": "--batch-size",
     "lora_rank": "--lora-rank",
     "lora_alpha": "--lora-alpha",
@@ -453,6 +455,7 @@ def _preview(
         warnings.append(no_epoch_warning(spec, inputs))
     rows = _rows(inputs)
     usage = _usage(spec, inputs, epochs=spec.max_epochs)
+    max_steps = spec.max_steps(len(inputs.train_rows))
     return {
         "action": _action(profile, spec, rows),
         "billing": provider.training_billing(usage),
@@ -469,6 +472,8 @@ def _preview(
         "tokens_per_epoch": inputs.tokens_per_epoch,
         "validation_tokens": inputs.validation.train_tokens,
         "max_tokens_total": usage.max_tokens,
+        "max_steps": max_steps,
+        "warmup_steps": spec.warmup_steps(max_steps),
         "settings": spec.resolved_settings(profile, max_seq_len_flag=max_seq_len_flag),
         "defaults_used": list(defaults_used),
         "data_destination": f"training data is sent to {provider.name}",
@@ -760,6 +765,14 @@ def train(
     learning_rate: Annotated[
         float, typer.Option(metavar="X", help="Learning rate.", rich_help_panel=TRAINING)
     ] = _float_default("learning_rate"),
+    lr_schedule: Annotated[
+        str,
+        typer.Option(metavar="NAME", help="Constant, linear or cosine.", rich_help_panel=TRAINING),
+    ] = str(_default("lr_schedule")),
+    warmup_fraction: Annotated[
+        float,
+        typer.Option(metavar="X", help="Share of steps warming up.", rich_help_panel=TRAINING),
+    ] = _float_default("warmup_fraction"),
     batch_size: Annotated[
         int, typer.Option(metavar="N", help="Rows per optimizer step.", rich_help_panel=TRAINING)
     ] = _int_default("batch_size"),
@@ -979,6 +992,8 @@ def train(
         "patience": patience,
         "min_delta": min_delta,
         "learning_rate": learning_rate,
+        "lr_schedule": lr_schedule,
+        "warmup_fraction": warmup_fraction,
         "batch_size": batch_size,
         "lora_rank": lora_rank,
         "lora_alpha": lora_alpha,
@@ -1799,8 +1814,7 @@ TRAIN_DOC = CommandDoc(
     short="Fine-tune a model (paid; previews without --confirm).",
     description=describe(
         "Fine-tune --model with LoRA SFT on --dataset's train split, keeping the best epoch "
-        "by validation loss. Without --confirm, previews the run and prints the command that "
-        "starts it. With --confirm, trains (Ctrl-C cancels gracefully).",
+        "by validation loss. Previews without --confirm; trains with it.",
         "--dataset must be in Datadog: every kept row pushed with `dataset push`, or the "
         "directory made by `dataset fetch` (the offline fake provider trains on any). "
         "The run goes in runs/RUN_ID unless --run-dir names another directory (a runs/ this "
@@ -1811,6 +1825,11 @@ TRAIN_DOC = CommandDoc(
         "epoch and in total, the settings and where the data goes. --detach trains in a "
         "background worker; follow it with `status --watch`. Training stops early after --patience epochs without a "
         "validation-loss improvement; a Ctrl-C or `cancel` still promotes the best epoch. "
+        "--learning-rate is constant unless --lr-schedule linear or cosine decays it over the "
+        "steps of --max-epochs epochs (the preview's max_steps; early stopping or a cap ends "
+        "the run first), after a linear warmup over --warmup-fraction of them (warmup_steps); "
+        "it never reaches zero, and the other Adam parameters are fixed (run.json "
+        "settings.optimizer). "
         "With --evaluate, the run is also evaluated on the test split in its training "
         "session once the best epoch is promoted (see `evaluate`): the judge is calibrated "
         "and --eval-out-dir checked before training starts, so a failed calibration trains "
@@ -1827,8 +1846,7 @@ TRAIN_DOC = CommandDoc(
     ),
     examples=(
         "pup finetune train --dataset ds --model qwen3p8-27b",
-        "pup finetune train --provider fireworks --model qwen3p8-27b --dataset ds "
-        "--run-dir run --max-seq-len 8192 --detach",
+        "pup finetune train --dataset ds --model qwen3p8-27b --lr-schedule cosine",
     ),
     safety=Safety(
         data="sends rows to the provider (and the judge)",

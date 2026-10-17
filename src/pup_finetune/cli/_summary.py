@@ -1024,9 +1024,12 @@ def _training_settings(settings: Mapping[str, Any]) -> str:
     lora = settings.get("lora") or {}
     text = (
         f"up to {_n(settings.get('max_epochs'), 'epoch')} (patience {settings.get('patience')}), "
-        f"batch {settings.get('batch_size')}, lr {_rate(settings.get('learning_rate'))}, "
-        f"LoRA rank {lora.get('rank')} ({lora.get('rank_source')})"
+        f"batch {settings.get('batch_size')}, lr {_rate(settings.get('learning_rate'))}"
     )
+    schedule, warmup = settings.get("lr_schedule", "constant"), settings.get("warmup_fraction", 0)
+    if schedule != "constant" or warmup:
+        text += f" ({schedule}, warmup {warmup})"
+    text += f", LoRA rank {lora.get('rank')} ({lora.get('rank_source')})"
     if lora.get("alpha") is not None:
         text += f", alpha {lora['alpha']}"
     source = settings.get("max_seq_len_source")

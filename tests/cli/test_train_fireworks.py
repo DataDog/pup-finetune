@@ -149,6 +149,21 @@ def test_train_on_fireworks_runs_end_to_end(
     assert API_KEY not in result.stdout + result.stderr
 
 
+def test_each_step_reaches_fireworks_at_its_scheduled_learning_rate(
+    dataset: Path, tmp_path: Path, fw: CrashingFireworks
+) -> None:
+    run_dir = tmp_path / "run"
+    total = output(train(dataset, run_dir, "--lr-schedule", "linear"))["preview"]["max_steps"]
+    result = train(dataset, run_dir, "--lr-schedule", "linear", "--confirm")
+    assert result.exit_code == 0, result.stderr
+    spec = RunDir(run_dir).spec()
+    (run,) = fw.services[0].runs
+    assert [adam.learning_rate for adam in run.adam] == [
+        spec.learning_rate_at(step, total) for step in range(1, total + 1)
+    ]
+    assert run.adam[-1].learning_rate < run.adam[0].learning_rate
+
+
 def test_read_only_allows_the_preview_but_not_training(
     dataset: Path, tmp_path: Path, fw: CrashingFireworks, monkeypatch: pytest.MonkeyPatch
 ) -> None:

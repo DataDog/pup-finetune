@@ -243,6 +243,12 @@ def test_the_fake_provider_needs_dev_mode(
         (("--max-epochs", "0"), "--max-epochs"),
         (("--max-spend-usd", "5"), "--hourly-rate-usd"),
         (("--spend-reserve-fraction", "1"), "--spend-reserve-fraction"),
+        (
+            ("--lr-schedule", "step"),
+            "Error [usage]: invalid training settings: --lr-schedule: Input should be "
+            "'constant', 'linear' or 'cosine'",
+        ),
+        (("--warmup-fraction", "1"), "--warmup-fraction: Input should be less than 1"),
         (("--provider-option", "no-equals-sign"), "key=value"),
         (("--provider-option", "nope=1"), "unknown fake provider option"),
         (("--run-id", "Not Valid"), "invalid run id"),

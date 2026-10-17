@@ -47,8 +47,8 @@ WIDTH = 80
 """What help renders at with stdout piped and no ``COLUMNS``: every agent sees this."""
 MAX_LINES = 60
 LINE_LIMITS = {"train": 65}
-"""Commands allowed more than :data:`MAX_LINES`, and why: ``train`` has 35 options in six
-panels, which take 47 lines before its usage, description and examples (60 at the least)."""
+"""Commands allowed more than :data:`MAX_LINES`, and why: ``train`` has 37 options in six
+panels, which take 50 lines before its usage, description and examples (60 at the least)."""
 
 SHELL_STOP = {">", ">>", "<", "|", "&&", "||", ";"}
 
