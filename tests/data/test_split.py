@@ -258,15 +258,23 @@ def test_check_isolation_rejects_a_conversation_that_differs_only_in_tool_call_i
 
 def test_check_distinct_rejects_a_repeat_within_one_split() -> None:
     rows = [make_row("row-a", "same"), make_row("row-b", "same")]
-    with pytest.raises(StateError, match=r"'row-a' \(train\) and 'row-b' \(train\).* in the train"):
+    with pytest.raises(
+        StateError, match=r"'row-a' \(train\) and 'row-b' \(train\).* in the train"
+    ) as raised:
         check_distinct({"train": rows, "validation": [], "test": []})
+    assert "dataset label --file" in str(raised.value.hint)
 
 
 def test_check_distinct_keeps_the_cross_split_message() -> None:
     train = make_row("row-a", "same", trace_id="synthetic-trace-1")
     test = make_row("row-b", "same", trace_id="synthetic-trace-2")
-    with pytest.raises(StateError, match=r"'row-a' \(train\) and 'row-b' \(test\).* in different"):
+    with pytest.raises(
+        StateError, match=r"'row-a' \(train\) and 'row-b' \(test\).* in different"
+    ) as raised:
         check_distinct({"train": [train], "validation": [], "test": [test]})
+    # A drop is not enough: add() refuses a conversation in two splits, dropped or not.
+    assert "rows.jsonl" in str(raised.value.hint)
+    assert "dataset label" not in str(raised.value.hint)
 
 
 def test_check_distinct_counts_tool_call_ids_by_position() -> None:
