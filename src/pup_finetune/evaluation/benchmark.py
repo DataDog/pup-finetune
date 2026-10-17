@@ -147,9 +147,12 @@ class BenchmarkPlan:
     runtime: Runtime
     sampled_from: int | None = None
     """How many test conversations ``--max-rows`` sampled from; ``None`` when it cut none."""
+    inputs: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    """What each model's answers are sampled under, by model, from its full renderer
+    identity; read only when the store exists."""
     keys: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
-    """Each model's answer key per case in the dataset's store, by model and case id; read
-    only when the store exists (see :meth:`keys_for`)."""
+    """Each model's answer key per case in the dataset's store, by model and case id, from
+    :attr:`inputs`."""
     reuse: ReuseIndex | None = None
     """What the dataset's store holds for this plan, read once when it was planned; ``None``
     with ``--no-reuse``."""
@@ -240,12 +243,6 @@ class BenchmarkPlan:
             {} if eval_dir is None else eval_dir.read_generations(),
             {} if eval_dir is None else eval_dir.read_results(),
         )
-
-    def keys_for(self, candidate: Candidate) -> Mapping[str, str]:
-        """``candidate``'s answer key per case: the plan's, else computed now (which loads
-        its renderer)."""
-        found = self.keys.get(candidate.target)
-        return found if found is not None else _keys(self, candidate)
 
     def remaining(self, candidate: Candidate) -> dict[str, int]:
         """What a run would still do for ``candidate``: ``{"done", "generate", "judge"}``,
@@ -508,7 +505,7 @@ def plan_benchmark(
     from pup_finetune.evaluation.cases import build_cases
     from pup_finetune.evaluation.judge import check_judge_differs
     from pup_finetune.evaluation.replay import EvalDir
-    from pup_finetune.evaluation.reuse import ReuseIndex, Wanted, store_path
+    from pup_finetune.evaluation.reuse import ReuseIndex, Wanted, generation_key, store_path
 
     dataset = DatasetDir(dataset_dir)
     by_split = dataset.rows_by_split()
@@ -569,27 +566,29 @@ def plan_benchmark(
         return plan
     if not store_path(dataset_dir).exists():
         return replace(plan, reuse=ReuseIndex(store_path(dataset_dir)))
-    keys = {candidate.target: _keys(plan, candidate) for candidate in candidates}
+    inputs = {candidate.target: _inputs(plan, candidate) for candidate in candidates}
+    keys = {
+        target: {case.id: generation_key(found, case) for case in cases}
+        for target, found in inputs.items()
+    }
     wanted = [
         Wanted(c.target, cases, keys[c.target], EvalDir(plan.model_dir(c)).read_generations())
         for c in candidates
     ]
-    return replace(plan, keys=keys, reuse=ReuseIndex.load(dataset_dir, judge, wanted))
+    return replace(
+        plan, inputs=inputs, keys=keys, reuse=ReuseIndex.load(dataset_dir, judge, wanted)
+    )
 
 
-def _keys(plan: BenchmarkPlan, candidate: Candidate) -> dict[str, str]:
-    """``candidate``'s answer key per case, by case id, from its full renderer identity."""
-    from pup_finetune.evaluation.reuse import generation_key
+def _inputs(plan: BenchmarkPlan, candidate: Candidate) -> dict[str, Any]:
+    """What ``candidate``'s answers are sampled under, from its full renderer identity, which
+    loads its renderer."""
+    from pup_finetune.evaluation.reuse import key_inputs
 
     provider = get_provider(candidate.provider, plan.runtime)
     provider.validate_options({})
     rendering = provider.renderer(candidate.profile).identity()
-    return {
-        case.id: generation_key(
-            candidate.provider, candidate.profile, rendering, plan.settings.max_tokens, case
-        )
-        for case in plan.cases
-    }
+    return key_inputs(candidate.provider, candidate.profile, rendering, plan.settings.max_tokens)
 
 
 def _stored_judge(out_dir: Path, candidates: Sequence[Candidate]) -> str | None:
@@ -664,19 +663,19 @@ def _calibration(plan: BenchmarkPlan, client: ChatCompleter) -> dict[str, Any] |
     return report
 
 
-def _import(plan: BenchmarkPlan, candidate: Candidate) -> None:
-    """Copy what ``candidate`` takes from the dataset's store into its directory."""
+def _prepare(plan: BenchmarkPlan, candidate: Candidate, inputs: Mapping[str, Any]) -> None:
+    """Stamp ``candidate``'s directory with the ``inputs`` its answers are sampled under,
+    then copy in what it takes from the dataset's store."""
     from pup_finetune.evaluation.replay import EvalDir
-    from pup_finetune.evaluation.reuse import import_target
+    from pup_finetune.evaluation.reuse import import_target, stamp
 
-    if plan.reuse is None or not (plan.reuse.generations or plan.reuse.verdicts):
-        return
     eval_dir = EvalDir(plan.model_dir(candidate))
     eval_dir.create()
     with eval_dir.lock():
         eval_dir.check_identity(plan.identity(candidate))
+        stamp(eval_dir, inputs)
         taken = plan.reused(candidate)
-        if taken is None or not any(taken.counts().values()):
+        if plan.reuse is None or taken is None or not any(taken.counts().values()):
             return
         copied = import_target(eval_dir, taken, plan.cases)
     info(
@@ -685,9 +684,14 @@ def _import(plan: BenchmarkPlan, candidate: Candidate) -> None:
     )
 
 
-def _share(plan: BenchmarkPlan, candidate: Candidate, warnings: list[str]) -> None:
-    """Add ``candidate``'s own answers and verdicts to the dataset's store; a warning when
-    they could not be."""
+def _share(
+    plan: BenchmarkPlan,
+    candidate: Candidate,
+    inputs: Mapping[str, Any] | None,
+    warnings: list[str],
+) -> None:
+    """Add ``candidate``'s own answers and verdicts, sampled under ``inputs`` (loaded now
+    when ``None``), to the dataset's store; a warning when they could not be."""
     from pup_finetune.evaluation.replay import EvalDir
     from pup_finetune.evaluation.reuse import export_target
 
@@ -699,7 +703,7 @@ def _share(plan: BenchmarkPlan, candidate: Candidate, warnings: list[str]) -> No
         eval_dir,
         candidate.target,
         plan.cases,
-        plan.keys_for(candidate),
+        inputs if inputs is not None else _inputs(plan, candidate),
         plan.judge,
         {"command": "benchmark", "run_id": None},
     )
@@ -720,11 +724,13 @@ def _replay_model(
     from pup_finetune.evaluation.judge import judge
     from pup_finetune.evaluation.replay import run_replay
 
-    _import(plan, candidate)
+    inputs = plan.inputs.get(candidate.target)
+    if inputs is not None:
+        _prepare(plan, candidate, inputs)
     remaining = plan.remaining(candidate)
     if not remaining["judge"]:
-        # A rerun of a complete model shares what an older one never did.
-        _share(plan, candidate, warnings)
+        # A rerun of a complete model shares what an earlier one could not.
+        _share(plan, candidate, inputs, warnings)
         return None
     config = plan.judge
 
@@ -756,12 +762,15 @@ def _replay_model(
         replay({})
     else:
         try:
+            if inputs is None:
+                inputs = _inputs(plan, candidate)
+                _prepare(plan, candidate, inputs)
             with _base_sampler(plan, candidate) as sampler:
                 replay({candidate.target: sampler})
         except ExternalError as exc:
             info(f"{candidate.target} could not be benchmarked: {redact(exc.message)}")
             return error_json(exc)
-    _share(plan, candidate, warnings)
+    _share(plan, candidate, inputs, warnings)
     return None
 
 

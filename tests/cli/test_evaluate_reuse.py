@@ -23,6 +23,7 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from pup_finetune.cli import app
+from pup_finetune.evaluation import reuse as reuse_module
 from pup_finetune.evaluation import runner as runner_module
 from pup_finetune.evaluation.fake_judge import FakeJudge
 from pup_finetune.inference import ChatCompleter, ChatCompletion, JudgeConfig
@@ -294,6 +295,7 @@ def test_an_evaluation_made_before_reuse_resumes_and_shares_its_results(
 ) -> None:
     # As before the store existed: an identity without "reuse", and nothing shared.
     assert "reuse" not in json.loads((first / "eval" / "evaluation.json").read_text())
+    (first / "eval" / "reuse.json").unlink()
     for path in (dataset / "replay_cache").iterdir():
         path.unlink()
     preview = output(invoke("evaluate", str(first)))["preview"]
@@ -302,6 +304,20 @@ def test_an_evaluation_made_before_reuse_resumes_and_shares_its_results(
     assert result.exit_code == 0, result.stderr
     assert len(lines(dataset / "replay_cache" / "generations.jsonl")) == preview["cases"]
     assert len(lines(dataset / "replay_cache" / "verdicts.jsonl")) == preview["cases"]
+
+
+@pytest.mark.parametrize("stamped", [True, False])
+def test_a_rerun_after_a_reuse_version_bump_shares_nothing(
+    first: Path, dataset: Path, monkeypatch: pytest.MonkeyPatch, stamped: bool
+) -> None:
+    if not stamped:
+        (first / "eval" / "reuse.json").unlink()
+    store = dataset / "replay_cache" / "generations.jsonl"
+    before = store.read_text()
+    monkeypatch.setattr(reuse_module, "REUSE_VERSION", "2")
+    result = invoke("evaluate", str(first), "--confirm")
+    assert result.exit_code == 0, result.stderr
+    assert store.read_text() == before
 
 
 def test_a_busy_store_is_a_warning_and_the_evaluation_completes(

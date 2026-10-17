@@ -236,7 +236,10 @@ so `evaluate` publishes onto that dataset and `dataset push` has nothing to send
 An evaluation directory (`RUN_DIR/eval` by default) holds `evaluation.json` (the identity a
 rerun must match), `generations.jsonl` and `results.jsonl` (one line per target and case,
 appended; the last line of a pair wins), `calibration.json` and `summary.json`, and, once
-published, `experiments.json` and `published.json`.
+published, `experiments.json` and `published.json`. `reuse.json`, written before the first
+answer, records what its base answers are sampled under (every input of their
+`replay_cache` key but the case); they are shared to the dataset's `replay_cache` only while
+it matches, so a directory resumed after an upgrade that changes them shares none.
 
 With `evaluate --compare-model`, `compare.json` records the compare target, written once it
 has answered one short probe and never changed: `{"spec", "model": {"provider", "model",

@@ -15,9 +15,10 @@ generations.
 A run reads the store once, when it plans (:meth:`ReuseIndex.load`), so its preview and its
 execution see the same snapshot. :func:`plan_target` says what a target takes from it,
 :func:`import_target` copies that into the run's evaluation directory before the replay, and
-:func:`export_target` adds the run's own base answers and real verdicts afterwards. Only base
-models are shared: they sample greedily from pinned weights, so the same input gets the same
-answer, and a verdict is reused only for the same judge request.
+:func:`export_target` adds the run's own base answers and real verdicts afterwards, only
+from a directory whose answers were all sampled under the inputs they are keyed by
+(:func:`stamp`). Only base models are shared: they sample greedily from pinned weights, so the
+same input gets the same answer, and a verdict is reused only for the same judge request.
 """
 
 from __future__ import annotations
@@ -40,10 +41,12 @@ from pup_finetune.redaction import redact
 from pup_finetune.storage import (
     DirectoryLock,
     append_jsonl,
+    atomic_write_json,
     canonical_json,
     finite_json,
     make_private_dir,
     parse_jsonl_line,
+    read_json,
 )
 
 __all__ = [
@@ -55,7 +58,10 @@ __all__ = [
     "export_target",
     "generation_key",
     "import_target",
+    "key_inputs",
+    "not_shared",
     "plan_target",
+    "stamp",
     "store_path",
     "verdict_key",
 ]
@@ -65,6 +71,7 @@ REUSE_VERSION: Final = "1"
 CACHE_DIR_NAME: Final = "replay_cache"
 GENERATIONS_FILE: Final = "generations.jsonl"
 VERDICTS_FILE: Final = "verdicts.jsonl"
+STAMP_FILE: Final = "reuse.json"
 
 _GENERATION_FIELDS: Final = (
     "message",
@@ -87,27 +94,26 @@ def _digest(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(text.encode("ascii")).hexdigest()
 
 
-def generation_key(
-    provider: str,
-    profile: ModelProfile,
-    rendering: Mapping[str, Any],
-    max_tokens: int,
-    case: ReplayCase,
-) -> str:
-    """The key of ``case``'s base answer: everything the base model is sent and sampled
-    with, and nothing that only names the case (its id, split or reference)."""
-    return _digest(
-        {
-            "v": REUSE_VERSION,
-            "provider": provider,
-            "base_model": profile.base_model,
-            "max_seq_len": profile.max_seq_len,
-            "rendering": dict(rendering),
-            "max_tokens": max_tokens,
-            "prefix": list(case.prefix),
-            "tools": list(case.tools),
-        }
-    )
+def key_inputs(
+    provider: str, profile: ModelProfile, rendering: Mapping[str, Any], max_tokens: int
+) -> dict[str, Any]:
+    """What a base answer is sampled under: every input of its :func:`generation_key` but
+    the case."""
+    return {
+        "v": REUSE_VERSION,
+        "provider": provider,
+        "base_model": profile.base_model,
+        "max_seq_len": profile.max_seq_len,
+        "rendering": dict(rendering),
+        "max_tokens": max_tokens,
+    }
+
+
+def generation_key(inputs: Mapping[str, Any], case: ReplayCase) -> str:
+    """The key of ``case``'s base answer sampled under ``inputs`` (:func:`key_inputs`):
+    everything the base model is sent and sampled with, and nothing that only names the case
+    (its id, split or reference)."""
+    return _digest({**inputs, "prefix": list(case.prefix), "tools": list(case.tools)})
 
 
 def verdict_key(judge: JudgeConfig, case: ReplayCase, message: Mapping[str, Any]) -> str:
@@ -327,24 +333,61 @@ def import_target(
     return copied
 
 
+def stamp(eval_dir: EvalDir, inputs: Mapping[str, Any]) -> None:
+    """Record in ``eval_dir`` (its lock held) the ``inputs`` its base answers are sampled
+    under, while it holds none: a stamp names its first answers' inputs, and a directory made
+    before stamps gets none."""
+    if not eval_dir.read_generations():
+        atomic_write_json(eval_dir.path / STAMP_FILE, finite_json(dict(inputs)))
+
+
+def _made_under(eval_dir: EvalDir, inputs: Mapping[str, Any], *, legacy: bool) -> bool:
+    """Whether ``eval_dir``'s answers were all sampled under ``inputs`` (see
+    :func:`export_target`)."""
+    path = eval_dir.path / STAMP_FILE
+    if path.exists():
+        stamped = read_json(path)
+    elif legacy:
+        stamped = {**inputs, "v": "1"}
+    else:
+        return False
+    return canonical_json(stamped) == canonical_json(finite_json(dict(inputs)))
+
+
+def not_shared(exc: FinetuneError | OSError) -> str:
+    """The warning of a run whose base results could not be added to the store."""
+    reason = exc.message if isinstance(exc, FinetuneError) else exc.strerror or str(exc)
+    return (
+        f"base results were not shared: {redact(reason)}; the next run of this command shares them"
+    )
+
+
 def export_target(
     dataset_dir: Path,
     eval_dir: EvalDir,
     target: str,
     cases: Sequence[ReplayCase],
-    keys: Mapping[str, str],
+    inputs: Mapping[str, Any],
     judge: JudgeConfig,
     source: Mapping[str, str | None],
+    *,
+    legacy: bool = False,
 ) -> str | None:
-    """Add ``target``'s own answers in ``eval_dir`` (not those it reused) and its real
-    verdicts (no error, a judge answer kept) to the store; a key it has is skipped.
+    """Add ``target``'s own answers in ``eval_dir`` (not those it reused), keyed under
+    ``inputs``, and its real verdicts (no error, a judge answer kept) to the store; a key it
+    has is skipped.
 
-    Takes the store's lock once: when it is busy or the store cannot be written, nothing is
-    written and the warning is returned.
+    Only a directory whose answers were all sampled under ``inputs`` shares: its
+    :func:`stamp` holds them, or, with ``legacy`` (an identity that pins every input but the
+    version), it has no stamp and ``inputs`` are version 1's. Takes the store's lock once:
+    when it is busy or the store cannot be written, nothing is written and the warning is
+    returned.
     """
     store = store_path(dataset_dir)
     generations, results = eval_dir.read_generations(), eval_dir.read_results()
     try:
+        if not _made_under(eval_dir, inputs, legacy=legacy):
+            return None
         make_private_dir(store)
         with DirectoryLock(store):
             answers = {_key(row) for row in _lines(store / GENERATIONS_FILE)}
@@ -355,7 +398,7 @@ def export_target(
                 record = generations.get((target, case.id))
                 if record is None or not _has_message(record):
                     continue
-                key = keys[case.id]
+                key = generation_key(inputs, case)
                 if "reused_from" not in record and key not in answers:
                     answers.add(key)
                     fields = {name: record.get(name) for name in _GENERATION_FIELDS}
@@ -386,9 +429,5 @@ def export_target(
             if new_verdicts:
                 append_jsonl(store / VERDICTS_FILE, new_verdicts, ensure_ascii=True)
     except (FinetuneError, OSError) as exc:
-        reason = exc.message if isinstance(exc, FinetuneError) else exc.strerror or str(exc)
-        return (
-            f"base results were not shared: {redact(reason)}; the next run of this command "
-            "shares them"
-        )
+        return not_shared(exc)
     return None

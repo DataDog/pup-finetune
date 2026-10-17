@@ -507,6 +507,13 @@ class EvalPlan:
             reuse=self.settings.reuse,
         )
 
+    @property
+    def base_inputs(self) -> dict[str, Any]:
+        """What base answers are sampled under, for their keys in the dataset's store."""
+        from pup_finetune.evaluation.reuse import key_inputs
+
+        return key_inputs(self.provider, self.profile, self.rendering, self.settings.max_tokens)
+
     def base_reuse(self, eval_dir: EvalDir | None) -> TargetReuse | None:
         """What base takes from the store for the pairs ``eval_dir`` has not done (every
         pair without one); ``None`` with ``--no-reuse``."""
@@ -1004,7 +1011,7 @@ def plan_evaluation(
     from pup_finetune.evaluation.compare import resolve_compare, stored_compare
     from pup_finetune.evaluation.judge import check_judge_differs
     from pup_finetune.evaluation.replay import EvalDir
-    from pup_finetune.evaluation.reuse import ReuseIndex, Wanted, generation_key
+    from pup_finetune.evaluation.reuse import ReuseIndex, Wanted, generation_key, key_inputs
 
     judge_config, judge_source = resolve_judge(
         settings.judge_model,
@@ -1036,10 +1043,8 @@ def plan_evaluation(
             "no assistant turn to replay",
             hint="import more rows so the test split holds some conversations",
         )
-    keys = {
-        case.id: generation_key(provider, profile, rendering, settings.max_tokens, case)
-        for case in cases
-    }
+    inputs = key_inputs(provider, profile, rendering, settings.max_tokens)
+    keys = {case.id: generation_key(inputs, case) for case in cases}
     reuse = None
     if settings.reuse:
         own = EvalDir(settings.out_dir).read_generations()
@@ -1230,9 +1235,11 @@ def _settle_calibration(
 
 
 def _import_base(plan: EvalPlan, eval_dir: EvalDir) -> None:
-    """Copy what base takes from the dataset's store into ``eval_dir`` (its lock held)."""
-    from pup_finetune.evaluation.reuse import import_target
+    """Stamp ``eval_dir`` (its lock held) with what base answers are sampled under, then copy
+    in what base takes from the dataset's store."""
+    from pup_finetune.evaluation.reuse import import_target, stamp
 
+    stamp(eval_dir, plan.base_inputs)
     reuse = plan.base_reuse(eval_dir)
     if reuse is None or plan.reuse is None or not any(reuse.counts().values()):
         return
@@ -1254,9 +1261,10 @@ def share_base(plan: EvalPlan) -> str | None:
         EvalDir(plan.out_dir),
         "base",
         plan.replays["base"],
-        plan.base_keys,
+        plan.base_inputs,
         plan.judge,
         {"command": "evaluate", "run_id": plan.run_id},
+        legacy=True,
     )
 
 

@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from pup_finetune.evaluation import reuse
 from pup_finetune.evaluation.cases import ReplayCase
 from pup_finetune.evaluation.replay import EvalDir
 from pup_finetune.evaluation.reuse import (
@@ -25,7 +26,9 @@ from pup_finetune.evaluation.reuse import (
     export_target,
     generation_key,
     import_target,
+    key_inputs,
     plan_target,
+    stamp,
     store_path,
     verdict_key,
 )
@@ -74,15 +77,13 @@ def key(case: ReplayCase, **changes: Any) -> str:
         "max_tokens": 64,
         **changes,
     }
-    return generation_key(
-        settings["provider"],
-        settings["profile"],
-        settings["rendering"],
-        settings["max_tokens"],
-        case,
+    inputs = key_inputs(
+        settings["provider"], settings["profile"], settings["rendering"], settings["max_tokens"]
     )
+    return generation_key(inputs, case)
 
 
+INPUTS = key_inputs("fake", FAKE_PROFILE, RENDERING, 64)
 KEYS = {case.id: key(case) for case in CASES}
 
 
@@ -338,6 +339,14 @@ def judged(
     )
 
 
+def made(dataset: Path) -> EvalDir:
+    """An evaluation directory stamped with :data:`INPUTS`, as a run makes one."""
+    eval_dir = EvalDir(dataset / "eval")
+    eval_dir.create()
+    stamp(eval_dir, INPUTS)
+    return eval_dir
+
+
 def stored(dataset: Path, name: str) -> list[dict[str, Any]]:
     path = store_path(dataset) / name
     return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
@@ -345,12 +354,11 @@ def stored(dataset: Path, name: str) -> list[dict[str, Any]]:
 
 def test_export_writes_the_target_s_own_answers_and_real_verdicts(tmp_path: Path) -> None:
     a, b = CASES
-    eval_dir = EvalDir(tmp_path / "eval")
-    eval_dir.create()
+    eval_dir = made(tmp_path)
     judged(eval_dir, "base", a, answer("a"))
     judged(eval_dir, "base", b, answer("b"), raw=None, error="unparseable")
     judged(eval_dir, "tuned", a, answer("tuned"))
-    assert export_target(tmp_path, eval_dir, "base", CASES, KEYS, JUDGE, SOURCE) is None
+    assert export_target(tmp_path, eval_dir, "base", CASES, INPUTS, JUDGE, SOURCE) is None
     answers = stored(tmp_path, "generations.jsonl")
     assert [(line["key"], line["message"]) for line in answers] == [
         (KEYS[a.id], answer("a")),
@@ -368,8 +376,7 @@ def test_export_writes_the_target_s_own_answers_and_real_verdicts(tmp_path: Path
 def test_export_skips_reused_answers_and_keys_the_store_has(tmp_path: Path) -> None:
     a, b = CASES
     store(tmp_path, [generation(a, answer("first"))], [verdict(a, answer("first"))])
-    eval_dir = EvalDir(tmp_path / "eval")
-    eval_dir.create()
+    eval_dir = made(tmp_path)
     judged(eval_dir, "base", a, answer("first"))
     eval_dir.append_generation(
         {
@@ -380,20 +387,53 @@ def test_export_skips_reused_answers_and_keys_the_store_has(tmp_path: Path) -> N
             "reused_from": SOURCE,
         }
     )
-    assert export_target(tmp_path, eval_dir, "base", CASES, KEYS, JUDGE, SOURCE) is None
+    assert export_target(tmp_path, eval_dir, "base", CASES, INPUTS, JUDGE, SOURCE) is None
     assert len(stored(tmp_path, "generations.jsonl")) == 1
     assert len(stored(tmp_path, "verdicts.jsonl")) == 1
 
 
 def test_export_to_a_busy_store_writes_nothing_and_warns(tmp_path: Path) -> None:
-    eval_dir = EvalDir(tmp_path / "eval")
-    eval_dir.create()
+    eval_dir = made(tmp_path)
     judged(eval_dir, "base", CASES[0], answer())
     store_path(tmp_path).mkdir()
     with DirectoryLock(store_path(tmp_path)):
-        warning = export_target(tmp_path, eval_dir, "base", CASES, KEYS, JUDGE, SOURCE)
+        warning = export_target(tmp_path, eval_dir, "base", CASES, INPUTS, JUDGE, SOURCE)
     assert warning == (
         "base results were not shared: another pup-finetune process is using "
         f"{store_path(tmp_path)}; the next run of this command shares them"
     )
     assert stored(tmp_path, "generations.jsonl") == []
+
+
+def test_a_directory_stamped_with_other_inputs_shares_nothing(tmp_path: Path) -> None:
+    eval_dir = EvalDir(tmp_path / "eval")
+    eval_dir.create()
+    stamp(eval_dir, key_inputs("fake", FAKE_PROFILE, {**RENDERING, "renderer_version": "0"}, 64))
+    judged(eval_dir, "base", CASES[0], answer())
+    assert export_target(tmp_path, eval_dir, "base", CASES, INPUTS, JUDGE, SOURCE) is None
+    assert not store_path(tmp_path).exists()
+
+
+def test_the_stamp_is_written_only_while_the_directory_holds_no_answer(tmp_path: Path) -> None:
+    eval_dir = made(tmp_path)
+    judged(eval_dir, "base", CASES[0], answer())
+    stamp(eval_dir, {**INPUTS, "v": "0"})
+    assert json.loads((eval_dir.path / "reuse.json").read_text()) == INPUTS
+
+
+@pytest.mark.parametrize(
+    ("legacy", "version", "shared"), [(False, "1", 0), (True, "1", 1), (True, "2", 0)]
+)
+def test_an_unstamped_directory_shares_only_as_a_legacy_one_at_version_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy: bool, version: str, shared: int
+) -> None:
+    eval_dir = EvalDir(tmp_path / "eval")
+    eval_dir.create()
+    judged(eval_dir, "base", CASES[0], answer())
+    monkeypatch.setattr(reuse, "REUSE_VERSION", version)
+    inputs = key_inputs("fake", FAKE_PROFILE, RENDERING, 64)
+    assert (
+        export_target(tmp_path, eval_dir, "base", CASES, inputs, JUDGE, SOURCE, legacy=legacy)
+        is None
+    )
+    assert len(stored(tmp_path, "generations.jsonl")) == shared

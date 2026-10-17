@@ -26,7 +26,7 @@ from pup_finetune.evaluation import benchmark as benchmark_module
 from pup_finetune.evaluation.fake_judge import FakeJudge
 from pup_finetune.inference import ChatCompletion
 from pup_finetune.providers.base import Sampler
-from pup_finetune.providers.fake import FakeBackend
+from pup_finetune.providers.fake import FakeBackend, FakeRenderer
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
 
@@ -408,3 +408,19 @@ def test_a_max_rows_sample_reuses_the_answers_it_matches(dataset: Path) -> None:
         "verdicts": preview["cases"],
     }
     assert preview["generation_calls"] == 0
+
+
+def test_a_rerun_after_a_renderer_change_shares_nothing(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--confirm")
+    assert invoke(*args).exit_code == 0
+    store = dataset / "replay_cache" / "generations.jsonl"
+    before = store.read_text()
+    original = FakeRenderer.identity
+    monkeypatch.setattr(
+        FakeRenderer, "identity", lambda self: {**original(self), "renderer_version": "2"}
+    )
+    again = invoke(*args)
+    assert again.exit_code == 0, again.stderr
+    assert store.read_text() == before
