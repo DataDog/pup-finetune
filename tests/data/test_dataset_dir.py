@@ -706,6 +706,22 @@ def test_a_reimport_does_not_adopt_a_hand_added_copy(tmp_path: Path) -> None:
         dataset.rows_by_split()
 
 
+def test_a_dropped_copy_in_another_split_still_blocks_an_import(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    dataset.add([make_row("a", "one", trace_id="t1")], settings=IMPORT)
+    append_line(dataset, make_row("a-copy", "one", trace_id="t2"))
+    data = json.loads(dataset.splits_path.read_text())
+    data["assignments"]["t2"] = next(s for s in SPLITS if s != data["assignments"]["t1"])
+    dataset.splits_path.write_text(json.dumps(data))
+    with pytest.raises(StateError, match="in different splits") as raised:
+        dataset.rows_by_split()
+    assert "dataset label" not in str(raised.value.hint)
+    apply_labels(dataset, [Label(id="a-copy", keep=False, reason="a copy")])
+    assert [row.id for rows in dataset.rows_by_split().values() for row in rows] == ["a"]
+    with pytest.raises(StateError, match="in different splits"):
+        dataset.add([], settings=IMPORT)
+
+
 @pytest.mark.parametrize(
     ("source", "command"),
     [
