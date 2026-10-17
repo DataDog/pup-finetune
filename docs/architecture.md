@@ -367,6 +367,20 @@ provider, and talks to models only through the `Sampler` protocol.
   case, as the judge decides, and the summary counts those per target
   (`judge_no_verdict`). Ctrl-C or SIGTERM stops new pairs from starting and keeps what
   finished. The directory is made `0700` even when it already existed.
+- **Evaluators** ([`evaluators.py`](../src/pup_finetune/evaluation/evaluators.py), over
+  [`user_checks.py`](../src/pup_finetune/user_checks.py)). `evaluate --evaluators` adds the
+  user's own LLM judges (a rubric in place of the substitution rules, on the same untrusted
+  blocks, calibrated only on the user's graded examples, since corruptions of the reference
+  can pass a tone rubric that works) and Python checks, run in this process, one at a time,
+  on copies. They are frozen by name in `evaluators.json`, which only grows, and each result
+  line carries their entries, so a pair is done once every attached evaluator scored it: an
+  evaluator added to a complete evaluation scores the stored answers without a generation, a
+  built-in judgment or a training session. An evaluator's outage, or a check that raises, is
+  that entry's error, in no rate. The summary adds each evaluator's rates and the composite
+  `all` (the judge and every evaluator pass), with paired deltas through the same bootstrap;
+  the headline (`judge`, an evaluator or `all`) leads the result and ranks a benchmark. Only
+  base answers and built-in verdicts go to the dataset's store; evaluators are scored per
+  directory.
 - **Reuse** ([`reuse.py`](../src/pup_finetune/evaluation/reuse.py)). Base answers are shared
   across the evaluations of one dataset through a content-addressed store in the dataset
   directory, `replay_cache/`, since runs and their evaluation directories can live anywhere
@@ -415,8 +429,9 @@ provider, and talks to models only through the `Sampler` protocol.
   steps as its output; each case is a child span in the same trace, `replay_assistant`, with
   the prefix and tools in, the generated message out and the recorded one expected, timed by
   its generation. Metrics join spans by id: a boolean per deterministic metric that applies
-  and `judge_pass` (with the judge's reason) on children, `trajectory_agreement` and
-  `completed_actions` on roots; an error case is an error span with no metric, as it counts
+  and `judge_pass` (with the judge's reason) on children, with a boolean per evaluator that
+  scored it (never the composite `all`), `trajectory_agreement` and `completed_actions` on
+  roots; an error case is an error span with no metric, as it counts
   in no local rate either. Metrics are stamped when they are sent (the API refuses ones more
   than a day old), and a request carries at most 100 spans. Span ids are uuid5 of the
   evaluation's identity, the target and the row or case, the experiments are recorded in
@@ -428,7 +443,10 @@ provider, and talks to models only through the `Sampler` protocol.
   response was lost is sent again by the rerun, with the same deterministic span ids. A
   span already published keeps the result it was sent with: a retried error updates only
   the local results, and the experiments keep the error (the result's hint says so, and a
-  new `--out-dir` publishes experiments with every result). A cancel stops between requests
+  new `--out-dir` publishes experiments with every result). Evaluator metrics go only with
+  the spans being sent, so a span published before an evaluator scored it is a warning
+  naming the evaluator (`published.json` keeps the evaluators each span went out with). A
+  cancel stops between requests
   and leaves a `cancelled` publication the rerun continues. A read-back waits up to two
   minutes, one budget for both experiments, for the events to be indexed (each count may
   take only the time left, and a cancel is checked before each); spans not indexed

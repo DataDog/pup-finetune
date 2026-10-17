@@ -87,7 +87,7 @@ row-weather-002 (train, 2 turns, tools: get_weather)
 | evaluate `status` `complete` | Report the headline (step 6). |
 | evaluate `status` `complete_with_errors` | Its `next_command` retries the errors; it is paid, so ask first. |
 | evaluate `status` `partial` | Rerun the same command to continue. |
-| evaluate `status` `calibration_failed` | The judge failed its check. Pick another judge with the user. |
+| evaluate `status` `calibration_failed` | The judge (or the `evaluator` it names) failed its check. Pick another judge with the user. |
 | `publication.status` `failed` or `cancelled` | Its `next_command` publishes the rest. |
 
 ## Step 0: check the setup
@@ -272,12 +272,13 @@ pup finetune evaluate ft-20261007183443-a8b181
 ```
 
 The preview counts cases, generations and judge calls, and names the judge and where it came
-from (`judge_source`: by default Anthropic's or OpenAI's when their key is found, else
-Fireworks'); show it, since a judge on a new provider needs a new consent. After a
+from (`judge_source`); show it, since a judge on a new provider needs a new consent. After a
 yes, run its `next_command`: both models replay each test conversation into two experiments
 that fill in as it runs; share the link it prints (`publication.comparison_url`). Rerun to
 continue one that stopped. `--compare-model anthropic/<MODEL>` (never the judge) adds the
-app's current model, reusing base and tuned: report `headline.tuned_minus_compare`. Report:
+app's current model, reusing base and tuned: report `headline.tuned_minus_compare`. The user's
+own judges and pure-function checks go in `--evaluators evals.toml`, reusing every answer:
+report `headline.evaluator` and `headline.evaluators`, and show an uncalibrated warning. Report:
 
 - `headline.judge_pass_rate` (`base`, `tuned`, `delta`, `ci95`), `headline.paired`, and the
   `cases` and `trajectories` behind them. An interval that includes 0 is no clear difference.
@@ -285,10 +286,9 @@ app's current model, reusing base and tuned: report `headline.tuned_minus_compar
 - The caveat: replay measures agreement with the recorded behavior, not task success.
 - `headline.truncated`: failures from length, not quality, which inflate the delta. Do not
   report the delta then: evaluate again into a new `--out-dir` with a higher `--max-tokens`.
-- The user's metric (step 1) for base and tuned: join `generations.jsonl` (the answers) to
-  the file `files.results` names on `target` and `case_id`, whose `row_id` and `message_index`
-  give the reference in `rows.jsonl`. Report true and false positives and negatives per case;
-  with fewer than about 30 positives, precision and recall move 20 points on a few cases.
+- The user's metric (step 1) as two checks in `--evaluators`: precision applies (else `None`)
+  when the answer makes the decision, recall when the reference does; report each pass rate
+  with its `n`, since with fewer than about 30 cases a rate moves 20 points on a few.
 
 Compare recipes, not single runs: one recipe trained twice can differ by 5 points, so a
 smaller gap is noise. Choose on the user's metric and call the chosen run's test number

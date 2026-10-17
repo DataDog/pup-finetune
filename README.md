@@ -289,6 +289,63 @@ opens or ends on an assistant turn) is never sent: the preview counts it per rea
 compare model's rates, nor in `tuned_minus_compare`. A compare model that would be sent no
 case at all is refused by the preview.
 
+### Your own evaluators
+
+```sh
+pup finetune evaluate ft-20261007183443-a8b181 --evaluators evals.toml
+```
+
+`--evaluators` scores every answer with your own LLM judges and Python checks too, next to the
+built-in judge. The spec is TOML, its paths relative to it:
+
+```toml
+headline = "all"                 # "judge" (the default), an evaluator's name, or "all"
+
+[[evaluator]]
+name = "polite"
+type = "judge"
+model = "anthropic/claude-sonnet-5-5"   # optional, named as --judge-model; default: the judge
+rubric = """
+Pass when the answer is courteous and does not blame the user. Fail when it is curt or sarcastic.
+"""
+examples = "polite-examples.jsonl"      # optional: answers you graded, to calibrate it
+
+[[evaluator]]
+name = "no_card_numbers"
+type = "check"
+file = "checks.py"
+function = "no_card_numbers"     # optional; default: the name
+```
+
+A check is a plain function of the case and the answer:
+
+```python
+def no_card_numbers(case, candidate):
+    if any(char.isdigit() for char in candidate.get("content") or ""):
+        return False, "the answer shows digits"
+    return True
+```
+
+It returns `True` (pass), `False` or `(False, "why")` (fail), or `None` (does not apply). `case`
+holds the recorded `prefix`, `tools` and `reference`; `candidate` is the generated assistant
+message. Each examples line is `{"conversation": [...], "candidate": "...", "pass": true}`
+(`tools` and `reference` optional), with at least one passing and one failing answer; a judge
+without examples is not calibrated, and the preview and the result warn. The result's
+`headline` names the `evaluator` it leads with and has `evaluators`: each one's pass rate per
+model and tuned minus base with its interval, and `all`, which passes a case when the built-in
+judge and every evaluator pass it (one that does not apply counts as a pass).
+
+Added to a complete evaluation, evaluators reuse every stored answer: nothing is generated
+again and no training session opens, so only their judges' calls are paid, and checks cost
+nothing. The directory keeps its evaluators: a rerun without the flag continues them, a rerun
+may add new ones, and a changed rubric, model or check file needs a new name (`polite_v2`) or
+a new `--out-dir`. Each evaluator becomes one boolean metric per case in the experiments; one
+added after they were published is a warning, since those experiments do not show it.
+`benchmark --evaluators` works the same way, and the headline ranks the models. Checks are
+Python you wrote: they run in this process with your privileges, previews included (the
+preview runs each one on every recorded answer, free, so a broken check fails before anything
+is paid).
+
 ## Deploy
 
 ```sh
@@ -358,7 +415,9 @@ choose, and every preview lists each recipient in `data_recipients`. `PUP_READ_O
 `deploy` and `undeploy`; previews still run. `dataset triage` writes nothing to Datadog, so it
 stays allowed, and it still sends rows to the judges. `train --remote` uploads the train and
 validation rows, their split assignments, the run files and pup-finetune's source to Baseten
-storage for its job; the test split and dropped rows stay on this machine.
+storage for its job; the test split and dropped rows stay on this machine. The checks of
+`--evaluators` run on this machine and send nothing; its judges are recipients like the
+built-in judge.
 [docs/data-format.md](docs/data-format.md)
 describes the rows, the exclusion codes and the files in a dataset directory.
 
