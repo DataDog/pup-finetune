@@ -45,6 +45,7 @@ def test_train_spec_defaults() -> None:
     assert spec.patience == 1
     assert spec.min_delta == 0.0
     assert spec.learning_rate == 1e-4
+    assert (spec.lr_schedule, spec.warmup_fraction) == ("constant", 0.0)
     assert spec.batch_size == 32
     assert spec.lora_rank is None
     assert spec.lora_alpha is None
@@ -114,6 +115,10 @@ def test_train_spec_accepts_an_integer_learning_rate_and_interval() -> None:
         ("spend_reserve_fraction", 1.0),
         ("spend_reserve_fraction", -0.01),
         ("spend_reserve_fraction", math.nan),
+        ("lr_schedule", "step"),
+        ("warmup_fraction", 1.0),
+        ("warmup_fraction", -0.1),
+        ("warmup_fraction", math.inf),
         ("batch_size", True),
         ("batch_size", "32"),
         ("batch_size", 1.5),
@@ -188,6 +193,67 @@ def test_adam_config_uses_the_learning_rate_and_defaults() -> None:
     assert adam == AdamConfig(
         learning_rate=3e-4, beta1=0.9, beta2=0.95, eps=1e-12, weight_decay=0.0, grad_clip_norm=0.0
     )
+
+
+def test_an_old_spec_without_a_schedule_is_constant() -> None:
+    old = TrainSpec().model_dump()
+    del old["lr_schedule"], old["warmup_fraction"]
+    spec = TrainSpec.model_validate(old)
+    assert (spec.lr_schedule, spec.warmup_fraction) == ("constant", 0.0)
+
+
+def test_the_horizon_is_max_epochs_of_steps() -> None:
+    assert TrainSpec(max_epochs=3, batch_size=4).max_steps(10) == 9
+
+
+@pytest.mark.parametrize(
+    ("fraction", "total", "steps"),
+    [(0.0, 10, 0), (0.2, 10, 2), (0.01, 3, 1), (0.1, 30, 3), (1e-12, 10, 1)],
+)
+def test_warmup_steps_round_up(fraction: float, total: int, steps: int) -> None:
+    assert TrainSpec(warmup_fraction=fraction).warmup_steps(total) == steps
+
+
+def test_a_constant_schedule_without_warmup_is_the_learning_rate_at_every_step() -> None:
+    spec = TrainSpec(learning_rate=3e-4)
+    assert [spec.learning_rate_at(step, 7) for step in range(1, 8)] == [3e-4] * 7
+
+
+@pytest.mark.parametrize(
+    ("schedule", "factors"),
+    [
+        ("constant", [0.5, 1, 1, 1, 1, 1, 1, 1, 1, 1]),
+        ("linear", [0.5, 1, 1, 0.875, 0.75, 0.625, 0.5, 0.375, 0.25, 0.125]),
+        (
+            "cosine",
+            [0.5, 1, 1, 0.96194, 0.85355, 0.69134, 0.5, 0.30866, 0.14645, 0.03806],
+        ),
+    ],
+)
+def test_the_schedule_warms_up_then_decays(schedule: str, factors: list[float]) -> None:
+    spec = TrainSpec.parse({"lr_schedule": schedule, "warmup_fraction": 0.2})
+    rates = [spec.learning_rate_at(step, 10) for step in range(1, 11)]
+    assert rates == pytest.approx([1e-4 * factor for factor in factors], rel=1e-4)
+
+
+@pytest.mark.parametrize("schedule", ["constant", "linear", "cosine"])
+@pytest.mark.parametrize(("total", "fraction"), [(1, 0.0), (1, 0.5), (3, 0.01), (50, 0.1)])
+def test_every_rate_is_positive_and_never_rises_after_warmup(
+    schedule: str, total: int, fraction: float
+) -> None:
+    spec = TrainSpec.parse({"lr_schedule": schedule, "warmup_fraction": fraction})
+    rates = [spec.learning_rate_at(step, total) for step in range(1, total + 1)]
+    assert all(0 < rate <= spec.learning_rate for rate in rates)
+    after = rates[spec.warmup_steps(total) :]
+    assert after == sorted(after, reverse=True)
+
+
+def test_resolved_settings_show_the_schedule_after_the_learning_rate() -> None:
+    settings = TrainSpec(lr_schedule="cosine", warmup_fraction=0.05).resolved_settings(_profile())
+    keys = list(settings)
+    start = keys.index("learning_rate")
+    assert keys[start : start + 3] == ["learning_rate", "lr_schedule", "warmup_fraction"]
+    assert (settings["lr_schedule"], settings["warmup_fraction"]) == ("cosine", 0.05)
 
 
 # --- Small value types ---------------------------------------------------------------------

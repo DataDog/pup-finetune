@@ -188,7 +188,9 @@ def test_step_events_number_steps_over_the_run() -> None:
         (2, 3, 1.0),
         (2, 4, 1.0),
     ]
-    assert all(set(e) == {"type", "epoch", "step", "loss", "tokens", "elapsed_s"} for e in steps)
+    keys = {"type", "epoch", "step", "loss", "learning_rate", "tokens", "elapsed_s"}
+    assert all(set(e) == keys for e in steps)
+    assert all(e["learning_rate"] == 1e-4 for e in steps)
     assert all(e["tokens"] > 0 and e["elapsed_s"] >= 0 for e in steps)
     assert [e["epoch"] for e in events if e["type"] == "epoch"] == [1, 2]
 
@@ -210,11 +212,50 @@ def test_the_loop_reports_its_plan_first_for_progress_lines() -> None:
         "steps_per_epoch": 3,
         "max_steps": 9,
         "max_epochs": 3,
+        "lr_schedule": "constant",
+        "warmup_steps": 0,
         "checkpoint_every_minutes": 20.0,
         "epoch": 1,
         "step": 0,
     }
     assert [event for event in events if event["type"] == "plan"] == [events[0]]
+
+
+# --- the learning-rate schedule -------------------------------------------------------------
+
+
+def test_each_step_sends_the_scheduled_learning_rate() -> None:
+    events: list[dict[str, Any]] = []
+    spec = make_spec(max_epochs=2, batch_size=1, lr_schedule="cosine", warmup_fraction=0.25)
+    with recording(curve(2.0, 1.5)) as session:
+        train(session, spec, on_event=events.append)
+    rates = [spec.learning_rate_at(step, 8) for step in range(1, 9)]
+    assert [adam.learning_rate for adam in session.adams] == rates
+    assert len(set(rates)) > 2
+    # Only the learning rate follows the schedule; the other Adam parameters stay fixed.
+    fixed = {dataclasses.replace(adam, learning_rate=1e-4) for adam in session.adams}
+    assert fixed == {spec.adam_config()}
+    assert [e["learning_rate"] for e in events if e["type"] == "step"] == rates
+    assert (events[0]["lr_schedule"], events[0]["warmup_steps"]) == ("cosine", 2)
+
+
+def test_a_constant_schedule_sends_the_same_adam_every_step() -> None:
+    spec = make_spec(max_epochs=2)
+    with recording(curve(2.0, 1.5)) as session:
+        train(session, spec)
+    assert session.adams == [spec.adam_config()] * 4
+
+
+def test_the_horizon_is_max_epochs_even_when_training_stops_early() -> None:
+    spec = make_spec(max_epochs=5, patience=1, batch_size=1, lr_schedule="linear")
+    with recording(curve(1.0, 2.0, 3.0)) as session:
+        result = train(session, spec)
+    assert result.stopped_reason == "early_stopped"
+    # Two epochs of four steps, on the schedule of all five epochs (20 steps).
+    assert [adam.learning_rate for adam in session.adams] == [
+        spec.learning_rate_at(step, 20) for step in range(1, 9)
+    ]
+    assert session.adams[-1].learning_rate > spec.learning_rate / 2
 
 
 def test_the_step_loss_is_a_token_mean_over_its_microbatches() -> None:
@@ -1066,6 +1107,37 @@ def test_resuming_after_a_time_based_checkpoint_skips_exactly_the_trained_steps(
         )
     # Only the last step of epoch 2 is trained again, on the same batch as uninterrupted.
     assert resumed.train_batches == unbroken_session.train_batches[-1:]
+
+
+def test_a_resumed_run_sends_the_same_learning_rates() -> None:
+    spec = make_spec(
+        max_epochs=3,
+        batch_size=1,
+        pipeline_depth=1,
+        checkpoint_every_minutes=10,
+        lr_schedule="cosine",
+        warmup_fraction=0.1,
+    )
+    options = FakeOptions(fail_at_step=8)
+    rows = row_examples(4)
+    clock = Clock()
+    first = MemoryState()
+    with (
+        pytest.raises(Exception, match="fail_at_step"),
+        FakeBackend(options).open_session(FAKE_PROFILE, LORA, **SESSION) as inner,
+    ):
+        train(inner, spec, rows=rows, state=first, clock=clock, on_event=ticking(clock, 4))
+    point = first.resume_points[-1]
+    assert (point.epoch, point.step) == (2, 7)
+    with recording() as unbroken:
+        train(unbroken, spec, rows=rows)
+    with FakeBackend(options).open_session(
+        FAKE_PROFILE, LORA, resume_from=point.checkpoint, **SESSION
+    ) as inner:
+        resumed = RecordingSession(inner)
+        train(resumed, spec, rows=rows, resume=Resume(point=point, epochs=first.epochs))
+    assert len(resumed.adams) == 5
+    assert resumed.adams == unbroken.adams[7:]
 
 
 def test_resuming_keeps_the_best_epoch_and_the_patience_counter() -> None:

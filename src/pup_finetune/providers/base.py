@@ -20,6 +20,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime
+from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, Protocol, Self, runtime_checkable
 
@@ -143,7 +144,11 @@ class TrainSpec(BaseModel):
     """How to train: the provider-neutral settings of one run, frozen into the run directory.
 
     ``patience`` is how many epochs without a validation-loss improvement of more than
-    ``min_delta`` end training early. ``lora_rank`` ``None`` uses the profile's default.
+    ``min_delta`` end training early. ``learning_rate`` is the peak rate: after a linear
+    warmup over ``warmup_fraction`` of the run's steps, ``lr_schedule`` keeps it (``constant``)
+    or decays it toward zero (``linear``, ``cosine``) over :meth:`max_steps`, the steps of
+    ``max_epochs`` epochs (see :meth:`learning_rate_at`). ``lora_rank`` ``None`` uses the
+    profile's default.
     ``checkpoint_every_minutes`` adds a resumable checkpoint at a step boundary between the
     end-of-epoch ones. ``max_train_tokens`` stops cleanly before a step that would train on
     more rendered tokens than that. ``microbatch_token_budget`` packs each step's examples
@@ -167,6 +172,8 @@ class TrainSpec(BaseModel):
     patience: PositiveInt = 1
     min_delta: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     learning_rate: float = Field(default=1e-4, gt=0, allow_inf_nan=False)
+    lr_schedule: Literal["constant", "linear", "cosine"] = "constant"
+    warmup_fraction: float = Field(default=0.0, ge=0, lt=1, allow_inf_nan=False)
     batch_size: PositiveInt = 32
     lora_rank: PositiveInt | None = None
     lora_alpha: PositiveInt | None = None
@@ -207,8 +214,34 @@ class TrainSpec(BaseModel):
         return LoraConfig(rank=self.lora_rank or profile.default_lora_rank, alpha=self.lora_alpha)
 
     def adam_config(self) -> AdamConfig:
-        """The optimizer parameters for every step: a constant learning rate."""
+        """The optimizer parameters at the peak learning rate; each step sends a copy at
+        :meth:`learning_rate_at`."""
         return AdamConfig(learning_rate=self.learning_rate)
+
+    def max_steps(self, train_rows: int) -> int:
+        """The most optimizer steps a run on ``train_rows`` rows takes: the schedule's horizon."""
+        return self.max_epochs * math.ceil(train_rows / self.batch_size)
+
+    def warmup_steps(self, total_steps: int) -> int:
+        """The steps of ``total_steps`` that warm up: ``warmup_fraction`` of them, rounded up."""
+        # The fraction as written: 0.1 * 30 is 3.0000000000000004 in binary floating point.
+        return math.ceil(Fraction(repr(self.warmup_fraction)) * total_steps)
+
+    def learning_rate_at(self, step: int, total_steps: int) -> float:
+        """The learning rate of optimizer ``step`` (1-based, over the run) of ``total_steps``.
+
+        It ramps up linearly to ``learning_rate`` over :meth:`warmup_steps`, then stays there
+        (``constant``) or decays over the rest (``linear``, ``cosine``); it never reaches zero.
+        """
+        warmup = self.warmup_steps(total_steps)
+        if step <= warmup:
+            return self.learning_rate * step / warmup
+        if self.lr_schedule == "constant":
+            return self.learning_rate
+        progress = (step - 1 - warmup) / max(1, total_steps - warmup)
+        if self.lr_schedule == "linear":
+            return self.learning_rate * (1 - progress)
+        return self.learning_rate * 0.5 * (1 + math.cos(math.pi * progress))
 
     def resolved_settings(
         self, profile: ModelProfile, *, max_seq_len_flag: str = MAX_SEQ_LEN_FLAG
@@ -224,6 +257,8 @@ class TrainSpec(BaseModel):
             "patience": self.patience,
             "min_delta": self.min_delta,
             "learning_rate": self.learning_rate,
+            "lr_schedule": self.lr_schedule,
+            "warmup_fraction": self.warmup_fraction,
             "batch_size": self.batch_size,
             "lora": {
                 "rank": lora.rank,

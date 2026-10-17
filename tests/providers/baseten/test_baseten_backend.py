@@ -470,6 +470,14 @@ def test_optim_step_passes_every_adam_parameter(setup: Setup) -> None:
     ]
 
 
+def test_each_optim_step_sends_its_own_learning_rate(setup: Setup) -> None:
+    with setup.session() as session:
+        for rate in (5e-5, 1e-4):
+            session.optim_step(AdamConfig(learning_rate=rate)).result()
+    sent = [kwargs["adam_params"].learning_rate for kwargs in setup.loops.kwargs("optim_step")]
+    assert sent == [5e-5, 1e-4]
+
+
 @pytest.mark.parametrize(
     ("call", "error", "on_result", "transient"),
     [

@@ -343,6 +343,8 @@ _SETTING_PARAMS: dict[str, str] = {
     "patience": "patience",
     "min_delta": "min_delta",
     "learning_rate": "learning_rate",
+    "lr_schedule": "lr_schedule",
+    "warmup_fraction": "warmup_fraction",
     "batch_size": "batch_size",
     "lora.rank": "lora_rank",
     "lora.alpha": "lora_alpha",

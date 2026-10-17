@@ -108,8 +108,10 @@ def test_the_train_preview_shows_what_will_be_used(dataset: Path, tmp_path: Path
     }
     assert (settings["max_seq_len"], settings["max_seq_len_source"]) == (4096, "model default")
     assert settings["max_epochs"] == 3
+    assert (settings["lr_schedule"], settings["warmup_fraction"]) == ("constant", 0.0)
     assert "max_epochs" not in preview["defaults_used"]
     assert {"lora.rank", "learning_rate", "batch_size", "seed"} <= set(preview["defaults_used"])
+    assert {"lr_schedule", "warmup_fraction"} <= set(preview["defaults_used"])
     # The optimizer's fixed parameters and the full profile stay in run.json.
     assert "optimizer" not in settings and "spec" not in preview
     assert set(preview["profile"]) == {"alias", "base_model", "max_seq_len"}
