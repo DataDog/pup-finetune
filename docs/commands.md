@@ -738,7 +738,7 @@ Safety: Free · signals the local training process · PUP_READ_ONLY: allowed.
 
 Replay each held-out test conversation of a run, one recorded assistant turn at a time, with the base model and the run's best checkpoint, and score both with tool-call metrics and an LLM judge. Without --confirm, previews the calls and where the data goes. A complete evaluation is published to Datadog as two experiments, three with --compare-model, when the dataset was pushed (--no-publish skips it).
 
-The result compares the two: pass rates, wins and regressions, and the tuned-minus-base delta with a bootstrap confidence interval. --compare-model, named as --judge-model is, replays a third model on the same cases, judged alike, with its own token limit (16000, thinking included) and the provider's lowest reasoning effort, and adds tuned-minus-compare; added to a complete evaluation, it reuses the base and tuned results and opens no training session. The directory keeps its compare model: a rerun without the flag continues it, and another one needs a new --out-dir. Tools are not executed, so the scores measure agreement with the recorded behavior, not task success. With --confirm, the judge is calibrated first, then every case is replayed; rerun the same command to continue an evaluation that stopped. A changed --max-tokens, judge, seed or --max-cases needs a new --out-dir. Without --judge-model, the judge is the one the --out-dir holds an evaluation by, else anthropic/claude-haiku-5-5 when an Anthropic credential resolves (ANTHROPIC_API_KEY, the OS keychain or the Anthropic SDK's login), else openai/gpt-5.4-mini when an OpenAI one does, else Fireworks' deepseek-v4p1-flash; the preview names it and where it came from (judge_source). Base answers from another evaluation or benchmark of the same dataset, made under the same settings, are reused from DATASET/replay_cache, together with their judgments when the judge is the same; --no-reuse makes them again.
+The result compares the two: pass rates, wins and regressions, and the tuned-minus-base delta with a bootstrap confidence interval. --compare-model, named as --judge-model is, replays a third model on the same cases, judged alike, with its own token limit (16000, thinking included) and the provider's lowest reasoning effort, and adds tuned-minus-compare; added to a complete evaluation, it reuses the base and tuned results and opens no training session. The directory keeps its compare model: a rerun without the flag continues it, and another one needs a new --out-dir. Tools are not executed, so the scores measure agreement with the recorded behavior, not task success. With --confirm, the judge is calibrated first, then every case is replayed; rerun the same command to continue an evaluation that stopped. A changed --max-tokens, judge, seed or --max-cases needs a new --out-dir. Without --judge-model, the judge is the one the --out-dir holds an evaluation by, else anthropic/claude-haiku-5-5 when an Anthropic credential resolves (ANTHROPIC_API_KEY, the OS keychain or the Anthropic SDK's login), else openai/gpt-5.4-mini when an OpenAI one does, else Fireworks' deepseek-v4p1-flash; the preview names it and where it came from (judge_source). Base answers from another evaluation or benchmark of the same dataset, made under the same settings, are reused from DATASET/replay_cache, together with their judgments when the judge is the same; --no-reuse makes them again. --evaluators FILE adds your own evaluators from a TOML spec: LLM judges, each with a rubric, an optional model and optional graded examples that calibrate it, and Python checks, each a function of the case and the answer that returns True, False, None (does not apply) or (False, reason); its headline is judge, an evaluator's name or all (the judge and every evaluator pass). Added to a complete evaluation, they score the stored answers, so only their judges' calls are paid. The directory keeps its evaluators: a rerun may add some, but a changed or dropped one needs a new name or a new --out-dir. Checks run in this process with your privileges.
 
 ```
 pup finetune evaluate [OPTIONS] RUN_DIR
@@ -757,6 +757,7 @@ pup finetune evaluate [OPTIONS] RUN_DIR
 | **Models** | | | |
 | `--judge-model` | `MODEL` | by key: Anthropic, OpenAI, else Fireworks | An alias (glm-5p3-flash), anthropic/MODEL, openai/MODEL or a Fireworks id. |
 | `--compare-model` | `MODEL` |  | Also replay this model, named as --judge-model. |
+| `--evaluators` | `FILE` |  | More judges and Python checks, from a TOML file. |
 | `--skip-calibration` |  |  | Do not check the judge on known answers first. |
 | **Run** | | | |
 | `--out-dir` | `DIR` | RUN_DIR/eval | Output directory. |
@@ -770,8 +771,8 @@ Examples:
 ```sh
 pup finetune evaluate run
 pup finetune evaluate run --judge-model glm-5p3-flash
-pup finetune evaluate run --max-cases 4 --out-dir run/eval-4
 pup finetune evaluate run --compare-model anthropic/claude-opus-5-5
+pup finetune evaluate run --evaluators evals.toml
 ```
 
 Safety: Paid with --confirm · sends test rows to the provider and the judge, results to Datadog · PUP_READ_ONLY: preview only unless offline.

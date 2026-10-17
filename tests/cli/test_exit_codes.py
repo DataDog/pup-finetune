@@ -116,6 +116,28 @@ def _wrong_judge_settings(w: World) -> list[str]:
     return ["evaluate", str(w.run), "--no-publish", "--max-tokens", "64"]
 
 
+def _evaluators(
+    text: str, checks: str = "def card(case, candidate):\n    return True\n"
+) -> Callable[[World], list[str]]:
+    def setup(w: World) -> list[str]:
+        (w.tmp / "checks.py").write_text(checks)
+        spec = w.tmp / "evals.toml"
+        spec.write_text(text)
+        return ["evaluate", str(w.run), "--no-publish", "--evaluators", str(spec)]
+
+    return setup
+
+
+_CARD = '[[evaluator]]\nname = "card"\ntype = "check"\nfile = "checks.py"\n'
+
+
+def _changed_evaluator(w: World) -> list[str]:
+    args = _evaluators(_CARD)(w)
+    assert _invoke(*args, "--confirm").exit_code == 0
+    (w.tmp / "checks.py").write_text("def card(case, candidate):\n    return None\n")
+    return args
+
+
 def _still_training(command: str) -> Callable[[World], list[str]]:
     def setup(w: World) -> list[str]:
         w.set_state(phase="training")
@@ -227,6 +249,14 @@ MISTAKES: list[tuple[str, Setup, int, str]] = [
         lambda w: ["evaluate", str(w.run), "--no-publish", "--no-reuse"],
         2,
         "settings_conflict",
+    ),
+    ("evaluators that are not TOML", _evaluators("[[evaluator]\n"), 2, "usage"),
+    ("an evaluator changed since attached", _changed_evaluator, 2, "settings_conflict"),
+    (
+        "a check that raises on a reference",
+        _evaluators(_CARD, "def card(case, candidate):\n    raise ValueError('x')\n"),
+        2,
+        "usage",
     ),
     # The wrong phase.
     ("resume a completed run", lambda w: ["resume", str(w.run), "--confirm"], 2, "wrong_phase"),

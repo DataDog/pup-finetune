@@ -430,6 +430,19 @@ def _publication(result: Mapping[str, Any]) -> str | None:
     return None if line is None else line + compare
 
 
+def _headline_evaluator(headline: Mapping[str, Any]) -> str | None:
+    """The line of the evaluator the headline names, when it is not the built-in judge."""
+    name = headline.get("evaluator")
+    if not isinstance(name, str) or name == "judge":
+        return None
+    entry = (headline.get("evaluators") or {}).get(name) or {}
+    label = "all (the judge and every evaluator)" if name == "all" else name
+    return (
+        f"headline {label}: base {_agreement(entry.get('base'))}, tuned "
+        f"{_agreement(entry.get('tuned'))}, tuned - base {_difference(entry)}"
+    )
+
+
 def _evaluation_parts(result: Mapping[str, Any], *, compact: bool) -> Summary:
     """An evaluation's lines and its one-line form, without the next command; ``compact``
     (inside ``train --evaluate``) leaves out the table."""
@@ -471,20 +484,22 @@ def _evaluation_parts(result: Mapping[str, Any], *, compact: bool) -> Summary:
     verdicts = _verdicts(headline_data.get("paired") or {}, result.get("errors"), ("base", "tuned"))
     paired = "paired: " + verdicts
     publication = _publication(result)
+    chosen = [line] if (line := _headline_evaluator(headline_data)) is not None else []
     if isinstance(headline_data.get("tuned_minus_compare"), Mapping):
-        return _compared_parts(result, headline, verdicts, publication)
+        return _compared_parts(result, headline, verdicts, publication, chosen)
     agreement = f"judge agreement: base {base}, tuned {tuned}, tuned - base {difference}"
     if compact:
-        lines = [headline, agreement, paired, CAVEAT]
+        lines = [headline, *chosen, agreement, paired, CAVEAT]
     else:
         lines = [
             headline,
+            *chosen,
             f"{'':<21}{'base':<11}{'tuned':<11}tuned - base",
             f"{'judge agreement':<21}{base:<11}{tuned:<11}{difference}",
             paired,
             CAVEAT,
         ]
-    parts = [headline, agreement, verdicts, CAVEAT]
+    parts = [headline, *chosen, agreement, verdicts, CAVEAT]
     if publication is not None:
         lines.append(publication)
         parts.append(publication)
@@ -492,7 +507,11 @@ def _evaluation_parts(result: Mapping[str, Any], *, compact: bool) -> Summary:
 
 
 def _compared_parts(
-    result: Mapping[str, Any], headline: str, verdicts: str, publication: str | None
+    result: Mapping[str, Any],
+    headline: str,
+    verdicts: str,
+    publication: str | None,
+    chosen: Sequence[str] = (),
 ) -> Summary:
     """An evaluation with a compare target: each target's judge agreement, then each
     comparison with its paired verdicts (``verdicts`` is base against tuned)."""
@@ -502,6 +521,7 @@ def _compared_parts(
     names = [name for name in rates if name not in ("delta", "ci95")]
     found = [
         headline,
+        *chosen,
         "judge agreement: " + ", ".join(f"{name} {_agreement(rates[name])}" for name in names),
         f"tuned - base: {_difference(rates)}; {verdicts}",
         f"tuned - compare: {_difference(versus)}; "

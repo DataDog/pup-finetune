@@ -25,6 +25,9 @@ receipt, which is a warning: the local results are complete either way.
 (:mod:`pup_finetune.evaluation.compare`), to the same evaluation directory under an identity
 of its own (``compare.json``), so it can be added to a complete evaluation: only its pairs
 are generated and judged, and no training session opens when base and tuned are done.
+``evaluate --evaluators`` adds the user's own judges and checks
+(:mod:`pup_finetune.evaluation.evaluators`) the same way: added to a complete evaluation,
+they score the stored answers alone.
 
 The evaluation modules this drives (and through them the judge's HTTP client) are imported
 only when a function here runs, so the CLI can import this module for every command.
@@ -39,7 +42,7 @@ import os
 import shlex
 import threading
 from collections import Counter
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -100,6 +103,7 @@ from pup_finetune.training.records import StoppedReason, TrainResult
 if TYPE_CHECKING:
     from pup_finetune.evaluation.cases import ReplayCase
     from pup_finetune.evaluation.compare import CompareTarget
+    from pup_finetune.evaluation.evaluators import CheckEvaluator, EvaluatorSet, JudgeEvaluator
     from pup_finetune.evaluation.judge import Judgment
     from pup_finetune.evaluation.replay import EvalDir, Publisher, ReplaySummary
     from pup_finetune.evaluation.reuse import ReuseIndex, TargetReuse
@@ -120,19 +124,25 @@ __all__ = [
     "EvalSettings",
     "EvalWork",
     "EvaluateAfterTraining",
+    "EvaluatorsPreview",
     "Publishing",
     "RecordedEvaluation",
     "StandaloneEvaluation",
+    "busy_judges",
+    "calibrate_evaluators",
     "calibration_failed",
     "calibration_line",
     "cancel_on_signals",
     "deploy_command",
     "evaluate_words",
     "evaluation_exit_code",
+    "evaluator_calibration_calls",
+    "evaluators_preview",
     "finished_result",
     "headline",
     "next_after_training",
     "no_reuse_hint",
+    "open_evaluator_clients",
     "open_judge_client",
     "plan_evaluation",
     "plan_standalone",
@@ -145,6 +155,7 @@ __all__ = [
     "resolve_judge",
     "run_calibration",
     "share_base",
+    "uncalibrated",
 ]
 
 DEFAULT_OUT_DIR_NAME: Final = "eval"
@@ -361,6 +372,7 @@ class EvalSettings:
     publish: bool = True
     compare_model: str | None = None
     reuse: bool = True
+    evaluators: Path | None = None
 
 
 def evaluate_words(
@@ -370,12 +382,13 @@ def evaluate_words(
     *,
     pin: bool,
     compare_spec: str | None = None,
+    evaluators: Path | None = None,
 ) -> list[str]:
     """The ``evaluate`` command (without ``--confirm``) for the run in ``run_dir`` with
     ``settings`` and the judge ``judge_spec``: the judge always, and the other settings that
     differ from the defaults, or every one of them with ``pin``. ``compare_spec``, the
-    compare model, is repeated whenever there is one: like the judge, it decides where the
-    data goes."""
+    compare model, and the ``evaluators`` spec (while it exists) are repeated whenever there
+    is one: like the judge, they decide where the data goes."""
     defaults = EvalSettings(out_dir=run_dir / DEFAULT_OUT_DIR_NAME)
     words = [*PROGRAM, "evaluate", display_path(run_dir)]
     if pin or settings.out_dir != defaults.out_dir:
@@ -385,6 +398,8 @@ def evaluate_words(
     words += ["--judge-model", judge_spec]
     if compare_spec is not None:
         words += ["--compare-model", compare_spec]
+    if evaluators is not None and evaluators.is_file():
+        words += ["--evaluators", display_path(evaluators)]
     if pin or settings.concurrency != defaults.concurrency:
         words += ["--concurrency", str(settings.concurrency)]
     if pin or settings.max_tokens != defaults.max_tokens:
@@ -404,8 +419,9 @@ def evaluate_words(
 class EvalWork:
     """What an evaluation would still do (:meth:`EvalPlan.work`)."""
 
-    by_target: dict[str, dict[str, int]]
-    """Each target's ``{"done", "generate", "judge"}`` pairs."""
+    by_target: dict[str, dict[str, Any]]
+    """Each target's ``{"done", "generate", "judge"}`` pairs, and with evaluators the pairs
+    each still scores (``"evaluators": {name: n}``)."""
     calibration: int
     """The judge calls calibration makes: none once one passed in the directory."""
     probe: bool
@@ -413,10 +429,18 @@ class EvalWork:
     reused: dict[str, TargetReuse] = field(default_factory=dict)
     """What each target takes from the dataset's store, already left out of
     :attr:`by_target`."""
+    evaluator_calibration: dict[str, int] = field(default_factory=dict)
+    """The example calls each of the user's judges still makes to calibrate."""
+
+    def evaluator_calls(self, name: str) -> int:
+        """The pairs the evaluator ``name`` still scores, over every target."""
+        return sum(
+            int(counts.get("evaluators", {}).get(name, 0)) for counts in self.by_target.values()
+        )
 
     @property
     def judge_calls(self) -> int:
-        return sum(counts["judge"] for counts in self.by_target.values()) + self.calibration
+        return sum(int(counts["judge"]) for counts in self.by_target.values()) + self.calibration
 
     @property
     def trained(self) -> int:
@@ -452,6 +476,8 @@ class EvalPlan:
     reuse: ReuseIndex | None = None
     """What the dataset's store holds for this plan, read once when it was planned; ``None``
     with ``--no-reuse``."""
+    evaluators: EvaluatorSet | None = None
+    """The user's own evaluators: ``--evaluators``, else those the directory has attached."""
     compare_skips: Mapping[str, str] = field(init=False)
     """The cases the compare model's API refuses, by case id, with the reason; none
     without a compare model (:func:`~pup_finetune.evaluation.compare.compare_skips`)."""
@@ -496,6 +522,7 @@ class EvalPlan:
             self.provider == "fake"
             and self.judge.provider == "fake"
             and (self.compare is None or self.compare.offline)
+            and (self.evaluators is None or self.evaluators.offline)
             and not (self.publishing.ready)
         )
 
@@ -560,7 +587,16 @@ class EvalPlan:
             self.judge.spec,
             pin=not self.standalone if pin is None else pin,
             compare_spec=None if self.compare is None else self.compare.spec,
+            evaluators=self.evaluators_spec,
         )
+
+    @property
+    def evaluators_spec(self) -> Path | None:
+        return None if self.evaluators is None else self.evaluators.spec
+
+    @property
+    def evaluator_names(self) -> list[str]:
+        return [] if self.evaluators is None else self.evaluators.names
 
     @property
     def default_out_dir(self) -> Path:
@@ -656,6 +692,17 @@ class EvalPlan:
         if conflict is not None:
             raise conflict
 
+    def _refuse_other_evaluators(self, eval_dir: EvalDir) -> None:
+        """Raise the conflict --confirm would raise for evaluators that drop or change one
+        ``eval_dir`` keeps."""
+        from pup_finetune.evaluation.evaluators import evaluators_conflict, stored_evaluators
+
+        if self.evaluators is None:
+            return
+        stored = stored_evaluators(eval_dir.evaluators_path)
+        if conflict := evaluators_conflict(stored, self.evaluators, out_dir=self.out_dir):
+            raise conflict
+
     def work(self, tuned_checkpoint: CheckpointRef | None) -> EvalWork:
         """What the evaluation would still do: everything, or with ``tuned_checkpoint`` (a
         standalone run) less what ``--out-dir`` already holds under the same settings. The
@@ -666,8 +713,14 @@ class EvalPlan:
         """
         from pup_finetune.evaluation.replay import EvalDir, remaining_work
 
-        by_target = {
-            target: {"done": 0, "generate": len(cases), "judge": len(cases)}
+        names = self.evaluator_names
+        by_target: dict[str, Any] = {
+            target: {
+                "done": 0,
+                "generate": len(cases),
+                "judge": len(cases),
+                **({"evaluators": dict.fromkeys(names, len(cases))} if names else {}),
+            }
             for target, cases in self.replays.items()
         }
         calibration = self.calibration_calls()
@@ -691,7 +744,8 @@ class EvalPlan:
             )
         if reusing:
             self._refuse_another_compare(eval_dir)
-            by_target = remaining_work(eval_dir, self.replays)
+            self._refuse_other_evaluators(eval_dir)
+            by_target = remaining_work(eval_dir, self.replays, names)
             if (eval_dir.read_calibration() or {}).get("ok"):
                 calibration = 0
         reused = {}
@@ -700,14 +754,23 @@ class EvalPlan:
             reused["base"] = base
             by_target["base"]["generate"] -= len(base.generations)
             by_target["base"]["judge"] -= len(base.verdicts)
-        return EvalWork(by_target=by_target, calibration=calibration, probe=probe, reused=reused)
+        examples = evaluator_calibration_calls(
+            self.evaluators, eval_dir if reusing else None, skip=self.settings.skip_calibration
+        )
+        return EvalWork(
+            by_target=by_target,
+            calibration=calibration,
+            probe=probe,
+            reused=reused,
+            evaluator_calibration=examples,
+        )
 
     def preview(self, *, tuned: str, tuned_checkpoint: CheckpointRef | None) -> dict[str, Any]:
         """The calls the evaluation makes. With ``tuned_checkpoint`` (a standalone run), what
         ``--out-dir`` already holds under the same settings is left out of the counts."""
         from pup_finetune.datadog.experiments import experiment_name
         from pup_finetune.evaluation.compare import require_sent, skipped_warning
-        from pup_finetune.evaluation.replay import CAVEAT, COMPARE, TARGETS
+        from pup_finetune.evaluation.replay import CAVEAT, COMPARE, TARGETS, EvalDir
 
         settings = self.settings
         warnings: list[str] = [] if self.reuse is None else list(self.reuse.warnings)
@@ -730,6 +793,7 @@ class EvalPlan:
             key: sum(counts[key] for counts in by_target.values())
             for key in ("done", "generate", "judge")
         }
+        scoring = [name for name in self.evaluator_names if work.evaluator_calls(name)]
         trained = sum(by_target[target]["generate"] for target in targets if target != COMPARE)
         compared = by_target.get(COMPARE, {}).get("generate", 0)
         trajectories = len({case.row_id for case in self.cases})
@@ -768,6 +832,20 @@ class EvalPlan:
             require_key(self.judge, warnings=soft)
         if self.compare is not None and compared:
             require_key(self.compare.config, what="compare model", warnings=soft)
+        evaluated = None
+        if (evaluators := self.evaluators) is not None:
+            for judge in busy_judges(evaluators, work):
+                require_key(judge.config, what=f"evaluator {judge.name}", warnings=soft)
+            eval_dir = EvalDir(self.out_dir)
+            evaluated = evaluators_preview(
+                evaluators,
+                work,
+                self.cases,
+                attached=_attached(eval_dir),
+                reports=_reports(eval_dir),
+                calibrate=not settings.skip_calibration,
+            )
+            warnings.extend(evaluated.warnings)
         judge_name = "the fake judge" if self.judge.provider == "fake" else self.judge.spec
         # Only what generates bills or is named: answers already stored, or taken from the
         # dataset's store, are reused, so attaching a compare model never mentions the
@@ -799,15 +877,27 @@ class EvalPlan:
         elif self.compare is not None:
             reused.append("compare")
         billing.append(judge_billing(self.judge, judge_calls))
+        if evaluated is not None:
+            billing.extend(evaluated.billing)
         steps = [_store_step(taken)] if from_store else []
         if reused:
             steps.append(f"reuse the {joined(reused)} answers already generated")
         if models:
             steps.append(f"generate each with {' and with '.join(models)}")
         cases = f"{_cases(len(self.cases))} from {trajectories} test conversations"
+        score = f", and score each with {joined(scoring)}" if scoring else ""
         if models or remaining["judge"]:
             each = "each new answer" if from_store else "each answer"
-            action = f"evaluate {cases}: {', '.join(steps)}, and judge {each} with {judge_name}"
+            action = (
+                f"evaluate {cases}: {', '.join(steps)}, and judge {each} with {judge_name}{score}"
+            )
+        elif scoring:
+            calibrate = f"calibrate {judge_name} first, then " if calibration else ""
+            answers = joined([*reused] or ["stored"])
+            action = (
+                f"{calibrate}score {cases} with {joined(scoring)}, reusing the {answers} answers "
+                "already generated and judged"
+            )
         else:
             calibrate = f"calibrate {judge_name} first, then " if calibration else ""
             action = f"{calibrate}summarize {cases}: every answer is already generated and judged"
@@ -841,6 +931,7 @@ class EvalPlan:
             "judge_source": self.judge_source,
             "judge_provider": self.judge.provider,
             "judge_endpoint": self.judge.base_url,
+            **({} if evaluated is None else {"evaluators": evaluated.block}),
             "already_done": remaining["done"],
             "generation_calls": remaining["generate"],
             "generation_calls_by_target": {
@@ -860,11 +951,23 @@ class EvalPlan:
                 "calibration": not settings.skip_calibration,
                 "publish": settings.publish,
                 "reuse": settings.reuse,
+                **(
+                    {}
+                    if self.evaluators is None
+                    else {
+                        "evaluators": _spec_word(self.evaluators),
+                        "headline": self.evaluators.headline,
+                    }
+                ),
             },
             "publish": publish,
             "data_destination": destination,
-            "data_recipients": self.recipients(trained=bool(trained), compared=bool(compared)),
+            "data_recipients": [
+                *self.recipients(trained=bool(trained), compared=bool(compared)),
+                *([] if evaluated is None else evaluated.recipients),
+            ],
             "caveat": CAVEAT,
+            **({"notes": evaluated.notes} if evaluated is not None and evaluated.notes else {}),
             "warnings": warnings,
         }
 
@@ -924,6 +1027,183 @@ def _store_step(taken: Mapping[str, int]) -> str:
     noted = f" ({judged} already judged)" if judged else ""
     plural = "" if answers == 1 else "s"
     return f"reuse the base model's {answers} answer{plural}{noted} made earlier on this dataset"
+
+
+def _spec_word(evaluators: EvaluatorSet) -> str | None:
+    return None if evaluators.spec is None else display_path(evaluators.spec)
+
+
+def _attached(eval_dir: EvalDir) -> set[str]:
+    from pup_finetune.evaluation.evaluators import stored_evaluators
+
+    stored = stored_evaluators(eval_dir.evaluators_path) or {}
+    return {str(item.get("name")) for item in stored.get("evaluators") or []}
+
+
+def busy_judges(evaluators: EvaluatorSet, work: EvalWork) -> list[JudgeEvaluator]:
+    """The user's judges with a call left, to score or to calibrate."""
+    return [
+        judge
+        for judge in evaluators.judges
+        if work.evaluator_calls(judge.name) or work.evaluator_calibration.get(judge.name)
+    ]
+
+
+def _calibrated(report: object, judge: JudgeEvaluator) -> bool:
+    return (
+        isinstance(report, Mapping)
+        and bool(report.get("ok"))
+        and canonical_json(report.get("identity")) == canonical_json(finite_json(judge.identity()))
+    )
+
+
+def _reports(eval_dir: EvalDir | None) -> Mapping[str, Any]:
+    if eval_dir is None:
+        return {}
+    found = (eval_dir.read_calibration() or {}).get("evaluators")
+    return found if isinstance(found, Mapping) else {}
+
+
+def evaluator_calibration_calls(
+    evaluators: EvaluatorSet | None, eval_dir: EvalDir | None, *, skip: bool
+) -> dict[str, int]:
+    """The example calls each of the user's judges still makes to calibrate, by name: none
+    with ``skip``, without examples, or once one passed for it in ``eval_dir``."""
+    if evaluators is None or skip:
+        return {}
+    reports = _reports(eval_dir)
+    return {
+        judge.name: len(judge.examples)
+        for judge in evaluators.judges
+        if judge.examples and not _calibrated(reports.get(judge.name), judge)
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluatorsPreview:
+    """What the user's evaluators add to a preview."""
+
+    block: dict[str, Any]
+    billing: list[str]
+    recipients: list[str]
+    notes: list[str]
+    warnings: list[str]
+
+
+def uncalibrated(
+    evaluators: EvaluatorSet, reports: Mapping[str, Any], *, calibrate: bool
+) -> list[str]:
+    """A warning for each of the user's judges without examples nor a calibration that
+    passed (``reports``, by name); none when calibration is skipped."""
+    return [
+        f"evaluator {judge.name} is not calibrated: add examples (answers you graded) to its spec"
+        for judge in evaluators.judges
+        if calibrate and not judge.examples and not _calibrated(reports.get(judge.name), judge)
+    ]
+
+
+def evaluators_preview(
+    evaluators: EvaluatorSet,
+    work: EvalWork,
+    cases: Sequence[ReplayCase],
+    *,
+    attached: set[str],
+    reports: Mapping[str, Any],
+    calibrate: bool,
+) -> EvaluatorsPreview:
+    """The preview's ``evaluators`` block (``attached`` names those frozen already) and
+    what they bill, receive and warn. Every check with cases left runs on each case's
+    reference first (free, local): one that raises or answers outside its contract fails
+    the preview."""
+    from pup_finetune.evaluation.evaluators import CheckEvaluator
+    from pup_finetune.judges import billing, recipient
+
+    items: list[dict[str, Any]] = []
+    calls: dict[str, tuple[JudgeConfig, int]] = {}
+    recipients: list[str] = []
+    files: list[str] = []
+    for evaluator in evaluators.evaluators:
+        left = work.evaluator_calls(evaluator.name)
+        if isinstance(evaluator, CheckEvaluator):
+            rate = None
+            if left:
+                rate = _self_test(evaluator, cases)
+                if (shown := display_path(evaluator.file)) not in files:
+                    files.append(shown)
+            items.append(
+                {
+                    "name": evaluator.name,
+                    "type": "check",
+                    "file": display_path(evaluator.file),
+                    "function": evaluator.function,
+                    "file_sha256": evaluator.file_sha256[:8],
+                    "attached": evaluator.name in attached,
+                    "reference_pass_rate": rate,
+                }
+            )
+            continue
+        examples = work.evaluator_calibration.get(evaluator.name, 0)
+        config = evaluator.config
+        if left + examples:
+            before = calls.get(config.spec, (config, 0))[1]
+            calls[config.spec] = (config, before + left + examples)
+            recipients.append(
+                f"test cases and answers -> the offline fake judge (evaluator {evaluator.name}; "
+                "nothing is sent)"
+                if config.provider == "fake"
+                else f"test cases and answers -> {recipient(config)} (evaluator {evaluator.name})"
+            )
+        items.append(
+            {
+                "name": evaluator.name,
+                "type": "judge",
+                "model": config.spec,
+                "provider": config.provider,
+                "rubric_sha256": evaluator.rubric_sha256[:8],
+                "attached": evaluator.name in attached,
+                "calls": left,
+                "calibration": "examples" if evaluator.examples else "none",
+                "calibration_calls": examples,
+            }
+        )
+    notes = [
+        f"{name} is Python you wrote: its checks run in this process with your privileges (this "
+        "preview ran them on every reference); nothing is sent"
+        for name in files
+    ]
+    return EvaluatorsPreview(
+        block={
+            "spec": _spec_word(evaluators),
+            "source": evaluators.source,
+            "headline": evaluators.headline,
+            "items": items,
+        },
+        billing=[billing(config, count, what="evaluator") for config, count in calls.values()],
+        recipients=recipients,
+        notes=notes,
+        warnings=uncalibrated(evaluators, reports, calibrate=calibrate),
+    )
+
+
+def _self_test(check: CheckEvaluator, cases: Sequence[ReplayCase]) -> float | None:
+    """``check``'s pass rate on the references of ``cases`` (``None`` when it never
+    applies); a :class:`UsageError` naming the case when it fails on one."""
+    from pup_finetune.user_checks import CheckError
+
+    passed = applied = 0
+    for case in cases:
+        try:
+            entry = check.loaded().check(case, case.reference)
+        except CheckError as exc:
+            raise UsageError(
+                f"the check {check.name} failed on the reference of case {case.id}: {exc.message}",
+                hint="fix it to return True, False, None or (bool, reason) for every answer; "
+                "this preview ran it, free, before anything is paid",
+            ) from None
+        if entry["status"] == "ok":
+            applied += 1
+            passed += bool(entry["passed"])
+    return passed / applied if applied else None
 
 
 JUDGE_GIVEN: Final = "given"
@@ -1017,8 +1297,9 @@ def plan_evaluation(
     """
     from pup_finetune.evaluation.cases import cases_from_dataset
     from pup_finetune.evaluation.compare import resolve_compare, stored_compare
+    from pup_finetune.evaluation.evaluators import resolve_evaluators, stored_evaluators
     from pup_finetune.evaluation.judge import check_judge_differs
-    from pup_finetune.evaluation.replay import EvalDir
+    from pup_finetune.evaluation.replay import EvalDir, remaining_work
     from pup_finetune.evaluation.reuse import ReuseIndex, Wanted, generation_key, key_inputs
 
     judge_config, judge_source = resolve_judge(
@@ -1057,7 +1338,7 @@ def plan_evaluation(
     if settings.reuse:
         own = EvalDir(settings.out_dir).read_generations()
         reuse = ReuseIndex.load(dataset.path, judge_config, [Wanted("base", cases, keys, own)])
-    return EvalPlan(
+    plan = EvalPlan(
         run_id=run_id,
         run_dir=run_dir,
         provider=provider,
@@ -1073,6 +1354,34 @@ def plan_evaluation(
         base_keys=keys,
         reuse=reuse,
     )
+    eval_dir = EvalDir(settings.out_dir)
+
+    def pending(name: str) -> bool:
+        left = remaining_work(eval_dir, plan.replays, [name])
+        return any(counts["evaluators"][name] for counts in left.values())
+
+    evaluators = resolve_evaluators(
+        settings.evaluators,
+        stored_evaluators(eval_dir.evaluators_path),
+        judge=judge_config,
+        runtime=runtime,
+        pending=pending,
+    )
+    for judge in [] if evaluators is None else evaluators.judges:
+        try:
+            check_judge_differs(
+                judge.config,
+                profile.base_model,
+                tuned,
+                compare=None if compare is None else compare.config,
+            )
+        except UsageError as exc:
+            raise UsageError(
+                f"evaluator {judge.name}: {exc.message}",
+                hint="name another model for it in the spec: a model should not grade its own "
+                "outputs",
+            ) from None
+    return plan if evaluators is None else dataclasses.replace(plan, evaluators=evaluators)
 
 
 # --- the judge ----------------------------------------------------------------------------
@@ -1103,6 +1412,54 @@ def open_judge_client(config: JudgeConfig, *, calls: int) -> Iterator[ChatComple
         return
     with open_client(config) as client:
         yield client
+
+
+@contextmanager
+def open_evaluator_clients(
+    judges: Sequence[JudgeEvaluator],
+) -> Iterator[dict[str, ChatCompleter]]:
+    """One client per provider of ``judges`` (the user's judges with a call left, to score
+    or to calibrate), by provider, opened now like the judge's (the fake judge offline);
+    none without any, so a run that only adds checks needs no key. Closed on exit."""
+    from pup_finetune.evaluation.fake_judge import FakeJudge
+    from pup_finetune.judges import open_clients
+
+    busy = [judge.config for judge in judges]
+    with open_clients([config for config in busy if config.provider != "fake"]) as clients:
+        found: dict[str, ChatCompleter] = {str(name): client for name, client in clients.items()}
+        if any(config.provider == "fake" for config in busy):
+            found["fake"] = FakeJudge()
+        yield found
+
+
+def calibrate_evaluators(
+    evaluators: EvaluatorSet | None,
+    eval_dir: EvalDir,
+    clients: Mapping[str, ChatCompleter],
+    *,
+    skip: bool,
+) -> dict[str, Any] | None:
+    """Calibrate each of the user's judges on its examples, unless one passed for it in
+    ``eval_dir`` (its lock held), keeping each report in its ``calibration.json`` under
+    ``evaluators``; the first failed report, with ``evaluator``, its judge's name."""
+    from pup_finetune.evaluation.judge import calibrate_examples
+
+    due = evaluator_calibration_calls(evaluators, eval_dir, skip=skip)
+    for judge in [] if evaluators is None else evaluators.judges:
+        if not due.get(judge.name):
+            continue
+        info(f"calibrating the evaluator {judge.name} on {len(judge.examples)} examples")
+        found = calibrate_examples(
+            judge.examples, clients[judge.config.provider], judge.config, judge.rubric
+        )
+        report = {**found.to_json(), "identity": judge.identity()}
+        info(calibration_line(report))
+        stored = eval_dir.read_calibration() or {}
+        reports = {**_reports(eval_dir), judge.name: report}
+        eval_dir.write_calibration({**stored, "evaluators": reports})
+        if not found.ok:
+            return {**report, "evaluator": judge.name}
+    return None
 
 
 def run_calibration(plan: EvalPlan, client: ChatCompleter) -> dict[str, Any] | None:
@@ -1156,6 +1513,18 @@ def calibration_failed(plan: EvalPlan, report: Mapping[str, Any]) -> dict[str, A
         if plan.standalone
         else ("--eval-judge-model", "--eval-skip-calibration")
     )
+    if (name := report.get("evaluator")) is not None:
+        return {
+            "status": "calibration_failed",
+            "run_id": plan.run_id,
+            "out_dir": display_path(plan.out_dir),
+            "judge_model": plan.judge.spec,
+            "evaluator": name,
+            "calibration": dict(report),
+            "hint": f"the evaluator {name} disagreed with answers you graded, so its verdicts "
+            "cannot be trusted; fix its rubric or examples under a new name, or pick another "
+            f"model for it (or rerun with {skip_flag} to evaluate anyway)",
+        }
     return {
         "status": "calibration_failed",
         "run_id": plan.run_id,
@@ -1197,9 +1566,11 @@ def prepare_eval_dir(
     *,
     calibration: Mapping[str, Any] | None = None,
     probe: Callable[[], None] | None = None,
+    evaluator_clients: Mapping[str, ChatCompleter] | None = None,
 ) -> dict[str, Any] | None:
-    """Create ``--out-dir``, check its identity, attach the compare target and settle the
-    calibration; the report.
+    """Create ``--out-dir``, check its identity, attach the compare target, settle the
+    calibration and attach the user's evaluators once their own calibration passed; the
+    report (a failed one of an evaluator's names it as ``evaluator``).
 
     ``probe`` checks that the compare model answers right before it is attached, so a model
     that cannot fails before ``compare.json`` freezes it. A calibration that passed is stored
@@ -1209,6 +1580,7 @@ def prepare_eval_dir(
     takes from the dataset's store are copied in last.
     """
     from pup_finetune.evaluation.compare import attach_compare
+    from pup_finetune.evaluation.evaluators import attach_evaluators
     from pup_finetune.evaluation.replay import EvalDir
 
     eval_dir = EvalDir(plan.out_dir)
@@ -1216,11 +1588,22 @@ def prepare_eval_dir(
     with eval_dir.lock():
         eval_dir.check_identity(plan.identity(tuned_checkpoint))
         attach_compare(eval_dir.compare_path, plan.compare_identity, probe=probe)
+        plan._refuse_other_evaluators(eval_dir)
         report = _settle_calibration(plan, eval_dir, client, calibration)
         # Imported work freezes the identity, so a failed calibration's retry with another
         # judge must find none.
-        if report is None or report.get("ok"):
-            _import_base(plan, eval_dir)
+        if report is not None and not report.get("ok"):
+            return report
+        failed = calibrate_evaluators(
+            plan.evaluators,
+            eval_dir,
+            evaluator_clients or {},
+            skip=plan.settings.skip_calibration,
+        )
+        if failed is not None:
+            return failed
+        attach_evaluators(eval_dir.evaluators_path, plan.evaluators)
+        _import_base(plan, eval_dir)
         return report
 
 
@@ -1238,7 +1621,8 @@ def _settle_calibration(
         return stored
     report = dict(calibration) if calibration is not None else run_calibration(plan, client)
     if report is not None:
-        eval_dir.write_calibration(report)
+        kept = (stored or {}).get("evaluators")
+        eval_dir.write_calibration({**report, **({"evaluators": kept} if kept else {})})
     return report
 
 
@@ -1295,9 +1679,11 @@ def replay(
     tuned_checkpoint: CheckpointRef,
     *,
     cancel: threading.Event,
+    evaluator_clients: Mapping[str, ChatCompleter] | None = None,
 ) -> ReplaySummary:
-    """:func:`~pup_finetune.evaluation.replay.run_replay` of ``plan`` with ``client`` judging,
-    published by :meth:`EvalPlan.publisher` once complete."""
+    """:func:`~pup_finetune.evaluation.replay.run_replay` of ``plan`` with ``client`` judging
+    and the user's judges on ``evaluator_clients``, published by :meth:`EvalPlan.publisher`
+    once complete."""
     from pup_finetune.evaluation.judge import judge
     from pup_finetune.evaluation.replay import run_replay
 
@@ -1325,6 +1711,10 @@ def replay(
         on_progress=EvaluationProgress(),
         replays=plan.replays,
         compare=plan.compare_identity,
+        evaluators=plan.evaluators,
+        scorers=None
+        if plan.evaluators is None
+        else plan.evaluators.scorers(evaluator_clients or {}),
     )
 
 
@@ -1370,16 +1760,30 @@ def replay_result(
     a retry of the errors the experiments still show them as errors.
     """
     from pup_finetune.evaluation.compare import skipped_warning
-    from pup_finetune.evaluation.replay import COMPARE, truncation_warning
+    from pup_finetune.evaluation.replay import COMPARE, EvalDir, truncation_warning
 
     summary = outcome.summary
     errors = sum(int(count) for count in summary["errors"].values())
+    scoring = sum(
+        int(target["evaluators"][name]["errors"])
+        for target in summary["targets"].values()
+        for name in plan.evaluator_names
+    )
     status = "partial"
     if outcome.complete:
-        status = "complete_with_errors" if errors else "complete"
+        status = "complete_with_errors" if errors or scoring else "complete"
     warnings: list[str] = [] if shared is None else [shared]
     hint = None
     publication = _publication(plan, outcome)
+    if scoring:
+        warnings.append(
+            f"{scoring} evaluator score(s) ended in an error (an evaluator's judge outage or a "
+            "check that raised), left out of their rates; run next_command to retry them"
+        )
+    if plan.evaluators is not None:
+        reports = _reports(EvalDir(plan.out_dir))
+        calibrate = not plan.settings.skip_calibration
+        warnings += uncalibrated(plan.evaluators, reports, calibrate=calibrate)
     if errors:
         hint = (
             f"{errors} case(s) ended in an error, left out of every rate (see the file "
@@ -1506,6 +1910,7 @@ def _replay_next(
             plan.judge.spec,
             pin=not plan.standalone,
             compare_spec="<MODEL>",
+            evaluators=plan.evaluators_spec,
         )
         steps.append(
             step(
@@ -1514,6 +1919,14 @@ def _replay_next(
                 "today, on the same cases and judge: base and tuned results are reused, so "
                 "only the compare model's answers and their judgments are paid for (it "
                 "previews first)",
+            )
+        )
+    if status == "complete" and plan.evaluators is None:
+        steps.append(
+            step(
+                template(*rerun[len(PROGRAM) :], "--evaluators", "<EVALUATORS_FILE>"),
+                "score the stored answers with your own LLM judges and Python checks; nothing "
+                "is generated again, so only those judges' calls are paid (it previews first)",
             )
         )
     if retry:
@@ -1627,6 +2040,10 @@ def headline(summary: Mapping[str, Any]) -> dict[str, Any]:
             **{key: against.get(key, 0) for key in verdicts},
             "skipped": int((targets.get(COMPARE) or {}).get("skipped") or 0),
         }
+    evaluators = summary.get("evaluators")
+    if isinstance(evaluators, Mapping):
+        found["evaluator"] = evaluators.get("headline")
+        found["evaluators"] = _evaluator_rates(targets, evaluators)
     found |= {"cases": summary.get("n_cases"), "trajectories": summary.get("n_trajectories")}
     truncated = {
         name: int(target.get("truncated") or 0)
@@ -1635,6 +2052,34 @@ def headline(summary: Mapping[str, Any]) -> dict[str, Any]:
     }
     if truncated:
         found["truncated"] = truncated
+    return found
+
+
+def _evaluator_rates(targets: Mapping[str, Any], evaluators: Mapping[str, Any]) -> dict[str, Any]:
+    """Each evaluator's and ``all``'s pass rate per target, and tuned minus base (and
+    minus compare) with its CI and the cases paired."""
+    from pup_finetune.evaluation.evaluators import ALL
+
+    found: dict[str, Any] = {}
+    for name in [*(evaluators.get("names") or []), ALL]:
+        entry: dict[str, Any] = {}
+        for target, values in targets.items():
+            rate = ((values.get("evaluators") or {}).get(name) or {}).get("pass") or {}
+            entry[target] = rate.get("rate")
+        base = (evaluators.get("tuned_minus_base") or {}).get(name) or {}
+        entry |= {
+            "delta": base.get("delta"),
+            "ci95": _ci(base.get("ci95")),
+            "n": base.get("n_cases"),
+        }
+        versus = (evaluators.get("tuned_minus_compare") or {}).get(name)
+        if isinstance(versus, Mapping):
+            entry["tuned_minus_compare"] = {
+                "delta": versus.get("delta"),
+                "ci95": _ci(versus.get("ci95")),
+                "n": versus.get("n_cases"),
+            }
+        found[name] = entry
     return found
 
 
@@ -1661,6 +2106,7 @@ def _settings_record(plan: EvalPlan) -> dict[str, Any]:
         "publish": settings.publish,
         "reuse": settings.reuse,
         **({"compare_model": plan.compare.spec} if plan.compare is not None else {}),
+        **({"evaluators": str(plan.evaluators_spec)} if plan.evaluators_spec is not None else {}),
     }
 
 
@@ -1732,6 +2178,7 @@ class RecordedEvaluation:
             self.judge_model,
             pin=True,
             compare_spec=self.settings.compare_model,
+            evaluators=self.settings.evaluators,
         )
         return shlex.join(words)
 
@@ -1784,6 +2231,7 @@ def _recorded(run_dir: Path, entry: object) -> RecordedEvaluation | None:
             publish=bool(settings.get("publish", True)),
             compare_model=str(settings["compare_model"]) if settings.get("compare_model") else None,
             reuse=bool(settings.get("reuse", True)),
+            evaluators=Path(str(settings["evaluators"])) if settings.get("evaluators") else None,
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -2083,19 +2531,23 @@ class StandaloneEvaluation:
         work = plan.work(self.training)
         with ExitStack() as stack:
             client = stack.enter_context(open_judge_client(plan.judge, calls=work.judge_calls))
+            busy = [] if plan.evaluators is None else busy_judges(plan.evaluators, work)
+            scoring = stack.enter_context(open_evaluator_clients(busy))
             compare, target = self._open_compare(stack, work), plan.compare
             check = (
                 None
                 if compare is None or target is None
                 else lambda: probe(compare, target, plan.cases)
             )
-            report = prepare_eval_dir(plan, self.training, client, probe=check)
+            report = prepare_eval_dir(
+                plan, self.training, client, probe=check, evaluator_clients=scoring
+            )
             if report is not None and not report.get("ok"):
                 return calibration_failed(plan, report)
             record_evaluation(plan, {"status": "running"})
             try:
                 with cancel_on_signals(cancel):
-                    result = self._replay(client, compare, cancel, report)
+                    result = self._replay(client, compare, cancel, report, scoring)
                 record_evaluation(plan, result)
                 return result
             except KeyboardInterrupt:
@@ -2124,10 +2576,11 @@ class StandaloneEvaluation:
         compare: Sampler | None,
         cancel: threading.Event,
         report: Mapping[str, Any] | None,
+        scoring: Mapping[str, ChatCompleter],
     ) -> dict[str, Any]:
         """Replay with the samplers of the targets that have cases left to generate: a
         training session only for base and tuned, and ``compare``, already open, for the
-        compare model."""
+        compare model; the user's judges on ``scoring``."""
         from pup_finetune.evaluation.replay import COMPARE
         from pup_finetune.evaluation.targets import run_samplers
 
@@ -2153,7 +2606,9 @@ class StandaloneEvaluation:
                     f"nothing left to generate in {display_path(plan.out_dir)}: judging and "
                     "summarizing only"
                 )
-            outcome = replay(plan, samplers, client, self.training, cancel=cancel)
+            outcome = replay(
+                plan, samplers, client, self.training, cancel=cancel, evaluator_clients=scoring
+            )
         return replay_result(
             plan,
             outcome,

@@ -234,7 +234,8 @@ def test_without_a_push_receipt_the_evaluation_is_not_published(
     # Not published: no next command; the steps push the dataset (with a name only the user
     # can pick) and rerun the evaluation, which reuses every result, or deploy unpublished.
     assert data["next_command"] is None
-    push_step, rerun_step, deploy_step, compare_step = data["next_steps"]
+    push_step, rerun_step, deploy_step, compare_step, evaluators_step = data["next_steps"]
+    assert "--evaluators <EVALUATORS_FILE>" in evaluators_step["command"]
     assert deploy_step["command"] == f"pup finetune deploy {run_dir}"
     assert "--compare-model <MODEL>" in compare_step["command"]
     dataset = Path(str(json.loads((run_dir / "run.json").read_text())["dataset_dir"]))
@@ -254,7 +255,8 @@ def test_without_a_push_receipt_the_evaluation_is_not_published(
     # Complete and published: deploying is next (a free preview).
     assert published["next_command"] == f"pup finetune deploy {run_dir}"
     assert [step["command"] for step in published["next_steps"]] == [
-        f"pup finetune evaluate {run_dir} --judge-model fake-judge --compare-model <MODEL>"
+        f"pup finetune evaluate {run_dir} --judge-model fake-judge --compare-model <MODEL>",
+        f"pup finetune evaluate {run_dir} --judge-model fake-judge --evaluators <EVALUATORS_FILE>",
     ]
 
 
@@ -433,7 +435,7 @@ def test_a_test_row_changed_after_its_push_is_not_published(
     assert result.exit_code == 0, result.stderr
     assert output(result)["publication"]["status"] == "skipped"
     assert experiments_calls(fake) == 0
-    (step, _, _, _) = output(result)["next_steps"]
+    (step, _, _, _, _) = output(result)["next_steps"]
     assert step["command"] == f"pup finetune dataset push {dataset.resolve()} --name <NAME>"
     assert "push.json aside" in step["why"]
 
