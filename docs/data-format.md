@@ -182,6 +182,19 @@ content. Keep it out of version control.
 | `judgments.jsonl`, `triage.json` | For `dataset triage`, every judge vote (`{"row_id", "row_sha256", "judge", "criteria_sha256", "keep", "reason", "at"}`, plus `"too_long": true` when the judge refused the row as longer than its context window, which drops it) and the frozen rubric hash, judges and the settings they are called with. |
 | `push.json` | The receipt `dataset push` writes (see below). |
 
+**Editing a dataset.** Only `dataset import`, `pull`, `fetch`, `label`, `triage` and `push`
+write these files. Each command checks what it reads: every row valid and under an id of its
+own, and every kept row with a split; `dataset show`, `push`, `train`, `benchmark` and
+`evaluate` also refuse two kept rows that hold one conversation (`Error [state]`, with the
+fix). A label of an id that names no row changes nothing, and the summary warns about it. An
+edit to a pushed row makes it `changed` (`pushed_with_changed_rows`), so `train` and
+`benchmark` on a real provider need the dataset fetched first. Never edit `splits.json`: it is
+the only record of each split (groups of copies and fetched records take splits the hash
+would not give). To prepare rows your own way, analyze a copy of `rows.jsonl`, write the rows
+you change, with new ids, to a file and `dataset import` it into a new directory; check that
+`import.excluded` is 0, as a pandas round trip can write `null` tools or source. Never copy a
+directory that has a `push.json`: the copy pushes into the same dataset.
+
 ## The pushed record
 
 `dataset push` adds one record per kept row to an Agent Observability dataset

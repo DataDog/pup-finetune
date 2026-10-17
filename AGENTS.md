@@ -570,12 +570,16 @@ Source lives under `src/pup_finetune/`.
   more holding more than 10% of the rows in a dataset of 50 traces or more
   (`SplitGroups.chained`); `assign_splits`, which never moves a recorded trace;
   `split_conflicts`, every group whose kept rows are in several splits, which the summary
-  counts);
+  counts; `check_isolation`, one conversation in two splits, and the stricter
+  `check_distinct`, one conversation in two rows);
   `dataset_dir.py` is the dataset directory (`settings.json`, `rows.jsonl`, `excluded.jsonl`,
   `splits.json`, `summary.json`, `split_conflicts.jsonl` (drop labels for the kept copies
   outside their group's split, written with the summary while there are any), `raw/`, a
   pull's page cache, and `push.json`, the receipt `dataset push` writes) behind `dataset
-  import`, `dataset pull` and `dataset show`;
+  import`, `dataset pull` and `dataset show`; hand edits fail on read with `state`: `rows`
+  refuses a row id on two lines, `rows_by_split` (what push, train, benchmark and evaluate
+  read) runs `check_distinct` over the kept rows (`add` runs `check_isolation` over every
+  row), and the summary warns about labels naming no accepted or excluded row;
   `labels.py` has the keep/drop `Label` and the `labels.jsonl` format (append-only, last label
   per id wins, a reason required to drop; `DatasetDir.kept_rows` leaves dropped rows out of
   training and split exports).
