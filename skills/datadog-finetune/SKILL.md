@@ -137,14 +137,14 @@ rebalancing (step 4) and the recipe kept (step 6). The filter's flags, for `data
 | `--include-errors` | Also errored LLM calls (`span_error` rows). Off by default; ask first. |
 | `--from 7d`, `--to now` | The window: `7d`, `24h`, `now-7d`, `now`, ISO 8601 or epoch ms. |
 | `--target-count`, `--max-candidates` | Rows to keep (rows dropped in review do not count) and spans read. |
+| `--sample random`, `--max-rows-per-trace 3` | Rows spread over traces (by `--seed`), at most 3 per trace, when a few traces give most rows. |
 
 Build a filter only from values you saw, and test it (a `--query` above all) in step 2.
 
 Check:
 
 - [ ] The ml_app has LLM spans in the window, and every filter value appears in them.
-- [ ] The user named the metric that decides success, and agreed on the quality signal and
-      the time range.
+- [ ] The user named the metric that decides success, and agreed on the quality signal and the time range.
 
 ## Step 2: test the filter, then pull the dataset
 

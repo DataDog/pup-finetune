@@ -150,6 +150,7 @@ cannot see. `dataset show` counts them.
 | `unreadable_span` | dataset | The exported span does not have the fields of an LLM span (such as its trace id), so it could not be converted. |
 | `unreadable_record` | dataset | The dataset record's input is not chat messages, or its expected output is not an assistant message, so it is not a conversation to train on. |
 | `split_conflict` | dataset | The dataset record names another split than a record of the same trace does, and a trace is never in two splits. |
+| `trace_row_cap` | dataset | Its trace already gives --max-rows-per-trace rows, so one trace cannot dominate the dataset. |
 <!-- END GENERATED: exclusion codes -->
 
 `train` can also leave rows out when it renders them for the model. These rows stay in the

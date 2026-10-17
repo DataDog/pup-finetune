@@ -178,6 +178,17 @@ def test_a_pull_warns_when_max_candidates_stops_it_short(api: FakeExportApi) -> 
     assert any("--max-candidates" in warning for warning in data["warnings"])
 
 
+def test_a_pull_with_sample_random_reads_every_span_and_spreads_the_rows(
+    api: FakeExportApi,
+) -> None:
+    data = output_json(fresh("--sample", "random", "--target-count", "3"))
+    assert api.cursors == [None, PAGE_2_CURSOR]
+    assert data["pull"]["stopped"] == "exhausted"
+    rows = [json.loads(line) for line in Path("ds/rows.jsonl").read_text().splitlines()]
+    traces = [row["source"]["trace_id"] for row in rows]
+    assert len(traces) == len(set(traces)) == 3
+
+
 def test_max_candidates_equal_to_every_span_is_not_a_short_read(api: FakeExportApi) -> None:
     data = output_json(fresh("--max-candidates", "10"))
     assert data["pull"]["matched_spans"] == 10
@@ -420,6 +431,8 @@ def test_a_rerun_retires_a_stored_prefix_of_a_conversation_on_a_later_page(
         ("--from", "1766620800000"),
         ("--to", "now-1h"),
         ("--seed", "7"),
+        ("--sample", "random"),
+        ("--max-rows-per-trace", "1"),
     ],
 )
 def test_pulling_with_other_settings_is_rejected(
@@ -630,6 +643,29 @@ def test_a_flagless_pull_into_an_imported_dataset_is_a_settings_conflict(
         "Error [settings_conflict]: ds was built by `dataset import`; pull into a new DIR\n"
     )
     assert api.requests == []
+
+
+def test_a_pull_freezes_the_sample_and_the_cap_and_a_rerun_takes_them(
+    api: FakeExportApi, tmp_path: Path
+) -> None:
+    first = pull(tmp_path / "ds", "--sample", "random", "--max-rows-per-trace", "1")
+    assert first.exit_code == 0, first.stderr
+    # Trace synthetic-trace-0101 has two rows.
+    assert output_json(first)["excluded_by_code"]["trace_row_cap"] == 1
+    source = json.loads((tmp_path / "ds" / "settings.json").read_text())["source"]
+    assert (source["sample"], source["max_rows_per_trace"]) == ("random", 1)
+    rows = (tmp_path / "ds" / "rows.jsonl").read_bytes()
+
+    rerun = invoke("pull", "ds")
+    assert rerun.exit_code == 0, rerun.stderr
+    assert "using its --ml-app, --sample, --max-rows-per-trace" in rerun.stderr
+    assert output_json(rerun)["pull"]["added"] == 0
+    assert (tmp_path / "ds" / "rows.jsonl").read_bytes() == rows
+    other = invoke("pull", "ds", "--max-rows-per-trace", "2")
+    assert other.exit_code == 2
+    assert other.stderr.startswith(
+        "Error [settings_conflict]: ds froze --max-rows-per-trace 1 on its first pull\n"
+    )
 
 
 def test_tags_given_in_another_order_are_the_frozen_ones(

@@ -49,6 +49,7 @@ from pup_finetune.data.pull import (
     DEFAULT_TARGET_COUNT,
     Collection,
     PullOptions,
+    SampleMode,
     frozen_window,
     pull,
     read_limits,
@@ -223,6 +224,24 @@ IncludeErrorsOption = Annotated[
         rich_help_panel=ROWS_PANEL,
     ),
 ]
+SampleOption = Annotated[
+    SampleMode,
+    typer.Option(
+        metavar="MODE",
+        help="first rows read, or random: spread over traces (by --seed).",
+        rich_help_panel=ROWS_PANEL,
+    ),
+]
+MaxRowsPerTraceOption = Annotated[
+    int | None,
+    typer.Option(
+        min=1,
+        metavar="N",
+        help="At most this many rows from any one trace.",
+        show_default=False,
+        rich_help_panel=ROWS_PANEL,
+    ),
+]
 
 _PULL_FLAGS = (
     "Spans are LLM spans of --ml-app in the time range, narrowed by --span-name, --query and "
@@ -231,9 +250,14 @@ _PULL_FLAGS = (
     "contains is dropped, so sub-agents stay their own rows. "
     "Errored LLM calls are excluded as span_error unless --include-errors is passed. Reading "
     "stops once --target-count rows are accepted or --max-candidates spans are read, "
-    "unreadable ones included. A relative time is a number and a unit (s, m, h, d or w, or "
-    "spelled out, such as 5min or 2hours), with or without now- in front (7d is now-7d), or "
-    "now; it is resolved once, when the command starts. A bare number is epoch "
+    "unreadable ones included. --max-rows-per-trace N keeps a trace's first N rows and excludes "
+    "the rest as trace_row_cap. --sample random instead reads every span up to "
+    "--max-candidates, then deals rows round-robin over the traces in an order --seed fixes "
+    "(one row of every trace, then a second one, and so on, the rows a pull already stored "
+    "first; with --max-rows-per-trace, N rounds) and keeps the first --target-count, so one "
+    "long trace cannot fill the dataset. A relative time is a number and a unit (s, m, h, d "
+    "or w, or spelled out, such as 5min or 2hours), with or without now- in front (7d is "
+    "now-7d), or now; it is resolved once, when the command starts. A bare number is epoch "
     "milliseconds, not seconds: one below 10^11 (before March 1973) is refused."
 )
 
@@ -336,9 +360,9 @@ PULL_DOC = CommandDoc(
     short="Pull training rows from Datadog into a dataset directory.",
     description=describe(
         "Pull --ml-app's LLM spans from Datadog into DIR as training rows, with splits. "
-        "The filter, the time range, --reasoning, --include-errors and the splits are frozen "
-        "on the first pull, so a rerun needs no flag: `dataset pull DIR` resumes, and a "
-        "higher --target-count reads further.",
+        "The filter, the time range, the Rows options and the splits are frozen on the first "
+        "pull, so a rerun needs no flag: `dataset pull DIR` resumes, and a higher "
+        "--target-count reads further.",
         "Excluded rows are recorded in excluded.jsonl with their reason. On a rerun, a flag "
         "left out takes the frozen value and a flag with another value fails, so use a new "
         "directory for other settings. Raw pages are cached in DIR/raw/, so a rerun resumes "
@@ -868,6 +892,8 @@ def pull_rows(
     max_candidates: MaxCandidatesOption = DEFAULT_MAX_CANDIDATES,
     reasoning: ReasoningOption = "omit",
     include_errors: IncludeErrorsOption = False,
+    sample: SampleOption = "first",
+    max_rows_per_trace: MaxRowsPerTraceOption = None,
     seed: SeedOption = DEFAULT_SEED,
     validation_fraction: ValidationFractionOption = DEFAULT_VALIDATION_FRACTION,
     test_fraction: TestFractionOption = DEFAULT_TEST_FRACTION,
@@ -886,6 +912,8 @@ def pull_rows(
             "to": to,
             "reasoning": reasoning,
             "include_errors": include_errors,
+            "sample": sample,
+            "max_rows_per_trace": max_rows_per_trace,
             "seed": seed,
             "validation_fraction": validation_fraction,
             "test_fraction": test_fraction,
@@ -910,6 +938,8 @@ def pull_rows(
         max_candidates=max_candidates,
         reasoning=values["reasoning"],
         include_errors=values["include_errors"],
+        sample=values["sample"],
+        max_rows_per_trace=values["max_rows_per_trace"],
     )
     frozen = frozen_window(options, dataset) is not None
     options = resolve_window(options, dataset, clock)
@@ -1078,6 +1108,8 @@ def _frozen_pull_values(dataset: DatasetDir) -> dict[str, Any] | None:
         "to": expr("to_expr", "to", DEFAULT_TO),
         "reasoning": source.get("reasoning", "omit"),
         "include_errors": bool(source.get("include_errors", False)),
+        "sample": source.get("sample", "first"),
+        "max_rows_per_trace": source.get("max_rows_per_trace"),
         "seed": split.seed,
         "validation_fraction": split.validation_fraction,
         "test_fraction": split.test_fraction,
@@ -1223,6 +1255,8 @@ def _pull_options(
     max_candidates: int,
     reasoning: ReasoningMode,
     include_errors: bool,
+    sample: SampleMode,
+    max_rows_per_trace: int | None,
 ) -> PullOptions:
     if not ml_app.strip():
         raise UsageError("--ml-app must not be empty")
@@ -1240,6 +1274,8 @@ def _pull_options(
         include_errors=include_errors,
         target_count=target_count,
         max_candidates=max_candidates,
+        max_rows_per_trace=max_rows_per_trace,
+        sample=sample,
     )
 
 
