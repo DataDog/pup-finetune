@@ -18,10 +18,12 @@ metrics (``pup api v2/llm-obs/v1/experiments/<id>/events``):
   row's cases) and ``completed_actions`` (the cases judged);
 - one child span per case, ``replay_assistant``, in the root's trace, with the prefix and
   tools in, the generated message out and the recorded message expected; its metrics are a
-  boolean per deterministic metric that applies and ``judge_pass``, with the judge's reason.
-  A case that ended in an error is an ``error`` span with its message and no metric, as it
-  counts in no rate of the local summary. A case a target did not replay (the compare model
-  skips those its API refuses) has no span in its experiment, nor a row with only such cases.
+  boolean per deterministic metric that applies and ``judge_pass``, with the judge's reason,
+  and one boolean per evaluator of ``evaluate --evaluators`` that scored it, with its reason
+  (the composite ``all`` is not published). A case that ended in an error is an ``error``
+  span with its message and no metric, as it counts in no rate of the local summary. A case
+  a target did not replay (the compare model skips those its API refuses) has no span in its
+  experiment, nor a row with only such cases.
 
 Metrics are stamped with the time they are submitted, since the API refuses timestamps more
 than a day old. At most :data:`SPANS_PER_REQUEST` spans go in one request, with their
@@ -47,8 +49,9 @@ evaluation directory keeps, both ``0600``:
   looks for that experiment and adopts it, or creates it with the same nonce. The nonce
   keeps another evaluation directory of the same evaluation from adopting it;
 - ``published.json`` - the spans submitted to each experiment (span id to a digest of what was
-  sent), saved after every request, so a rerun sends only the spans not sent yet. A span sent
-  with an earlier result (an error since retried) is not sent again; it is reported instead.
+  sent, and after a ``+`` the evaluators sent with it), saved after every request, so a rerun
+  sends only the spans not sent yet. A span sent with an earlier result (an error since
+  retried), or before an evaluator scored it, is not sent again; it is reported instead.
 
 A span is recorded only once its request was answered with a 2xx. An events request whose
 response is lost (a timeout after the API stored it) is therefore not recorded, and a rerun
@@ -82,8 +85,10 @@ from urllib.parse import quote
 from pup_finetune.data.push import SOURCE_TAG, PushState
 from pup_finetune.datadog.jsonapi import JSON_API, object_id, private_json_file
 from pup_finetune.datadog.pup import DEFAULT_TIMEOUT_SECONDS, Pup
+from pup_finetune.display import joined
 from pup_finetune.errors import ExternalError, StateError, require_writable
 from pup_finetune.evaluation.cases import ReplayCase
+from pup_finetune.evaluation.evaluators import unscored
 from pup_finetune.evaluation.replay import COMPARE, METRICS_VERSION, TARGETS, PairKey, Replays
 from pup_finetune.inference import JudgeConfig
 from pup_finetune.redaction import redact
@@ -331,6 +336,9 @@ class PublishSettings:
     records: Mapping[str, Mapping[str, Any]]
     compare: JudgeConfig | None = None
     replays: Replays = field(default_factory=dict)
+    evaluators: tuple[str, ...] = ()
+    """The user's evaluators: each is one boolean metric per case span."""
+    headline: str | None = None
 
     @property
     def targets(self) -> tuple[str, ...]:
@@ -386,6 +394,8 @@ class PublishSettings:
                 "max_tokens": self.max_tokens,
                 "metrics_version": METRICS_VERSION,
             }
+        if self.evaluators:
+            config |= {"evaluators": list(self.evaluators), "headline": self.headline}
         attributes: dict[str, Any] = {
             "name": experiment_name(target, self.run_id),
             "description": (
@@ -415,12 +425,23 @@ class SpanGroup:
     spans: list[dict[str, Any]]
     metrics: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     """Metrics by the span id they belong to."""
+    evaluator_metrics: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    """The user's evaluators' metrics by span id, apart so :meth:`digest` stays the same."""
 
     def digest(self, span: Mapping[str, Any]) -> str:
         """A sha256 over ``span`` and its metrics: what was sent for it, minus timestamps."""
         payload = canonical_json({"span": span, "metrics": self.metrics.get(span["span_id"], [])})
         # A generated tool call can hold a lone surrogate, which strict UTF-8 cannot encode.
         return hashlib.sha256(payload.encode("utf-8", "surrogatepass")).hexdigest()
+
+    def labels(self, span: Mapping[str, Any]) -> set[str]:
+        return {str(metric["label"]) for metric in self.evaluator_metrics.get(span["span_id"], [])}
+
+    def record(self, span: Mapping[str, Any]) -> str:
+        """What ``published.json`` keeps for ``span``: its :meth:`digest`, then ``+`` and the
+        evaluators sent with it, if any."""
+        labels = self.labels(span)
+        return self.digest(span) + (f"+{','.join(sorted(labels))}" if labels else "")
 
 
 def _ids(eval_key: str, name: str) -> tuple[str, str]:
@@ -492,8 +513,9 @@ def _child(
     result: Mapping[str, Any],
     tags: list[str],
     fallback_ns: int,
-) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
-    """The span of ``case``, its metrics and its step in the root's output."""
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
+    """The span of ``case``, its metrics, its step in the root's output and its evaluators'
+    metrics."""
     span_id, _ = _ids(settings.eval_key, f"case:{target}:{case.id}")
     start_ns, duration = _timing(generation, result, fallback_ns)
     ok = result.get("status") == "ok"
@@ -554,7 +576,18 @@ def _child(
             if reason:
                 judge_metric["reasoning"] = reason
             metrics.append(judge_metric)
-    return span, metrics, step
+    found = result.get("evaluators")
+    entries = found if isinstance(found, Mapping) else {}
+    scores: list[dict[str, Any]] = []
+    for name in settings.evaluators if ok else ():
+        entry = entries.get(name)
+        if not isinstance(entry, Mapping) or entry.get("status") != "ok":
+            continue
+        score = _metric(span, name, "boolean", bool(entry.get("passed")), settings.tags(target))
+        if entry.get("reason"):
+            score["reasoning"] = str(entry["reason"])
+        scores.append(score)
+    return span, metrics, step, scores
 
 
 def _row_group(
@@ -579,10 +612,11 @@ def _row_group(
     root: dict[str, Any] = {"span_id": span_id, "trace_id": trace_id}
     children: list[dict[str, Any]] = []
     metrics: dict[str, list[dict[str, Any]]] = {}
+    scores: dict[str, list[dict[str, Any]]] = {}
     steps: list[dict[str, Any]] = []
     for case in cases:
         key = (target, case.id)
-        child, child_metrics, step = _child(
+        child, child_metrics, step, child_scores = _child(
             settings,
             target,
             case,
@@ -594,6 +628,8 @@ def _row_group(
         )
         children.append(child)
         metrics[child["span_id"]] = child_metrics
+        if child_scores:
+            scores[child["span_id"]] = child_scores
         steps.append(step)
     judged = [step for step in steps if step["status"] == "ok"]
     start_ns = min(child["start_ns"] for child in children)
@@ -633,7 +669,9 @@ def _row_group(
             "type": "ReplayError",
         }
     metrics[span_id] = root_metrics
-    return SpanGroup(spans=[root, *children], metrics=finite_json(metrics))
+    return SpanGroup(
+        spans=[root, *children], metrics=finite_json(metrics), evaluator_metrics=finite_json(scores)
+    )
 
 
 def build_span_groups(
@@ -852,9 +890,7 @@ class ExperimentsPublisher:
                 ready = [
                     case
                     for row in by_row.values()
-                    if all(
-                        (results.get((target, case.id)) or {}).get("status") == "ok" for case in row
-                    )
+                    if all(self._final(results.get((target, case.id))) for case in row)
                     for case in row
                 ]
                 if ready:
@@ -862,6 +898,15 @@ class ExperimentsPublisher:
                     self._submit(target, experiment, ready, generations, results, [])
         except (ExternalError, _PublishCancelled):
             self._live_failed = True
+
+    def _final(self, result: Mapping[str, Any] | None) -> bool:
+        """Whether a case's result is ``ok`` and scored by every evaluator: what it is sent
+        with for good."""
+        return (
+            result is not None
+            and result.get("status") == "ok"
+            and not unscored(result.get("evaluators"), self.settings.evaluators)
+        )
 
     # --- experiments ----------------------------------------------------------------------
 
@@ -987,6 +1032,8 @@ class ExperimentsPublisher:
         todo: list[SpanGroup] = []
         stale = 0
         total = 0
+        late: set[str] = set()
+        unscored_spans = 0
         for group in groups:
             keep = []
             for span in group.spans:
@@ -994,10 +1041,25 @@ class ExperimentsPublisher:
                 previous = sent.get(span["span_id"])
                 if previous is None:
                     keep.append(span)
-                elif previous != group.digest(span):
+                    continue
+                digest, _, labels = previous.partition("+")
+                if digest != group.digest(span):
                     stale += 1
+                elif missing := group.labels(span) - set(filter(None, labels.split(","))):
+                    late |= missing
+                    unscored_spans += 1
             if keep:
-                todo.append(SpanGroup(spans=keep, metrics=group.metrics))
+                todo.append(
+                    SpanGroup(
+                        spans=keep, metrics=group.metrics, evaluator_metrics=group.evaluator_metrics
+                    )
+                )
+        if late:
+            warnings.append(
+                f"{unscored_spans} span(s) of the {target} experiment were published before "
+                f"{joined(sorted(late))} scored them, so the experiment does not show those "
+                "scores; evaluate into a new --out-dir to publish them"
+            )
         if stale:
             warnings.append(
                 f"{stale} span(s) of the {target} experiment were published with an earlier "
@@ -1014,11 +1076,12 @@ class ExperimentsPublisher:
             metrics = [
                 {**metric, "timestamp_ms": now_ms, "experiment_id": experiment.id}
                 for group, index in batch
-                for metric in group.metrics.get(group.spans[index]["span_id"], [])
+                for found in (group.metrics, group.evaluator_metrics)
+                for metric in found.get(group.spans[index]["span_id"], [])
             ]
             self.api.submit_events(experiment.id, spans=spans, metrics=metrics, tags=tags)
             for group, index in batch:
-                sent[group.spans[index]["span_id"]] = group.digest(group.spans[index])
+                sent[group.spans[index]["span_id"]] = group.record(group.spans[index])
             atomic_write_json(self.published_path, published)
             submitted += len(spans)
             self.progress(

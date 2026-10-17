@@ -649,6 +649,8 @@ class EvalPlan:
             records=publishing.records,
             compare=None if self.compare is None else self.compare.config,
             replays=self.replays,
+            evaluators=tuple(self.evaluator_names),
+            headline=None if self.evaluators is None else self.evaluators.headline,
         )
         return ExperimentsPublisher(
             Pup(),

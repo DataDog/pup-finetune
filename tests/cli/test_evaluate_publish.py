@@ -487,6 +487,26 @@ def test_retried_errors_update_only_the_local_results_of_a_published_evaluation(
     assert "published with an earlier result" in warning
 
 
+def test_an_evaluator_added_after_publishing_says_the_experiments_lack_it(
+    fake: FakePup, experiments: FakeExperimentsApi, dataset: Path, run_dir: Path, tmp_path: Path
+) -> None:
+    push(dataset)
+    assert invoke("evaluate", str(run_dir), "--confirm").exit_code == 0
+    spec = tmp_path / "evals.toml"
+    (tmp_path / "checks.py").write_text("def short(case, candidate):\n    return True\n")
+    spec.write_text('[[evaluator]]\nname = "short"\ntype = "check"\nfile = "checks.py"\n')
+    result = invoke("evaluate", str(run_dir), "--evaluators", str(spec), "--confirm")
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["publication"]["status"] == "published"
+    assert all(entry["submitted"] == 0 for entry in data["publication"]["experiments"].values())
+    lacking = [w for w in data["warnings"] if "before short scored them" in w]
+    assert len(lacking) == 2
+    assert "evaluate into a new --out-dir to publish them" in lacking[0]
+    labels = {m["label"] for e in experiments.experiments.values() for m in e.metrics}
+    assert "short" not in labels
+
+
 def test_a_cancel_while_publishing_is_continued_by_the_rerun(
     fake: FakePup, experiments: FakeExperimentsApi, dataset: Path, run_dir: Path
 ) -> None:
