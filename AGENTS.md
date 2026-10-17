@@ -401,7 +401,7 @@ Source lives under `src/pup_finetune/`.
   never in Typer's box);
   `default_note` writes a default the option itself cannot hold. `tests/cli/test_help_layout.py`
   holds every `--help` to 80 columns with nothing cut off and at most 60 lines (`train`, with
-  35 options in six panels, 65), and parses every example against the app.
+  37 options in six panels, 65), and parses every example against the app.
 - `skill.py` - the bundled agent skill: `bundled_skills_dir` (the package's `_skills/`, else
   the repository's `skills/`), `npx_argv`, `npx_env` (the environment without
   `datadog/pup.py`'s `SECRET_ENV` and every registered provider key variable) and
@@ -643,7 +643,9 @@ Source lives under `src/pup_finetune/`.
   optimizer steps into microbatches; `budget.py` caps trained tokens and wall-clock spend;
   `loop.py` has `run_training` (pipelined steps, validation loss, early stopping, best epoch,
   epoch-end and time-based checkpoints, cancellation, deterministic resume at an epoch and
-  step, and the `finalize` hook, whose failure raises `FinalizeFailed` carrying the result);
+  step, and the `finalize` hook, whose failure raises `FinalizeFailed` carrying the result;
+  it sends each step its scheduled learning rate, `TrainSpec.learning_rate_at` over
+  `max_steps`, so a resume sends the same rates);
   `records.py` has its records (`EpochMetrics`, `TrainResult`, `ResumePoint`, `Resume`);
   `promotion.py` has `Promotion`, the `finalize` hook that promotes the best checkpoint
   before the session ends (re-creating its sampler checkpoint when that session expired) or
