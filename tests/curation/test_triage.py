@@ -28,6 +28,7 @@ from pup_finetune.curation.triage import (
     TOO_LONG_REASON,
     Criteria,
     Vote,
+    apply_check_labels,
     build_messages,
     decide,
     has_template_task,
@@ -39,16 +40,19 @@ from pup_finetune.curation.triage import (
     rubric_sections,
     rubric_template,
     run_triage,
+    triage_status,
 )
 from pup_finetune.data.dataset_dir import DatasetDir, DatasetSettings
 from pup_finetune.data.exclusions import Exclusion, ExclusionCode
 from pup_finetune.data.labels import LabelSource
 from pup_finetune.data.schema import TrainingRow, validate_row
 from pup_finetune.data.split import SplitParams
+from pup_finetune.display import display_path
 from pup_finetune.errors import ExternalError, StateError, UsageError
 from pup_finetune.inference import ChatCompletion, ContextLimitError
 from pup_finetune.judge_models import FIREWORKS_JUDGES
 from pup_finetune.providers.base import ProviderAuthError
+from pup_finetune.user_checks import CheckModule, load_checks
 from tests.fakes.chat_api import block
 
 pytestmark = pytest.mark.usefixtures("judge_keys")
@@ -1217,3 +1221,187 @@ def test_a_failed_call_on_a_row_found_too_long_needs_no_retry(tmp_path: Path) ->
     assert replan.pending == []
     # The call J2 never got to make is not a reused vote.
     assert (replan.votes_reused, replan.preview()["votes_reused"]) == (1, 1)
+
+
+# --- checks --------------------------------------------------------------------------------
+
+CHECKS = """\
+def first(row):
+    if row["id"] == "row-1":
+        return False, "too short"
+    return True
+
+
+def second(row):
+    return row["id"] not in ("row-1", "row-2")
+
+
+def _helper(row):
+    return False
+"""
+
+
+def checks_file(tmp_path: Path, text: str = CHECKS, name: str = "checks.py") -> CheckModule:
+    path = tmp_path / name
+    path.write_text(text)
+    return load_checks(path)
+
+
+def test_checks_label_failing_rows_before_the_council_and_skip_their_calls(
+    tmp_path: Path,
+) -> None:
+    dataset = make_dataset(tmp_path)
+    module = checks_file(tmp_path)
+    plan = plan_triage(dataset, RUBRIC, (J1, J2), checks=module)
+    assert sorted(row.id for row in plan.rows) == ["row-0", "row-3"]
+    assert {row_id: (f.check, f.failed_by) for row_id, f in plan.checked.items()} == {
+        "row-1": ("first", ("first", "second")),
+        "row-2": ("second", ("second",)),
+    }
+    preview = plan.preview()
+    assert preview["judge_calls"] == 4
+    assert preview["checks"] == {
+        "file": display_path(tmp_path / "checks.py"),
+        "sha256": module.sha256[:12],
+        "functions": ["first", "second"],
+        "rows_checked": 4,
+        "failed": 2,
+        "failed_by_check": {"first": 1, "second": 2},
+    }
+    assert "your privileges" in preview["notes"][0]
+    assert not (dataset.path / "labels.jsonl").exists()  # the preview labels nothing
+    council = FakeCouncil(keep_all)
+    report = run_triage(plan, council)
+    assert sorted(row_id for _, row_id in council.calls) == ["row-0", "row-0", "row-3", "row-3"]
+    assert report.check_labels is not None and report.check_labels.applied == 2
+    labels = dataset.labels()
+    assert {row_id: (label.by, label.keep, label.reason) for row_id, label in labels.items()} == {
+        "row-0": ("judge", True, "fine"),
+        "row-1": ("check", False, "check first: too short"),
+        "row-2": ("check", False, "check second: failed"),
+        "row-3": ("judge", True, "fine"),
+    }
+    assert report.complete
+    assert triage_status(dataset) == ("complete", None)
+
+
+def test_check_labels_are_kept_when_the_council_stops(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path)
+
+    def rejected(judge: str, row_id: str) -> Exception:
+        return ProviderAuthError("the API key is not valid", source="fireworks")
+
+    plan = plan_triage(dataset, RUBRIC, (J1,), checks=checks_file(tmp_path))
+    with pytest.raises(ProviderAuthError):
+        run_triage(plan, FakeCouncil(rejected), concurrency=1)
+    assert {row_id: label.by for row_id, label in dataset.labels().items()} == {
+        "row-1": "check",
+        "row-2": "check",
+    }
+
+
+def test_checks_alone_label_at_once_with_no_judge(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path)
+    plan = plan_triage(dataset, None, (), checks=checks_file(tmp_path))
+    assert (plan.calls, plan.pending_judges) == (0, [])
+    report = apply_check_labels(plan)
+    assert report.check_labels is not None
+    assert (report.check_labels.applied, report.check_labels.unchanged) == (2, 0)
+    assert {label.by for label in dataset.labels().values()} == {"check"}
+    assert not (dataset.path / JUDGMENTS_FILE).exists()
+    assert not (dataset.path / SETTINGS_FILE).exists()
+    again = apply_check_labels(plan_triage(dataset, None, (), checks=checks_file(tmp_path)))
+    assert again.check_labels is not None and again.check_labels.applied == 0
+
+
+def test_rows_a_check_labeled_are_skipped_without_checks(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path)
+    apply_check_labels(plan_triage(dataset, None, (), checks=checks_file(tmp_path)))
+    plan = plan_triage(dataset, RUBRIC, (J1,))
+    assert sorted(row.id for row in plan.rows) == ["row-0", "row-3"]
+    assert (plan.skipped_checked, plan.skipped_labeled) == (2, 0)
+    assert plan.preview()["rows"] == {"to_review": 2, "skipped_labeled": 0, "skipped_checked": 2}
+
+
+def test_a_row_an_edited_check_now_passes_goes_to_the_council(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path)
+    apply_check_labels(plan_triage(dataset, None, (), checks=checks_file(tmp_path)))
+    edited = checks_file(tmp_path, CHECKS.replace('("row-1", "row-2")', '("row-1",)'))
+    alone = plan_triage(dataset, None, (), checks=edited)
+    assert alone.stale_check_labels == ["row-2"]
+    council = FakeCouncil(keep_all)
+    run_triage(plan_triage(dataset, RUBRIC, (J1,), checks=edited), council)
+    assert (J1, "row-2") in council.calls
+    assert dataset.labels()["row-2"].by == "judge"
+    assert dataset.labels()["row-1"].by == "check"
+
+
+def test_a_judge_label_a_check_now_fails_is_replaced_and_not_stale(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path)
+    run_triage(plan_triage(dataset, RUBRIC, (J1,)), FakeCouncil(keep_all))
+    plan = plan_triage(dataset, RUBRIC, (J1,), checks=checks_file(tmp_path))
+    assert "stale_judge_labels" not in plan.preview()
+    report = run_triage(plan, FakeCouncil(keep_all))
+    assert report.stale_labels == ()
+    assert dataset.labels()["row-1"].by == "check"
+
+
+def test_a_manual_label_written_after_planning_wins_over_a_check(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path)
+    plan = plan_triage(dataset, RUBRIC, (J1,), checks=checks_file(tmp_path))
+    apply_labels(dataset, [Label(id="row-1", keep=True, by="manual", at=AT)])
+    report = run_triage(plan, FakeCouncil(keep_all))
+    assert report.skipped_labeled == 1
+    assert (dataset.labels()["row-1"].by, dataset.labels()["row-2"].by) == ("manual", "check")
+
+
+def test_max_rows_and_rows_apply_before_the_checks(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path, n=10)
+    module = checks_file(tmp_path)
+    sample = plan_triage(dataset, None, (), max_rows=3, checks=module)
+    unchecked = plan_triage(dataset, RUBRIC, (J1,), max_rows=3)
+    assert sample.rows_checked == 3
+    assert {row.id for row in sample.rows} | set(sample.checked) == {
+        row.id for row in unchecked.rows
+    }
+    only = plan_triage(dataset, None, (), only=frozenset({"row-0", "row-1"}), checks=module)
+    assert (only.rows_checked, list(only.checked)) == (2, ["row-1"])
+
+
+def test_agreement_reports_the_checks_apart_from_the_council(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path)
+    label_rows(dataset, {"row-0": True, "row-1": False, "row-2": True, "row-3": True})
+    labels_before = (dataset.path / "labels.jsonl").read_text()
+    plan = plan_triage(dataset, RUBRIC, (J1,), agreement=True, checks=checks_file(tmp_path))
+    assert sorted(row.id for row in plan.rows) == ["row-0", "row-3"]
+    assert plan.check_agreement() == {
+        "first": {"failed": 1, "agree": 1},
+        "second": {"failed": 2, "agree": 1},
+    }
+    report = run_triage(plan, FakeCouncil(keep_all))
+    assert report.agreement is not None
+    assert (report.agreement.compared, report.agreement.kappa) == (2, None)
+    assert (dataset.path / "labels.jsonl").read_text() == labels_before
+
+
+def test_a_check_that_raises_names_the_row_and_writes_nothing(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path)
+    broken = checks_file(tmp_path, "def broken(row):\n    return row['missing']\n")
+    with pytest.raises(UsageError, match="the check broken failed on the row row-") as caught:
+        plan_triage(dataset, RUBRIC, (J1,), checks=broken)
+    assert "KeyError" in str(caught.value)
+    assert not (dataset.path / "labels.jsonl").exists()
+
+
+@pytest.mark.parametrize(
+    ("text", "problem"),
+    [
+        ("def _private(row):\n    return True\n", "no public function"),
+        ("def two(a, b):\n    return True\n", "must take 1 argument"),
+    ],
+)
+def test_a_check_file_needs_public_functions_of_one_row(
+    tmp_path: Path, text: str, problem: str
+) -> None:
+    with pytest.raises(UsageError, match=problem):
+        plan_triage(make_dataset(tmp_path), None, (), checks=checks_file(tmp_path, text))
