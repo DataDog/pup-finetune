@@ -1085,6 +1085,36 @@ def test_a_random_sample_deals_a_trace_s_next_row_only_up_to_the_cap() -> None:
     assert "past the --max-rows-per-trace 2 rows kept of trace 'busy'" in capped[0].detail
 
 
+@pytest.mark.parametrize(
+    ("sample", "expected"),
+    [
+        (
+            "first",
+            ["row:busy:span-x", "row:quiet:span-copy", "excluded:trace_row_cap:busy:span-shared"],
+        ),
+        # Seed 42 deals quiet first and ranks busy's shared row first.
+        (
+            "random",
+            [
+                "row:quiet:span-copy",
+                "row:busy:span-x",
+                "excluded:duplicate_conversation:busy:span-shared",
+            ],
+        ),
+    ],
+)
+def test_a_row_past_the_cap_does_not_make_its_copy_in_another_trace_a_duplicate(
+    sample: str, expected: list[str]
+) -> None:
+    busy = [
+        item("span-x", [SYSTEM, Q1, A1], trace_id="busy"),
+        item("span-shared", [SYSTEM, Q2, A2], trace_id="busy"),
+    ]
+    copy = item("span-copy", [SYSTEM, Q2, A2], trace_id="quiet")
+    collection, _ = collected([page([*busy, copy])], max_rows_per_trace=1, sample=sample)
+    assert outcome(collection) == expected
+
+
 def test_rows_dropped_from_a_random_sample_are_replaced_by_the_next_ones_dealt() -> None:
     dealt = [row.id for row in sampled(target_count=10).rows]
     collection = sampled(target_count=2, dropped=frozenset(dealt[:1]))

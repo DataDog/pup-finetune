@@ -160,7 +160,8 @@ with the same expressions reads the frozen window, so a resumed pull reads the s
 a re-run, every source flag left out (`--ml-app`, the filter, the time range, `--reasoning`,
 `--include-errors`, `--sample`, `--max-rows-per-trace` and the split flags) takes the frozen
 value, and one given with another value is a `settings_conflict` naming the frozen one;
-`--ml-app` is required only for the first pull. The result's `window` holds the bounds read and whether they are the frozen ones.
+`--ml-app` is required only for the first pull. The result's `window` holds the bounds read
+and whether they are the frozen ones.
 
 Every dataset command's result holds a `pipeline` block (`curation/pipeline.py`): `rows`
 (`accepted`, `kept`, `dropped`, `unlabeled`), `triage` (`none`, `incomplete`, `complete`; see

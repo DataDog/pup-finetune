@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import shlex
 import time
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -65,6 +66,7 @@ from pup_finetune.data.push import (
     push_path,
     read_push_state,
 )
+from pup_finetune.data.schema import TrainingRow
 from pup_finetune.data.split import (
     DEFAULT_SEED,
     DEFAULT_TEST_FRACTION,
@@ -89,6 +91,10 @@ from pup_finetune.workspace import ParentSetup, ignore_new_parent
 SAMPLE_IDS_PER_SPLIT = 5
 EXPLAINED_CODES = 5
 """How many of the most frequent exclusion codes get an explanation in the output."""
+SPREAD_MIN_ROWS = 20
+"""Below this many accepted rows, one trace giving most of them is not warned about."""
+SPREAD_MAX_SHARE = 0.25
+"""The share of the accepted rows one trace may give before a warning."""
 
 DEFAULT_FROM = "7d"
 DEFAULT_TO = "now"
@@ -992,6 +998,7 @@ def pull_rows(
             "matched_spans": collection.spans,
             "traces": collection.traces,
             "accepted": len(collection.rows),
+            **_spread(collection.rows),
             "added": added.added,
             "unchanged": added.unchanged,
             "excluded": added.excluded,
@@ -1387,11 +1394,30 @@ def _collection_warnings(collection: Collection, options: PullOptions) -> list[s
             "spans of the time range (oldest first), not all of it; raise --max-candidates or "
             "narrow --from and --to to sample the whole range"
         )
+    busiest, accepted = _spread(collection.rows)["busiest_trace_rows"], len(collection.rows)
+    if (
+        options.max_rows_per_trace is None
+        and accepted >= SPREAD_MIN_ROWS
+        and busiest > accepted * SPREAD_MAX_SHARE
+    ):
+        warnings.append(
+            f"one trace gives {busiest} of the {accepted} accepted rows; --sample random "
+            "--max-rows-per-trace N spreads the rows over more traces"
+        )
     if unreadable:
         warnings.append(
             f"{unreadable} spans could not be read and were skipped (excluded as unreadable_span)"
         )
     return warnings
+
+
+def _spread(rows: Sequence[TrainingRow]) -> dict[str, int]:
+    """How many traces the accepted ``rows`` come from, and the most rows one trace gives."""
+    by_trace = Counter(row.source.trace_id for row in rows)
+    return {
+        "accepted_traces": len(by_trace),
+        "busiest_trace_rows": max(by_trace.values(), default=0),
+    }
 
 
 def register(app: typer.Typer) -> None:

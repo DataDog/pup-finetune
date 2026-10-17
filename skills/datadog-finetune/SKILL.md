@@ -144,7 +144,8 @@ Build a filter only from values you saw, and test it (a `--query` above all) in 
 Check:
 
 - [ ] The ml_app has LLM spans in the window, and every filter value appears in them.
-- [ ] The user named the metric that decides success, and agreed on the quality signal and the time range.
+- [ ] The user named the metric that decides success, and agreed on the quality signal and
+      the time range.
 
 ## Step 2: test the filter, then pull the dataset
 
@@ -156,16 +157,15 @@ pup finetune dataset show datasets/my-agent
 ```
 
 The search writes nothing: agree with the user that its spans (read a few with `get-content`)
-are the ones to train on, then pull the same filter into `datasets/<ml_app>` (git-ignored).
-The pull freezes the filter, splits and window, so `pup finetune dataset pull datasets/my-agent`
+are the ones to train on, then pull them into `datasets/<ml_app>` (git-ignored), freezing the
+filter, splits, window, `--sample` and `--max-rows-per-trace`: `pup finetune dataset pull datasets/my-agent`
 resumes it with the last limits; after a review drops rows, it reads on to replace them.
 
 Check:
 
 - [ ] The accepted rows and exclusion reasons look right to the user.
 - [ ] Every split is non-empty. Fix a skewed split by pulling more rows, never with the seed.
-- [ ] Trace content stays out of git: keep the dataset, label files and any rubric quoting
-      rows under `datasets/` (ignored).
+- [ ] Trace content stays out of git: keep the dataset, label files and rubrics in `datasets/`.
 
 ## Step 3: review the rows
 

@@ -198,6 +198,30 @@ def test_a_random_pull_cut_short_by_max_candidates_warns_it_samples_the_oldest_s
     assert "--max-candidates 3" in warning
 
 
+def test_a_pull_reports_how_the_accepted_rows_spread_over_traces(use_pup: UsePup) -> None:
+    busy = [conversation(f"span-busy-{n}", "busy", f"Q{n}?", f"A{n}.") for n in range(20)]
+    quiet = [conversation(f"span-quiet-{n}", f"quiet-{n}", "Q?", f"A{n}.") for n in range(10)]
+    pages = [page([*busy, *quiet])]
+
+    def spread_warnings(data: dict[str, Any]) -> list[str]:
+        return [warning for warning in data["warnings"] if "one trace gives" in warning]
+
+    serve(use_pup, pages)
+    data = output_json(pull(Path("a")))
+    assert (data["accepted"], data["pull"]["accepted_traces"]) == (30, 11)
+    assert data["pull"]["busiest_trace_rows"] == 20
+    (warning,) = spread_warnings(data)
+    assert "20 of the 30 accepted rows" in warning
+    assert "--sample random --max-rows-per-trace N" in warning
+    # Not once --max-rows-per-trace is set, nor for a few rows.
+    serve(use_pup, pages)
+    capped = output_json(pull(Path("b"), "--max-rows-per-trace", "10"))
+    assert (capped["accepted"], capped["pull"]["busiest_trace_rows"]) == (20, 10)
+    assert spread_warnings(capped) == []
+    serve(use_pup, pages)
+    assert spread_warnings(output_json(pull(Path("c"), "--target-count", "19"))) == []
+
+
 def test_max_candidates_equal_to_every_span_is_not_a_short_read(api: FakeExportApi) -> None:
     data = output_json(fresh("--max-candidates", "10"))
     assert data["pull"]["matched_spans"] == 10

@@ -332,71 +332,70 @@ def _convert(
     seed: int = DEFAULT_SEED,
     held: AbstractSet[str] = frozenset(),
 ) -> _Converted:
-    """The rows and exclusions of ``spans``: a repeated conversation is a duplicate, and the
-    rows are in :func:`_ordered`'s order, those past the per-trace cap excluded."""
+    """The rows and exclusions of ``spans``, in :func:`_ordered`'s order: a row past the
+    per-trace cap is excluded, then one repeating the conversation of a row kept before it."""
     conversion = rows_from_spans(spans, reasoning=options.reasoning)
     result = _Converted()
-    by_hash: dict[str, str] = {}
+    rows: list[TrainingRow] = []
     for converted in conversion:
-        row = converted.row
-        if row is None:
-            if converted.exclusion is not None:
-                result.exclusions.append(converted.exclusion)
+        if converted.row is not None:
+            rows.append(converted.row)
+        elif converted.exclusion is not None:
+            result.exclusions.append(converted.exclusion)
+    cap = options.max_rows_per_trace
+    taken: Counter[str | None] = Counter()
+    by_hash: dict[str, str] = {}
+    for row in _ordered(rows, options, seed, held):
+        trace = row.source.trace_id
+        if cap is not None and taken[trace] >= cap:
+            # Not hashed, so a copy of its conversation in a trace with room is kept.
+            detail = f"past the first --max-rows-per-trace {cap} rows of trace {trace!r}"
+            if options.sample == "random":
+                detail = f"past the --max-rows-per-trace {cap} rows kept of trace {trace!r}"
+            result.exclusions.append(Exclusion.for_row(row, ExclusionCode.TRACE_ROW_CAP, detail))
             continue
-        digest = row_content_hash(row)
-        other = by_hash.setdefault(digest, row.id)
+        other = by_hash.setdefault(row_content_hash(row), row.id)
         if other != row.id:
             detail = f"same conversation as row {other!r}"
             exclusion = Exclusion.for_row(row, ExclusionCode.DUPLICATE_CONVERSATION, detail)
             result.exclusions.append(exclusion)
             result.duplicates.append((row, other))
             continue
+        taken[trace] += 1
         result.rows.append(row)
-    result.rows, capped = _ordered(result.rows, options, seed, held)
-    for row in capped:
-        cap, trace = options.max_rows_per_trace, row.source.trace_id
-        detail = f"past the first --max-rows-per-trace {cap} rows of trace {trace!r}"
-        if options.sample == "random":
-            detail = f"past the --max-rows-per-trace {cap} rows kept of trace {trace!r}"
-        result.exclusions.append(Exclusion.for_row(row, ExclusionCode.TRACE_ROW_CAP, detail))
     result.stats = conversion.stats
     return result
 
 
 def _ordered(
     rows: Sequence[TrainingRow], options: PullOptions, seed: int, held: AbstractSet[str]
-) -> tuple[list[TrainingRow], list[TrainingRow]]:
-    """``rows`` in the order they count toward ``target_count``, and those past the cap.
+) -> list[TrainingRow]:
+    """``rows`` in the order they count toward ``target_count``.
 
-    With ``sample="first"`` the order is conversion's (time order) and a trace keeps its first
-    ``max_rows_per_trace`` rows. With ``sample="random"`` rows are dealt in rounds: each trace
-    ranks its rows (``held`` ones first, then by ``sha256(f"sample:{seed}:{row id}")``), round
-    ``k`` holds the ``k``-th row of every trace that has one, in the order of
-    ``sha256(f"sample:{seed}:{trace id}")``, held rows lead, and a trace keeps its first
-    ``max_rows_per_trace`` rounds. No rank depends on how far a pull read, so a rerun keeps
-    the rows it stored and deals on from them.
+    With ``sample="first"`` the order is conversion's (time order). With ``sample="random"``
+    rows are dealt in rounds: each trace ranks its rows (``held`` ones first, then by
+    ``sha256(f"sample:{seed}:{row id}")``), round ``k`` holds the ``k``-th row of every trace
+    that has one, in the order of ``sha256(f"sample:{seed}:{trace id}")``, and held rows
+    lead. No rank depends on how far a pull read, so a rerun keeps the rows it stored and
+    deals on from them.
     """
+    if options.sample == "first":
+        return list(rows)
     by_trace: dict[str | None, list[TrainingRow]] = {}
     for row in rows:
         by_trace.setdefault(row.source.trace_id, []).append(row)
     rounds: dict[str, int] = {}
     for trace_rows in by_trace.values():
-        if options.sample == "random":
-            trace_rows.sort(key=lambda row: (row.id not in held, _rank(seed, row.id)))
+        trace_rows.sort(key=lambda row: (row.id not in held, _rank(seed, row.id)))
         rounds.update((row.id, n) for n, row in enumerate(trace_rows))
-    ordered = list(rows)
-    if options.sample == "random":
-        ordered.sort(
-            key=lambda row: (
-                row.id not in held,
-                rounds[row.id],
-                _rank(seed, str(row.source.trace_id)),
-            )
-        )
-    cap = options.max_rows_per_trace
-    if cap is None:
-        return ordered, []
-    return [r for r in ordered if rounds[r.id] < cap], [r for r in ordered if rounds[r.id] >= cap]
+    return sorted(
+        rows,
+        key=lambda row: (
+            row.id not in held,
+            rounds[row.id],
+            _rank(seed, str(row.source.trace_id)),
+        ),
+    )
 
 
 def _rank(seed: int, key: str) -> str:
