@@ -1,0 +1,21 @@
+# Synthetic evaluators for the tests and the offline dev loop.
+headline = "all"
+
+[[evaluator]]
+name = "polite"
+type = "judge"
+rubric = """
+Pass when the answer is courteous and does not blame the user. Fail when it is curt or sarcastic.
+"""
+examples = "polite-examples.jsonl"
+
+[[evaluator]]
+name = "no_card_numbers"
+type = "check"
+file = "checks.py"
+
+[[evaluator]]
+name = "text_when_expected"
+type = "check"
+file = "checks.py"
+function = "answers_in_text"
