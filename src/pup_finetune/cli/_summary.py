@@ -684,7 +684,18 @@ def sample_summary(result: Mapping[str, Any]) -> Summary:
 
 def triage_summary(result: Mapping[str, Any]) -> Summary:
     """``dataset triage``: kept, dropped, undecided and too long, or with ``--agreement`` how
-    often the council agreed with the labels (and Cohen's kappa)."""
+    often the council agreed with the labels (and Cohen's kappa), or with ``--checks`` alone
+    the rows they failed."""
+    if result.get("mode") == "checks":
+        checks = result.get("checks") or {}
+        labels = checks.get("labels") or {}
+        headline = (
+            f"checks: {checks.get('failed', 0)} of {_n(checks.get('rows_checked', 0), 'row')} "
+            f"failed, {labels.get('applied', 0)} newly labeled drop"
+        )
+        stale = result.get("stale_check_labels")
+        details = [f"{_n(stale, 'check label')} the checks no longer back"] if stale else []
+        return _summary(headline, details, next_command=result.get("next_command"))
     calls = (
         f"{_n(result.get('calls_made', 0), 'judge call')}, {result.get('calls_failed', 0)} failed"
     )
@@ -1181,10 +1192,18 @@ def _triage_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
     shown = ", ".join(
         f"{alias_of(str(judge.get('model')))} ({judge.get('provider')})" for judge in judges
     )
+    checks = preview.get("checks")
     return headline, [
         _row("data", data),
         _row("judges", shown),
         _row("rubric", _criteria(preview)),
+        _row(
+            "checks",
+            f"{checks.get('failed')} of {_n(checks.get('rows_checked'), 'row')} fail: labeled "
+            "drop, never judged",
+        )
+        if isinstance(checks, Mapping)
+        else None,
         _row("sends", _sends(preview)),
         _row("bills", _bills(preview.get("billing")) or "nothing: the judges run offline"),
     ]

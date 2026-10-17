@@ -39,7 +39,8 @@ has no cursor, so it is the last.
 
 ## `evaluators/`
 
-An `evaluate --evaluators` spec and what it names, for the tests and the offline dev loop.
+An `evaluate --evaluators` spec and what it names, and `dataset triage --checks` row checks,
+for the tests and the offline dev loop.
 
 - `evals.toml` - the spec: a rubric judge (`polite`, on the evaluation's judge) calibrated on
   `polite-examples.jsonl`, two checks from `checks.py`, and the headline `all`.
@@ -47,3 +48,7 @@ An `evaluate --evaluators` spec and what it names, for the tests and the offline
   reference so the offline fake judge grades them as labelled.
 - `checks.py` - `no_card_numbers` (fails an answer showing a card-like number) and
   `answers_in_text` (does not apply when the reference calls a tool).
+- `row_checks.py` - `dataset triage --checks` row checks: `declares_tools` (fails a row
+  without tools; `row-plain-001` in `rows/tool_use.jsonl`) and `no_tool_errors` (fails a row
+  whose tool returned an `error`, `row-inventory-001` and `row-weather-004`; does not apply
+  without tool results).

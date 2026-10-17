@@ -50,7 +50,7 @@ These print text on stdout instead of one JSON document: `help` (alone or with a
 - [`pup finetune dataset show`](#pup-finetune-dataset-show): Show a dataset's counts, exclusions, splits and settings.
 - [`pup finetune dataset sample`](#pup-finetune-dataset-sample): Show a small, readable sample of a dataset's rows.
 - [`pup finetune dataset label`](#pup-finetune-dataset-label): Record keep/drop labels for a dataset's rows.
-- [`pup finetune dataset triage`](#pup-finetune-dataset-triage): Label rows with judge models (paid; previews without --confirm).
+- [`pup finetune dataset triage`](#pup-finetune-dataset-triage): Label rows with checks and judge models (judges paid; preview first).
 - [`pup finetune dataset push`](#pup-finetune-dataset-push): Push kept rows to Datadog (previews without --confirm).
 - [`pup finetune dataset fetch`](#pup-finetune-dataset-fetch): Fetch an Agent Observability dataset to train on.
 - [`pup finetune benchmark`](#pup-finetune-benchmark): Compare base models before training (paid; previews without --confirm).
@@ -82,7 +82,7 @@ What each command does without and with `--confirm`, where its data goes, and wh
 | `pup finetune dataset show` | shows the dataset | no `--confirm` | nowhere: local files | allowed |
 | `pup finetune dataset sample` | shows rows | no `--confirm` | nowhere: local files | allowed |
 | `pup finetune dataset label` | records labels in DIR | no `--confirm` | nowhere: local files | allowed |
-| `pup finetune dataset triage` | previews the judge calls | runs the judges and labels rows (paid) | each judge's provider: Fireworks, Anthropic or OpenAI | allowed |
+| `pup finetune dataset triage` | previews the judge calls (--checks alone labels at once, free) | runs the judges and labels rows (paid) | each judge's provider: Fireworks, Anthropic or OpenAI | allowed |
 | `pup finetune dataset push` | previews the records | pushes the kept rows (a remote write) | Datadog: an Agent Observability dataset | preview allowed; `--confirm` refused |
 | `pup finetune dataset fetch` | fetches the dataset into DIR | no `--confirm` | nowhere: reads the dataset through pup into local files | allowed |
 | `pup finetune benchmark` | previews the calls | benchmarks every model (paid) | each model's provider, the judge's provider | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider and judge) |
@@ -429,7 +429,7 @@ Safety: Free · local files only · PUP_READ_ONLY: allowed.
 
 Have each judge model vote keep or drop on each whole row of DIR against --rubric and/or --rule; a strict majority of keep votes keeps a row. Without --confirm, previews the calls and where the rows go. Rerun the same command to resume; start with --max-rows 20 to calibrate the rubric.
 
-A judge reviews every turn of a row and its tools, since training imitates every assistant turn. A tie drops a row; a row missing a vote (a failed call) stays undecided and unlabeled, unless the votes cast already drop it (one drop of two judges, two of three), which also skips its other calls. Decisions are recorded as labels by judge; rows the agent or a person labeled are not reviewed. Votes are appended to DIR/judgments.jsonl as they arrive, so a rerun retries only failed calls. The rubric and the judges are frozen in DIR/triage.json once votes exist: change them in a new directory or with --reset-triage. Row content is sent to each judge's provider, Anthropic, OpenAI or Fireworks serverless, with that provider's API key; the preview names every one and where the council came from (judges_source). Without --judges, the council is the one triage.json froze, else anthropic/claude-haiku-5-5 and openai/gpt-5.4-mini when both credentials resolve, anthropic/claude-haiku-5-5 and anthropic/claude-sonnet-5-5 with only Anthropic's, openai/gpt-5.4-mini and openai/gpt-6-astra with only OpenAI's, else Fireworks' deepseek-v4p1-flash and glm-5p3-flash. --agreement measures the council against rows you labeled first; --rows FILE (one row id per line) reviews only those rows in either mode, and is not frozen; --print-template prints a rubric to start from.
+A judge reviews every turn of a row and its tools, since training imitates every assistant turn. A tie drops a row; a row missing a vote (a failed call) stays undecided and unlabeled, unless the votes cast already drop it (one drop of two judges, two of three), which also skips its other calls. Decisions are recorded as labels by judge; rows the agent or a person labeled are not reviewed. Votes are appended to DIR/judgments.jsonl as they arrive, so a rerun retries only failed calls. The rubric and the judges are frozen in DIR/triage.json once votes exist: change them in a new directory or with --reset-triage. Row content is sent to each judge's provider, Anthropic, OpenAI or Fireworks serverless, with that provider's API key; the preview names every one and where the council came from (judges_source). Without --judges, the council is the one triage.json froze, else anthropic/claude-haiku-5-5 and openai/gpt-5.4-mini when both credentials resolve, anthropic/claude-haiku-5-5 and anthropic/claude-sonnet-5-5 with only Anthropic's, openai/gpt-5.4-mini and openai/gpt-6-astra with only OpenAI's, else Fireworks' deepseek-v4p1-flash and glm-5p3-flash. --agreement measures the council against rows you labeled first; --rows FILE (one row id per line) reviews only those rows in either mode, and is not frozen; --print-template prints a rubric to start from. --checks FILE runs every public function of a Python file on each row reviewed first, free and in this process: a row one fails is labeled drop by: check and never sent to a judge (with --agreement, the checks are compared with your labels apart). --checks alone calls no judge and labels at once, without --confirm; without --checks, rows a check labeled are skipped.
 
 ```
 pup finetune dataset triage [OPTIONS] [DIR]
@@ -444,6 +444,7 @@ pup finetune dataset triage [OPTIONS] [DIR]
 | **Rubric** | | | |
 | `--rubric` | `FILE` |  | A rubric file (see --print-template). |
 | `--rule` | `TEXT, repeatable` |  | A rule to judge by; repeatable. |
+| `--checks` | `FILE` |  | Python row checks, run first (free). |
 | `--allow-template-rubric` |  |  | With --rubric: allow the template's Task text. |
 | `--print-template` |  |  | Print a rubric template and exit. |
 | **Judges** | | | |
@@ -461,8 +462,8 @@ Examples:
 ```sh
 pup finetune dataset triage --print-template > rubric.md
 pup finetune dataset triage datasets/my-agent --rubric rubric.md --max-rows 20
-pup finetune dataset triage datasets/my-agent --rubric rubric.md --judges glm-5p3-flash
 pup finetune dataset triage datasets/my-agent --rubric rubric.md --agreement
+pup finetune dataset triage datasets/my-agent --checks checks.py
 ```
 
 Safety: Paid with --confirm · sends rows to each judge's provider · PUP_READ_ONLY: allowed.
