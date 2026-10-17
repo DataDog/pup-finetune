@@ -338,11 +338,12 @@ judge and every evaluator pass it (one that does not apply counts as a pass).
 Added to a complete evaluation, evaluators reuse every stored answer: nothing is generated
 again and no training session opens, so only their judges' calls are paid, and checks cost
 nothing. The directory keeps its evaluators: a rerun without the flag continues them, a rerun
-may add new ones, and a changed rubric, model or check file needs a new name (`polite_v2`) or
-a new `--out-dir`. Each evaluator becomes one boolean metric per case in the experiments; one
-added after they were published is a warning, since those experiments do not show it.
-`benchmark --evaluators` works the same way, and the headline ranks the models. Checks are
-Python you wrote: they run in this process with your privileges, previews included (the
+may add new ones, and one is never dropped or changed: keep it as it was attached and add a
+changed rubric, model or check under a new name (`polite_v2`; a changed check in a new file),
+or use a new `--out-dir`. Each evaluator becomes one boolean metric per case in the
+experiments; one added after they were published is a warning, since those experiments do not
+show it. `benchmark --evaluators` works the same way, and the headline ranks the models. Checks
+are Python you wrote: they run in this process with your privileges, previews included (the
 preview runs each one on every recorded answer, free, so a broken check fails before anything
 is paid).
 

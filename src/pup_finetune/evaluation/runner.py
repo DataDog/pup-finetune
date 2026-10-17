@@ -137,6 +137,7 @@ __all__ = [
     "evaluate_words",
     "evaluation_exit_code",
     "evaluator_calibration_calls",
+    "evaluator_fix",
     "evaluators_preview",
     "finished_result",
     "headline",
@@ -1525,8 +1526,8 @@ def calibration_failed(plan: EvalPlan, report: Mapping[str, Any]) -> dict[str, A
             "evaluator": name,
             "calibration": dict(report),
             "hint": f"the evaluator {name} disagreed with answers you graded, so its verdicts "
-            "cannot be trusted; fix its rubric or examples under a new name, or pick another "
-            f"model for it (or rerun with {skip_flag} to evaluate anyway)",
+            f"cannot be trusted; {evaluator_fix(name, [plan.out_dir], plan.out_dir)} (or rerun "
+            f"with {skip_flag} to evaluate anyway)",
         }
     return {
         "status": "calibration_failed",
@@ -1538,6 +1539,19 @@ def calibration_failed(plan: EvalPlan, report: Mapping[str, Any]) -> dict[str, A
         f"verdicts cannot be trusted; pick another {judge_flag} (or rerun with "
         f"{skip_flag} to evaluate anyway)",
     }
+
+
+def evaluator_fix(name: str, dirs: Sequence[Path], out_dir: Path) -> str:
+    """How to fix the evaluator ``name`` that failed calibration: its examples, and its
+    rubric or model only in a free ``--out-dir`` once one of ``dirs`` has it attached."""
+    from pup_finetune.evaluation.replay import EvalDir
+
+    if any(name in _attached(EvalDir(directory)) for directory in dirs):
+        return (
+            f"fix its examples, or pass --out-dir {quoted(free_sibling(out_dir))} to change its "
+            "rubric or model, frozen since it was attached"
+        )
+    return "fix its rubric or examples, or pick another model for it"
 
 
 def require_new_eval_dir(out_dir: Path, run_dir: Path) -> None:

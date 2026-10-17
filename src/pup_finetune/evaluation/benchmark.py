@@ -55,6 +55,7 @@ from pup_finetune.evaluation.runner import (
     calibration_line,
     cancel_on_signals,
     evaluator_calibration_calls,
+    evaluator_fix,
     evaluators_preview,
     no_reuse_hint,
     open_evaluator_clients,
@@ -963,12 +964,13 @@ def execute(plan: BenchmarkPlan) -> dict[str, Any]:
 
 def _calibration_failed(plan: BenchmarkPlan, report: Mapping[str, Any]) -> dict[str, Any]:
     name = report.get("evaluator")
+    dirs = [plan.model_dir(candidate) for candidate in plan.candidates]
     hint = (
         "the judge passed a corrupted action or failed a recorded one, so its verdicts cannot "
         "be trusted; pick another --judge-model"
         if name is None
         else f"the evaluator {name} disagreed with answers you graded, so its verdicts cannot "
-        "be trusted; fix its rubric or examples under a new name, or pick another model for it"
+        f"be trusted; {evaluator_fix(str(name), dirs, plan.out_dir)}"
     )
     return {
         "status": "calibration_failed",

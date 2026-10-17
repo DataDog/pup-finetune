@@ -10,6 +10,7 @@ generating again. Development mode, the fake provider and the fake judge."""
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import shutil
 from collections.abc import Iterator
@@ -232,7 +233,9 @@ def test_a_changed_rubric_conflicts_and_a_renamed_one_scores(
     conflict = invoke(*args)
     assert conflict.exit_code == 2
     assert "settings_conflict" in conflict.stderr
-    assert "rename it" in conflict.stderr
+    assert "keep polite as it was attached and add the new version under another name" in (
+        conflict.stderr
+    )
     spec.write_text(spec.read_text().replace('name = "polite"', 'name = "polite_v2"'))
     conflict = invoke(*args)
     assert "leaves out" in conflict.stderr
@@ -293,10 +296,27 @@ def test_a_failed_custom_calibration_stops_before_anything_is_generated(
     assert result.exit_code == 1
     data = output(result)
     assert (data["status"], data["evaluator"]) == ("calibration_failed", "polite")
-    assert "under a new name" in data["hint"]
+    assert "fix its rubric or examples, or pick another model for it" in data["hint"]
     assert "calibration failed: the evaluator polite got 2 of 2 checks wrong" in result.stderr
     assert not (run_dir / "eval" / "generations.jsonl").exists()
     assert not (run_dir / "eval" / "evaluators.json").exists()
+
+
+def test_an_attached_evaluator_that_fails_calibration_keeps_its_name(
+    evaluated: Path, spec: Path
+) -> None:
+    args = ("evaluate", str(evaluated), "--evaluators", str(spec), "--no-publish", "--confirm")
+    assert invoke(*args, "--skip-calibration").exit_code == 0
+    examples = spec.with_name("polite-examples.jsonl")
+    swapped = {'"pass": true': '"pass": false', '"pass": false': '"pass": true'}
+    examples.write_text(
+        re.sub(r'"pass": (true|false)', lambda m: swapped[m[0]], examples.read_text())
+    )
+    result = invoke(*args)
+    assert result.exit_code == 1
+    data = output(result)
+    assert data["evaluator"] == "polite"
+    assert f"fix its examples, or pass --out-dir {evaluated / 'eval-2'} to change" in data["hint"]
 
 
 def test_train_evaluate_then_evaluators_reuses_the_session_s_answers(

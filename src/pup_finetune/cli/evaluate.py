@@ -139,8 +139,9 @@ DOC = CommandDoc(
         "returns True, False, None (does not apply) or (False, reason); its headline is judge, "
         "an evaluator's name or all (the judge and every evaluator pass). Added to a complete "
         "evaluation, they score the stored answers, so only their judges' calls are paid. The "
-        "directory keeps its evaluators: a rerun may add some, but a changed or dropped one "
-        "needs a new name or a new --out-dir. Checks run in this process with your privileges.",
+        "directory keeps its evaluators: a rerun may add some, never drop or change one (add "
+        "the new version under another name, or use a new --out-dir). Checks run in this "
+        "process with your privileges.",
     ),
     examples=(
         "pup finetune evaluate run",

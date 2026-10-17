@@ -179,8 +179,8 @@ class CheckEvaluator:
             raise UsageError(
                 f"the check file {display_path(self.file)} of the evaluator {self.name} {what} "
                 "since it was attached, and it has cases left to score",
-                hint="restore the file, or attach the new check under another name with "
-                "--evaluators",
+                hint="restore it (a new version goes in a new file, under another name), or "
+                "pass a new --out-dir",
             )
         module = load_checks(self.file)
         module.function(self.function, 2)
@@ -529,8 +529,9 @@ def evaluators_conflict(
             return SettingsConflict(
                 f"the evaluator {name} changed since it was attached to "
                 f"{display_path(out_dir)} (changed: {', '.join(identity_changes(before, now))})",
-                hint="rename it to score it again from the stored answers (only its judge "
-                f"calls are paid), or pass --out-dir {fresh}",
+                hint=f"keep {name} as it was attached and add the new version under another "
+                "name, which scores the stored answers (a check in a new file, since its whole "
+                f"file is frozen), or pass --out-dir {fresh}",
             )
     return None
 

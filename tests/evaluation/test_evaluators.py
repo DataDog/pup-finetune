@@ -153,8 +153,8 @@ def test_attaching_only_grows_and_takes_a_new_headline(
 @pytest.mark.parametrize(
     ("text", "match", "hint"),
     [
-        (JUDGE_ITEM.replace("Be kind.", "Be very kind."), "polite changed", "rename it"),
-        (JUDGE_ITEM + 'model = "glm-5p3-flash"\n', "polite changed", "rename it"),
+        (JUDGE_ITEM.replace("Be kind.", "Be very kind."), "polite changed", "keep polite as"),
+        (JUDGE_ITEM + 'model = "glm-5p3-flash"\n', "polite changed", "keep polite as"),
         (CHECK, "leaves out", "add polite back"),
     ],
 )
@@ -217,8 +217,11 @@ def test_stored_evaluators_resolve_again_and_load_a_check_only_with_work_left(
     assert done.names == ["polite", "no_card_numbers"]
     assert done.evaluators[0].rubric == "Be kind."
     assert done.checks[0].module is None
-    with pytest.raises(UsageError, match="changed since it was attached"):
+    with pytest.raises(UsageError, match="changed since it was attached") as caught:
         resolve(True)
+    assert caught.value.hint == (
+        "restore it (a new version goes in a new file, under another name), or pass a new --out-dir"
+    )
     (spec_dir / "checks.py").unlink()
     with pytest.raises(UsageError, match="is missing since it was attached"):
         resolve(True)

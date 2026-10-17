@@ -10,6 +10,7 @@ machine."""
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import shutil
 from collections.abc import Iterator
@@ -517,6 +518,26 @@ def test_evaluators_attach_per_model_and_one_added_later_opens_no_session(
     stored = json.loads((dataset / "benchmark" / "calibration.json").read_text())
     assert stored["evaluators"]["polite"]["ok"] is True
     assert "ranked by all" in result.stderr
+
+
+def test_an_evaluator_that_fails_calibration_can_be_fixed_under_its_name(
+    dataset: Path, tmp_path: Path
+) -> None:
+    spec_dir = tmp_path / "spec"
+    shutil.copytree(ROWS.parent.parent / "evaluators", spec_dir)
+    examples = spec_dir / "polite-examples.jsonl"
+    swapped = {"true": "false", "false": "true"}
+    examples.write_text(
+        re.sub(r'(?<="pass": )(true|false)', lambda m: swapped[m[0]], examples.read_text())
+    )
+    result = invoke(
+        "benchmark", str(dataset), "--models", "fake-model", "--confirm",
+        "--evaluators", str(spec_dir / "evals.toml"),
+    )  # fmt: skip
+    assert result.exit_code == 1
+    data = output(result)
+    assert (data["status"], data["evaluator"]) == ("calibration_failed", "polite")
+    assert "fix its rubric or examples, or pick another model for it" in data["hint"]
 
 
 def test_evaluator_errors_are_reported_and_retried(dataset: Path, tmp_path: Path) -> None:
