@@ -43,8 +43,9 @@ stays text. A family whose tokenizer ships no chat template renders through a
 
 ``transformers`` comes from the optional ``hf`` extra and is imported only when a tokenizer
 is first needed, never when this module is imported. A family's ``trust_remote_code`` is
-passed to it with the pinned revision, so that code comes from the model's repository at that
-commit. Tests inject a :class:`ChatTokenizer`.
+passed to it with the pinned revision as both the files' and the code's revision, and a
+tokenizer class from any other repository or commit is refused. Tests inject a
+:class:`ChatTokenizer`.
 A tokenizer that cannot be loaded fails every row alike, so it is an :class:`ExternalError`
 (a :class:`UsageError` when the extra is missing), never a per-row :class:`RendererError`.
 """
@@ -56,12 +57,10 @@ import importlib
 import json
 import os
 import re
-import sys
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from importlib import metadata
-from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Protocol
 
@@ -134,12 +133,12 @@ class ChatTokenizer(Protocol):
 class TransformersTokenizer:
     """A ``transformers`` tokenizer adapted to :class:`ChatTokenizer`.
 
-    ``remote_code`` says the tokenizer's code came from the model's repository; without a
-    Jinja template, that code renders the chat, and its source stands in as
-    :attr:`chat_template`.
+    ``remote_code`` names the repository and commit (``model@revision``) whose code the
+    tokenizer runs; without a Jinja template, that code renders the chat, and the pin stands
+    in as :attr:`chat_template`: code at a commit cannot change.
     """
 
-    def __init__(self, tokenizer: Any, *, remote_code: bool = False) -> None:
+    def __init__(self, tokenizer: Any, *, remote_code: str | None = None) -> None:
         self._tokenizer = tokenizer
         self._remote_code = remote_code
 
@@ -208,26 +207,16 @@ class TransformersTokenizer:
 
     @property
     def chat_template(self) -> str:
-        template = self._tokenizer.chat_template
-        if isinstance(template, str) and template:
+        template = self._jinja_template()
+        if template:
             return template
-        if self._remote_code:
-            return _remote_source(self._tokenizer)
+        if self._remote_code is not None:
+            return f"tokenizer code of {self._remote_code}"
         raise ValueError("the tokenizer has no chat template")
 
-
-def _remote_source(tokenizer: Any) -> str:
-    """The source of the remote modules loaded for ``tokenizer``, read from the package that
-    ``transformers`` stored the repository's code in at the pinned revision."""
-    package = type(tokenizer).__module__.rpartition(".")[0]
-    files = sorted(
-        str(module.__file__)
-        for name, module in list(sys.modules.items())
-        if name.startswith(f"{package}.") and getattr(module, "__file__", None)
-    )
-    return "".join(
-        f"# {Path(path).name}\n{Path(path).read_text(encoding='utf-8')}" for path in files
-    )
+    def _jinja_template(self) -> str:
+        template = self._tokenizer.chat_template
+        return template if isinstance(template, str) else ""
 
 
 def load_tokenizer(
@@ -235,19 +224,26 @@ def load_tokenizer(
 ) -> TransformersTokenizer:
     """``model``'s tokenizer at ``revision``, from the Hugging Face cache or Hub.
 
-    ``trust_remote_code`` runs the tokenizer code of the model's repository at ``revision``;
+    ``trust_remote_code`` runs the tokenizer code of the model's repository at ``revision``,
+    and only there: the tokenizer class must come from that repository's code at that commit;
     ``template`` false loads a tokenizer whose chat a :class:`ChatEncoder` renders. Raises
     :class:`UsageError` when ``transformers`` is not installed and :class:`ExternalError`
-    when the tokenizer cannot be loaded or, with ``template``, renders no chat.
+    when the tokenizer cannot be loaded, its code came from elsewhere or, with ``template``,
+    it renders no chat.
     """
     transformers = _transformers()
+    pinned: dict[str, Any] = {"revision": revision, "trust_remote_code": trust_remote_code}
+    if trust_remote_code:
+        pinned["code_revision"] = revision
     try:
-        tokenizer = transformers.AutoTokenizer.from_pretrained(
-            model, revision=revision, trust_remote_code=trust_remote_code
-        )
+        tokenizer = transformers.AutoTokenizer.from_pretrained(model, **pinned)
     except Exception as exc:
         raise _load_failure(model, revision, exc) from exc
-    adapter = TransformersTokenizer(tokenizer, remote_code=trust_remote_code)
+    if trust_remote_code:
+        _require_pinned_code(tokenizer, model, revision)
+    adapter = TransformersTokenizer(
+        tokenizer, remote_code=f"{model}@{revision}" if trust_remote_code else None
+    )
     if not template:
         return adapter
     try:
@@ -258,6 +254,31 @@ def load_tokenizer(
             source="huggingface",
         ) from exc
     return adapter
+
+
+def _require_pinned_code(tokenizer: Any, model: str, revision: str) -> None:
+    """Refuse a tokenizer whose class is not ``model``'s code at ``revision``.
+
+    ``transformers`` imports a repository's code as ``transformers_modules.<org>.<name>.
+    <commit>``; a repository whose ``auto_map`` names another repository's code loads it from
+    that one, at its default branch, which no pin covers.
+    """
+    package = ".".join(["transformers_modules", *map(_module_name, model.split("/")), revision])
+    module = type(tokenizer).__module__
+    if not module.startswith(f"{package}."):
+        raise ExternalError(
+            f"the {model} tokenizer at revision {revision} loaded its code from {module}, "
+            f"not from {model} at that revision",
+            source="huggingface",
+            hint="pup-finetune runs a tokenizer's code only from the model's own repository at "
+            "the pinned commit; update the model family when the repository moves its code",
+        )
+
+
+def _module_name(name: str) -> str:
+    """``name`` as ``transformers`` spells a repository name in a module path."""
+    sanitized = name.replace(".", "_dot_").replace("-", "_hyphen_")
+    return f"_{sanitized}" if sanitized[:1].isdigit() else sanitized
 
 
 class ChatEncoder(Protocol):

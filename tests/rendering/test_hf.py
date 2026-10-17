@@ -11,6 +11,8 @@ import json
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -556,8 +558,75 @@ def test_load_tokenizer_pins_the_revision_and_adapts_the_tokenizer(
     assert excinfo.value.source == "huggingface"
     # A tokenizer whose chat an encoder renders needs no template.
     assert hf.load_tokenizer("example/tiny-chat", SHA, template=False).token_id("a") == 97
-    hf.load_tokenizer("example/tiny-chat", SHA, trust_remote_code=True, template=False)
-    assert calls[-1] == (("example/tiny-chat",), {"revision": SHA, "trust_remote_code": True})
+
+
+REMOTE_PACKAGE = f"transformers_modules.example.tiny_hyphen_chat.{SHA}"
+
+
+def _load_remote(monkeypatch: pytest.MonkeyPatch, module: str) -> list[dict[str, Any]]:
+    """Make ``load_tokenizer`` load a template-less tokenizer whose class sits in
+    ``module``; the keyword arguments of each load are recorded."""
+    calls: list[dict[str, Any]] = []
+    remote = type("RemoteTokenizer", (_StubHFTokenizer,), {"__module__": module})
+
+    def from_pretrained(model: str, **kwargs: Any) -> _StubHFTokenizer:
+        calls.append({"model": model, **kwargs})
+        stub = remote()
+        stub.chat_template = None  # type: ignore[assignment]
+        return stub
+
+    auto = SimpleNamespace(from_pretrained=from_pretrained)
+    monkeypatch.setattr(hf, "_transformers", lambda: SimpleNamespace(AutoTokenizer=auto))
+    return calls
+
+
+def test_remote_tokenizer_code_is_loaded_at_the_pinned_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _load_remote(monkeypatch, f"{REMOTE_PACKAGE}.tokenization_stub")
+    loaded = hf.load_tokenizer("example/tiny-chat", SHA, trust_remote_code=True)
+    assert calls == [
+        {
+            "model": "example/tiny-chat",
+            "revision": SHA,
+            "trust_remote_code": True,
+            "code_revision": SHA,
+        }
+    ]
+    assert loaded.chat_template == f"tokenizer code of example/tiny-chat@{SHA}"
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        f"transformers_modules.other.tiny_hyphen_chat.{SHA}.tokenization_stub",
+        f"transformers_modules.example.tiny_hyphen_chat.{'f' * 40}.tokenization_stub",
+        f"{REMOTE_PACKAGE}_suffix.tokenization_stub",
+        "tests.rendering.test_hf",
+    ],
+    ids=["another_repository", "another_commit", "a_lookalike_package", "not_remote"],
+)
+def test_remote_tokenizer_code_from_anywhere_else_is_refused(
+    monkeypatch: pytest.MonkeyPatch, module: str
+) -> None:
+    _load_remote(monkeypatch, module)
+    with pytest.raises(ExternalError, match="loaded its code from") as excinfo:
+        hf.load_tokenizer("example/tiny-chat", SHA, trust_remote_code=True, template=False)
+    assert excinfo.value.source == "huggingface"
+
+
+def test_a_remote_tokenizer_s_identity_ignores_the_modules_loaded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _load_remote(monkeypatch, f"{REMOTE_PACKAGE}.tokenization_stub")
+    loaded = hf.load_tokenizer("example/tiny-chat", SHA, trust_remote_code=True)
+    before = loaded.chat_template
+    extra = tmp_path / "helpers.py"
+    extra.write_text("X = 1\n", encoding="utf-8")
+    module = ModuleType(f"{REMOTE_PACKAGE}.helpers")
+    module.__file__ = str(extra)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    assert loaded.chat_template == before
 
 
 def _hub_error(kind: str) -> Exception:

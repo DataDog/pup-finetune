@@ -13,6 +13,7 @@ code once.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -33,7 +34,10 @@ from pup_finetune.training.datums import build_examples
 pytestmark = pytest.mark.tokenizer
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
-SOURCE_SHA256 = "ed17395b2c9a080542d746fbb7387412bcfe0f7d67d5432b4e72ad97d2705108"
+CODE_PIN_SHA256 = hashlib.sha256(
+    f"tokenizer code of {KIMI_K3.tokenizer_model}@{KIMI_K3.revision}".encode()
+).hexdigest()
+"""The identity of a tokenizer whose code renders the chat is its pinned commit."""
 PROMPT_END = '<|open|>message role="assistant"<|sep|><|open|>think<|sep|>'
 
 WEATHER_TOOL: dict[str, Any] = {
@@ -271,7 +275,7 @@ def test_the_pinned_revision_remote_code_and_stop_token(
     identity = renderer.identity()
     assert identity["tokenizer"] == "moonshotai/Kimi-K3"
     assert identity["tokenizer_revision"] == KIMI_K3.revision
-    assert identity["chat_template_sha256"] == SOURCE_SHA256
+    assert identity["chat_template_sha256"] == CODE_PIN_SHA256
     assert identity["parser"] == "kimi_xtml"
     assert identity["prefix_stable"] == "true"
     assert [renderer.decode([t]) for t in renderer.stop_token_ids] == ["<|end_of_msg|>"]
