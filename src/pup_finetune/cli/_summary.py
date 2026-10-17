@@ -451,9 +451,14 @@ def _evaluation_parts(result: Mapping[str, Any], *, compact: bool) -> Summary:
         calibration = result.get("calibration") or {}
         checks = [check for check in calibration.get("checks") or [] if isinstance(check, dict)]
         wrong = sum(1 for check in checks if not check.get("ok"))
+        who = (
+            f"the evaluator {result['evaluator']}"
+            if result.get("evaluator")
+            else f"the judge {result.get('judge_model')}"
+        )
         headline = (
-            f"calibration failed: the judge {result.get('judge_model')} got {wrong} of "
-            f"{len(checks)} checks wrong, so nothing was evaluated"
+            f"calibration failed: {who} got {wrong} of {len(checks)} checks wrong, so nothing "
+            "was evaluated"
         )
         # The hint spells the flags of the command that ran it (evaluate or train).
         hint = result.get("hint")

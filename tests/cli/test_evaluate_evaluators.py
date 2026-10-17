@@ -264,6 +264,7 @@ def test_a_failed_custom_calibration_stops_before_anything_is_generated(
     data = output(result)
     assert (data["status"], data["evaluator"]) == ("calibration_failed", "polite")
     assert "under a new name" in data["hint"]
+    assert "calibration failed: the evaluator polite got 2 of 2 checks wrong" in result.stderr
     assert not (run_dir / "eval" / "generations.jsonl").exists()
     assert not (run_dir / "eval" / "evaluators.json").exists()
 

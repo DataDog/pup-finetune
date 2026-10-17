@@ -1779,8 +1779,9 @@ def replay_result(
     publication = _publication(plan, outcome)
     if scoring:
         warnings.append(
-            f"{scoring} evaluator score(s) ended in an error (an evaluator's judge outage or a "
-            "check that raised), left out of their rates; run next_command to retry them"
+            f"{scoring} evaluator score(s) are missing after an error (an evaluator's judge "
+            "outage, a check that raised, or the pair's own error), left out of their rates; run "
+            "next_command to retry them"
         )
     if plan.evaluators is not None:
         reports = _reports(EvalDir(plan.out_dir))
