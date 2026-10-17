@@ -780,6 +780,21 @@ def test_agreement_reports_the_checks_apart_from_the_council(
     assert {label.by for label in DatasetDir(dataset).labels().values()} == {"manual"}
 
 
+@pytest.mark.parametrize("confirm", [[], ["--confirm"]])
+def test_an_agreement_whose_labeled_rows_all_fail_a_check_is_refused(
+    dataset: Path, chat: FakeChatApi, tmp_path: Path, confirm: list[str]
+) -> None:
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(json.dumps({"id": "row-plain-001", "keep": False, "reason": "x"}) + "\n")
+    assert invoke("dataset", "label", str(dataset), "--file", str(labels)).exit_code == 0
+    args = ["dataset", "triage", str(dataset), "--rule", "stay on topic", "--agreement"]
+    result = invoke(*args, "--checks", str(ROW_CHECKS), "--judges", "fireworks/j1", *confirm)
+    assert result.exit_code == 2
+    assert result.stderr.startswith("Error [usage]: the checks fail every row labeled by you")
+    assert chat.requests == []
+    assert not (dataset / "triage.json").exists()
+
+
 def test_a_check_that_raises_fails_the_preview_before_any_call(
     dataset: Path, chat: FakeChatApi, tmp_path: Path
 ) -> None:

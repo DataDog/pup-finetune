@@ -859,8 +859,8 @@ def plan_triage(
     :class:`StateError` when votes exist under another rubric or other judges (see the module
     docstring) and ``reset`` is false, and :class:`UsageError` for a judge spec with an empty
     model after its provider prefix, for an id in ``only`` that is not an accepted row, or
-    with ``agreement`` when no row (of ``only``) carries such a label, and as
-    :func:`run_row_checks` does.
+    with ``agreement`` when no row (of ``only``) carries such a label or, with ``criteria``,
+    the checks fail every such row, and as :func:`run_row_checks` does.
     """
     for spec in judges:
         judge_config(spec)
@@ -918,6 +918,14 @@ def plan_triage(
     reviewable.sort(key=_review_order)
     rows = reviewable[:max_rows] if max_rows is not None else reviewable
     checked = run_row_checks(rows, checks) if checks is not None else {}
+    if agreement and criteria is not None and len(checked) == len(rows):
+        among = " that --rows names" if only is not None else ""
+        raise UsageError(
+            f"the checks fail every row labeled by you or the agent{among}, so the council "
+            "has none to compare with",
+            hint="compare the checks alone with those labels (leave out --rubric and --rule; "
+            "free), or label more rows (`dataset sample`, then `dataset label --file`)",
+        )
     for row_id in checked:
         judge_labels.pop(row_id, None)  # its check label replaces it
     stale_checked = [

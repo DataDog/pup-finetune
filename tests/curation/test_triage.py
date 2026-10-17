@@ -1384,6 +1384,18 @@ def test_agreement_reports_the_checks_apart_from_the_council(tmp_path: Path) -> 
     assert (dataset.path / "labels.jsonl").read_text() == labels_before
 
 
+def test_an_agreement_whose_labeled_rows_all_fail_a_check_is_a_usage_error(
+    tmp_path: Path,
+) -> None:
+    dataset = make_dataset(tmp_path)
+    label_rows(dataset, {"row-1": False, "row-2": True})
+    module = checks_file(tmp_path)
+    with pytest.raises(UsageError, match="the checks fail every row labeled by you or the agent"):
+        plan_triage(dataset, RUBRIC, (J1,), agreement=True, checks=module)
+    alone = plan_triage(dataset, None, (), agreement=True, checks=module)
+    assert sorted(alone.checked) == ["row-1", "row-2"]
+
+
 @pytest.mark.parametrize(
     ("body", "problem"),
     [("return row['missing']", "KeyError"), ('return False, "\\ud800"', "lone surrogate")],
