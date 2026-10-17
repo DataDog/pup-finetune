@@ -818,10 +818,11 @@ Source lives under `src/pup_finetune/`.
   `EvalWork.reused`), `import_target` copies it in after calibration passed
   (`prepare_eval_dir`; answers get `reused_from`, results `reused`), and `export_target`
   adds the run's own base answers and verdicts with a judge answer after the replay
-  (`share_base`), under the store's lock tried once (a busy one is a warning), only from a
-  directory whose `reuse.json` (`stamp`, written before its first answer) holds the current
-  `key_inputs` (an evaluation made before stamps counts as version 1). Only base answers are
-  shared; `evaluation.json` records `"reuse": false` only with `--no-reuse`.
+  (`share_base`), under the store's lock tried once (a busy one is a warning naming the
+  command that shares them), only from a directory whose `reuse.json` (`stamp`, written
+  before its first answer) holds the current `key_inputs` (an evaluation made before stamps
+  counts as version 1). Only base answers are shared; `evaluation.json` records
+  `"reuse": false` only with `--no-reuse`.
 - `providers/` - the provider seam. `base.py` has the neutral types (`ModelProfile`,
   `TrainSpec`, `CheckpointRef`, `StepMetrics`, ...) and the `Provider`, `TrainingBackend`,
   `TrainingSession` and `Sampler` protocols; `__init__.py` is the lazy registry

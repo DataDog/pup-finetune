@@ -360,12 +360,11 @@ def _made_under(eval_dir: EvalDir, inputs: Mapping[str, Any], *, legacy: bool) -
     return canonical_json(stamped) == canonical_json(finite_json(dict(inputs)))
 
 
-def not_shared(exc: FinetuneError | OSError) -> str:
-    """The warning of a run whose base results could not be added to the store."""
+def not_shared(exc: FinetuneError | OSError, rerun: str) -> str:
+    """The warning of a run whose base results could not be added to the store; ``rerun``
+    is the command that adds them."""
     reason = exc.message if isinstance(exc, FinetuneError) else exc.strerror or str(exc)
-    return (
-        f"base results were not shared: {redact(reason)}; the next run of this command shares them"
-    )
+    return f"base results were not shared: {redact(reason)}; run `{rerun}` to share them"
 
 
 def export_target(
@@ -376,12 +375,13 @@ def export_target(
     inputs: Mapping[str, Any],
     judge: JudgeConfig,
     source: Mapping[str, str | None],
+    rerun: str,
     *,
     legacy: bool = False,
 ) -> str | None:
     """Add ``target``'s own answers in ``eval_dir`` (not those it reused), keyed under
     ``inputs``, and its real verdicts (no error, a judge answer kept) to the store; a key it
-    has is skipped.
+    has is skipped. ``rerun`` is the command that shares them when this cannot.
 
     Only a directory whose answers were all sampled under ``inputs`` shares: its
     :func:`stamp` holds them, or, with ``legacy`` (an identity that pins every input but the
@@ -435,5 +435,5 @@ def export_target(
             if new_verdicts:
                 append_jsonl(store / VERDICTS_FILE, new_verdicts, ensure_ascii=True)
     except (FinetuneError, OSError) as exc:
-        return not_shared(exc)
+        return not_shared(exc, rerun)
     return None

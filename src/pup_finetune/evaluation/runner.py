@@ -1264,6 +1264,7 @@ def share_base(plan: EvalPlan) -> str | None:
         plan.base_inputs,
         plan.judge,
         {"command": "evaluate", "run_id": plan.run_id},
+        f"{shlex.join(plan.evaluate_command())} --confirm",
         legacy=True,
     )
 

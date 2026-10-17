@@ -705,10 +705,11 @@ def _share(
     eval_dir = EvalDir(plan.model_dir(candidate))
     if not eval_dir.has_work() or not stamped(eval_dir):
         return
+    rerun = f"{shlex.join(plan.command())} --confirm"
     try:
         inputs = inputs if inputs is not None else _inputs(plan, candidate)
     except (FinetuneError, OSError) as exc:
-        warning: str | None = not_shared(exc)
+        warning: str | None = not_shared(exc, rerun)
     else:
         warning = export_target(
             plan.dataset_dir,
@@ -718,6 +719,7 @@ def _share(
             inputs,
             plan.judge,
             {"command": "benchmark", "run_id": None},
+            rerun,
         )
     if warning is not None and warning not in warnings:
         warnings.append(warning)

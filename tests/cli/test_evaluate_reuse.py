@@ -55,6 +55,13 @@ def lines(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
+def share_command(warning: str) -> list[str]:
+    """The command a "not shared" warning names, without ``pup finetune``."""
+    words = shlex.split(warning.split("`")[1])
+    assert words[:2] == ["pup", "finetune"] and words[-1] == "--confirm"
+    return words[2:]
+
+
 def train(dataset: Path, run_dir: Path, *extra: str) -> Result:
     return invoke(
         "train",
@@ -332,9 +339,10 @@ def test_a_busy_store_is_a_warning_and_the_evaluation_completes(
     assert result.exit_code == 0, result.stderr
     data = output(result)
     assert data["status"] == "complete"
+    rerun = shlex.join(["pup", "finetune", "evaluate", str(run), "--judge-model", "fake-judge"])
     assert data["warnings"][0] == (
-        f"base results were not shared: another pup-finetune process is using {store}; the "
-        "next run of this command shares them"
+        f"base results were not shared: another pup-finetune process is using {store}; run "
+        f"`{rerun} --confirm` to share them"
     )
     assert not (store / "generations.jsonl").exists()
 
@@ -409,3 +417,21 @@ def test_train_evaluate_reuses_the_base_answers_in_its_session(
     evaluation = output(result)["evaluation"]
     assert evaluation["status"] == "complete"
     assert evaluation["reused"] == {"base": {"generations": cases, "verdicts": cases}}
+
+
+def test_train_evaluate_names_the_evaluate_command_that_shares_a_busy_store(
+    dataset: Path, tmp_path: Path
+) -> None:
+    run = tmp_path / "run"
+    store = dataset / "replay_cache"
+    store.mkdir(mode=0o700)
+    with DirectoryLock(store):
+        result = train(dataset, run, "--evaluate", "--eval-no-publish")
+    assert result.exit_code == 0, result.stderr
+    [warning] = output(result)["evaluation"]["warnings"]
+    words = share_command(warning)
+    assert words[:2] == ["evaluate", str(run)]
+    shared = invoke(*words)
+    assert shared.exit_code == 0, shared.stderr
+    base = [line for line in lines(run / "eval" / "generations.jsonl") if line["target"] == "base"]
+    assert len(lines(store / "generations.jsonl")) == len(base) > 0

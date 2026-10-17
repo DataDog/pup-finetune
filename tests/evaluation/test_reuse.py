@@ -39,6 +39,7 @@ from pup_finetune.storage import DirectoryLock, append_jsonl
 JUDGE = JudgeConfig(model="judge/model")
 RENDERING = {"renderer": "fake", "renderer_version": "1"}
 SOURCE = {"command": "evaluate", "run_id": "ft-a"}
+RERUN = "pup finetune evaluate ft-a --confirm"
 CALL = {
     "role": "assistant",
     "content": "",
@@ -358,7 +359,7 @@ def test_export_writes_the_target_s_own_answers_and_real_verdicts(tmp_path: Path
     judged(eval_dir, "base", a, answer("a"))
     judged(eval_dir, "base", b, answer("b"), raw=None, error="unparseable")
     judged(eval_dir, "tuned", a, answer("tuned"))
-    assert export_target(tmp_path, eval_dir, "base", CASES, INPUTS, JUDGE, SOURCE) is None
+    assert export_target(tmp_path, eval_dir, "base", CASES, INPUTS, JUDGE, SOURCE, RERUN) is None
     answers = stored(tmp_path, "generations.jsonl")
     assert [(line["key"], line["message"]) for line in answers] == [
         (KEYS[a.id], answer("a")),
@@ -387,7 +388,7 @@ def test_export_skips_reused_answers_and_keys_the_store_has(tmp_path: Path) -> N
             "reused_from": SOURCE,
         }
     )
-    assert export_target(tmp_path, eval_dir, "base", CASES, INPUTS, JUDGE, SOURCE) is None
+    assert export_target(tmp_path, eval_dir, "base", CASES, INPUTS, JUDGE, SOURCE, RERUN) is None
     assert len(stored(tmp_path, "generations.jsonl")) == 1
     assert len(stored(tmp_path, "verdicts.jsonl")) == 1
 
@@ -397,10 +398,10 @@ def test_export_to_a_busy_store_writes_nothing_and_warns(tmp_path: Path) -> None
     judged(eval_dir, "base", CASES[0], answer())
     store_path(tmp_path).mkdir()
     with DirectoryLock(store_path(tmp_path)):
-        warning = export_target(tmp_path, eval_dir, "base", CASES, INPUTS, JUDGE, SOURCE)
+        warning = export_target(tmp_path, eval_dir, "base", CASES, INPUTS, JUDGE, SOURCE, RERUN)
     assert warning == (
         "base results were not shared: another pup-finetune process is using "
-        f"{store_path(tmp_path)}; the next run of this command shares them"
+        f"{store_path(tmp_path)}; run `{RERUN}` to share them"
     )
     assert stored(tmp_path, "generations.jsonl") == []
 
@@ -410,7 +411,7 @@ def test_a_directory_stamped_with_other_inputs_shares_nothing(tmp_path: Path) ->
     eval_dir.create()
     stamp(eval_dir, key_inputs("fake", FAKE_PROFILE, {**RENDERING, "renderer_version": "0"}, 64))
     judged(eval_dir, "base", CASES[0], answer())
-    assert export_target(tmp_path, eval_dir, "base", CASES, INPUTS, JUDGE, SOURCE) is None
+    assert export_target(tmp_path, eval_dir, "base", CASES, INPUTS, JUDGE, SOURCE, RERUN) is None
     assert not store_path(tmp_path).exists()
 
 
@@ -433,7 +434,9 @@ def test_an_unstamped_directory_shares_only_as_a_legacy_one_at_version_1(
     monkeypatch.setattr(reuse, "REUSE_VERSION", version)
     inputs = key_inputs("fake", FAKE_PROFILE, RENDERING, 64)
     assert (
-        export_target(tmp_path, eval_dir, "base", CASES, inputs, JUDGE, SOURCE, legacy=legacy)
+        export_target(
+            tmp_path, eval_dir, "base", CASES, inputs, JUDGE, SOURCE, RERUN, legacy=legacy
+        )
         is None
     )
     assert len(stored(tmp_path, "generations.jsonl")) == shared

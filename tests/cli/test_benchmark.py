@@ -452,13 +452,18 @@ def test_a_complete_rerun_whose_renderer_cannot_load_only_warns(
     args = ("benchmark", str(dataset), "--models", "fake-model", "--confirm")
     assert invoke(*args).exit_code == 0
     shutil.rmtree(dataset / "replay_cache")
+    loadable = FakeProvider.renderer
     monkeypatch.setattr(FakeProvider, "renderer", unloadable)
     result = invoke(*args)
     assert result.exit_code == 0, result.stderr
+    words = ["pup", "finetune", *args[:4], "--judge-model", "fake-judge", "--confirm"]
     assert output(result)["warnings"][-1] == (
-        "base results were not shared: the tokenizer of fake-model cannot be loaded; the next "
-        "run of this command shares them"
+        "base results were not shared: the tokenizer of fake-model cannot be loaded; run "
+        f"`{shlex.join(words)}` to share them"
     )
+    monkeypatch.setattr(FakeProvider, "renderer", loadable)
+    assert rerun(shlex.join(words)).exit_code == 0
+    assert (dataset / "replay_cache" / "generations.jsonl").exists()
 
 
 def test_a_benchmark_made_before_reuse_neither_loads_its_renderer_nor_warns(
