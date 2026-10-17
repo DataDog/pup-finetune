@@ -264,6 +264,8 @@ class DatasetDir:
         groups = split_groups(rows)
         dropped = {row_id for row_id, label in labels.items() if not label.keep}
         conflicts = split_conflicts(groups, splits, dropped=dropped)
+        excluded_ids = {r["row_id"] for r in excluded if isinstance(r.get("row_id"), str)}
+        unknown = sorted(set(labels) - {row.id for row in rows} - excluded_ids)
         summary = {
             "total": len(rows) + len(excluded),
             "accepted": len(rows),
@@ -286,6 +288,7 @@ class DatasetDir:
                     more=self._more_rows(),
                 ),
                 *_grouping_warnings(groups, conflicts),
+                *_unknown_label_warnings(unknown),
             ],
         }
         return summary, conflicts
@@ -666,6 +669,20 @@ def _grouping_warnings(groups: SplitGroups, conflicts: Sequence[SplitConflict]) 
             f"requests they share (e.g. rows {shown})"
         )
     return warnings
+
+
+def _unknown_label_warnings(unknown: Sequence[str]) -> list[str]:
+    """A warning about labels of ids that name no accepted or excluded row, such as a typo
+    in a hand-appended label."""
+    if not unknown:
+        return []
+    one = len(unknown) == 1
+    shown = ", ".join(repr(row_id) for row_id in unknown[:3])
+    return [
+        f"{counted(len(unknown), 'label')} in {LABELS_FILE} {'names' if one else 'name'} no row "
+        f"of the dataset (e.g. {shown}), so {'it changes' if one else 'they change'} nothing; "
+        "record labels with `dataset label --file`, which refuses such ids"
+    ]
 
 
 def _group_by_split(

@@ -706,6 +706,22 @@ def test_a_reimport_does_not_adopt_a_hand_added_copy(tmp_path: Path) -> None:
         dataset.rows_by_split()
 
 
+def test_labels_of_unknown_ids_warn(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    rows = [make_row("a", "one", trace_id="t1"), make_row("b", "two", trace_id="t2")]
+    dataset.add(rows, settings=IMPORT)
+    apply_labels(dataset, [Label(id="b", keep=False, reason="off-topic")])
+    dataset.add([], settings=IMPORT, retired=[retire(rows[1])])
+    assert not [w for w in dataset.summary()["warnings"] if "labels.jsonl" in w]
+    with dataset.labels_path.open("a") as handle:
+        handle.write(json.dumps({"id": "a-typo", "keep": False, "reason": "off-topic"}) + "\n")
+    assert [w for w in dataset.summary()["warnings"] if "labels.jsonl" in w] == [
+        "1 label in labels.jsonl names no row of the dataset (e.g. 'a-typo'), so it changes "
+        "nothing; record labels with `dataset label --file`, which refuses such ids"
+    ]
+    assert [row.id for row in dataset.kept_rows()] == ["a"]
+
+
 # --- export -----------------------------------------------------------------------------
 
 
