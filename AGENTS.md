@@ -375,9 +375,10 @@ Source lives under `src/pup_finetune/`.
   alone; `run_command` prints it, after the result's warnings, unless `PUP_FINETUNE_QUIET`
   is on. `dataset.py` has `dataset import`,
   `fetch`, `pull`, `show`, `sample`, `label` and `push`, and `dataset_next`, the next
-  command and steps a dataset directory's state calls for (unlabeled: `dataset sample`;
-  labeled: training steps, since the model is the user's to choose; the provider follows from
-  it and the run directory defaults); `train.py` has `train` (`provider_for_model` infers
+  command and steps a dataset directory's state calls for (unlabeled, or labeled only `by:
+  check` with rows left: `dataset sample`; labeled: training steps, since the model is the
+  user's to choose; the provider follows from it and the run directory defaults); `train.py`
+  has `train` (`provider_for_model` infers
   `--provider` from the registry's aliases, failing on an alias several providers offer),
   `resume`,
   `status`, `cancel` and the hidden `_worker` a detached run executes (and `train

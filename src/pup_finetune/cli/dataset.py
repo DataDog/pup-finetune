@@ -414,7 +414,8 @@ def dataset_next(
 
     With accepted rows and none labeled, the next command is a ``dataset sample`` to
     review (``None`` right after one, ``sampled``), and labeling them, by hand or with a
-    judge council, are the steps; a fetched dataset (``dataset fetch``) was curated in
+    judge council, are the steps (labels a check wrote count as none while rows are
+    unlabeled: no review decided them); a fetched dataset (``dataset fetch``) was curated in
     Datadog, so its rows go straight to training. A triage that is not complete gets a step
     to finish it. Once rows are labeled, the push is a step
     (:meth:`~pup_finetune.curation.pipeline.Pipeline.push_gap`). Training (and
@@ -490,7 +491,7 @@ def _next_by_state(
     source = dataset.settings().get("source")
     # A fetched dataset was curated in Datadog: its rows are the ones to train on.
     fetched = isinstance(source, Mapping) and source.get("kind") == "datadog_dataset"
-    if not state.labeled and not fetched:
+    if state.labeled == state.checked and state.unlabeled and not fetched:
         triage_step = step(
             template(
                 "dataset",

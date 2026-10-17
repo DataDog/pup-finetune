@@ -485,7 +485,12 @@ def _checks_result(
             if plan.references is not None
             else "have the judge council review the rows the checks pass"
         )
-        data["next_steps"].insert(0, step(council, f"{why} (paid; it previews first)"))
+        # It pins --checks, so it stands for the first council step the dataset's state offers.
+        first = template("dataset", "triage", directory, "--rubric", "<RUBRIC_FILE>", "--max-rows")
+        data["next_steps"] = [
+            step(council, f"{why} (paid; it previews first)"),
+            *(s for s in data["next_steps"] if not s["command"].startswith(f"{first} ")),
+        ]
     if stale:
         data["hint"] = (
             f"{len(stale)} rows keep a check label every check now passes, and a label is never "

@@ -108,6 +108,25 @@ def test_labels_move_the_pipeline_on_to_a_first_push_then_training(tmp_path: Pat
 
 
 @pytest.mark.usefixtures("imported")
+def test_rows_only_checks_labeled_are_still_to_review() -> None:
+    checks = ROWS.parent.parent / "evaluators" / "row_checks.py"
+    checked = output(invoke("triage", "ds", "--checks", str(checks)))
+    assert checked["next_command"] == "pup finetune dataset sample ds --count 20"
+    assert [step["command"] for step in checked["next_steps"]] == [
+        f"pup finetune dataset triage ds --checks {checks} --rubric <RUBRIC_FILE>",
+        "pup finetune dataset label ds --file <LABELS_FILE>",
+    ]
+    shown = output(invoke("show", "ds"))
+    assert shown["pipeline"]["rows"]["unlabeled"] == 11
+    assert shown["next_command"] == "pup finetune dataset sample ds --count 20"
+    assert [step["command"] for step in shown["next_steps"]] == [
+        "pup finetune dataset label ds --file <LABELS_FILE>",
+        "pup finetune dataset triage ds --rubric <RUBRIC_FILE> --max-rows 20",
+    ]
+    assert pipeline_state(DatasetDir(Path("ds"))).checked == 3
+
+
+@pytest.mark.usefixtures("imported")
 def test_with_every_row_dropped_there_is_nothing_to_push_or_train_on(tmp_path: Path) -> None:
     labels = tmp_path / "labels.jsonl"
     labels.write_text(
