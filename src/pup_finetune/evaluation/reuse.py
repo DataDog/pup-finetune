@@ -4,7 +4,7 @@
 #
 # This product includes software developed at Datadog (https://www.datadoghq.com/).
 # Copyright 2026-present Datadog, Inc.
-"""Base-model results shared by the evaluations of one dataset.
+"""Base-model results shared by the evaluations and benchmarks of one dataset.
 
 A dataset directory keeps a content-addressed store, ``replay_cache/`` (``0700``, files
 ``0600``): ``generations.jsonl``, one base answer per :func:`generation_key`, and

@@ -128,8 +128,8 @@ DOC = CommandDoc(
         "anthropic/claude-haiku-5-5 when an Anthropic credential resolves (ANTHROPIC_API_KEY, "
         "the OS keychain or the Anthropic SDK's login), else openai/gpt-5.4-mini when an "
         "OpenAI one does, else Fireworks' deepseek-v4p1-flash; the preview names it and "
-        "where it came from (judge_source). Base answers from another evaluation of the "
-        "same dataset, made under the same settings, are reused from "
+        "where it came from (judge_source). Base answers from another evaluation or "
+        "benchmark of the same dataset, made under the same settings, are reused from "
         "DATASET/replay_cache, together with their judgments when the judge is the same; "
         "--no-reuse makes them again.",
     ),

@@ -215,6 +215,21 @@ def test_a_second_run_reuses_the_base_answers_and_verdicts_of_the_first(
     assert {line["source"]["run_id"] for line in store} == {source["run_id"]}
 
 
+def test_an_evaluation_reuses_the_answers_of_a_benchmark(
+    dataset: Path, second: Path, sampled: list[CheckpointRef | None]
+) -> None:
+    benchmarked = invoke("benchmark", str(dataset), "--models", "fake-model", "--confirm")
+    assert benchmarked.exit_code == 0, benchmarked.stderr
+    preview = output(invoke("evaluate", str(second)))["preview"]
+    base = preview["reuse"]["by_target"]["base"]
+    assert (base["generations"], base["verdicts"]) == (preview["cases"], preview["cases"])
+    assert base["from"] == ["benchmark"]
+    sampled.clear()  # the benchmark's own base sampler
+    result = invoke("evaluate", str(second), "--confirm")
+    assert result.exit_code == 0, result.stderr
+    assert None not in sampled
+
+
 def test_another_max_tokens_reuses_nothing(first: Path, second: Path) -> None:
     preview = output(invoke("evaluate", str(second), "--max-tokens", "512"))["preview"]
     assert preview["reuse"]["by_target"] == {}

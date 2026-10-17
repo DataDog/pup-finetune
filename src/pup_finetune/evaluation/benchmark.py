@@ -13,7 +13,9 @@ a seeded sample of the test conversations), the judge and the output directory.
 model in turn (:func:`~pup_finetune.evaluation.replay.run_replay`, with the model alias as
 its one target), in a session of its own that ends before the next model starts, into
 ``OUT/<model>``; a rerun resumes every model where it stopped. A model whose session cannot
-start is recorded as an error and the others still run.
+start is recorded as an error and the others still run. Base answers and verdicts are shared
+with the dataset's other evaluations and benchmarks (:mod:`~pup_finetune.evaluation.reuse`):
+a model with every answer reused opens no session.
 
 :func:`leaderboard` ranks the models by judge pass rate, with a 95% bootstrap CI over
 trajectories and each one's paired gap to the best; :func:`recommend` names the model to
@@ -30,7 +32,7 @@ import threading
 from collections import defaultdict
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
@@ -74,6 +76,8 @@ from pup_finetune.storage import (
 if TYPE_CHECKING:
     from pup_finetune.evaluation.cases import ReplayCase
     from pup_finetune.evaluation.judge import Judgment
+    from pup_finetune.evaluation.replay import EvalDir
+    from pup_finetune.evaluation.reuse import ReuseIndex, TargetReuse
     from pup_finetune.inference import ChatCompleter, JudgeConfig
 
 __all__ = [
@@ -113,6 +117,7 @@ class BenchmarkSettings:
     seed: int = DEFAULT_SEED
     skip_calibration: bool = False
     target_pass_rate: float = DEFAULT_TARGET_PASS_RATE
+    reuse: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +147,12 @@ class BenchmarkPlan:
     runtime: Runtime
     sampled_from: int | None = None
     """How many test conversations ``--max-rows`` sampled from; ``None`` when it cut none."""
+    keys: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+    """Each model's answer key per case in the dataset's store, by model and case id; read
+    only when the store exists (see :meth:`keys_for`)."""
+    reuse: ReuseIndex | None = None
+    """What the dataset's store holds for this plan, read once when it was planned; ``None``
+    with ``--no-reuse``."""
 
     @property
     def out_dir(self) -> Path:
@@ -186,29 +197,75 @@ class BenchmarkPlan:
             "max_cases_per_trajectory": self.settings.max_cases_per_trajectory,
             # Only when it sampled, so one that cut nothing resumes without --max-rows.
             **({} if self.sampled_from is None else {"max_rows": self.settings.max_rows}),
+            **({} if self.settings.reuse else {"reuse": False}),
         }
 
-    def remaining(self, candidate: Candidate) -> dict[str, int]:
-        """What a run would still do for ``candidate``: ``{"done", "generate", "judge"}``.
+    def _matching_dir(self, candidate: Candidate) -> EvalDir | None:
+        """``candidate``'s directory when what it holds counts for this plan; ``None`` when
+        ``--confirm`` would start it again (another identity, no work).
 
-        Raises :class:`SettingsConflict` when its directory holds work done under other
-        settings, which ``--confirm`` would refuse.
+        Raises :class:`SettingsConflict` when it holds work done under other settings, which
+        ``--confirm`` would refuse.
         """
-        from pup_finetune.evaluation.replay import EvalDir, remaining_work
+        from pup_finetune.evaluation.replay import EvalDir
 
         eval_dir = EvalDir(self.model_dir(candidate))
         stored = eval_dir.stored_identity()
         wanted = finite_json(self.identity(candidate))
-        if stored is not None and canonical_json(stored) != canonical_json(wanted):
-            if eval_dir.has_work():
-                raise SettingsConflict(
-                    f"{display_path(eval_dir.path)} holds a benchmark with other settings "
-                    f"(changed: {', '.join(identity_changes(stored, wanted))}), so its "
-                    "results cannot be reused",
-                    hint="benchmark into a new directory: pass a new --out-dir",
-                )
-            return {"done": 0, "generate": len(self.cases), "judge": len(self.cases)}
-        return remaining_work(eval_dir, {candidate.target: self.cases})[candidate.target]
+        if stored is None or canonical_json(stored) == canonical_json(wanted):
+            return eval_dir
+        if eval_dir.has_work():
+            raise SettingsConflict(
+                f"{display_path(eval_dir.path)} holds a benchmark with other settings "
+                f"(changed: {', '.join(identity_changes(stored, wanted))}), so its "
+                "results cannot be reused",
+                hint="benchmark into a new directory: pass a new --out-dir",
+            )
+        return None
+
+    def reused(self, candidate: Candidate) -> TargetReuse | None:
+        """What ``candidate`` takes from the dataset's store for the pairs its directory has
+        not done; ``None`` with ``--no-reuse``."""
+        from pup_finetune.evaluation.reuse import plan_target
+
+        if self.reuse is None:
+            return None
+        eval_dir = self._matching_dir(candidate)
+        return plan_target(
+            self.reuse,
+            candidate.target,
+            self.cases,
+            self.keys.get(candidate.target, {}),
+            self.judge,
+            {} if eval_dir is None else eval_dir.read_generations(),
+            {} if eval_dir is None else eval_dir.read_results(),
+        )
+
+    def keys_for(self, candidate: Candidate) -> Mapping[str, str]:
+        """``candidate``'s answer key per case: the plan's, else computed now (which loads
+        its renderer)."""
+        found = self.keys.get(candidate.target)
+        return found if found is not None else _keys(self, candidate)
+
+    def remaining(self, candidate: Candidate) -> dict[str, int]:
+        """What a run would still do for ``candidate``: ``{"done", "generate", "judge"}``,
+        less what it takes from the dataset's store.
+
+        Raises :class:`SettingsConflict` when its directory holds work done under other
+        settings, which ``--confirm`` would refuse.
+        """
+        from pup_finetune.evaluation.replay import remaining_work
+
+        eval_dir = self._matching_dir(candidate)
+        if eval_dir is None:
+            found = {"done": 0, "generate": len(self.cases), "judge": len(self.cases)}
+        else:
+            found = remaining_work(eval_dir, {candidate.target: self.cases})[candidate.target]
+        taken = self.reused(candidate)
+        if taken is not None:
+            found["generate"] -= len(taken.generations)
+            found["judge"] -= len(taken.verdicts)
+        return found
 
     def split_warnings(self) -> list[str]:
         """A warning when the test split is too small for the intervals to separate models."""
@@ -268,9 +325,13 @@ class BenchmarkPlan:
             words += ["--target-pass-rate", str(settings.target_pass_rate)]
         if settings.skip_calibration:
             words.append("--skip-calibration")
+        if not settings.reuse:
+            words.append("--no-reuse")
         return words
 
-    def recipients(self) -> list[str]:
+    def recipients(self, providers: Sequence[str]) -> list[str]:
+        """Who receives the test split: the ``providers`` of the models with a case left to
+        generate, and the judge."""
         from pup_finetune.judges import recipient
 
         judge = (
@@ -278,8 +339,8 @@ class BenchmarkPlan:
             if self.judge.provider == "fake"
             else f"{recipient(self.judge)} (judge)"
         )
-        providers = sorted({candidate.provider for candidate in self.candidates})
-        return [f"test split -> {', '.join(providers)} (generate), {judge}"]
+        generate = f"{', '.join(providers)} (generate), " if providers else ""
+        return [f"test split -> {generate}{judge}"]
 
     def preview(self) -> dict[str, Any]:
         """The calls the benchmark makes; work ``--out-dir`` already holds is left out."""
@@ -291,12 +352,18 @@ class BenchmarkPlan:
         models: list[dict[str, Any]] = []
         generate = judge_calls = done = 0
         calls_by_provider: dict[str, int] = defaultdict(int)
+        names: list[str] = []
+        taken: list[tuple[TargetReuse, int]] = []
         for candidate in self.candidates:
             remaining = self.remaining(candidate)
             generate += remaining["generate"]
             judge_calls += remaining["judge"]
             done += remaining["done"]
-            calls_by_provider[candidate.provider] += remaining["generate"]
+            if remaining["generate"]:
+                calls_by_provider[candidate.provider] += remaining["generate"]
+            reused = self.reused(candidate)
+            if reused is not None:
+                taken.append((reused, remaining["generate"]))
             models.append(
                 {
                     "model": candidate.target,
@@ -304,10 +371,15 @@ class BenchmarkPlan:
                     "base_model": candidate.profile.base_model,
                     "already_done": remaining["done"],
                     "generation_calls": remaining["generate"],
+                    "reused": {"generations": 0, "verdicts": 0}
+                    if reused is None
+                    else reused.counts(),
                 }
             )
+            idle = "" if remaining["generate"] else " (no session for it)"
+            names.append(f"{candidate.target}{idle}")
         calibration = self.calibration_calls()
-        warnings = self.split_warnings()
+        warnings = [*self.split_warnings(), *(() if self.reuse is None else self.reuse.warnings)]
         if judge_calls + calibration:
             # --confirm would fail on a key nothing provides: fail now, never offer it. A
             # read-only preview offers none, so it only warns.
@@ -325,13 +397,19 @@ class BenchmarkPlan:
             if self.judge.provider == "fake"
             else destination(self.judge)
         )
-        names = ", ".join(candidate.target for candidate in self.candidates)
         sampled = "" if self.sampled_from is None else f" (of {self.sampled_from}, --max-rows)"
+        providers = sorted(calls_by_provider)
+        sent = f"{', '.join(providers)} to generate and to " if providers else ""
         return {
-            "action": f"benchmark {_models(len(self.candidates))} ({names}) on "
+            "action": f"benchmark {_models(len(self.candidates))} ({', '.join(names)}) on "
             f"{len(self.cases)} cases from {self.trajectories} test conversations{sampled}: "
-            "generate each with every model, one model at a time in a session of its own, and "
-            f"judge each answer with {judge_name}",
+            + (
+                "generate each with every model, one model at a time in a session of its own, "
+                f"and judge each answer with {judge_name}"
+                if generate
+                else "every answer is already generated, so no session opens; judge any answer "
+                f"left with {judge_name}"
+            ),
             "billing": "; ".join(billing),
             "dataset": display_path(self.dataset_dir),
             "out_dir": display_path(self.out_dir),
@@ -351,6 +429,7 @@ class BenchmarkPlan:
             "judge_calls": judge_calls + calibration,
             "calibration_calls": calibration,
             "max_generated_tokens": generate * settings.max_tokens,
+            "reuse": self._reuse_block(taken),
             "settings": {
                 "models": [candidate.target for candidate in self.candidates],
                 "judge_model": self.judge.spec,
@@ -361,12 +440,32 @@ class BenchmarkPlan:
                 "seed": settings.seed,
                 "calibration": not settings.skip_calibration,
                 "target_pass_rate": settings.target_pass_rate,
+                "reuse": settings.reuse,
             },
-            "data_destination": "the test split's conversations are sent to "
-            f"{', '.join(sorted(calls_by_provider))} to generate and to {judged_at} to judge",
-            "data_recipients": self.recipients(),
+            "data_destination": f"the test split's conversations are sent to {sent}{judged_at} "
+            "to judge",
+            "data_recipients": self.recipients(providers),
             "caveat": CAVEAT,
             "warnings": warnings,
+        }
+
+    def _reuse_block(self, taken: Sequence[tuple[TargetReuse, int]]) -> dict[str, Any]:
+        """The preview's ``reuse``: the store, its oldest answer reused, and the calls and
+        sessions that saves; ``taken`` is each model's reuse and generations left."""
+        if self.reuse is None:
+            return {"status": "off"}
+        answers = sum(len(reused.generations) for reused, _ in taken)
+        stamps = [reused.oldest_sampled_at for reused, _ in taken if reused.oldest_sampled_at]
+        return {
+            "status": "on",
+            "store": display_path(self.reuse.store),
+            "oldest_sampled_at": min(stamps, default=None),
+            "saved": {
+                "generation_calls": answers,
+                "judge_calls": sum(len(reused.verdicts) for reused, _ in taken),
+                "max_generated_tokens": answers * self.settings.max_tokens,
+                "sessions": sum(1 for reused, left in taken if reused.generations and not left),
+            },
         }
 
 
@@ -401,11 +500,15 @@ def plan_benchmark(
 
     Raises :class:`UsageError` for fewer than one model, a model given twice, a missing
     package, a judge that is one of the models, or a test split with no case. With
-    ``max_rows``, the cases are those of :func:`sample_conversations`.
+    ``max_rows``, the cases are those of :func:`sample_conversations`. Unless
+    ``settings.reuse`` is off, the dataset's store of base results is read here, once: each
+    model's renderer is loaded for the keys only when the store exists.
     """
     from pup_finetune.curation.pipeline import require_in_datadog
     from pup_finetune.evaluation.cases import build_cases
     from pup_finetune.evaluation.judge import check_judge_differs
+    from pup_finetune.evaluation.replay import EvalDir
+    from pup_finetune.evaluation.reuse import ReuseIndex, Wanted, store_path
 
     dataset = DatasetDir(dataset_dir)
     by_split = dataset.rows_by_split()
@@ -452,7 +555,7 @@ def plan_benchmark(
     if settings.max_rows is not None and settings.max_rows < conversations:
         cases = sample_conversations(cases, settings.max_rows, seed=settings.seed)
         sampled_from = conversations
-    return BenchmarkPlan(
+    plan = BenchmarkPlan(
         dataset_dir=dataset_dir,
         candidates=tuple(candidates),
         cases=cases,
@@ -462,6 +565,31 @@ def plan_benchmark(
         runtime=runtime,
         sampled_from=sampled_from,
     )
+    if not settings.reuse:
+        return plan
+    if not store_path(dataset_dir).exists():
+        return replace(plan, reuse=ReuseIndex(store_path(dataset_dir)))
+    keys = {candidate.target: _keys(plan, candidate) for candidate in candidates}
+    wanted = [
+        Wanted(c.target, cases, keys[c.target], EvalDir(plan.model_dir(c)).read_generations())
+        for c in candidates
+    ]
+    return replace(plan, keys=keys, reuse=ReuseIndex.load(dataset_dir, judge, wanted))
+
+
+def _keys(plan: BenchmarkPlan, candidate: Candidate) -> dict[str, str]:
+    """``candidate``'s answer key per case, by case id, from its full renderer identity."""
+    from pup_finetune.evaluation.reuse import generation_key
+
+    provider = get_provider(candidate.provider, plan.runtime)
+    provider.validate_options({})
+    rendering = provider.renderer(candidate.profile).identity()
+    return {
+        case.id: generation_key(
+            candidate.provider, candidate.profile, rendering, plan.settings.max_tokens, case
+        )
+        for case in plan.cases
+    }
 
 
 def _stored_judge(out_dir: Path, candidates: Sequence[Candidate]) -> str | None:
@@ -536,19 +664,67 @@ def _calibration(plan: BenchmarkPlan, client: ChatCompleter) -> dict[str, Any] |
     return report
 
 
+def _import(plan: BenchmarkPlan, candidate: Candidate) -> None:
+    """Copy what ``candidate`` takes from the dataset's store into its directory."""
+    from pup_finetune.evaluation.replay import EvalDir
+    from pup_finetune.evaluation.reuse import import_target
+
+    if plan.reuse is None or not (plan.reuse.generations or plan.reuse.verdicts):
+        return
+    eval_dir = EvalDir(plan.model_dir(candidate))
+    eval_dir.create()
+    with eval_dir.lock():
+        eval_dir.check_identity(plan.identity(candidate))
+        taken = plan.reused(candidate)
+        if taken is None or not any(taken.counts().values()):
+            return
+        copied = import_target(eval_dir, taken, plan.cases)
+    info(
+        f"reusing {copied['generations']} answers of {candidate.target} "
+        f"({copied['verdicts']} judged) from {display_path(plan.reuse.store)}"
+    )
+
+
+def _share(plan: BenchmarkPlan, candidate: Candidate, warnings: list[str]) -> None:
+    """Add ``candidate``'s own answers and verdicts to the dataset's store; a warning when
+    they could not be."""
+    from pup_finetune.evaluation.replay import EvalDir
+    from pup_finetune.evaluation.reuse import export_target
+
+    eval_dir = EvalDir(plan.model_dir(candidate))
+    if not eval_dir.has_work():
+        return
+    warning = export_target(
+        plan.dataset_dir,
+        eval_dir,
+        candidate.target,
+        plan.cases,
+        plan.keys_for(candidate),
+        plan.judge,
+        {"command": "benchmark", "run_id": None},
+    )
+    if warning is not None and warning not in warnings:
+        warnings.append(warning)
+
+
 def _replay_model(
     plan: BenchmarkPlan,
     candidate: Candidate,
     client: ChatCompleter,
     cancel: threading.Event,
+    warnings: list[str],
 ) -> dict[str, Any] | None:
-    """Replay every case with ``candidate``; the error that kept its session from starting,
-    or ``None``."""
+    """Replay every case with ``candidate`` (after copying what it takes from the dataset's
+    store), then share its answers; the error that kept its session from starting, or
+    ``None``."""
     from pup_finetune.evaluation.judge import judge
     from pup_finetune.evaluation.replay import run_replay
 
+    _import(plan, candidate)
     remaining = plan.remaining(candidate)
     if not remaining["judge"]:
+        # A rerun of a complete model shares what an older one never did.
+        _share(plan, candidate, warnings)
         return None
     config = plan.judge
 
@@ -578,13 +754,14 @@ def _replay_model(
     info(f"benchmarking {candidate.target} on {candidate.provider}")
     if not remaining["generate"]:
         replay({})
-        return None
-    try:
-        with _base_sampler(plan, candidate) as sampler:
-            replay({candidate.target: sampler})
-    except ExternalError as exc:
-        info(f"{candidate.target} could not be benchmarked: {redact(exc.message)}")
-        return error_json(exc)
+    else:
+        try:
+            with _base_sampler(plan, candidate) as sampler:
+                replay({candidate.target: sampler})
+        except ExternalError as exc:
+            info(f"{candidate.target} could not be benchmarked: {redact(exc.message)}")
+            return error_json(exc)
+    _share(plan, candidate, warnings)
     return None
 
 
@@ -595,6 +772,7 @@ def execute(plan: BenchmarkPlan) -> dict[str, Any]:
 
     cancel = threading.Event()
     errors: dict[str, dict[str, Any]] = {}
+    shared: list[str] = []
     EvalDir(plan.out_dir).create()
     with DirectoryLock(plan.out_dir), cancel_on_signals(cancel):
         calls = plan.judge_calls()
@@ -605,11 +783,11 @@ def execute(plan: BenchmarkPlan) -> dict[str, Any]:
             for candidate in plan.candidates:
                 if cancel.is_set():
                     break
-                error = _replay_model(plan, candidate, client, cancel)
+                error = _replay_model(plan, candidate, client, cancel, shared)
                 if error is not None:
                     errors[candidate.target] = error
     board = leaderboard(plan, errors)
-    result = _result(plan, board, calibration=calibration, cancelled=cancel.is_set())
+    result = _result(plan, board, calibration=calibration, cancelled=cancel.is_set(), shared=shared)
     atomic_write_json(plan.out_dir / RESULT_FILE, finite_json(result))
     return result
 
@@ -704,6 +882,7 @@ def _entry(
         "pending": target["pending"],
         "truncated": target["truncated"],
         "unparseable": unparseable,
+        "reused": target["reused"],
         "latency_p50_s": statistics.median(latencies) if latencies else None,
         "gap_to_best": None,
         "within_noise_of_best": None,
@@ -816,6 +995,7 @@ def _result(
     *,
     calibration: Mapping[str, Any] | None,
     cancelled: bool,
+    shared: Sequence[str] = (),
 ) -> dict[str, Any]:
     from pup_finetune.evaluation.replay import CAVEAT, truncation_warning
 
@@ -860,6 +1040,7 @@ def _result(
                 f"{entry['out_dir']}) and count as failures"
             )
     warnings += plan.split_warnings()
+    warnings += shared
     return finite_json(
         {
             "status": status,

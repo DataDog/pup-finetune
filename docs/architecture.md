@@ -379,9 +379,12 @@ provider, and talks to models only through the `Sampler` protocol.
   samplers are chosen from the directory after that copy, so a base model with every answer
   reused costs no base sampler (on Baseten, one less GPU deployment). After the replay, the
   run adds its own base answers and its verdicts with a judge answer (never tuned or compare
-  ones) under the store's lock, tried once: a busy or unwritable store is a warning. There
-  is no age limit: the preview shows the oldest answer reused, and `--no-reuse`, frozen in
-  `evaluation.json` only when set, makes them again.
+  ones) under the store's lock, tried once: a busy or unwritable store is a warning.
+  `benchmark` shares its models' answers the same way, keyed on each model's full renderer
+  identity, so evaluating the model it recommends reuses the base side; a benchmark model
+  with every answer reused opens no session, and a rerun of a complete one shares what an
+  older run never did. There is no age limit: the preview shows the oldest answer reused,
+  and `--no-reuse`, frozen in `evaluation.json` only when set, makes them again.
 - **Summary** (`summary.json`). Per target, the judge pass rate, every metric's rate and the
   mean of per-trajectory agreement. Across targets, the cases both answered are compared
   verdict by verdict (wins, regressions, ties), and `tuned_minus_base` is the mean paired
