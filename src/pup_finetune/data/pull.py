@@ -305,7 +305,11 @@ def collect(
         e.row_id for e in result.exclusions if e.row_id is not None
     }
     result.exclusions.extend(_unreadable(span) for span in pages.stats.unreadable)
-    result.rows = _up_to_target(rows, options.target_count, dropped)
+    target = options.target_count
+    if options.sample == "random":
+        # Stored rows this read stops short of keep their places in the sample.
+        target -= len(held - dropped - result.read_ids)
+    result.rows = _up_to_target(rows, max(0, target), dropped)
     result.over_target = len(rows) - len(result.rows)
     result.counted = sum(1 for row in result.rows if row.id not in dropped)
     if stopped is None:
@@ -352,6 +356,8 @@ def _convert(
     for row in capped:
         cap, trace = options.max_rows_per_trace, row.source.trace_id
         detail = f"past the first --max-rows-per-trace {cap} rows of trace {trace!r}"
+        if options.sample == "random":
+            detail = f"past the --max-rows-per-trace {cap} rows kept of trace {trace!r}"
         result.exclusions.append(Exclusion.for_row(row, ExclusionCode.TRACE_ROW_CAP, detail))
     result.stats = conversion.stats
     return result
@@ -812,7 +818,8 @@ def pull(
             retired=retired,
             updated=updated,
         )
-        write_limits(dataset, options, exhausted=collection.stopped == "exhausted")
+        exhausted = collection.stopped == "exhausted" and collection.over_target == 0
+        write_limits(dataset, options, exhausted=exhausted)
     return collection, added
 
 
@@ -823,7 +830,7 @@ are what a rerun without them continues toward."""
 
 def read_limits(dataset: DatasetDir) -> tuple[int, int, bool] | None:
     """``(target_count, max_candidates, exhausted)`` of ``dataset``'s last pull (``exhausted``:
-    it read every matching span), or ``None``."""
+    it read every matching span and the target cut no row), or ``None``."""
     try:
         data = read_json(dataset.path / LIMITS_FILE)
     except (FileNotFoundError, ValueError):
@@ -840,9 +847,9 @@ def read_limits(dataset: DatasetDir) -> tuple[int, int, bool] | None:
 
 def write_limits(dataset: DatasetDir, options: PullOptions, *, exhausted: bool = False) -> None:
     """Record ``options``' limits as ``dataset``'s last pull's, and whether it read every
-    matching span. :func:`pull` records them, under the ``raw/`` lock, when it starts, so the
-    rerun that resumes a pull which failed part-way continues toward the limits it was given,
-    and again once it ends."""
+    matching span with no row cut by the target. :func:`pull` records them, under the
+    ``raw/`` lock, when it starts, so the rerun that resumes a pull which failed part-way
+    continues toward the limits it was given, and again once it ends."""
     atomic_write_json(
         dataset.path / LIMITS_FILE,
         {

@@ -297,7 +297,7 @@ pup finetune dataset pull [OPTIONS] DIR
 | `--from` | `TIME` | `7d` | Start: ISO 8601, epoch ms, or relative: 7d, 24h, now-7d, now. |
 | `--to` | `TIME` | `now` | End, in the same forms as --from. |
 | **Limits** | | | |
-| `--target-count` | `N (x>=1)` | `200` | Stop once this many rows are accepted. |
+| `--target-count` | `N (x>=1)` | `200` | Rows to accept (--sample first stops reading there). |
 | `--max-candidates` | `N (x>=1)` | `5000` | Read at most this many spans. |
 | **Rows** | | | |
 | `--reasoning` | `omit\|preserve` | `omit` | omit or preserve reasoning messages. |
@@ -305,7 +305,7 @@ pup finetune dataset pull [OPTIONS] DIR
 | `--sample` | `first\|random` | `first` | first rows read, or random: spread over traces (by --seed). |
 | `--max-rows-per-trace` | `N (x>=1)` |  | At most this many rows from any one trace. |
 | **Splits** | | | |
-| `--seed` | `N` | `42` | Seed for the split assignment. |
+| `--seed` | `N` | `42` | Seed for the splits and --sample random. |
 | `--validation-fraction` | `X` | `0.1` | Share of traces for validation. |
 | `--test-fraction` | `X` | `0.1` | Share of traces for test. |
 

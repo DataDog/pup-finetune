@@ -124,6 +124,12 @@ SeedOption = Annotated[
     int,
     typer.Option(metavar="N", help="Seed for the split assignment.", rich_help_panel=SPLITS_PANEL),
 ]
+PullSeedOption = Annotated[
+    int,
+    typer.Option(
+        metavar="N", help="Seed for the splits and --sample random.", rich_help_panel=SPLITS_PANEL
+    ),
+]
 ValidationFractionOption = Annotated[
     float,
     typer.Option(metavar="X", help="Share of traces for validation.", rich_help_panel=SPLITS_PANEL),
@@ -195,7 +201,7 @@ TargetCountOption = Annotated[
     typer.Option(
         min=1,
         metavar="N",
-        help="Stop once this many rows are accepted.",
+        help="Rows to accept (--sample first stops reading there).",
         rich_help_panel=LIMITS_PANEL,
     ),
 ]
@@ -570,7 +576,7 @@ def _pull_more_steps(dataset: DatasetDir, directory: Path, state: Pipeline) -> l
     toward the target)."""
     limits = read_limits(dataset)
     if limits is None or limits[2] or not state.dropped or state.kept >= limits[0]:
-        return []  # no pull, or the last one read every matching span
+        return []  # no pull, or the last one read and kept every matching row
     return [
         step(
             command("dataset", "pull", directory),
@@ -894,7 +900,7 @@ def pull_rows(
     include_errors: IncludeErrorsOption = False,
     sample: SampleOption = "first",
     max_rows_per_trace: MaxRowsPerTraceOption = None,
-    seed: SeedOption = DEFAULT_SEED,
+    seed: PullSeedOption = DEFAULT_SEED,
     validation_fraction: ValidationFractionOption = DEFAULT_VALIDATION_FRACTION,
     test_fraction: TestFractionOption = DEFAULT_TEST_FRACTION,
 ) -> dict[str, Any]:
@@ -1375,6 +1381,12 @@ def _collection_warnings(collection: Collection, options: PullOptions) -> list[s
                 f"fewer than --target-count {options.target_count}; widen the filter or the "
                 "time range for more"
             )
+    if options.sample == "random" and collection.stopped == "max_candidates":
+        warnings.append(
+            f"--sample random covers only the first --max-candidates {options.max_candidates} "
+            "spans of the time range (oldest first), not all of it; raise --max-candidates or "
+            "narrow --from and --to to sample the whole range"
+        )
     if unreadable:
         warnings.append(
             f"{unreadable} spans could not be read and were skipped (excluded as unreadable_span)"

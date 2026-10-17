@@ -189,6 +189,15 @@ def test_a_pull_with_sample_random_reads_every_span_and_spreads_the_rows(
     assert len(traces) == len(set(traces)) == 3
 
 
+def test_a_random_pull_cut_short_by_max_candidates_warns_it_samples_the_oldest_spans(
+    api: FakeExportApi,
+) -> None:
+    data = output_json(fresh("--sample", "random", "--max-candidates", "3", "--target-count", "1"))
+    assert data["pull"]["stopped"] == "max_candidates"
+    (warning,) = [warning for warning in data["warnings"] if "oldest first" in warning]
+    assert "--max-candidates 3" in warning
+
+
 def test_max_candidates_equal_to_every_span_is_not_a_short_read(api: FakeExportApi) -> None:
     data = output_json(fresh("--max-candidates", "10"))
     assert data["pull"]["matched_spans"] == 10
@@ -732,6 +741,22 @@ def test_a_rerun_keeps_the_last_target_and_a_review_s_drops_are_replaced(
     refilled = output_json(pull(target))
     assert refilled["pull"]["added"] == 1
     assert refilled["pipeline"]["rows"]["kept"] == 2
+
+
+def test_a_random_pull_that_read_every_span_still_steps_to_replace_a_review_s_drops(
+    api: FakeExportApi, tmp_path: Path
+) -> None:
+    target = tmp_path / "ds"
+    first = output_json(pull(target, "--sample", "random", "--target-count", "2"))
+    # Every span is read, but the target cut rows a rerun can replace drops with.
+    assert (first["pull"]["stopped"], first["pull"]["rows_over_target"]) == ("exhausted", 2)
+    first_row = json.loads((target / "rows.jsonl").read_text().splitlines()[0])["id"]
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(json.dumps({"id": first_row, "keep": False, "reason": "synthetic"}) + "\n")
+    labeled = output_json(invoke("label", str(target), "--file", str(labels)))
+    pull_more = [step for step in labeled["next_steps"] if " dataset pull " in step["command"]]
+    assert pull_more and pull_more[0]["command"].endswith("dataset pull ds")
+    assert output_json(pull(target))["pull"]["added"] == 1
 
 
 def test_the_pull_more_step_stops_once_every_matching_span_was_read(

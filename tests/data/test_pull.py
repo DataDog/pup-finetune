@@ -1082,6 +1082,7 @@ def test_a_random_sample_deals_a_trace_s_next_row_only_up_to_the_cap() -> None:
     assert traces(collection.rows).count("busy") == 2
     capped = [e for e in collection.exclusions if e.code is ExclusionCode.TRACE_ROW_CAP]
     assert [e.trace_id for e in capped] == ["busy"] * 4
+    assert "past the --max-rows-per-trace 2 rows kept of trace 'busy'" in capped[0].detail
 
 
 def test_rows_dropped_from_a_random_sample_are_replaced_by_the_next_ones_dealt() -> None:
@@ -1115,6 +1116,35 @@ def test_a_random_pull_resumes_to_its_rows_and_deals_on_from_them(tmp_path: Path
     new = traces(dataset.rows()[2:])
     assert len(set(new)) == 2
     assert all(trace.startswith("quiet-") for trace in new)
+
+
+def test_a_random_rerun_reading_less_counts_the_stored_rows_it_does_not_reach(
+    tmp_path: Path,
+) -> None:
+    def row(n: int) -> dict[str, Any]:
+        question = {"role": "user", "content": f"Question {n}?"}
+        answer = {"role": "assistant", "content": f"Answer {n}."}
+        return item(f"span-{n}", [SYSTEM, question, answer], trace_id=f"trace-{n}")
+
+    items = [row(n) for n in range(8)]
+    pages = [page(items[:4], after="cursor-2"), page(items[4:])]
+    dataset = DatasetDir(tmp_path / "ds")
+
+    def pull_random(**limits: Any) -> Any:
+        api = FakeExportApi(pages)
+        pup = api.install(FakePup()).client()
+        query = SpanQuery(ml_app="synthetic")
+        options = PullOptions(query, sample="random", target_count=4, **limits)
+        return pull(pup, options, dataset, SplitParams())
+
+    pull_random()
+    stored = [row.id for row in dataset.rows()]
+    assert {"trace-4", "trace-5", "trace-6", "trace-7"} & set(traces(dataset.rows()))
+    # Page 1 alone holds part of the sample; the stored rows on page 2 still count.
+    collection, added = pull_random(max_candidates=4)
+    assert collection.stopped == "max_candidates"
+    assert added.added == 0
+    assert [row.id for row in dataset.rows()] == stored
 
 
 def test_a_pull_holds_a_trace_to_the_cap_with_the_rows_it_stored(tmp_path: Path) -> None:
