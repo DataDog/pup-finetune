@@ -55,6 +55,7 @@ however much later it runs.
 from __future__ import annotations
 
 import hashlib
+import heapq
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
@@ -345,7 +346,8 @@ def _convert(
     cap = options.max_rows_per_trace
     taken: Counter[str | None] = Counter()
     by_hash: dict[str, str] = {}
-    for row in _ordered(rows, options, seed, held):
+
+    def keep(row: TrainingRow) -> bool:
         trace = row.source.trace_id
         if cap is not None and taken[trace] >= cap:
             # Not hashed, so a copy of its conversation in a trace with room is kept.
@@ -353,49 +355,63 @@ def _convert(
             if options.sample == "random":
                 detail = f"past the --max-rows-per-trace {cap} rows kept of trace {trace!r}"
             result.exclusions.append(Exclusion.for_row(row, ExclusionCode.TRACE_ROW_CAP, detail))
-            continue
+            return False
         other = by_hash.setdefault(row_content_hash(row), row.id)
         if other != row.id:
             detail = f"same conversation as row {other!r}"
             exclusion = Exclusion.for_row(row, ExclusionCode.DUPLICATE_CONVERSATION, detail)
             result.exclusions.append(exclusion)
             result.duplicates.append((row, other))
-            continue
+            return False
         taken[trace] += 1
         result.rows.append(row)
+        return True
+
+    _ordered(rows, options, seed, held, keep)
     result.stats = conversion.stats
     return result
 
 
 def _ordered(
-    rows: Sequence[TrainingRow], options: PullOptions, seed: int, held: AbstractSet[str]
-) -> list[TrainingRow]:
-    """``rows`` in the order they count toward ``target_count``.
+    rows: Sequence[TrainingRow],
+    options: PullOptions,
+    seed: int,
+    held: AbstractSet[str],
+    keep: Callable[[TrainingRow], bool],
+) -> None:
+    """Offer ``rows`` to ``keep`` in the order they count toward ``target_count``.
 
     With ``sample="first"`` the order is conversion's (time order). With ``sample="random"``
-    rows are dealt in rounds: each trace ranks its rows (``held`` ones first, then by
-    ``sha256(f"sample:{seed}:{row id}")``), round ``k`` holds the ``k``-th row of every trace
-    that has one, in the order of ``sha256(f"sample:{seed}:{trace id}")``, and held rows
-    lead. No rank depends on how far a pull read, so a rerun keeps the rows it stored and
-    deals on from them.
+    rows are dealt in turns: each trace ranks its rows (``held`` ones first, then by
+    ``sha256(f"sample:{seed}:{row id}")``), and the next turn goes to the trace with the
+    fewest rows kept, ties broken by ``sha256(f"sample:{seed}:{trace id}")``, held rows
+    leading. On its turn a trace offers rows until ``keep`` takes one, so a duplicate does
+    not cost it its turn. No rank depends on how far a pull read, so a rerun keeps the rows
+    it stored and deals on from them.
     """
     if options.sample == "first":
-        return list(rows)
+        for row in rows:
+            keep(row)
+        return
     by_trace: dict[str | None, list[TrainingRow]] = {}
     for row in rows:
         by_trace.setdefault(row.source.trace_id, []).append(row)
-    rounds: dict[str, int] = {}
-    for trace_rows in by_trace.values():
-        trace_rows.sort(key=lambda row: (row.id not in held, _rank(seed, row.id)))
-        rounds.update((row.id, n) for n, row in enumerate(trace_rows))
-    return sorted(
-        rows,
-        key=lambda row: (
-            row.id not in held,
-            rounds[row.id],
-            _rank(seed, str(row.source.trace_id)),
-        ),
-    )
+    # Each queue is reversed, so pop() takes a trace's next row.
+    queues: list[list[TrainingRow]] = []
+    turns: list[tuple[bool, int, str, int]] = []
+    for trace, trace_rows in by_trace.items():
+        queue = sorted(
+            trace_rows, key=lambda row: (row.id not in held, _rank(seed, row.id)), reverse=True
+        )
+        turns.append((queue[-1].id not in held, 0, _rank(seed, str(trace)), len(queues)))
+        queues.append(queue)
+    heapq.heapify(turns)
+    while turns:
+        _, kept, rank, index = heapq.heappop(turns)
+        queue = queues[index]
+        kept += keep(queue.pop())
+        if queue:
+            heapq.heappush(turns, (queue[-1].id not in held, kept, rank, index))
 
 
 def _rank(seed: int, key: str) -> str:

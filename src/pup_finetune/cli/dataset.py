@@ -1370,10 +1370,11 @@ def _collection_warnings(collection: Collection, options: PullOptions) -> list[s
             "an LLM span, such as a trace id), so there was nothing to convert"
         )
         return warnings
+    anew = " in a new directory (this one froze them)"
     if not collection.spans:
         warnings.append(
             "no LLM spans matched; check --ml-app, --span-name, --query, --tag and the time "
-            "range (--from, --to)"
+            f"range (--from, --to){anew}"
         )
     elif collection.counted < options.target_count:
         if collection.stopped == "max_candidates":
@@ -1386,13 +1387,13 @@ def _collection_warnings(collection: Collection, options: PullOptions) -> list[s
             warnings.append(
                 f"only {collection.counted} rows were accepted from every matching span, "
                 f"fewer than --target-count {options.target_count}; widen the filter or the "
-                "time range for more"
+                f"time range{anew} for more"
             )
     if options.sample == "random" and collection.stopped == "max_candidates":
         warnings.append(
             f"--sample random covers only the first --max-candidates {options.max_candidates} "
-            "spans of the time range (oldest first), not all of it; raise --max-candidates or "
-            "narrow --from and --to to sample the whole range"
+            "spans of the time range (oldest first), not all of it; raise --max-candidates to "
+            "sample the whole range"
         )
     busiest, accepted = _spread(collection.rows)["busiest_trace_rows"], len(collection.rows)
     if (
@@ -1402,7 +1403,8 @@ def _collection_warnings(collection: Collection, options: PullOptions) -> list[s
     ):
         warnings.append(
             f"one trace gives {busiest} of the {accepted} accepted rows; --sample random "
-            "--max-rows-per-trace N spreads the rows over more traces"
+            "--max-rows-per-trace N in a new directory (this one froze its row options) "
+            "spreads the rows over more traces"
         )
     if unreadable:
         warnings.append(

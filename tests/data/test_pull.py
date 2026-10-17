@@ -1115,6 +1115,23 @@ def test_a_row_past_the_cap_does_not_make_its_copy_in_another_trace_a_duplicate(
     assert outcome(collection) == expected
 
 
+@pytest.mark.parametrize("seed", range(10))
+def test_a_duplicate_does_not_cost_a_trace_its_turn_in_a_random_sample(seed: int) -> None:
+    greet = {"role": "user", "content": "Hello?"}
+    spans = []
+    for trace in ("a", "b", "c"):
+        own = {"role": "user", "content": f"Question {trace}?"}
+        spans += [
+            item(f"{trace}-greet", [SYSTEM, greet, A1], trace_id=trace),
+            item(f"{trace}-own", [SYSTEM, own, A2], trace_id=trace),
+        ]
+    api = FakeExportApi([page(spans)])
+    pup = api.install(FakePup()).client()
+    options = PullOptions(SpanQuery(ml_app="synthetic"), sample="random", target_count=3)
+    collection = collect(pup, options, seed=seed)
+    assert sorted(traces(collection.rows)) == ["a", "b", "c"]
+
+
 def test_rows_dropped_from_a_random_sample_are_replaced_by_the_next_ones_dealt() -> None:
     dealt = [row.id for row in sampled(target_count=10).rows]
     collection = sampled(target_count=2, dropped=frozenset(dealt[:1]))

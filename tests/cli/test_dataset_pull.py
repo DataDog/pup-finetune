@@ -196,6 +196,7 @@ def test_a_random_pull_cut_short_by_max_candidates_warns_it_samples_the_oldest_s
     assert data["pull"]["stopped"] == "max_candidates"
     (warning,) = [warning for warning in data["warnings"] if "oldest first" in warning]
     assert "--max-candidates 3" in warning
+    assert "--from" not in warning  # the directory froze the window
 
 
 def test_a_pull_reports_how_the_accepted_rows_spread_over_traces(use_pup: UsePup) -> None:
@@ -212,7 +213,7 @@ def test_a_pull_reports_how_the_accepted_rows_spread_over_traces(use_pup: UsePup
     assert data["pull"]["busiest_trace_rows"] == 20
     (warning,) = spread_warnings(data)
     assert "20 of the 30 accepted rows" in warning
-    assert "--sample random --max-rows-per-trace N" in warning
+    assert "--sample random --max-rows-per-trace N in a new directory" in warning
     # Not once --max-rows-per-trace is set, nor for a few rows.
     serve(use_pup, pages)
     capped = output_json(pull(Path("b"), "--max-rows-per-trace", "10"))
@@ -235,7 +236,7 @@ def test_a_pull_warns_when_no_span_matched(use_pup: UsePup) -> None:
     assert data["pull"]["matched_spans"] == 0
     assert data["warnings"][0] == (
         "no LLM spans matched; check --ml-app, --span-name, --query, --tag and the time "
-        "range (--from, --to)"
+        "range (--from, --to) in a new directory (this one froze them)"
     )
 
 
@@ -415,6 +416,8 @@ def test_pull_stops_at_the_target_count_and_reads_further_with_a_higher_one(
     assert api.cursors == [None, PAGE_2_CURSOR]
     assert more["accepted"] == FIXTURE_ROWS
     assert (more["pull"]["added"], more["pull"]["unchanged"]) == (2, 2)
+    # The directory froze the filter and time range, so widening them needs a new one.
+    assert any("time range in a new directory" in warning for warning in more["warnings"])
 
 
 def test_a_rerun_retires_a_stored_prefix_of_a_conversation_on_a_later_page(
