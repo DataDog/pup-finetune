@@ -112,11 +112,14 @@ def test_a_label_file_from_before_says_agent_or_human_and_reads_as_manual(
     assert record["by"] == "manual"
 
 
-def test_a_label_file_cannot_claim_the_judge_council(dataset: Path, tmp_path: Path) -> None:
-    file = label_file(tmp_path, {"id": FIXTURE_IDS[0], "keep": True, "by": "judge"})
+@pytest.mark.parametrize(("by", "claim"), [("judge", "the judge council"), ("check", "a check")])
+def test_a_label_file_cannot_claim_the_judge_council_or_a_check(
+    dataset: Path, tmp_path: Path, by: str, claim: str
+) -> None:
+    file = label_file(tmp_path, {"id": FIXTURE_IDS[0], "keep": False, "reason": "x", "by": by})
     result = label(dataset, file)
     assert result.exit_code == 2
-    assert "judge" in result.stderr
+    assert f"as decided by {claim}" in result.stderr
     assert not (dataset / "labels.jsonl").exists()
 
 

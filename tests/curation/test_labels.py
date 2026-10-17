@@ -219,6 +219,13 @@ def test_a_new_source_or_reason_for_the_same_decision_is_recorded(tmp_path: Path
     assert len(read_labels(dataset.labels_path)) == 3
 
 
+def test_a_check_label_round_trips(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path / "ds", ["a"])
+    checked = Label(id="a", keep=False, reason="check is_json: not JSON", by="check", at=AT)
+    apply_labels(dataset, [checked])
+    assert read_labels(dataset.labels_path) == [checked]
+
+
 def test_a_repeat_within_one_batch_is_recorded_once(tmp_path: Path) -> None:
     dataset = make_dataset(tmp_path / "ds", ["a"])
     report = apply_labels(dataset, [drop("a"), drop("a")])

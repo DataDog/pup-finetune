@@ -1189,7 +1189,8 @@ def _push_brief(dataset: DatasetDir) -> dict[str, Any] | None:
 def _read_label_file(path: Path, *, at: datetime) -> list[Label]:
     """The labels in ``path``, all ``manual``; ``at`` fills in lines that leave it out.
 
-    A line claiming ``"by": "judge"`` is refused: judge labels come only from the council."""
+    A line claiming ``"by": "judge"`` or ``"check"`` is refused: those labels come only from
+    ``dataset triage``."""
     labels = parse_labels(
         path,
         defaults={"at": at},
@@ -1198,12 +1199,13 @@ def _read_label_file(path: Path, *, at: datetime) -> list[Label]:
     )
     if not labels:
         raise UsageError(f"{path} has no labels")
-    judged = next((label.id for label in labels if label.by == "judge"), None)
-    if judged is not None:
+    claimed = next((label for label in labels if label.by != "manual"), None)
+    if claimed is not None:
+        by = "the judge council" if claimed.by == "judge" else "a check"
         raise UsageError(
-            f"{path} labels {judged!r} as decided by the judge council",
-            hint='leave "by" out: `dataset label` records your decisions, and judge labels '
-            "come only from `pup finetune dataset triage`",
+            f"{path} labels {claimed.id!r} as decided by {by}",
+            hint='leave "by" out: `dataset label` records your decisions, and judge and check '
+            "labels come only from `pup finetune dataset triage`",
         )
     return labels
 
