@@ -191,6 +191,26 @@ def check_isolation(rows_by_split: Mapping[SplitName, Iterable[TrainingRow]]) ->
                 )
 
 
+def check_distinct(rows_by_split: Mapping[SplitName, Iterable[TrainingRow]]) -> None:
+    """Raise :class:`StateError` when two rows hold the same conversation, in one split or two.
+
+    Stricter than :func:`check_isolation`, for the kept rows a command trains, pushes or
+    evaluates on: a copy under another id weighs its conversation twice even in one split.
+    """
+    seen: dict[str, tuple[SplitName, str]] = {}
+    for split, rows in rows_by_split.items():
+        for row in rows:
+            other = seen.setdefault(row_content_hash(row), (split, row.id))
+            if other[1] != row.id:
+                where = "different splits" if other[0] != split else f"the {split} split"
+                raise StateError(
+                    f"rows {other[1]!r} ({other[0]}) and {row.id!r} ({split}) hold the same "
+                    f"conversation in {where}",
+                    hint="drop one of them with `dataset label --file`, or remove its line "
+                    "from rows.jsonl",
+                )
+
+
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")
 _SPACE = re.compile(r"\s+")
 

@@ -24,6 +24,7 @@ from pup_finetune.data.split import (
     SplitParams,
     assign_split,
     assign_splits,
+    check_distinct,
     check_isolation,
     conflict_summary,
     request_key,
@@ -253,6 +254,27 @@ def test_check_isolation_rejects_a_conversation_that_differs_only_in_tool_call_i
     validation = tool_row("row-b", "call_8c4d", "synthetic-trace-2")
     with pytest.raises(StateError, match=r"'row-a' \(train\) and 'row-b' \(validation\)"):
         check_isolation({"train": [train], "validation": [validation], "test": []})
+
+
+def test_check_distinct_rejects_a_repeat_within_one_split() -> None:
+    rows = [make_row("row-a", "same"), make_row("row-b", "same")]
+    with pytest.raises(StateError, match=r"'row-a' \(train\) and 'row-b' \(train\).* in the train"):
+        check_distinct({"train": rows, "validation": [], "test": []})
+
+
+def test_check_distinct_keeps_the_cross_split_message() -> None:
+    train = make_row("row-a", "same", trace_id="synthetic-trace-1")
+    test = make_row("row-b", "same", trace_id="synthetic-trace-2")
+    with pytest.raises(StateError, match=r"'row-a' \(train\) and 'row-b' \(test\).* in different"):
+        check_distinct({"train": [train], "validation": [], "test": [test]})
+
+
+def test_check_distinct_counts_tool_call_ids_by_position() -> None:
+    first = tool_row("row-a", "call_1f2e", "synthetic-trace-1")
+    second = tool_row("row-b", "call_8c4d", "synthetic-trace-1")
+    with pytest.raises(StateError, match="same conversation in the validation split"):
+        check_distinct({"train": [], "validation": [first, second], "test": []})
+    check_distinct({"train": [first, make_row("row-c", "other")], "validation": [], "test": []})
 
 
 def test_split_warnings_for_healthy_counts_are_empty() -> None:

@@ -159,6 +159,11 @@ def _repeated_row_id(w: World) -> list[str]:
     return ["benchmark", str(copy), "--models", "fake-model", "--judge-model", "fake-judge"]
 
 
+def _copied_conversation(w: World) -> list[str]:
+    copy = _hand_edited(w, lambda row: {**row, "id": f"{row['id']}-copy"})
+    return ["dataset", "show", str(copy)]
+
+
 def _pup_fails(w: World) -> list[str]:
     fake = FakePup().on("auth", "status", returncode=1, stderr="Error: 500 Internal Error")
     w.monkeypatch.setattr(dataset_cli, "Pup", fake.client)
@@ -249,6 +254,7 @@ MISTAKES: list[tuple[str, Setup, int, str]] = [
     ("a dataset another process is using", _locked_dataset, 1, "lock_busy"),
     ("an unreadable state.json", _corrupt_state, 1, "state"),
     ("a row id repeated in rows.jsonl by hand", _repeated_row_id, 1, "state"),
+    ("a conversation copied in rows.jsonl by hand", _copied_conversation, 1, "state"),
     ("pup fails", _pup_fails, 1, "external"),
     (
         "the provider crashes mid-run",

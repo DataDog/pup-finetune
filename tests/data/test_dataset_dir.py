@@ -16,11 +16,13 @@ from typing import Any
 
 import pytest
 
+from pup_finetune.curation.labels import apply_labels
 from pup_finetune.data import dataset_dir
 from pup_finetune.data import jsonl as jsonl_module
 from pup_finetune.data.dataset_dir import DatasetDir, DatasetSettings, read_import_file
 from pup_finetune.data.exclusions import Exclusion, ExclusionCode
 from pup_finetune.data.jsonl import read_rows, to_provider_dict
+from pup_finetune.data.labels import Label
 from pup_finetune.data.schema import (
     RowError,
     RowErrorCode,
@@ -678,6 +680,30 @@ def test_a_repeated_row_id_is_a_state_error(tmp_path: Path, text: str) -> None:
     assert "dataset import" in str(raised.value.hint)
     with pytest.raises(StateError, match="on more than one line"):
         dataset.add([], settings=IMPORT)
+
+
+def test_a_repeated_conversation_is_refused_until_one_copy_is_dropped(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    dataset.add([make_row("a", "one", trace_id="t1")], settings=IMPORT)
+    append_line(dataset, make_row("a-copy", "one", trace_id="t1"))
+    with pytest.raises(
+        StateError, match=r"'a' \((\w+)\) and 'a-copy' \(\1\) hold the same"
+    ) as raised:
+        dataset.rows_by_split()
+    assert "dataset label --file" in str(raised.value.hint)
+    assert dataset.summary()["accepted"] == 2
+    assert [row.id for row in dataset.rows()] == ["a", "a-copy"]
+    apply_labels(dataset, [Label(id="a-copy", keep=False, reason="a copy")])
+    assert [row.id for rows in dataset.rows_by_split().values() for row in rows] == ["a"]
+
+
+def test_a_reimport_does_not_adopt_a_hand_added_copy(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    dataset.add([make_row("a", "one", trace_id="t1")], settings=IMPORT)
+    append_line(dataset, make_row("a-copy", "one", trace_id="t2"))
+    dataset.add([], settings=IMPORT)  # assigns the copy its group's split
+    with pytest.raises(StateError, match="hold the same conversation in the"):
+        dataset.rows_by_split()
 
 
 # --- export -----------------------------------------------------------------------------

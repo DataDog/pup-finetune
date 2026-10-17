@@ -917,3 +917,16 @@ def test_plan_push_refuses_a_repeated_row_id_before_building_records(
     with pytest.raises(StateError, match="on more than one line"):
         push(dataset, fake)
     assert records_add_calls(fake) == 0
+
+
+def test_plan_push_refuses_a_repeated_conversation_in_one_split(
+    dataset: DatasetDir, fake: FakePup
+) -> None:
+    first = json.loads(dataset.rows_path.read_text().splitlines()[0])
+    with dataset.rows_path.open("a") as handle:
+        handle.write(json.dumps({**first, "id": f"{first['id']}-copy"}) + "\n")
+    with pytest.raises(StateError, match="same conversation in the"):
+        plan_push(dataset, project=PROJECT, name=NAME)
+    with pytest.raises(StateError, match="same conversation in the"):
+        push(dataset, fake)
+    assert records_add_calls(fake) == 0

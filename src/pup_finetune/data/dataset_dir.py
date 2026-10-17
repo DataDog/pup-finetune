@@ -55,6 +55,7 @@ from pup_finetune.data.split import (
     SplitName,
     SplitParams,
     assign_splits,
+    check_distinct,
     check_isolation,
     conflict_summary,
     skew_warnings,
@@ -230,8 +231,11 @@ class DatasetDir:
         return list(read_jsonl(self.excluded_path))
 
     def rows_by_split(self) -> dict[SplitName, list[TrainingRow]]:
-        """The kept rows grouped by split; every split is present, possibly empty."""
-        return _group_by_split(self.kept_rows(), self.splits(), where=self.splits_path)
+        """The kept rows grouped by split; every split is present, possibly empty. Two kept
+        rows holding one conversation raise :class:`StateError`."""
+        by_split = _group_by_split(self.kept_rows(), self.splits(), where=self.splits_path)
+        check_distinct(by_split)
+        return by_split
 
     def rows_for_split(self, split: SplitName) -> list[TrainingRow]:
         if split not in SPLITS:
@@ -342,7 +346,6 @@ class DatasetDir:
         Every split gets a file, empty when the split is. Returns the path per split.
         """
         by_split = self.rows_by_split()
-        check_isolation(by_split)
         out = ensure_private_dir(Path(out_dir))
         paths: dict[str, Path] = {}
         for split in SPLITS:
