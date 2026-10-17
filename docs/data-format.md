@@ -173,7 +173,7 @@ content. Keep it out of version control.
 | `settings.json` | The source (`import`, `datadog`, or `datadog_dataset` for `dataset fetch`, which freezes the dataset's project, name, id and version) and its settings, such as the span filter and time window, plus the split settings. Frozen on first use: later runs may leave a flag out (it takes the frozen value), but may not pass another value (later imports pass the same split settings). |
 | `rows.jsonl` | The accepted rows, one canonical row per line. Never rewritten by labeling. |
 | `excluded.jsonl` | One `{"code", "detail", "row_id", "trace_id", "span_id", "line_sha256"}` per excluded row (fields that do not apply are left out). |
-| `labels.jsonl` | Keep/drop decisions appended by `dataset label` and `dataset triage`: `{"id", "keep", "reason", "by", "at"}`, where `by` is `manual` (recorded with `dataset label`) or `judge` (decided by the `dataset triage` council; triage never relabels a manual row). Older files that say `agent` or `human` read as `manual`. The last label of an id wins, a reason is required to drop, and a dropped row never trains and is never pushed. |
+| `labels.jsonl` | Keep/drop decisions appended by `dataset label` and `dataset triage`: `{"id", "keep", "reason", "by", "at"}`, where `by` is `manual` (recorded with `dataset label`), `judge` (decided by the `dataset triage` council) or `check` (a row one of `dataset triage --checks` failed, with the reason `check <name>: <reason>`); triage never relabels a manual row. Older files that say `agent` or `human` read as `manual`. The last label of an id wins, a reason is required to drop, and a dropped row never trains and is never pushed. |
 | `splits.json` | The split of every trace (one per group of traces and copies of one request) and the frozen seed and fractions. A trace never changes split once assigned. |
 | `summary.json` | Counts, splits and warnings, rewritten after every change. |
 | `split_conflicts.jsonl` | While a group of copies has kept rows in more than one split, a drop label (`{"id", "keep": false, "reason"}`) for each kept row outside the split holding most of the group, for `dataset label --file`; rewritten with `summary.json`, and removed once there are none. |
@@ -318,8 +318,9 @@ Every dataset command's result (`import`, `pull`, `show`, `sample`, `label`, `tr
 }
 ```
 
-`triage` is `none` before any triage, `complete` once every row has a label and every judge
-label is backed by the votes under the frozen rubric and judges, `unreadable` when
+`triage` is `none` before any council triage (check labels alone leave it there), `complete`
+once every row has a label (a check's included) and every judge label is backed by the votes
+under the frozen rubric and judges, `unreadable` when
 `triage.json` or `judgments.jsonl` cannot be read, and `incomplete` otherwise (for example
 after `--max-rows`). `push.status` is `not_pushed` without `push.json`, `pushed` when it lists
 every kept row as it is now, `pushed_with_new_rows` when `pending` kept rows are not pushed yet

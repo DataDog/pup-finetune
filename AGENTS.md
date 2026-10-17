@@ -153,6 +153,9 @@ uv run pup-finetune dataset triage --print-template > rubric.md  # Task / Keep /
 uv run pup-finetune dataset triage /tmp/ds --rubric rubric.md --max-rows 20
                                      # preview only (exit 2): rows, judge calls, rubric hash;
                                      # add --confirm to have the judge council label them (paid)
+uv run pup-finetune dataset triage /tmp/ds --checks tests/fixtures/evaluators/row_checks.py
+                                     # labels the rows a check fails by: check, at once (free,
+                                     # local, no --confirm); with --rubric they run first
 uv run pup-finetune dataset push /tmp/ds --name my-dataset --project pup-finetune-dev
                                      # preview only (exit 2); add --confirm to push the kept rows
 uv run pup-finetune dataset push /tmp/ds   # later pushes: push.json names the dataset
@@ -200,6 +203,12 @@ labeling the rest. A label cannot be withdrawn, so judge labels the current vote
 (after a reset with `--max-rows`, or on undecided rows) are reported as `stale_judge_labels`,
 and the triage stays `incomplete` until a run over every row replaces them. It is paid, so it
 needs `--confirm`, but it writes nothing to Datadog, so `PUP_READ_ONLY` does not block it.
+`--checks FILE.py` runs the user's row checks first (after `--rows` and `--max-rows`): a row
+one fails is labeled `by: check` before any judge call and never judged, the preview runs them
+too (one that raises is a `usage` error naming the row), and they are not frozen, so rows they
+labeled are skipped without `--checks` (`skipped_checked`). With `--checks` alone it calls no
+judge and labels at once, without `--confirm` (refusing `--judges`, `--concurrency` and
+`--reset-triage`), reporting `stale_check_labels`; `dataset label --file` refuses `by: check`.
 Tests replace the judges' clients (`cli/triage.py`'s `open_clients`) with a fake.
 
 Judges can run on Anthropic or OpenAI too: `--judge-model`, `--eval-judge-model` and each
@@ -492,7 +501,8 @@ Source lives under `src/pup_finetune/`.
   `key_source` is where a key would come from without reading it out, or a `KeyUnreadable`
   when the lookup raised anything; `doctor`'s key checks and the default judges both use it.
 - `redaction.py` - masks resolved secrets and `Bearer` tokens in error output and logs.
-- `user_checks.py` - the user's Python checks, shared by `evaluate --evaluators`:
+- `user_checks.py` - the user's Python checks, shared by `evaluate --evaluators` and `dataset
+  triage --checks`:
   `load_checks` runs a file as a module named by its sha256 (`CheckModule`: its public
   functions in definition order, `function` with an arity check), `call` runs one check on
   deep copies under one lock and reads `True`, `False`, `None` or `(bool, reason)`; anything
@@ -651,7 +661,10 @@ Source lives under `src/pup_finetune/`.
   arrive, failed calls reported and retried next run, a row's calls skipped once a judge
   found it too long, labels `by: judge` for decided rows, judge labels the votes do not back
   reported as stale, or with `agreement` no label and `measure_agreement`'s `Agreement`; a
-  torn last vote line is cut before appending). `rubric_template.md` ships in the wheel. Curation builds on
+  torn last vote line is cut before appending), with `checks` `run_row_checks` (the rows a
+  check fails, `CheckFailure`s, labeled `by: check` first, also by `apply_check_labels` for
+  checks alone, and with `agreement` compared apart, `check_agreement`). `rubric_template.md`
+  ships in the wheel. Curation builds on
   `data/`; `data/` never imports `curation/`.
 - `training/` - the shared, provider-neutral SFT loop. `datums.py` renders rows into
   `TokenizedExample`s (per turn when a renderer is not prefix-stable) and rejects rows that

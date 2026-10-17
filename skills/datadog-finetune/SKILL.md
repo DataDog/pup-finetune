@@ -197,10 +197,10 @@ measure again (`--reset-triage`) until the user is satisfied. `--rows <ROWS_FILE
 per line) narrows either mode to those rows. With a council of two judges, a row is kept only
 when both vote keep; add a third with `--judges` for a true majority.
 
-Also check what no command does: answers that break the app's own output contract (invalid
-JSON, duplicate keys, two answers in one). Drop them with labels, or fix the records in
-Datadog and fetch the dataset (step 4). Show the user what you found. Rows `split_conflicts`
-names are copies of a request in two splits: with a yes, run the first `dataset label` step.
+Write the app's own output contract (valid JSON, no duplicate keys, one answer) as checks the
+user agrees with: `--checks datasets/checks.py`, a function of the row per rule returning `True`,
+`False` or `(False, "why")`. Failing rows get `by: check` labels, free; alone it labels at once,
+with no `--confirm`. With a yes, run the first `dataset label` step for `split_conflicts` rows.
 
 Check:
 
