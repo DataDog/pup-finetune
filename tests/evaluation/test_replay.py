@@ -9,11 +9,13 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import os
 import stat
 import threading
 import time
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -24,6 +26,13 @@ from pup_finetune.errors import ExternalError, SettingsConflict, StateError
 from pup_finetune.evaluation.bootstrap import paired_bootstrap_ci
 from pup_finetune.evaluation.cases import ReplayCase
 from pup_finetune.evaluation.compare import attach_compare, stored_compare
+from pup_finetune.evaluation.evaluators import (
+    CheckEvaluator,
+    Evaluator,
+    EvaluatorSet,
+    JudgeEvaluator,
+)
+from pup_finetune.evaluation.fake_judge import FakeJudge, fake_judge_config
 from pup_finetune.evaluation.judge import Judgment
 from pup_finetune.evaluation.replay import (
     CAVEAT,
@@ -34,9 +43,11 @@ from pup_finetune.evaluation.replay import (
     run_replay,
     summarize,
 )
-from pup_finetune.inference import JudgeConfig
+from pup_finetune.inference import ChatCompletion, JudgeConfig
 from pup_finetune.providers.base import CheckpointRef, Generation, Sampler
 from pup_finetune.rendering.base import ChatMessage, ToolSpec
+from pup_finetune.storage import canonical_json
+from pup_finetune.user_checks import load_checks
 
 CKPT = CheckpointRef(
     kind="training", name="t1s4-abcd", uri="fake://ckpt/t1", epoch=1, step=4, created_in_session="s"
@@ -986,3 +997,218 @@ def test_the_summary_counts_the_answers_and_verdicts_each_target_reused() -> Non
     targets = summarize(CASES, results, generations, seed=0)["targets"]
     assert targets["base"]["reused"] == {"generations": 1, "verdicts": 1}
     assert targets["tuned"]["reused"] == {"generations": 0, "verdicts": 0}
+
+
+# --- the user's evaluators -----------------------------------------------------------------
+
+CHECKS = """\
+def no_three(case, candidate):
+    if str(candidate.get("content")).endswith("3"):
+        return False, "ends in 3"
+    return True
+
+
+def row_a_only(case, candidate):
+    if case["row_id"] != "row-a":
+        return None
+    return candidate.get("content") != "hm"
+
+
+def boom(case, candidate):
+    raise ValueError("the check broke")
+"""
+
+
+class RubricJudge(FakeJudge):
+    """The fake judge as a rubric judge's client, out for the questions in ``outage``."""
+
+    def __init__(self, outage: Iterable[str] = ()) -> None:
+        super().__init__()
+        self.outage = set(outage)
+
+    def complete(self, messages: Sequence[Mapping[str, Any]], **kwargs: Any) -> ChatCompletion:
+        if any(f'"{question}"' in str(messages[-1]["content"]) for question in self.outage):
+            raise ExternalError("rubric judge unreachable", source="judge")
+        return super().complete(messages, **kwargs)
+
+
+def evaluator_set(tmp_path: Path, *names: str, headline: str = "all") -> EvaluatorSet:
+    path = tmp_path / "checks.py"
+    path.write_text(CHECKS)
+    module = load_checks(path)
+    found: list[Evaluator] = []
+    for name in names:
+        if name == "polite":
+            found.append(JudgeEvaluator(name=name, rubric="Be kind.", config=fake_judge_config()))
+        else:
+            found.append(
+                CheckEvaluator(
+                    name=name, file=path, function=name, file_sha256=module.sha256, module=module
+                )
+            )
+    return EvaluatorSet(evaluators=tuple(found), headline=headline, spec=None, source="flag")
+
+
+def scored_replay(
+    out: Path, evaluators: EvaluatorSet, client: FakeJudge, samplers: Mapping[str, Sampler],
+    judge: Judge, **options: Any,
+) -> Any:  # fmt: skip
+    return replay(
+        out, samplers, judge, evaluators=evaluators,
+        scorers=evaluators.scorers({"fake": client}), **options,
+    )  # fmt: skip
+
+
+def knowing() -> dict[str, Sampler]:
+    return {"base": ScriptedSampler(), "tuned": ScriptedSampler({q(case) for case in CASES})}
+
+
+def test_evaluator_entries_go_in_the_result_line_of_the_judgment(tmp_path: Path) -> None:
+    out = tmp_path / "eval"
+    evaluators = evaluator_set(tmp_path, "polite", "no_three")
+    scored_replay(out, evaluators, RubricJudge(), knowing(), Judge())
+    results = lines(out / "results.jsonl")
+    assert len(results) == 2 * len(CASES)
+    tuned = next(r for r in results if r["target"] == "tuned" and r["case_id"] == "row-a:3")
+    assert tuned["judgment"]["passed"] is True
+    assert tuned["evaluators"]["polite"]["status"] == "ok"
+    assert tuned["evaluators"]["no_three"] == {
+        "status": "ok", "passed": False, "reason": "ends in 3", "raw": None,
+        "no_verdict": None, "error": None,
+    }  # fmt: skip
+    assert json.loads((out / "evaluators.json").read_text())["headline"] == "all"
+
+
+def test_an_evaluator_added_to_a_complete_directory_scores_the_stored_answers(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "eval"
+    replay(out, knowing(), Judge())
+    samplers = {"base": ScriptedSampler(), "tuned": ScriptedSampler()}
+    judge, client = Judge(), RubricJudge()
+    calls: Counter[str] = Counter()
+    evaluators = evaluator_set(tmp_path, "polite", "no_three")
+    scorers = evaluators.scorers({"fake": client})
+    check = scorers["no_three"]
+
+    def counted(case: ReplayCase, generation: Generation) -> dict[str, Any]:
+        calls[case.id] += 1
+        return check(case, generation)
+
+    outcome = replay(
+        out, samplers, judge, evaluators=evaluators, scorers={**scorers, "no_three": counted}
+    )
+    assert outcome.complete
+    assert samplers["base"].calls == samplers["tuned"].calls == []
+    assert judge.calls == 0
+    assert client.calls == 2 * len(CASES)
+    assert calls == dict.fromkeys((case.id for case in CASES), 2)
+    assert remaining_work(EvalDir(out), dict.fromkeys(("base", "tuned"), CASES), ["polite"]) == {
+        target: {"done": len(CASES), "generate": 0, "judge": 0, "evaluators": {"polite": 0}}
+        for target in ("base", "tuned")
+    }
+
+
+def test_an_evaluator_outage_is_its_entry_s_error_and_a_rerun_retries_only_it(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "eval"
+    evaluators = evaluator_set(tmp_path, "polite", "no_three")
+    first = scored_replay(out, evaluators, RubricJudge({q(CASES[0])}), knowing(), Judge())
+    assert first.complete
+    base = first.summary["targets"]["base"]
+    assert (base["completed"], base["errors"]) == (len(CASES), 0)
+    assert base["evaluators"]["polite"]["errors"] == 1
+    assert base["evaluators"]["polite"]["pass"]["n"] == len(CASES) - 1
+    assert base["evaluators"]["all"]["errors"] == 1
+    entry = EvalDir(out).read_results()[("base", CASES[0].id)]
+    assert entry["status"] == "ok"
+    assert entry["evaluators"]["polite"]["error"]["stage"] == "evaluator"
+    left = remaining_work(EvalDir(out), {"base": CASES}, evaluators.names)
+    assert left["base"]["evaluators"] == {"polite": 1, "no_three": 0}
+
+    judge, client, samplers = Judge(), RubricJudge(), knowing()
+    again = scored_replay(out, evaluators, client, samplers, judge)
+    assert (judge.calls, client.calls) == (0, 2)
+    assert again.summary["targets"]["base"]["evaluators"]["polite"]["errors"] == 0
+
+
+def test_a_check_that_raises_is_its_entry_s_error(tmp_path: Path) -> None:
+    out = tmp_path / "eval"
+    outcome = scored_replay(out, evaluator_set(tmp_path, "boom"), RubricJudge(), knowing(), Judge())
+    assert outcome.complete
+    boom = outcome.summary["targets"]["tuned"]["evaluators"]["boom"]
+    assert (boom["errors"], boom["pass"]["n"]) == (len(CASES), 0)
+    entry = EvalDir(out).read_results()[("tuned", CASES[0].id)]["evaluators"]["boom"]
+    assert entry["error"]["type"] == "CheckError"
+    assert "the check broke" in entry["error"]["message"]
+
+
+def test_an_unparseable_answer_fails_every_evaluator_without_a_call(tmp_path: Path) -> None:
+    client = RubricJudge()
+    evaluators = evaluator_set(tmp_path, "polite", "row_a_only")
+    malformed = Generation(
+        message={"role": "assistant", "content": ""}, format_valid=False, prompt_tokens=1,
+        completion_tokens=1, latency_s=0.0, stop_reason="stop",
+    )  # fmt: skip
+    for scorer in evaluators.scorers({"fake": client}).values():
+        assert scorer(CASES[2], malformed)["passed"] is False
+    assert client.calls == 0
+
+
+def test_the_summary_counts_not_applicable_apart_and_the_composite_by_hand(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "eval"
+    evaluators = evaluator_set(tmp_path, "no_three", "row_a_only")
+    summary = scored_replay(out, evaluators, RubricJudge(), knowing(), Judge()).summary
+    tuned, base = (
+        summary["targets"]["tuned"]["evaluators"],
+        summary["targets"]["base"]["evaluators"],
+    )
+    assert tuned["no_three"]["pass"] == {"rate": 0.5, "passed": 3, "n": 6}
+    assert base["no_three"]["pass"] == {"rate": 1.0, "passed": 6, "n": 6}
+    assert tuned["row_a_only"]["pass"] == {"rate": 1.0, "passed": 2, "n": 2}
+    assert tuned["row_a_only"]["not_applicable"] == 4
+    assert base["row_a_only"]["pass"] == {"rate": 0.0, "passed": 0, "n": 2}
+    # all: the judge passes, no_three passes and row_a_only passes or does not apply.
+    assert tuned["all"]["pass"] == {"rate": 0.5, "passed": 3, "n": 6}
+    assert base["all"]["pass"] == {"rate": 0.0, "passed": 0, "n": 6}
+    block = summary["evaluators"]
+    assert (block["headline"], block["names"]) == ("all", ["no_three", "row_a_only"])
+    deltas = block["tuned_minus_base"]
+    assert (deltas["all"]["delta"], deltas["all"]["wins"], deltas["all"]["ties"]) == (0.5, 3, 3)
+    assert deltas["no_three"]["delta"] == -0.5
+    assert deltas["no_three"]["ci95"] == list(paired_bootstrap_ci([[0.0, -1.0]] * 3, seed=0))
+    assert (deltas["row_a_only"]["n_cases"], deltas["row_a_only"]["not_applicable"]) == (2, 4)
+    assert "tuned_minus_compare" not in block
+
+
+def test_compare_skips_skip_its_evaluators_and_tuned_minus_compare_pairs_the_rest(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "eval"
+    evaluators = evaluator_set(tmp_path, "no_three")
+    samplers = {**knowing(), "compare": ScriptedSampler({q(case) for case in CASES})}
+    replays = {"base": CASES, "tuned": CASES, "compare": CASES[2:]}
+    outcome = scored_replay(
+        out, evaluators, RubricJudge(), samplers, Judge(), replays=replays,
+        compare=compare_identity(),
+    )  # fmt: skip
+    compared = outcome.summary["targets"]["compare"]["evaluators"]["no_three"]
+    assert compared["pass"]["n"] == 4
+    assert ("compare", CASES[0].id) not in EvalDir(out).read_results()
+    versus = outcome.summary["evaluators"]["tuned_minus_compare"]["no_three"]
+    assert (versus["n_cases"], versus["delta"]) == (4, 0.0)
+
+
+def test_without_evaluators_the_summary_is_unchanged(tmp_path: Path) -> None:
+    out = tmp_path / "eval"
+    summary = replay(out, knowing(), Judge()).summary
+    text = canonical_json(summary, ensure_ascii=True)
+    assert hashlib.sha256(text.encode("ascii")).hexdigest() == GOLDEN_SUMMARY_SHA256
+    assert not any("evaluators" in line for line in lines(out / "results.jsonl"))
+    assert not (out / "evaluators.json").exists()
+
+
+GOLDEN_SUMMARY_SHA256 = "32ac1d8dfb6b49b4ac9f98be3f43e978c03a086f141b59a9fb6bea807203c402"
