@@ -519,6 +519,46 @@ def test_evaluators_attach_per_model_and_one_added_later_opens_no_session(
     assert "ranked by all" in result.stderr
 
 
+def test_evaluator_errors_are_reported_and_retried(dataset: Path, tmp_path: Path) -> None:
+    spec_dir = tmp_path / "spec"
+    spec_dir.mkdir()
+    outage = spec_dir / "outage"
+    outage.touch()
+    (spec_dir / "flaky.py").write_text(
+        "import os\n\n\ndef same_as_reference(case, candidate):\n"
+        f"    if candidate != case['reference'] and os.path.exists({str(outage)!r}):\n"
+        "        raise ValueError('not the reference')\n"
+        "    return True\n"
+    )
+    spec = spec_dir / "evals.toml"
+    spec.write_text(
+        'headline = "same_as_reference"\n[[evaluator]]\nname = "same_as_reference"\n'
+        'type = "check"\nfile = "flaky.py"\n'
+    )
+    result = invoke(
+        "benchmark", str(dataset), "--models", "fake-model", "--evaluators", str(spec), "--confirm"
+    )
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    (entry,) = data["leaderboard"]
+    assert (data["status"], entry["status"]) == ("complete_with_errors", "complete_with_errors")
+    assert (entry["errors"], entry["evaluator_errors"]) == (0, data["cases"])
+    assert f"{data['cases']} evaluator score(s) are missing after an error" in result.stderr
+    assert data["recommendation"]["verdict"] == "no_result"
+    assert "same_as_reference" in data["recommendation"]["reason"]
+    assert data["next_command"] == (
+        f"pup finetune benchmark {dataset} --models fake-model --judge-model fake-judge "
+        f"--evaluators {spec}"
+    )
+    outage.unlink()
+    preview = output(rerun(data["next_command"]))
+    assert preview["preview"]["evaluators"]["items"][0]["reference_pass_rate"] == 1.0
+    assert (preview["preview"]["generation_calls"], preview["preview"]["judge_calls"]) == (0, 0)
+    retried = output(rerun(preview["next_command"]))
+    assert retried["status"] == "complete"
+    assert retried["leaderboard"][0]["headline_pass_rate"] == 1.0
+
+
 def test_a_stored_set_s_command_runs_only_the_evaluators_it_previewed(
     dataset: Path, tmp_path: Path
 ) -> None:

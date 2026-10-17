@@ -60,6 +60,7 @@ from pup_finetune.evaluation.runner import (
     open_evaluator_clients,
     open_judge_client,
     resolve_judge,
+    scoring_warning,
     stored_judge,
 )
 from pup_finetune.next_steps import PROGRAM, command, step, template
@@ -1037,12 +1038,13 @@ def _entry(
         record = generations.get((candidate.target, case.id))
         if record is not None and record.get("stop_reason") != "length":
             unparseable += record.get("format_valid") is False
+    scoring = sum(int(target["evaluators"][name]["errors"]) for name in plan.evaluator_names)
     if error is not None:
         status = "error"
     elif target["pending"]:
         status = "partial"
     else:
-        status = "complete_with_errors" if target["errors"] else "complete"
+        status = "complete_with_errors" if target["errors"] or scoring else "complete"
     return {
         "model": candidate.target,
         "provider": candidate.provider,
@@ -1056,7 +1058,8 @@ def _entry(
             else {
                 "evaluators": {
                     name: entry["pass"]["rate"] for name, entry in target["evaluators"].items()
-                }
+                },
+                "evaluator_errors": scoring,
             }
         ),
         "ci95": None if interval is None else list(interval),
@@ -1132,15 +1135,17 @@ def recommend(
 
     ``verdict`` is ``fine_tune`` (the best model is below ``target_pass_rate``: fine-tune
     it), ``base_meets_target`` (the best base model already reaches it, so fine-tuning may
-    add little) or ``no_result`` (no model has a judged case). Models within noise of the
-    best are named too: any of them is as good a start, so the cheapest to serve wins.
+    add little) or ``no_result`` (no model has a case the headline scored). Models within
+    noise of the best are named too: any of them is as good a start, so the cheapest to
+    serve wins.
     """
     scored = [entry for entry in board if entry.get("headline_pass_rate") is not None]
     if not scored:
+        what = "a judged case" if headline == "judge" else f"a case {headline} scored"
         return {
             "verdict": "no_result",
             "model": None,
-            "reason": "no model has a judged case yet, so there is nothing to compare",
+            "reason": f"no model has {what} yet, so there is nothing to compare",
         }
     best = scored[0]
     rate = float(best["headline_pass_rate"])
@@ -1201,11 +1206,14 @@ def _result(
     hint = None
     failed = [entry["model"] for entry in board if entry["status"] != "complete"]
     if status != "complete":
+        keys = "errors, evaluator_errors" if plan.evaluators is not None else "errors"
         hint = (
             f"{', '.join(failed)} {'has' if len(failed) == 1 else 'have'} no result for every "
-            "case (see each entry's errors, error and pending); run next_command to continue, "
+            f"case (see each entry's {keys}, error and pending); run next_command to continue, "
             "which reuses every finished result"
         )
+    if scoring := sum(int(entry.get("evaluator_errors") or 0) for entry in board):
+        warnings.append(scoring_warning(scoring))
     rate = recommendation.get("judge_pass_rate")
     if isinstance(rate, float) and rate < LOW_PASS_RATE:
         warnings.append(

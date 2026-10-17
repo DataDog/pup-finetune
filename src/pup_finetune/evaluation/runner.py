@@ -154,6 +154,7 @@ __all__ = [
     "require_new_eval_dir",
     "resolve_judge",
     "run_calibration",
+    "scoring_warning",
     "share_base",
     "uncalibrated",
 ]
@@ -1778,11 +1779,7 @@ def replay_result(
     hint = None
     publication = _publication(plan, outcome)
     if scoring:
-        warnings.append(
-            f"{scoring} evaluator score(s) are missing after an error (an evaluator's judge "
-            "outage, a check that raised, or the pair's own error), left out of their rates; run "
-            "next_command to retry them"
-        )
+        warnings.append(scoring_warning(scoring))
     if plan.evaluators is not None:
         reports = _reports(EvalDir(plan.out_dir))
         calibrate = not plan.settings.skip_calibration
@@ -1884,6 +1881,15 @@ def replay_result(
             else dataclasses.asdict(tuned_sampler),
             **_replay_next(plan, status=status, publication=publication, retry=retry),
         }
+    )
+
+
+def scoring_warning(count: int) -> str:
+    """The warning for ``count`` evaluator entries an error left without a score."""
+    return (
+        f"{count} evaluator score(s) are missing after an error (an evaluator's judge outage, "
+        "a check that raised, or the pair's own error), left out of their rates; run "
+        "next_command to retry them"
     )
 
 
