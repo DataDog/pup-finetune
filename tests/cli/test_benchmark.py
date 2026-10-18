@@ -175,11 +175,41 @@ def test_a_model_several_providers_offer_needs_its_provider_named(
     assert "name one of fake/fake-model, other/fake-model" in ambiguous.stderr
 
     named = output(invoke("benchmark", str(dataset), "--models", "fake/fake-model"))
-    assert named["preview"]["models"][0]["model"] == "fake-model"
+    assert named["preview"]["models"][0]["model"] == "fake/fake-model"
     assert "--models fake/fake-model " in named["next_command"]
     result = rerun(named["next_command"])
     assert result.exit_code == 0, result.stderr
     assert output(result)["status"] == "complete"
+
+
+def test_one_model_on_two_providers_is_named_by_provider_everywhere(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(providers, "_REGISTRY", dict(providers._REGISTRY))
+    providers.register_provider(
+        "twin",
+        "pup_finetune.providers.fake:FakeProvider",
+        dev_only=True,
+        models={"fake-model": ("fake-model",)},
+        offline=True,
+    )
+
+    preview = output(
+        invoke("benchmark", str(dataset), "--models", "fake/fake-model,twin/fake-model")
+    )
+    models = [(m["model"], m["provider"]) for m in preview["preview"]["models"]]
+    assert models == [("fake/fake-model", "fake"), ("twin/fake-model", "twin")]
+    assert "--models fake/fake-model,twin/fake-model " in preview["next_command"]
+
+    result = rerun(preview["next_command"])
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert sorted(data["files"]["models"]) == ["fake/fake-model", "twin/fake-model"]
+    for model in ("fake", "twin"):
+        assert (dataset / "benchmark" / model / "fake-model" / "results.jsonl").exists()
+    train = data["next_command"] or data["next_steps"][0]["command"]
+    assert "--model fake-model" in train
+    assert f"--provider {data['recommendation']['model'].split('/')[0]}" in train
 
 
 def test_a_model_whose_session_fails_is_an_error_and_exits_1(

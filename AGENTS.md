@@ -812,9 +812,10 @@ Source lives under `src/pup_finetune/`.
   the fake take any), with `compare_skips` over cases; it takes the `compare.json` path and imports nothing from `replay.py`, which imports it.
   `benchmark.py` is `benchmark`: `plan_benchmark` (the test split's cases, less those any
   model's renderer refuses, for every model, the judge and one `Candidate` per base model;
-  a session is sized on the prompts its renderer takes), `execute` (the judge calibrated once, then each model
-  replayed in a session of its own into `OUT/<model>` through `run_replay` with the model as
-  its one target, so each resumes; a model whose session fails is an error entry and the
+  a session is sized on the prompts its renderer takes; a model is named `PROVIDER/ALIAS`
+  when another provider offers its alias, `Candidate.target`), `execute` (the judge
+  calibrated once, then each model replayed in a session of its own into `OUT/<model>`
+  through `run_replay` with the model as its one target, so each resumes; a model whose session fails is an error entry and the
   others still run), `leaderboard` (judge pass rate with a bootstrap CI over trajectories,
   and each model's paired gap to the best) and `recommend` (`fine_tune`,
   `base_meets_target` at `--target-pass-rate`, or `no_result`; models within noise of the

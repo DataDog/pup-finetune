@@ -59,7 +59,8 @@ DOC = CommandDoc(
         "LLM judge evaluate uses. Without --confirm, previews the calls and where the data "
         "goes. The result ranks the models and recommends the one to fine-tune.",
         "The dataset must be in Datadog, as for `train`. "
-        "Each model runs in a session of its own, one after another, into OUT/<model>; rerun "
+        "Each model runs in a session of its own, one after another, into OUT/<model> "
+        "(PROVIDER/MODEL for a model both providers offer); rerun "
         "the same command to continue a benchmark that stopped. A model below "
         "--target-pass-rate is worth fine-tuning; one at or above it may need no training. "
         "Models within noise of the best are named, so the cheapest to serve can be chosen. "

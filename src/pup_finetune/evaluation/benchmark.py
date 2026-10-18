@@ -9,9 +9,11 @@
 :func:`plan_benchmark` turns a dataset and the models to compare into a
 :class:`BenchmarkPlan`: the same replay cases ``evaluate`` uses, the judge and the output
 directory. :func:`execute` calibrates the judge once, then replays the cases with each base
-model in turn (:func:`~pup_finetune.evaluation.replay.run_replay`, with the model alias as
-its one target), in a session of its own that ends before the next model starts, into
-``OUT/<model>``; a rerun resumes every model where it stopped. A model whose session cannot
+model in turn (:func:`~pup_finetune.evaluation.replay.run_replay`, with the model as its one
+target), in a session of its own that ends before the next model starts, into
+``OUT/<model>``; a rerun resumes every model where it stopped. A model is named by its alias,
+or ``PROVIDER/ALIAS`` when another provider offers that alias too (:attr:`Candidate.target`),
+so one model can be benchmarked on both providers. A model whose session cannot
 start is recorded as an error and the others still run.
 
 :func:`leaderboard` ranks the models by judge pass rate, with a 95% bootstrap CI over
@@ -123,11 +125,15 @@ class Candidate:
 
     provider: str
     profile: ModelProfile
+    shared: bool = False
+    """Whether another provider offers the profile's alias too."""
 
     @property
     def target(self) -> str:
-        """The replay target name, and the name of its directory under ``--out-dir``."""
-        return self.profile.alias
+        """How the benchmark names the model: its alias, or ``PROVIDER/ALIAS`` when another
+        provider offers that alias too. It is the ``--models`` entry, the replay target, the
+        model's directory under ``--out-dir`` and its name in the result."""
+        return f"{self.provider}/{self.profile.alias}" if self.shared else self.profile.alias
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -245,20 +251,13 @@ class BenchmarkPlan:
             finite_json(self.judge.identity())
         )
 
-    def _entry(self, candidate: Candidate) -> str:
-        """How ``--models`` names ``candidate``: its alias, ``PROVIDER/ALIAS`` when another
-        provider offers that alias too."""
-        if providers_for_model(candidate.target, self.runtime) == [candidate.provider]:
-            return candidate.target
-        return f"{candidate.provider}/{candidate.target}"
-
     def command(self) -> list[str]:
         """The ``benchmark`` command for this plan, without ``--confirm``: the models and the
         judge always, the other settings when they differ from the defaults."""
         settings = self.settings
         defaults = BenchmarkSettings(out_dir=self.dataset_dir / DEFAULT_OUT_DIR_NAME)
         words = [*PROGRAM, "benchmark", display_path(self.dataset_dir)]
-        words += ["--models", ",".join(self._entry(candidate) for candidate in self.candidates)]
+        words += ["--models", ",".join(candidate.target for candidate in self.candidates)]
         if settings.out_dir != defaults.out_dir:
             words += ["--out-dir", display_path(settings.out_dir)]
         if settings.max_cases_per_trajectory != defaults.max_cases_per_trajectory:
@@ -407,9 +406,11 @@ def plan_benchmark(
     for alias, provider_name in models:
         require_packages(provider_name, runtime, "evaluate")
         profile = get_provider(provider_name, runtime).resolve_model(alias)
-        if any(candidate.target == profile.alias for candidate in candidates):
-            raise UsageError(f"--models names {profile.alias} twice")
-        candidates.append(Candidate(provider=provider_name, profile=profile))
+        shared = providers_for_model(profile.alias, runtime) != [provider_name]
+        candidate = Candidate(provider=provider_name, profile=profile, shared=shared)
+        if any(other.target == candidate.target for other in candidates):
+            raise UsageError(f"--models names {candidate.target} twice")
+        candidates.append(candidate)
     if not candidates:
         raise UsageError("--models names no model", hint="pass --models MODEL,MODEL")
     offline = all(candidate.provider == "fake" for candidate in candidates)
@@ -880,13 +881,19 @@ def _next(plan: BenchmarkPlan, recommendation: Mapping[str, Any], *, retry: bool
     instead when the base model already meets the target."""
     rerun = shlex.join(plan.command())
     model = recommendation.get("model")
-    provider = next(
-        (candidate.provider for candidate in plan.candidates if candidate.target == model), None
-    )
+    chosen = next((c for c in plan.candidates if c.target == model), None)
     train = (
-        command("train", "--provider", provider, "--dataset", plan.dataset_dir, "--model", model)
-        if isinstance(model, str) and provider is not None
-        else None
+        None
+        if chosen is None
+        else command(
+            "train",
+            "--provider",
+            chosen.provider,
+            "--dataset",
+            plan.dataset_dir,
+            "--model",
+            chosen.profile.alias,
+        )
     )
     if retry:
         return {"next_command": rerun, "next_steps": []}
