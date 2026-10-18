@@ -16,10 +16,11 @@ Messages and tools are in OpenAI chat format, as
 :func:`~pup_finetune.data.jsonl.to_provider_dict` produces them: an assistant message may
 carry ``weight`` ``0``, meaning "do not train on this turn".
 
-**Prefix stability.** A renderer is prefix-stable when, for every assistant turn ``i``, the
-tokens of :meth:`Renderer.generation_prompt_tokens` for ``messages[:i]`` are a prefix of the
-tokens of the full conversation. Only then does training on one full render (every assistant
-turn trainable at once) match what the model sees at inference. A chat endpoint tokenizes the
+**Prefix stability.** A renderer is prefix-stable when, for every trained assistant turn
+``i``, the tokens of :meth:`Renderer.generation_prompt_tokens` for ``messages[:i]`` are a
+prefix of the tokens of the full conversation. Only then does training on one full render
+(every trained turn at once) match what the model sees at inference; an untrained turn carries
+no loss, so how the whole render shows it does not matter. A chat endpoint tokenizes the
 whole prompt text as one string and the model generates the completion after it, so a
 template that is prefix-stable as text can still fail as tokens: the tokenizer can merge
 characters across the boundary where generation starts. A renderer that cannot guarantee it

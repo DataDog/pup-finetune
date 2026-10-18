@@ -135,3 +135,12 @@ def test_without_tools_a_row_training_every_turn_falls_back_to_per_turn() -> Non
     result = build_examples([{"messages": TWO_TURNS, "tools": []}], r, max_seq_len=4096)
     assert result.rejected == []
     assert result.examples[0].examples == (first, second)
+
+
+def test_without_tools_a_row_training_only_its_last_turn_is_one_example() -> None:
+    # The untrained first reply renders after </think> in the whole row but after <think>
+    # in its own prompt; it carries no loss, so the whole row trains exactly the last turn.
+    r = deepseek_renderer()
+    messages = [TWO_TURNS[0], {**TWO_TURNS[1], "weight": 0}, *TWO_TURNS[2:]]
+    (turn,) = r.per_turn_examples(messages, [])
+    assert r.supervised_example(messages, []) == turn

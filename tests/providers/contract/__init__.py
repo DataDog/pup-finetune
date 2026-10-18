@@ -305,7 +305,11 @@ class RendererContract:
         messages, tools = conversation
         for rendered, example, full in self._examples(renderer, messages, tools):
             tokens, _ = _unshifted(example)
-            turns = _assistant_turns(rendered) if full else [len(rendered) - 1]
+            turns = (
+                [turn for turn in _assistant_turns(rendered) if _trainable(rendered[turn])]
+                if full
+                else [len(rendered) - 1]
+            )
             for turn in turns:
                 prompt = renderer.generation_prompt_tokens(rendered[:turn], tools)
                 assert tokens[: len(prompt)] == prompt, f"turn {turn} is not a token prefix"

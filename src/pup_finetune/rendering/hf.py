@@ -496,11 +496,11 @@ class HFChatTemplateRenderer:
         """The whole row as one example, when that trains exactly what the turns would.
 
         Raises :class:`RendererError` with ``not_prefix_stable`` when the row has
-        ``reasoning_content``, a trainable turn's per-turn example is not a token prefix of
-        the whole render, or an untrained turn's generation prompt is not: one example claims
-        every turn saw the history the whole render shows, and a template that rewrites
-        earlier turns later (DeepSeek-V4 without tools) breaks that claim even when only the
-        last turn trains. Render it with :meth:`per_turn_examples` then.
+        ``reasoning_content`` or a trainable turn's per-turn example is not a token prefix of
+        the whole render; render it with :meth:`per_turn_examples` instead. Otherwise each
+        trained token has exactly its per-turn context; untrained turns carry no loss, so a
+        template that renders them differently in a later history (DeepSeek-V4 without tools)
+        still trains exactly what the per-turn examples would.
         """
         turns = _trainable_turns(messages)
         self._refuse_unsupported(messages)
@@ -513,16 +513,6 @@ class HFChatTemplateRenderer:
         tokens = self._tokens(prepared, declared, generation=False, where="the conversation")
         if self._next_role_tag is not None and prepared[-1].get("role") == "assistant":
             tokens.append(self._single_token(self._next_role_tag(prepared[-1])))
-        for index in _assistant_turns(messages):
-            if index in turns:
-                continue
-            where = f"messages[{index}]"
-            prompt = self._tokens(prepared[:index], declared, generation=True, where=where)
-            if tokens[: len(prompt)] != prompt:
-                raise RendererError(
-                    RendererErrorCode.NOT_PREFIX_STABLE,
-                    f"{where}: the turn's prompt is not a prefix of the whole render",
-                )
         weights = [0.0] * len(tokens)
         end = 0
         for index in turns:
@@ -731,12 +721,12 @@ def _refuse_embedded_stop(completion: Sequence[int], stops: set[int], where: str
         )
 
 
-def _assistant_turns(messages: Sequence[ChatMessage]) -> list[int]:
-    return [index for index, message in enumerate(messages) if message.get("role") == "assistant"]
-
-
 def _trainable_turns(messages: Sequence[ChatMessage]) -> list[int]:
-    turns = [index for index in _assistant_turns(messages) if messages[index].get("weight") != 0]
+    turns = [
+        index
+        for index, message in enumerate(messages)
+        if message.get("role") == "assistant" and message.get("weight") != 0
+    ]
     if not turns:
         raise RendererError(
             RendererErrorCode.NO_TRAINABLE_TOKENS, "no assistant turn has a non-zero weight"

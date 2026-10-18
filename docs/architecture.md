@@ -132,7 +132,10 @@ the prompt's tokens, as the model would generate it.
 One example per row with every assistant turn trainable costs O(turns) tokens rather than
 O(turns²), but it is only correct when the renderer is **prefix-stable** for that row: for
 every trainable turn *i*, the turn's per-turn example must be an exact token prefix of the
-whole conversation tokenized once, and so must every untrained turn's own prompt. A family may pin `prefix_stable` to try this fast path;
+whole conversation tokenized once. Every trained token then has exactly its per-turn
+context; an untrained turn carries no loss, so a template that shows it differently in later
+history (DeepSeek-V4 without tools) still trains what the turns would. A family may pin
+`prefix_stable` to try this fast path;
 the renderer then checks it on every row in `supervised_example` (rows with
 `reasoning_content` always render per turn) and raises `RendererError` with code
 `not_prefix_stable` when it does not hold, and the loop renders that row with

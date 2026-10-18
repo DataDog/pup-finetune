@@ -706,13 +706,13 @@ Source lives under `src/pup_finetune/`.
   (the prompt tokenized whole, as the template tokenizes it: `ChatTokenizer.render_tokens`,
   then the completion through its stop token, re-encoded after the prompt when a token merges
   across the boundary), and a per-row-checked one-example fast path for families that pin
-  `prefix_stable` (every trainable turn, and every untrained turn's prompt, a token prefix of
-  the whole render). It also has the narrow `ChatTokenizer` seam (tests inject
-  `tests/fakes/tokenizer.py`), the lazily imported `transformers` adapter (the `hf` extra;
-  `load_tokenizer` passes `trust_remote_code` only for a family that sets it, always with the
-  pinned revision as `revision` and `code_revision`, refuses a tokenizer class from any other
-  repository or commit, and a remote tokenizer's identity is its pinned `model@revision`),
-  and `ChatEncoder` and `EncodedChatTokenizer`, for a tokenizer that ships no chat template.
+  `prefix_stable` (every trainable turn a token prefix of the whole render). It also has the
+  narrow `ChatTokenizer` seam (tests inject `tests/fakes/tokenizer.py`), the lazily imported
+  `transformers` adapter (the `hf` extra; `load_tokenizer` passes `trust_remote_code` only
+  for a family that sets it, always with the pinned revision as `revision` and
+  `code_revision`, refuses a tokenizer class from any other repository or commit, and a
+  remote tokenizer's identity is its pinned `model@revision`), and `ChatEncoder` and
+  `EncodedChatTokenizer`, for a tokenizer that ships no chat template.
   `encoders.py` has those encoders (`DeepSeekV4Encoder`, DeepSeek-V4's
   `encoding/encoding_dsv4.py` for the messages we train on, held to it by the `tokenizer`
   tests). `parsers.py` has the `ResponseParser`s (`Qwen3XmlToolParser`,
