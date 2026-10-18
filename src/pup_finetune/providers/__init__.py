@@ -50,6 +50,7 @@ __all__ = [
     "ProviderInfo",
     "RefusedFlag",
     "Step",
+    "aliases_for_model",
     "get_provider",
     "installed",
     "known_models",
@@ -370,16 +371,23 @@ def known_models(runtime: Runtime) -> dict[str, Mapping[str, tuple[str, ...]]]:
     return {name: _REGISTRY[name].models for name in known_providers(runtime)}
 
 
-def providers_for_model(model: str, runtime: Runtime) -> list[str]:
-    """The providers ``runtime`` may use with a profile that ``model`` names (its alias, or
-    in any case the provider's model id or its tokenizer: :func:`~pup_finetune.providers.
-    base.selects`), sorted: what ``train`` infers ``--provider`` from. Imports no provider
+def aliases_for_model(model: str, runtime: Runtime) -> dict[str, str]:
+    """The alias of the profile that ``model`` names (its alias, or in any case the
+    provider's model id or its tokenizer: :func:`~pup_finetune.providers.base.selects`), by
+    each provider ``runtime`` may use that has one, sorted by provider. Imports no provider
     module."""
-    return [
-        name
+    return {
+        name: alias
         for name, models in known_models(runtime).items()
-        if any(selects(names, model) for names in models.values())
-    ]
+        for alias, names in models.items()
+        if selects(names, model)
+    }
+
+
+def providers_for_model(model: str, runtime: Runtime) -> list[str]:
+    """The providers of :func:`aliases_for_model`: what ``train`` infers ``--provider``
+    from."""
+    return list(aliases_for_model(model, runtime))
 
 
 def get_provider(name: str, runtime: Runtime) -> Provider:

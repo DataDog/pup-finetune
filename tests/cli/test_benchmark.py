@@ -184,6 +184,20 @@ def test_a_model_several_providers_offer_needs_its_provider_named(
     assert output(result)["status"] == "complete"
 
 
+def test_the_hint_for_a_model_several_providers_offer_names_their_aliases(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(providers, "_REGISTRY", dict(providers._REGISTRY))
+    providers.register_provider(
+        "other", "pkg.other:Provider", models={"other-model": ("other-model", "fake/tokenizer")}
+    )
+
+    result = invoke("benchmark", str(dataset), "--models", "FAKE/TOKENIZER")
+
+    assert result.exit_code == 2
+    assert "name one of fake/fake-model, other/other-model" in result.stderr
+
+
 def test_one_model_on_two_providers_is_named_by_provider_everywhere(
     dataset: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

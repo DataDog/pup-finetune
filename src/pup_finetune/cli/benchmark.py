@@ -30,7 +30,7 @@ from pup_finetune.display import joined
 from pup_finetune.errors import PAID_RUN, UsageError, require_confirm, require_writable
 from pup_finetune.evaluation import benchmark, runner
 from pup_finetune.judge_models import BY_KEY
-from pup_finetune.providers import known_providers, providers_for_model
+from pup_finetune.providers import aliases_for_model, known_providers, providers_for_model
 from pup_finetune.runtime import Runtime
 
 SETTING_PARAMS: dict[str, tuple[str, ...]] = {
@@ -89,10 +89,12 @@ def model_and_provider(entry: str, runtime: Runtime) -> tuple[str, str]:
     (:func:`~pup_finetune.cli.train.provider_for_model`), else ``PROVIDER/MODEL``. A whole
     entry that names a model wins, so a tokenizer name such as ``org/name`` is never split.
     A model several providers offer is a usage error naming the entries that pick one."""
-    found = providers_for_model(entry, runtime)
+    found = aliases_for_model(entry, runtime)
     if len(found) > 1:
-        choices = ", ".join(f"{name}/{entry}" for name in found)
-        raise UsageError(f"{entry} is offered by {joined(found)}", hint=f"name one of {choices}")
+        choices = ", ".join(f"{name}/{alias}" for name, alias in found.items())
+        raise UsageError(
+            f"{entry} is offered by {joined(list(found))}", hint=f"name one of {choices}"
+        )
     head, slash, rest = entry.partition("/")
     if not found and slash and head in known_providers(runtime):
         if head not in providers_for_model(rest, runtime):
