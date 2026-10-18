@@ -206,7 +206,9 @@ needs `--confirm`, but it writes nothing to Datadog, so `PUP_READ_ONLY` does not
 `--checks FILE.py` runs the user's row checks first (after `--rows` and `--max-rows`): a row
 one fails is labeled `by: check` before any judge call and never judged, the preview runs them
 too (one that raises is a `usage` error naming the row), and they are not frozen, so rows they
-labeled are skipped without `--checks` (`skipped_checked`). With `--checks` alone it calls no
+labeled are skipped without `--checks` (`skipped_checked`); `triage.json` records a council's
+file as `checks_file`, which a dataset's step to finish the triage passes again while it
+exists. With `--checks` alone it calls no
 judge and labels at once, without `--confirm` (refusing `--judges`, `--concurrency` and
 `--reset-triage`), reporting `stale_check_labels`; `dataset label --file` refuses `by: check`.
 Tests replace the judges' clients (`cli/triage.py`'s `open_clients`) with a fake.

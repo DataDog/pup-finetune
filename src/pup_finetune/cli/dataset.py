@@ -37,6 +37,7 @@ from pup_finetune.curation.samples import (
     SampleSplit,
     sample_rows,
 )
+from pup_finetune.curation.triage import recorded_checks
 from pup_finetune.data.convert import ReasoningMode
 from pup_finetune.data.dataset_dir import (
     DatasetDir,
@@ -468,13 +469,7 @@ def _next_by_state(
         '"reason"} object per line (a reason is required to drop)',
     )
     triage_steps = (
-        [
-            step(
-                template("dataset", "triage", directory, "--rubric", "<RUBRIC_FILE>"),
-                "finish the triage: the same --rubric and --judges resume it, reusing the "
-                "votes cast (paid; it previews first)",
-            )
-        ]
+        [_finish_triage(dataset, directory)]
         if state.triage == "incomplete"
         else [
             step(
@@ -539,6 +534,23 @@ def _next_by_state(
     else:
         steps.append(push_step)
     return {"next_command": None, "next_steps": steps}
+
+
+def _finish_triage(dataset: DatasetDir, directory: Path) -> dict[str, str]:
+    """The step that finishes an incomplete triage, with the last council's checks file
+    (never frozen) while it exists."""
+    words: list[object] = ["dataset", "triage", directory, "--rubric", "<RUBRIC_FILE>"]
+    why = "finish the triage: the same --rubric and --judges resume it, reusing the votes cast"
+    checks = recorded_checks(dataset)
+    if checks is not None and checks.is_file():
+        words += ["--checks", checks]
+        why += ", and --checks keeps the rows a check fails from the judges"
+    elif checks is not None:
+        why += (
+            f"; the last triage ran the checks in {display_path(checks)}, which no longer "
+            "exists: pass --checks FILE again, or the judges review rows a check would fail"
+        )
+    return step(template(*words), f"{why} (paid; it previews first)")
 
 
 def _pull_more_steps(dataset: DatasetDir, directory: Path, state: Pipeline) -> list[dict[str, str]]:

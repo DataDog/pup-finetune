@@ -66,8 +66,9 @@ one fails is labeled ``by: check`` with the first failing check's reason, before
 call, and is never sent to a judge; the council judges only the rest, and with ``agreement``
 the checks are compared with the labels apart (:meth:`TriagePlan.check_agreement`). Checks
 are not frozen: they run again on every triage given them, so rows labeled ``by: check`` are
-reviewed only then, and are otherwise skipped. A plan with checks and no criteria calls no
-judge: :func:`apply_check_labels` labels its rows at once.
+reviewed only then, and are otherwise skipped (``triage.json`` records the last council's
+file, :func:`recorded_checks`). A plan with checks and no criteria calls no judge:
+:func:`apply_check_labels` labels its rows at once.
 """
 
 from __future__ import annotations
@@ -143,6 +144,7 @@ __all__ = [
     "parse_vote",
     "plan_triage",
     "read_votes",
+    "recorded_checks",
     "row_digest",
     "rubric_sections",
     "rubric_template",
@@ -154,6 +156,8 @@ __all__ = [
 DEFAULT_CONCURRENCY: Final = 4
 JUDGMENTS_FILE: Final = "judgments.jsonl"
 SETTINGS_FILE: Final = "triage.json"
+CHECKS_FILE_KEY: Final = "checks_file"
+"""The ``triage.json`` key of the last council's ``--checks`` file, which is not frozen."""
 TEMPLATE_FILE: Final = "rubric_template.md"
 PROMPT_VERSION: Final = 1
 """Bumped when the prompt changes, so votes cast under another prompt are not reused."""
@@ -1046,6 +1050,17 @@ def triage_status(dataset: DatasetDir) -> tuple[TriageStatus, str | None]:
     return "complete", None
 
 
+def recorded_checks(dataset: DatasetDir) -> Path | None:
+    """The ``--checks`` file the last council triage of ``dataset`` ran, as ``triage.json``
+    records it; ``None`` without one, or when that file cannot be read."""
+    try:
+        settings = read_json(dataset.path / SETTINGS_FILE)
+    except (OSError, StateError):
+        return None
+    recorded = settings.get(CHECKS_FILE_KEY) if isinstance(settings, dict) else None
+    return Path(recorded) if isinstance(recorded, str) else None
+
+
 def _readable_settings(settings: Any) -> bool:
     """Whether ``settings`` (``triage.json``) names the judges and the rubric's hash."""
     if not isinstance(settings, dict):
@@ -1074,6 +1089,8 @@ def _check_frozen(dataset: DatasetDir, settings: Mapping[str, Any], votes: int) 
     if not votes or not settings_path.exists():
         return
     stored = read_json(settings_path)
+    if isinstance(stored, dict):
+        stored.pop(CHECKS_FILE_KEY, None)
     if canonical_json(stored) == canonical_json(settings):
         return
     changed = sorted(
@@ -1430,7 +1447,10 @@ def run_triage(
         else:
             _check_unchanged(plan)
             _repair_torn_tail(votes_path)
-        atomic_write_json(settings_path, plan.settings)
+        checks = (
+            {CHECKS_FILE_KEY: str(plan.checks.path.absolute())} if plan.checks is not None else {}
+        )
+        atomic_write_json(settings_path, {**plan.settings, **checks})
         check_labels, check_skipped = _label_checked(plan, now)
         pool = DaemonPool(concurrency, name="triage")
         futures: dict[Future[_Answer], tuple[TrainingRow, str]] = {}

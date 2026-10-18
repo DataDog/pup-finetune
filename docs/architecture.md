@@ -617,7 +617,9 @@ labeled `by: check` with the first failing check's reason, under the dataset's l
 judge call (so a stopped council keeps them), and is never sent to a judge; with `--agreement`
 the checks are compared with the labels apart from the council. Checks are not frozen in
 `triage.json`: they run again whenever given, so rows they labeled are reviewed only then and
-skipped otherwise, and one an edited check now passes goes to the council. `--checks` alone
+skipped otherwise, and one an edited check now passes goes to the council. `triage.json`
+records the last council's file as `checks_file`, so a dataset's step to finish the triage
+passes it again while it exists. `--checks` alone
 calls no judge and labels at once, reporting such rows as stale check labels. `triage_status`
 reads only files, so `dataset show` never runs user code.
 

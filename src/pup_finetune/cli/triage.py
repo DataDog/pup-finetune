@@ -400,14 +400,13 @@ def triage_rows(
     if complete:
         merge_next(data, dataset_next(dataset, directory, summary=summary))
         if checks is not None:
-            finish = template("dataset", "triage", directory, "--rubric", "<RUBRIC_FILE>")
             data["next_steps"] = [
                 step(
                     shlex.join(every_row),
                     "finish the triage over every row with the same rubric, judges and checks, "
                     "reusing the votes cast (paid; it previews first)",
                 )
-                if entry["command"] == finish
+                if _council_step(entry, directory)
                 else entry
                 for entry in data["next_steps"]
             ]
@@ -462,6 +461,12 @@ def _checks(plan: triage.TriagePlan, report: triage.TriageReport) -> dict[str, A
             "unchanged": labels.unchanged if labels else 0,
         },
     }
+
+
+def _council_step(entry: Mapping[str, str], directory: Path) -> bool:
+    """Whether ``entry`` is a council step of the dataset's state (``dataset_next``)."""
+    council = template("dataset", "triage", directory, "--rubric", "<RUBRIC_FILE>")
+    return entry["command"] == council or entry["command"].startswith(f"{council} ")
 
 
 def _checks_result(

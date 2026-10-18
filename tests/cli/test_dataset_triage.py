@@ -743,6 +743,29 @@ def test_a_checked_sample_finishes_with_the_checks(dataset: Path, chat: FakeChat
     assert not any(command.endswith(" --rubric <RUBRIC_FILE>") for command in commands)
 
 
+def test_dataset_show_finishes_a_checked_sample_with_its_checks(
+    dataset: Path, chat: FakeChatApi, tmp_path: Path
+) -> None:
+    checks = tmp_path / "checks.py"
+    checks.write_text(ROW_CHECKS.read_text())
+    args = ["dataset", "triage", str(dataset), "--rule", "stay on topic"]
+    args += ["--judges", "fireworks/j1", "--max-rows", "4", "--confirm"]
+    assert invoke(*args, "--checks", str(ROW_CHECKS)).exit_code == 0
+    # The checks file is recorded but not frozen: another one resumes the same triage.
+    resumed = invoke(*args, "--checks", str(checks))
+    assert resumed.exit_code == 0, resumed.stderr
+    assert json.loads((dataset / "triage.json").read_text())["checks_file"] == str(checks)
+    finish = shlex.join(["pup", "finetune", "dataset", "triage", str(dataset)])
+    finish += " --rubric <RUBRIC_FILE>"
+    steps = output(invoke("dataset", "show", str(dataset)))["next_steps"]
+    assert f"{finish} --checks {shlex.quote(str(checks))}" in [s["command"] for s in steps]
+    checks.unlink()
+    steps = output(invoke("dataset", "show", str(dataset)))["next_steps"]
+    entry = next(s for s in steps if s["command"].startswith(finish))
+    assert entry["command"] == finish
+    assert f"{checks}, which no longer exists" in entry["why"]
+
+
 def test_an_edited_check_file_reports_stale_check_labels(
     dataset: Path, chat: FakeChatApi, tmp_path: Path
 ) -> None:
