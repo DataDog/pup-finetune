@@ -657,3 +657,23 @@ def test_a_conflict_s_hint_names_a_free_benchmark_directory(dataset: Path, tmp_p
     conflict = invoke(*args)
     assert conflict.exit_code == 2
     assert f"pass --out-dir {dataset / 'benchmark-2'}" in conflict.stderr
+
+
+def test_recalibrating_the_judge_keeps_the_evaluators_calibrations(
+    dataset: Path, tmp_path: Path
+) -> None:
+    spec_dir = tmp_path / "spec"
+    shutil.copytree(ROWS.parent.parent / "evaluators", spec_dir)
+    args = ("benchmark", str(dataset), "--models", "fake-model")
+    args += ("--evaluators", str(spec_dir / "evals.toml"))
+    assert invoke(*args, "--confirm").exit_code == 0
+    path = dataset / "benchmark" / "calibration.json"
+    stored = json.loads(path.read_text())
+    path.write_text(json.dumps({**stored, "judge": {**stored["judge"], "model": "another"}}))
+    preview = output(invoke(*args))["preview"]
+    assert preview["calibration_calls"] > 0
+    assert preview["evaluators"]["items"][0]["calibration_calls"] == 0
+    result = invoke(*args, "--confirm")
+    assert result.exit_code == 0, result.stderr
+    assert "calibrating the evaluator polite" not in result.stderr
+    assert json.loads(path.read_text())["evaluators"] == stored["evaluators"]

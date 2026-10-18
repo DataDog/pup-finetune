@@ -798,7 +798,8 @@ def _calibration(plan: BenchmarkPlan, client: ChatCompleter) -> dict[str, Any] |
         "judge": plan.judge.identity(),
     }
     info(calibration_line(report))
-    store.write_calibration(report)
+    kept = (store.read_calibration() or {}).get("evaluators")
+    store.write_calibration({**report, **({"evaluators": kept} if kept else {})})
     return report
 
 
