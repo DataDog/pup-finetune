@@ -171,8 +171,9 @@ The preview shows the rendered tokens per split, the rows left out (such as `exc
 and where the rows go. `--model` takes a model's alias, or in any case the provider's model id
 or its Hugging Face tokenizer name (`models list` shows them). The provider follows from the model
 when one provider offers it; `qwen3p8-27b`, `glm-5p3-flash` and `kimi-k3` are on both, so
-name `--provider` for them. The run goes in `runs/<run id>`. `--detach` trains in a background worker (its log is `worker.log`). Cap the
-spend with `--max-train-tokens`, or `--max-spend-usd` with `--hourly-rate-usd`. The epoch with
+name `--provider` for them. The run goes in `runs/<run id>`. `--detach` trains in a background
+worker (its log is `worker.log`). Cap the spend with `--max-train-tokens`, or `--max-spend-usd`
+with `--hourly-rate-usd`. The epoch with
 the best validation loss is kept, also when a cap stops the run: promoted to a Fireworks model,
 or recorded as the run's `deployable_checkpoint` on Baseten, which has no promotion. Fireworks
 also trains `deepseek-v4-flash-0731` and `muse-glimmer-30b`. The Baseten models are

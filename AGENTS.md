@@ -272,10 +272,11 @@ Training runs in the key's own account (Fireworks refuses a key that sees severa
 records.
 
 Training on Baseten Loops is paid too: `--provider baseten --model qwen3p5-9b` (or
-`glm-5p3-flash` or `qwen3p8-27b`, which Fireworks offers too) needs the `baseten` extra and a Baseten API key (`BASETEN_API_KEY`, the OS
-keychain after `pup finetune auth login baseten`, or the default remote's key in
-`~/.trussrc`, read only). Its preview asks Baseten, read only, whether the workspace can train
-the model; `--confirm` starts a billed dedicated trainer, deactivated when the session ends.
+`glm-5p3-flash` or `qwen3p8-27b`, which Fireworks offers too) needs the `baseten` extra and a
+Baseten API key (`BASETEN_API_KEY`, the OS keychain after `pup finetune auth login baseten`,
+or the default remote's key in `~/.trussrc`, read only). Its preview asks Baseten, read only,
+whether the workspace can train the model; `--confirm` starts a billed dedicated trainer,
+deactivated when the session ends.
 Baseten has no promotion, so `result.json` records the best sampler checkpoint as
 `deployable_checkpoint`, and `deploy` serves it as a dedicated Baseten model named after the
 deployment id (the run id made safe, or `--deployment-id`), on an instance type with exactly
@@ -707,8 +708,9 @@ Source lives under `src/pup_finetune/`.
   (the prompt tokenized whole, as the template tokenizes it: its text encoded whole, or
   `ChatTokenizer.render_tokens` when the tokenizer's own code tokenizes the chat (`None`
   otherwise); then the completion through its stop token, re-encoded after the prompt when a
-  token merges across the boundary, which a tokenizer with `render_tokens` refuses instead; two template renders per turn), and a per-row-checked one-example fast path for
-  families that pin `prefix_stable` (every trainable turn a token prefix of the whole
+  token merges across the boundary, which a tokenizer whose `render_tokens` is not `None`
+  refuses instead; two template renders per turn), and a per-row-checked one-example fast
+  path for families that pin `prefix_stable` (every trainable turn a token prefix of the whole
   render). It also has the narrow `ChatTokenizer` seam (tests inject
   `tests/fakes/tokenizer.py`), the lazily imported `transformers` adapter (the `hf` extra;
   `load_tokenizer` passes `trust_remote_code` only for a family that sets it, always with the
@@ -741,8 +743,9 @@ Source lives under `src/pup_finetune/`.
   turn. `exclusions` names the cases a model cannot replay, each with a stable `code`: a turn
   with no message before it (`empty_prompt`, for every provider) and a prompt the model's
   renderer refuses (`prompt_refusal`, the renderer's code). Tools are never executed, so
-  replay measures agreement with the recorded behavior, not task success. `metrics.py` has the deterministic tool-call metrics (`MetricName`,
-  `score_case`, `aggregate`; `None` when a metric does not apply) and `schema_errors`, a
+  replay measures agreement with the recorded behavior, not task success. `metrics.py` has
+  the deterministic tool-call metrics (`MetricName`, `score_case`, `aggregate`; `None` when a
+  metric does not apply) and `schema_errors`, a
   validator for the common JSON Schema subset tool declarations use. `judge.py` is the LLM
   judge: `judge` asks whether a candidate action is an acceptable substitute for the reference
   (the recorded data JSON-encoded in tagged blocks marked untrusted, reasoning never shown) and
@@ -766,8 +769,9 @@ Source lives under `src/pup_finetune/`.
   identity a rerun must match (`evaluation_identity`; a mismatch is a `SettingsConflict`, exit 2,
   asking for a new `--out-dir`); a sampler or judge failure is an error result, counted apart and out of
   every rate, and a generation whose prompt the renderer refused (`RendererError`) is one a
-  rerun never retries (`is_final`, counted as `errors_unrenderable`); `cancel` stops new pairs and keeps finished ones (any other error waits for the
-  pairs in flight, then propagates). `summarize` writes
+  rerun never retries (`is_final`, counted as `errors_unrenderable`); `cancel` stops new
+  pairs and keeps finished ones (any other error waits for the pairs in flight, then
+  propagates). `summarize` writes
   `summary.json`: per-target pass rates (judge and metrics), per-trajectory agreement, the
   paired wins, regressions and ties, and `tuned_minus_base` with a seeded paired bootstrap
   95% CI over trajectories (`bootstrap.py`'s `paired_bootstrap_ci`), `tuned_minus_compare`
