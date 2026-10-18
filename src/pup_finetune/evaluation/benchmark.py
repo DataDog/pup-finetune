@@ -408,7 +408,7 @@ class BenchmarkPlan:
             f"{', '.join(sorted(calls_by_provider))} to generate and to {judged_at} to judge",
             "data_recipients": self.recipients(),
             "caveat": CAVEAT,
-            "warnings": warnings,
+            "warnings": list(dict.fromkeys(warnings)),
         }
 
 

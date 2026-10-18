@@ -358,6 +358,21 @@ def test_the_preview_says_when_a_tokenizer_runs_repository_code(
     assert any(warning.startswith(notice) for warning in preview["warnings"])
 
 
+def test_a_warning_two_models_share_is_listed_once(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    register_fake_model(monkeypatch, twin="pup_finetune.providers.fake:FakeProvider")
+    remote = dataclasses.replace(fake_module.FAKE_PROFILE, trust_remote_code=True)
+    monkeypatch.setattr(fake_module, "FAKE_PROFILE", remote)
+    monkeypatch.setenv("PUP_READ_ONLY", "1")
+
+    result = invoke("benchmark", str(dataset), "--models", "fake/fake-model,twin/fake-model")
+
+    notice = "the fake-model tokenizer runs Python code from the Hugging Face repository"
+    warnings = output(result)["preview"]["warnings"]
+    assert len([warning for warning in warnings if warning.startswith(notice)]) == 1
+
+
 class _ToolShyRenderer(FakeRenderer):
     """The fake renderer, refusing every prompt that ends with a tool result."""
 
