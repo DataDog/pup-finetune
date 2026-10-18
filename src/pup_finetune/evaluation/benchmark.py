@@ -47,6 +47,7 @@ from pup_finetune.evaluation.runner import (
     DEFAULT_SEED,
     calibration_line,
     cancel_on_signals,
+    no_reuse_hint,
     open_judge_client,
     resolve_judge,
     stored_judge,
@@ -223,7 +224,8 @@ class BenchmarkPlan:
                 f"{display_path(eval_dir.path)} holds a benchmark with other settings "
                 f"(changed: {', '.join(identity_changes(stored, wanted))}), so its "
                 "results cannot be reused",
-                hint="benchmark into a new directory: pass a new --out-dir",
+                hint=f"{no_reuse_hint(stored, wanted)}benchmark into a new directory: pass a "
+                "new --out-dir",
             )
         return None
 

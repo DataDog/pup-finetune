@@ -132,6 +132,7 @@ __all__ = [
     "finished_result",
     "headline",
     "next_after_training",
+    "no_reuse_hint",
     "open_judge_client",
     "plan_evaluation",
     "plan_standalone",
@@ -180,6 +181,13 @@ _CANCEL_NOTICE: Final = (
 
 def _q(value: object) -> str:
     return quoted(value)
+
+
+def no_reuse_hint(stored: Mapping[str, Any], wanted: Mapping[str, Any]) -> str:
+    """The way to continue a directory that only ``--no-reuse`` keeps apart, else ``""``."""
+    if identity_changes(stored, wanted) == ["reuse"] and stored.get("reuse") is False:
+        return "it was made with --no-reuse: add --no-reuse to continue it, or "
+    return ""
 
 
 # --- publishing ---------------------------------------------------------------------------
@@ -678,8 +686,8 @@ class EvalPlan:
                 f"{self.out_dir} holds an evaluation with other settings (changed: "
                 f"{', '.join(identity_changes(stored, wanted))}), so its results cannot be "
                 "reused",
-                hint="evaluate into a new directory: pass --out-dir "
-                f"{_q(free_sibling(self.out_dir))}",
+                hint=f"{no_reuse_hint(stored, wanted)}evaluate into a new directory: pass "
+                f"--out-dir {_q(free_sibling(self.out_dir))}",
             )
         if reusing:
             self._refuse_another_compare(eval_dir)

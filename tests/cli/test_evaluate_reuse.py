@@ -294,6 +294,7 @@ def test_no_reuse_makes_the_answers_again_and_is_frozen(
     assert again.exit_code == 2
     assert "Error [settings_conflict]" in again.stderr
     assert "(changed: reuse)" in again.stderr
+    assert "Hint: it was made with --no-reuse: add --no-reuse to continue it, or" in again.stderr
     assert f"--out-dir {second / 'eval-2'}" in again.stderr
 
 

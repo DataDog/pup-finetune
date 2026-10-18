@@ -822,7 +822,8 @@ Source lives under `src/pup_finetune/`.
   command that shares them), only from a directory whose `reuse.json` (`stamp`, written
   before its first answer) holds the current `key_inputs` (an evaluation made before stamps
   counts as version 1). Only base answers are shared; `evaluation.json` records
-  `"reuse": false` only with `--no-reuse`.
+  `"reuse": false` only with `--no-reuse`, so a rerun without the flag is a conflict whose
+  hint adds it first (`no_reuse_hint`, in `benchmark` too).
 - `providers/` - the provider seam. `base.py` has the neutral types (`ModelProfile`,
   `TrainSpec`, `CheckpointRef`, `StepMetrics`, ...) and the `Provider`, `TrainingBackend`,
   `TrainingSession` and `Sampler` protocols; `__init__.py` is the lazy registry

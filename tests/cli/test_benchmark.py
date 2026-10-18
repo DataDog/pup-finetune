@@ -374,11 +374,17 @@ def test_no_reuse_is_frozen_in_the_out_dir(dataset: Path) -> None:
     assert changed.exit_code == 2
     assert "settings_conflict" in changed.stderr
     assert "(changed: reuse)" in changed.stderr
+    assert "to continue it" not in changed.stderr
     fresh = output(invoke(*args, "--no-reuse", "--out-dir", str(dataset / "fresh")))
     assert fresh["preview"]["reuse"] == {"status": "off"}
     assert fresh["preview"]["generation_calls"] == fresh["preview"]["cases"]
     assert "reuse" not in fresh["preview"]["defaults_used"]
     assert fresh["next_command"].endswith("--no-reuse --confirm")
+    assert rerun(fresh["next_command"]).exit_code == 0
+    again = invoke(*args, "--out-dir", str(dataset / "fresh"))
+    assert again.exit_code == 2
+    assert "Hint: it was made with --no-reuse: add --no-reuse to continue it, or" in again.stderr
+    assert "a new --out-dir" in again.stderr
 
 
 def test_a_rerun_of_a_complete_benchmark_shares_its_answers(dataset: Path) -> None:
