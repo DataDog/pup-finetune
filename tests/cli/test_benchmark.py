@@ -22,7 +22,7 @@ from typer.testing import CliRunner, Result
 
 from pup_finetune import providers
 from pup_finetune.cli import app
-from pup_finetune.errors import ExternalError
+from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.evaluation import benchmark as benchmark_module
 from pup_finetune.inference import ChatCompletion
 from pup_finetune.providers import fake as fake_module
@@ -516,3 +516,18 @@ def test_the_retry_hint_names_only_the_models_a_rerun_can_advance(
     assert statuses == {"fake/fake-model": "complete_with_errors", "twin/fake-model": "error"}
     assert data["hint"].startswith("twin/fake-model has no result for every case")
     assert data["next_command"].startswith("pup finetune benchmark")
+
+
+def test_a_model_whose_stop_tokens_do_not_resolve_fails_the_preview(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unresolved(self: FakeRenderer) -> list[int]:
+        raise UsageError("'<|end|>' is not a single token of the fake/tokenizer tokenizer")
+
+    monkeypatch.setattr(FakeRenderer, "stop_token_ids", property(unresolved))
+
+    result = invoke("benchmark", str(dataset), "--models", "fake-model")
+
+    assert result.exit_code == 2
+    assert "is not a single token" in result.stderr
+    assert "--confirm" not in result.stdout

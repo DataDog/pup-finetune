@@ -517,6 +517,7 @@ class HFChatTemplateRenderer:
             else tokenizer
         )
         self._stop_token_ids: tuple[int, ...] | None = None
+        self._control_ids: Mapping[int, str] = MappingProxyType({})
         self._lock = threading.Lock()
 
     # The Renderer protocol.
@@ -605,7 +606,8 @@ class HFChatTemplateRenderer:
     ) -> ParsedResponse:
         if not isinstance(self._parser, ControlTokenParser):
             return self._parser.parse(self.decode(tokens), tools)
-        controls = {self._single_token(token): token for token in self._parser.control_tokens}
+        self._stop_ids()
+        controls = self._control_ids
         segments: list[Segment] = []
         start = 0
         for index, token in enumerate(tokens):
@@ -671,7 +673,14 @@ class HFChatTemplateRenderer:
         return turns
 
     def _stop_ids(self) -> tuple[int, ...]:
+        """The stop tokens' ids; the parser's control tokens resolve with them, so a family
+        whose stop or control token is not one token fails before anything is sampled."""
         if self._stop_token_ids is None:
+            parser = self._parser
+            controls = parser.control_tokens if isinstance(parser, ControlTokenParser) else ()
+            self._control_ids = MappingProxyType(
+                {self._single_token(token): token for token in controls}
+            )
             self._stop_token_ids = tuple(self._single_token(token) for token in self._stop_tokens)
         return self._stop_token_ids
 

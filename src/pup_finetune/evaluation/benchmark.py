@@ -466,6 +466,7 @@ def plan_benchmark(
         provider = get_provider(provider_name, runtime)
         profile = provider.resolve_model(alias)
         renderer = provider.renderer(profile)
+        renderer.stop_token_ids  # noqa: B018 - a family whose tokens do not resolve fails here
         candidate = Candidate(
             provider=provider_name,
             profile=profile,

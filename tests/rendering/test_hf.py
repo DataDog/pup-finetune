@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -881,6 +882,40 @@ def test_a_sampled_completion_takes_structure_only_from_its_control_tokens(
     expected = [json.loads(c["function"]["arguments"]) for c in reply.get("tool_calls", [])]
     found = [json.loads(c["function"]["arguments"]) for c in parsed.message.get("tool_calls", [])]
     assert found == expected
+
+
+class _ExtraControlParser(KimiXtmlParser):
+    control_tokens = (*KimiXtmlParser.control_tokens, "<|nope|>")
+
+
+def test_a_control_token_that_is_not_one_token_fails_with_the_stop_tokens() -> None:
+    r = HFChatTemplateRenderer(
+        "example/tiny-xtml",
+        SHA,
+        response_parser=_ExtraControlParser(),
+        stop_tokens=["<|end_of_msg|>"],
+        tokenizer=FakeXtmlTokenizer(),
+    )
+    with pytest.raises(UsageError, match=re.escape("'<|nope|>' is not a single token")):
+        _ = r.stop_token_ids
+
+
+def test_parsing_a_completion_reuses_the_control_token_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tokenizer = FakeXtmlTokenizer()
+    r = xtml_renderer(tokenizer)
+    (turn,) = r.per_turn_examples(LITERAL_CONTROL_ROW, [])
+    completion = [t for t, w in zip(turn.target_tokens, turn.weights, strict=True) if w]
+    _ = r.stop_token_ids
+    looked_up: list[str] = []
+    token_id = tokenizer.token_id
+    monkeypatch.setattr(tokenizer, "token_id", lambda t: looked_up.append(t) or token_id(t))
+
+    first, again = r.parse_completion(completion), r.parse_completion(completion)
+
+    assert first == again and first.format_valid
+    assert looked_up == []
 
 
 def test_a_parser_without_control_tokens_reads_the_completion_s_text() -> None:
