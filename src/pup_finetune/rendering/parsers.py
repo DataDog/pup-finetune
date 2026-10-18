@@ -561,7 +561,6 @@ class _Xtml:
 
     end: str
     message_close: str
-    think_close: str
     markers: tuple[str, ...]
     channels: re.Pattern[str]
     call: re.Pattern[str]
@@ -573,7 +572,6 @@ def _xtml(open_tag: str, close_tag: str, sep: str, end: str) -> _Xtml:
     return _Xtml(
         end=end,
         message_close=f"{close_tag}message{sep}",
-        think_close=f"{close_tag}think{sep}",
         markers=(open_tag, close_tag, sep, end),
         channels=re.compile(
             rf"(?P<reasoning>.*?){c}think{s}{o}response{s}(?P<content>.*?){c}response{s}"
@@ -612,9 +610,9 @@ class KimiXtmlParser:
 
     Each argument names its type: a ``string`` is kept as is and any other is decoded as JSON
     of that type, so the declared tools are not needed. Attribute values are unescaped
-    (``&quot;``, ``&amp;``). Calls must be numbered from 1 in order. Text without the
-    channels is format-invalid, its reasoning kept; a malformed tools channel stays in
-    ``content`` as raw text.
+    (``&quot;``, ``&amp;``). Calls must be numbered from 1 in order, and every argument
+    needs a key. Text without the channels is format-invalid, kept whole in ``content``; a
+    malformed tools channel stays in ``content`` as raw text.
 
     Kimi's tokenizer encodes message text apart from its control tokens, so text may spell
     one. :meth:`parse_segments` splits structure only at the sampled control tokens;
@@ -646,8 +644,7 @@ def _parse_xtml(text: str, xtml: _Xtml) -> ParsedResponse:
     closed = body.endswith(xtml.message_close)
     channels = xtml.channels.fullmatch(body.removesuffix(xtml.message_close))
     if channels is None:
-        reasoning = body.partition(xtml.think_close)[0]
-        return ParsedResponse(_assistant("", reasoning, []), format_valid=False)
+        return ParsedResponse(_assistant(body, None, []), format_valid=False)
     content, reasoning = channels["content"], channels["reasoning"]
     calls: list[tuple[str, dict[str, Any]]] = []
     valid = closed
@@ -697,7 +694,7 @@ def _kimi_call(
     arguments: dict[str, Any] = {}
     for argument in arguments_found:
         key, kind = _unescape(argument["key"]), argument["type"]
-        if key in arguments or _marked(argument["key"] + argument["value"], xtml):
+        if not key or key in arguments or _marked(argument["key"] + argument["value"], xtml):
             return None
         if kind == "string":
             arguments[key] = argument["value"]

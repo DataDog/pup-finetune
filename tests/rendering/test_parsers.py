@@ -606,6 +606,7 @@ def test_kimi_several_typed_calls_and_unescaped_attributes() -> None:
         kimi_call("f", 1, ("x", "boolean", "1")),
         kimi_call("f", 1, ("x", "object", "not json")),
         kimi_call("f", 1, ("x", "string", "a"), ("x", "string", "b")),
+        pytest.param(kimi_call("f", 1, ("", "string", "a")), id="empty_key"),
         kimi_call("f", 1) + "stray",
     ],
 )
@@ -676,6 +677,15 @@ def test_kimi_structure_comes_only_from_sampled_control_tokens(
     segments: list[tuple[str, bool]],
 ) -> None:
     assert not KIMI.parse_segments(segments).format_valid
+
+
+@pytest.mark.parametrize(
+    "text", ["Let me think about Par", "Thinking.<|close|>think<|sep|>no response channel"]
+)
+def test_kimi_text_without_the_channels_is_kept_whole_as_content(text: str) -> None:
+    parsed = KIMI.parse(text + "<|end_of_msg|>")
+    assert not parsed.format_valid
+    assert parsed.message == {"role": "assistant", "content": text}
 
 
 def test_kimi_the_stop_token_is_optional() -> None:
