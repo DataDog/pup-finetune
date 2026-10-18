@@ -318,3 +318,28 @@ def test_a_rerun_without_evaluators_continues_the_largest_attached_set(
     again = plan_benchmark(runtime, plan.dataset_dir, models, plan.settings)
     assert again.evaluator_names == ["no_card_numbers", "text"]
     assert again.preview()["evaluators"]["source"] == "evaluation directory"
+
+
+def test_a_rerun_without_evaluators_ranks_by_the_newest_of_equal_sets_and_rewrites_none(
+    plan: BenchmarkPlan, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PUP_FINETUNE_DEV", "1")
+    runtime = Runtime.from_env()
+    profiles = [candidate.profile for candidate in plan.candidates]
+    monkeypatch.setattr(FakeProvider, "models", lambda self: profiles)
+    shutil.copy(CHECKS, tmp_path / "checks.py")
+    spec = tmp_path / "checks.toml"
+    check = '[[evaluator]]\nname = "no_card_numbers"\ntype = "check"\nfile = "checks.py"\n'
+    spec.write_text(check)
+    both = [("fake-model", "fake"), ("fake-b", "fake")]
+    flagged = dataclasses.replace(plan.settings, evaluators=spec)
+    assert benchmark_module.execute(plan_benchmark(runtime, plan.dataset_dir, both, flagged))
+    spec.write_text(f'headline = "no_card_numbers"\n{check}')
+    benchmark_module.execute(plan_benchmark(runtime, plan.dataset_dir, both[1:], flagged))
+    first = EvalDir(plan.model_dir(plan.candidates[0])).evaluators_path
+    before = first.read_bytes()
+
+    found = benchmark_module.execute(plan_benchmark(runtime, plan.dataset_dir, both, plan.settings))
+
+    assert found["recommendation"]["headline"] == "no_card_numbers"
+    assert first.read_bytes() == before

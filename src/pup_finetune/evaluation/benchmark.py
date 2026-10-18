@@ -663,9 +663,16 @@ def plan_benchmark(
         cases = sample_conversations(cases, settings.max_rows, seed=settings.seed)
         sampled_from = conversations
     model_dirs = [EvalDir(settings.out_dir / candidate.target) for candidate in candidates]
-    records = [r for d in model_dirs if (r := stored_evaluators(d.evaluators_path)) is not None]
-    # Lists only grow, so the longest holds every other directory's evaluators.
-    stored = max(records, key=lambda record: len(record["evaluators"]), default=None)
+    records = {
+        d.evaluators_path: r
+        for d in model_dirs
+        if (r := stored_evaluators(d.evaluators_path)) is not None
+    }
+    # The newest breaks a tie, so --models order never picks an older record.
+    newest = max(
+        records, key=lambda p: (len(records[p]["evaluators"]), p.stat().st_mtime), default=None
+    )
+    stored = None if newest is None else records[newest]
 
     def pending(name: str) -> bool:
         return any(
@@ -825,12 +832,12 @@ def _prepare(plan: BenchmarkPlan, candidate: Candidate, inputs: Mapping[str, Any
 
 
 def _attach(plan: BenchmarkPlan, candidate: Candidate) -> None:
-    """Attach the plan's evaluators to ``candidate``'s directory, which has nothing left to
-    replay, so their headline and spec's files are recorded as a replay would."""
+    """Attach the ``--evaluators`` spec to ``candidate``'s directory, which has nothing left
+    to replay, so its headline and files are recorded as a replay would."""
     from pup_finetune.evaluation.evaluators import attach_evaluators
     from pup_finetune.evaluation.replay import EvalDir
 
-    if plan.evaluators is None:
+    if plan.evaluators is None or plan.evaluators.source != "flag":
         return
     eval_dir = EvalDir(plan.model_dir(candidate))
     with eval_dir.lock():

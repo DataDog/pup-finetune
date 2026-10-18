@@ -839,8 +839,9 @@ Source lives under `src/pup_finetune/`.
   `evaluators.json` (`attach_evaluators` under the lock: the list only grows, a change is a
   `SettingsConflict` naming a new version beside it or a free `--out-dir`), `resolve_evaluators`
   (the flag, which no `--confirm` command but the preview's repeats, since a run attaches the
-  whole spec; else the stored record, in a benchmark the longest of its models'; a stored
-  check loads only with cases left) and `scorers`, which `run_replay` runs on every pair
+  whole spec; else the stored record, in a benchmark the longest of its models' (the newest
+  on a tie), which a complete model does not attach; a stored check loads only with cases
+  left) and `scorers`, which `run_replay` runs on every pair
   missing an entry (`replay.outcome` reads a result for the judge, an evaluator or `all`).
   Evaluators are scored per directory, never shared through the store; their metrics go only
   with spans being published, and one added after is a warning.
