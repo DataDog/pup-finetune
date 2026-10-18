@@ -13,6 +13,7 @@ offline fake judge (the default for a fake run), or a fake swapped in for
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import json
 import os
@@ -37,6 +38,7 @@ from pup_finetune.evaluation import runner as runner_module
 from pup_finetune.evaluation import targets as targets_module
 from pup_finetune.evaluation.fake_judge import FAKE_JUDGE_MODEL, FakeJudge
 from pup_finetune.inference import ChatCompleter, ChatCompletion, ContextLimitError, JudgeConfig
+from pup_finetune.providers import fake as fake_module
 from pup_finetune.providers.fake import FakeRenderer
 from pup_finetune.runs import RunDir, RunState, model_id_for_run
 from pup_finetune.runtime import Runtime
@@ -1223,3 +1225,18 @@ def test_a_prompt_refused_while_sampling_is_an_error_no_rerun_retries(
 
     again = invoke("evaluate", str(run), "--no-publish")
     assert output(again)["preview"]["generation_calls"] == 0
+
+
+def test_previews_say_when_the_tokenizer_runs_repository_code(
+    dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    remote = dataclasses.replace(fake_module.FAKE_PROFILE, trust_remote_code=True)
+    monkeypatch.setattr(fake_module, "FAKE_PROFILE", remote)
+    run = tmp_path / "run"
+    notice = "tokenizer runs Python code from the Hugging Face repository fake/tokenizer"
+
+    train = output(invoke(*train_args(dataset, run)))["preview"]
+    assert any(notice in warning for warning in train["warnings"])
+    assert invoke(*train_args(dataset, run, "--confirm")).exit_code == 0
+    evaluate = output(invoke("evaluate", str(run), "--no-publish"))["preview"]
+    assert any(notice in warning for warning in evaluate["warnings"])

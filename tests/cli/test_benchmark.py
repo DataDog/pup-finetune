@@ -9,6 +9,7 @@ machine."""
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import shlex
 from collections.abc import Iterator
@@ -24,6 +25,7 @@ from pup_finetune.cli import app
 from pup_finetune.errors import ExternalError
 from pup_finetune.evaluation import benchmark as benchmark_module
 from pup_finetune.inference import ChatCompletion
+from pup_finetune.providers import fake as fake_module
 from pup_finetune.providers.base import Sampler
 from pup_finetune.providers.fake import FakeRenderer
 from tests.fakes.rows import import_with_refused_test_row
@@ -318,3 +320,15 @@ def test_a_prompt_refused_while_sampling_never_stops_the_benchmark(
     assert entry["cases"] > 0
     assert "which a retry cannot fix" in data["hint"]
     assert "benchmark" not in (data["next_command"] or "")
+
+
+def test_the_preview_says_when_a_tokenizer_runs_repository_code(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    remote = dataclasses.replace(fake_module.FAKE_PROFILE, trust_remote_code=True)
+    monkeypatch.setattr(fake_module, "FAKE_PROFILE", remote)
+
+    preview = output(invoke("benchmark", str(dataset), "--models", "fake-model"))["preview"]
+
+    notice = "the fake-model tokenizer runs Python code from the Hugging Face repository"
+    assert any(warning.startswith(notice) for warning in preview["warnings"])

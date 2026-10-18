@@ -314,6 +314,11 @@ class BenchmarkPlan:
             )
         calibration = self.calibration_calls()
         warnings = self.split_warnings()
+        warnings += [
+            remote
+            for candidate in self.candidates
+            if (remote := candidate.profile.remote_code_warning()) is not None
+        ]
         if judge_calls + calibration:
             # --confirm would fail on a key nothing provides: fail now, never offer it. A
             # read-only preview offers none, so it only warns.

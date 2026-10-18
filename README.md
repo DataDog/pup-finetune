@@ -348,7 +348,8 @@ storage for its job; the test split and dropped rows stay on this machine.
 Rows are rendered with each model's own tokenizer and chat template, downloaded from Hugging
 Face at a pinned commit. Kimi K3's tokenizer is Python code from the model's repository
 (`trust_remote_code`, which `models list` shows): rendering for `kimi-k3` downloads that code
-at its pinned commit and runs it on this machine.
+at its pinned commit and runs it on this machine, and the `train`, `evaluate` and `benchmark`
+previews warn of it.
 [docs/data-format.md](docs/data-format.md)
 describes the rows, the exclusion codes and the files in a dataset directory.
 

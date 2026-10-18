@@ -668,6 +668,8 @@ class EvalPlan:
 
         settings = self.settings
         warnings = self.refusal_warnings()
+        if (remote := self.profile.remote_code_warning()) is not None:
+            warnings.append(remote)
         targets = self.targets
         replays = self.replays
         skips = Counter(self.compare_skips.values())

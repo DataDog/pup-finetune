@@ -449,6 +449,8 @@ def _preview(
         )
     if no_epoch_can_finish(spec, inputs):
         warnings.append(no_epoch_warning(spec, inputs))
+    if (remote := profile.remote_code_warning()) is not None:
+        warnings.append(remote)
     rows = _rows(inputs)
     usage = _usage(spec, inputs, epochs=spec.max_epochs)
     return {

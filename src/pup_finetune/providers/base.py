@@ -80,6 +80,16 @@ class ModelProfile:
         if self.default_lora_rank <= 0:
             raise ValueError(f"default_lora_rank must be positive, got {self.default_lora_rank}")
 
+    def remote_code_warning(self) -> str | None:
+        """What a preview warns when the tokenizer runs code from the model's repository."""
+        if not self.trust_remote_code:
+            return None
+        return (
+            f"the {self.alias} tokenizer runs Python code from the Hugging Face repository "
+            f"{self.tokenizer_model} at commit {self.tokenizer_revision} on this machine "
+            "(trust_remote_code)"
+        )
+
     @property
     def names(self) -> tuple[str, ...]:
         """Every name that selects this profile, alias first: the alias, the provider's
