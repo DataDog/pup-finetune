@@ -479,7 +479,11 @@ def plan_benchmark(
         if any(other.target == candidate.target for other in candidates):
             raise UsageError(f"--models names {candidate.target} twice")
         if len(candidate.excluded) == len(cases):
-            refused = [e for e in candidate.excluded.values() if e.code != EMPTY_PROMPT]
+            refused = [
+                exclusion
+                for exclusion in candidate.excluded.values()
+                if exclusion.code != EMPTY_PROMPT
+            ]
             if not refused:
                 raise UsageError(
                     f"nothing to benchmark: the test split of {display_path(dataset.path)} has "
