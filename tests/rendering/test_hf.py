@@ -471,6 +471,7 @@ def test_identity_pins_tokenizer_template_parser_and_transformers() -> None:
         "stop_tokens": '["<|im_end|>"]',
         "prefix_stable": "false",
         "message_rewrite": "none",
+        "prompt_check": "none",
         "transformers_version": hf.transformers_version(),
     }
     other = renderer(FakeChatTokenizer(template_name="another-template"))

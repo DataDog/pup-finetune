@@ -271,8 +271,8 @@ class RendererContract:
             assert examples == second.per_turn_examples(messages, tools)
             full = _full_render(first, messages, tools)
             assert full == _full_render(second, messages, tools)
-            prompt = first.generation_prompt_tokens(messages, tools)
-            assert prompt == second.generation_prompt_tokens(messages, tools)
+            prompt = first.generation_prompt_tokens(messages[:-1], tools)
+            assert prompt == second.generation_prompt_tokens(messages[:-1], tools)
             assert second.decode(prompt) == first.decode(prompt)
             for example in examples:
                 tokens, _ = _unshifted(example)
@@ -321,6 +321,13 @@ class RendererContract:
                 parsed = renderer.parse_response(renderer.decode(completion), tools)
                 assert parsed.format_valid
                 assert _comparable(parsed.message) == _comparable(rendered[turn])
+
+    def test_no_turn_s_prompt_is_refused(
+        self, renderer: Renderer, conversation: Conversation
+    ) -> None:
+        messages, tools = conversation
+        for turn in _assistant_turns(messages):
+            assert renderer.prompt_refusal(messages[:turn], tools) is None
 
     def test_weight_zero_turns_are_never_trained(self, renderer: Renderer) -> None:
         messages: list[ChatMessage] = [

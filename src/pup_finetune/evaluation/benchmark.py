@@ -28,7 +28,7 @@ import threading
 from collections import defaultdict
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
@@ -64,6 +64,7 @@ from pup_finetune.providers.base import (
     SamplingUsage,
 )
 from pup_finetune.redaction import redact
+from pup_finetune.rendering.base import Renderer, RendererError
 from pup_finetune.runs import error_json
 from pup_finetune.runtime import Runtime
 from pup_finetune.storage import (
@@ -75,7 +76,7 @@ from pup_finetune.storage import (
 )
 
 if TYPE_CHECKING:
-    from pup_finetune.evaluation.cases import ReplayCase
+    from pup_finetune.evaluation.cases import Refusal, ReplayCase
     from pup_finetune.evaluation.judge import Judgment
     from pup_finetune.inference import ChatCompleter, JudgeConfig
 
@@ -141,6 +142,9 @@ class BenchmarkPlan:
     """Where the judge came from (see :func:`~pup_finetune.evaluation.runner.resolve_judge`)."""
     settings: BenchmarkSettings
     runtime: Runtime
+    refused: Mapping[str, Refusal] = field(default_factory=dict)
+    """The test cases left out of :attr:`cases` for every model because some model's
+    renderer refuses their prompt, by case id, so every model is ranked on the same cases."""
 
     @property
     def out_dir(self) -> Path:
@@ -208,13 +212,19 @@ class BenchmarkPlan:
         return remaining_work(eval_dir, {candidate.target: self.cases})[candidate.target]
 
     def split_warnings(self) -> list[str]:
-        """A warning when the test split is too small for the intervals to separate models."""
-        if self.trajectories >= MIN_TRAJECTORIES:
-            return []
-        return [
-            f"the test split holds only {self.trajectories} conversations, so the confidence "
-            "intervals are wide: pull more rows for a firmer choice"
-        ]
+        """A warning for the cases left out (:attr:`refused`), and one when the test split is
+        too small for the intervals to separate models."""
+        from pup_finetune.evaluation.cases import refusal_warning
+
+        total = len(self.cases) + len(self.refused)
+        refused = refusal_warning(self.refused, cases=total, models=len(self.candidates))
+        warnings = [] if refused is None else [refused]
+        if self.trajectories < MIN_TRAJECTORIES:
+            warnings.append(
+                f"the test split holds only {self.trajectories} conversations, so the "
+                "confidence intervals are wide: pull more rows for a firmer choice"
+            )
+        return warnings
 
     def judge_calls(self) -> int:
         """The judge calls a run would still make: calibration's and every candidate's.
@@ -279,6 +289,7 @@ class BenchmarkPlan:
 
     def preview(self) -> dict[str, Any]:
         """The calls the benchmark makes; work ``--out-dir`` already holds is left out."""
+        from pup_finetune.evaluation.cases import refused_by_reason
         from pup_finetune.evaluation.replay import CAVEAT
         from pup_finetune.judges import billing as judge_billing
         from pup_finetune.judges import destination, require_key
@@ -332,6 +343,8 @@ class BenchmarkPlan:
             "out_dir": display_path(self.out_dir),
             "rows": {"test": self.trajectories},
             "cases": len(self.cases),
+            "excluded_cases": len(self.refused),
+            "excluded_by_reason": refused_by_reason(self.refused),
             "trajectories": self.trajectories,
             "models": models,
             "judge_model": self.judge.spec,
@@ -378,7 +391,7 @@ def plan_benchmark(
     package, a judge that is one of the models, or a test split with no case.
     """
     from pup_finetune.curation.pipeline import require_in_datadog
-    from pup_finetune.evaluation.cases import build_cases
+    from pup_finetune.evaluation.cases import build_cases, refusals
     from pup_finetune.evaluation.judge import check_judge_differs
 
     dataset = DatasetDir(dataset_dir)
@@ -421,10 +434,24 @@ def plan_benchmark(
             "kept rows and no assistant turn to replay",
             hint="import more rows so the test split holds some conversations",
         )
+    renderers: dict[str, Renderer] = {
+        candidate.target: get_provider(candidate.provider, runtime).renderer(candidate.profile)
+        for candidate in candidates
+    }
+    refused = refusals(cases, renderers)
+    if len(refused) == len(cases):
+        first = next(iter(refused.values()))
+        raise UsageError(
+            f"nothing to benchmark: the chat format of {first.model} cannot continue any of "
+            f"the {len(cases)} test cases' prompts ({first.code}: {first.detail})",
+            hint="benchmark without that model, or import rows whose test conversations "
+            "every model's chat format takes",
+        )
     return BenchmarkPlan(
         dataset_dir=dataset_dir,
         candidates=tuple(candidates),
-        cases=cases,
+        cases=[case for case in cases if case.id not in refused],
+        refused=refused,
         judge=judge,
         judge_source=judge_source,
         settings=settings,
@@ -459,14 +486,7 @@ def _base_sampler(plan: BenchmarkPlan, candidate: Candidate) -> Iterator[Sampler
     provider.validate_options({})
     profile = candidate.profile
     renderer = provider.renderer(profile)
-    longest = max(
-        len(
-            renderer.generation_prompt_tokens(
-                [dict(m) for m in case.prefix], [dict(t) for t in case.tools]
-            )
-        )
-        for case in plan.cases
-    )
+    longest = max(_prompt_length(renderer, case) for case in plan.cases)
     with provider.backend().open_session(
         profile,
         LoraConfig(rank=profile.default_lora_rank),
@@ -481,6 +501,18 @@ def _base_sampler(plan: BenchmarkPlan, candidate: Candidate) -> Iterator[Sampler
                 sampler.close()
             except Exception as exc:  # its work is done: only note it
                 info(f"closing the {candidate.target} sampler failed: {redact(str(exc))}")
+
+
+def _prompt_length(renderer: Renderer, case: ReplayCase) -> int:
+    """The tokens of ``case``'s prompt; ``0`` for one the renderer refuses, whose pair then
+    records the refusal instead of stopping the benchmark."""
+    try:
+        prompt = renderer.generation_prompt_tokens(
+            [dict(m) for m in case.prefix], [dict(t) for t in case.tools]
+        )
+    except RendererError:
+        return 0
+    return len(prompt)
 
 
 def _calibration(plan: BenchmarkPlan, client: ChatCompleter) -> dict[str, Any] | None:
@@ -664,6 +696,7 @@ def _entry(
         "ci95": None if interval is None else list(interval),
         "cases": target["completed"],
         "errors": target["errors"],
+        "errors_unrenderable": target["errors_unrenderable"],
         "pending": target["pending"],
         "latency_p50_s": statistics.median(latencies) if latencies else None,
         "gap_to_best": None,
@@ -791,11 +824,21 @@ def _result(
     warnings: list[str] = []
     hint = None
     failed = [entry["model"] for entry in board if entry["status"] != "complete"]
-    if status != "complete":
+    unrenderable = sum(int(entry["errors_unrenderable"]) for entry in board)
+    retry = status == "partial" or any(
+        entry["error"] is not None or entry["errors"] > entry["errors_unrenderable"]
+        for entry in board
+    )
+    if retry:
         hint = (
             f"{', '.join(failed)} {'has' if len(failed) == 1 else 'have'} no result for every "
             "case (see each entry's errors, error and pending); run next_command to continue, "
             "which reuses every finished result"
+        )
+    if unrenderable:
+        hint = (f"{hint}. " if hint else "") + (
+            f"{unrenderable} case(s) have a prompt a model's chat format cannot continue, "
+            "which a retry cannot fix, so next_command never retries them"
         )
     rate = recommendation.get("judge_pass_rate")
     if isinstance(rate, float) and rate < LOW_PASS_RATE:
@@ -826,15 +869,15 @@ def _result(
                 "result": display_path(plan.out_dir / RESULT_FILE),
                 "models": {entry["model"]: entry["out_dir"] for entry in board},
             },
-            **_next(plan, status, recommendation),
+            **_next(plan, recommendation, retry=retry),
         }
     )
 
 
-def _next(plan: BenchmarkPlan, status: str, recommendation: Mapping[str, Any]) -> dict[str, Any]:
-    """An unfinished benchmark is continued (a free preview first). A finished one leads to
-    the training preview of the recommended model, which is a step instead when the base
-    model already meets the target."""
+def _next(plan: BenchmarkPlan, recommendation: Mapping[str, Any], *, retry: bool) -> dict[str, Any]:
+    """An unfinished benchmark that a rerun can advance is continued (a free preview first).
+    A finished one leads to the training preview of the recommended model, which is a step
+    instead when the base model already meets the target."""
     rerun = shlex.join(plan.command())
     model = recommendation.get("model")
     provider = next(
@@ -845,7 +888,7 @@ def _next(plan: BenchmarkPlan, status: str, recommendation: Mapping[str, Any]) -
         if isinstance(model, str) and provider is not None
         else None
     )
-    if status != "complete":
+    if retry:
         return {"next_command": rerun, "next_steps": []}
     if train is None:
         return {"next_command": None, "next_steps": []}

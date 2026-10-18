@@ -144,3 +144,54 @@ def test_without_tools_a_row_training_only_its_last_turn_is_one_example() -> Non
     messages = [TWO_TURNS[0], {**TWO_TURNS[1], "weight": 0}, *TWO_TURNS[2:]]
     (turn,) = r.per_turn_examples(messages, [])
     assert r.supervised_example(messages, []) == turn
+
+
+SYSTEM: ChatMessage = {"role": "system", "content": "Be brief."}
+REPLY: ChatMessage = {"role": "assistant", "content": "Hello."}
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        pytest.param([SYSTEM, REPLY], id="after_the_system_message"),
+        pytest.param([REPLY, TWO_TURNS[0], REPLY], id="first"),
+        pytest.param([TWO_TURNS[0], REPLY, REPLY], id="after_an_assistant_message"),
+    ],
+)
+def test_a_trained_turn_with_no_user_or_tool_message_before_it_is_refused(
+    messages: list[ChatMessage],
+) -> None:
+    r = deepseek_renderer()
+    for render_row in (r.per_turn_examples, r.supervised_example):
+        with pytest.raises(RendererError, match="user or tool message") as excinfo:
+            render_row(messages, [])
+        assert excinfo.value.code == RendererErrorCode.UNSUPPORTED_MESSAGE
+    result = build_examples([{"messages": messages, "tools": []}], r, max_seq_len=4096)
+    assert [row.code for row in result.rejected] == [RendererErrorCode.UNSUPPORTED_MESSAGE]
+
+
+def test_an_untrained_turn_with_no_user_or_tool_message_before_it_renders() -> None:
+    r = deepseek_renderer()
+    messages = [*TWO_TURNS[:2], {**REPLY, "weight": 0}, *TWO_TURNS[2:]]
+    _, second = r.per_turn_examples(messages, [])
+    assert r.decode(second.input_tokens).count(f"Hello.{EOS}") == 2
+
+
+def test_a_prompt_must_end_with_a_user_or_tool_message() -> None:
+    r = DEEPSEEK_V4.renderer()  # no tokenizer: the check loads none
+    after_call: list[ChatMessage] = [
+        TWO_TURNS[0],
+        {"role": "assistant", "content": "", "tool_calls": [call("c", "f")]},
+        {"role": "tool", "tool_call_id": "c", "content": "done"},
+    ]
+    assert r.prompt_refusal(TWO_TURNS[:1], []) is None
+    assert r.prompt_refusal(after_call, [TOOL]) is None
+    for messages in ([], [SYSTEM], TWO_TURNS[:2]):
+        refusal = r.prompt_refusal(messages, [])
+        assert refusal is not None and refusal.code == RendererErrorCode.UNSUPPORTED_MESSAGE
+    with pytest.raises(RendererError, match="user or tool message"):
+        deepseek_renderer().generation_prompt_tokens([SYSTEM], [])
+
+
+def test_the_family_s_prompt_check_is_in_the_renderer_identity() -> None:
+    assert deepseek_renderer().identity()["prompt_check"] == "assistant_after_user_or_tool@1"

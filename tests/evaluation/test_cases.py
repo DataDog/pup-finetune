@@ -21,9 +21,13 @@ from pup_finetune.evaluation.cases import (
     build_cases,
     case_indices,
     cases_from_dataset,
+    refusal_warning,
+    refusals,
     row_cases,
     select_spread,
 )
+from pup_finetune.providers.fake import FakeRenderer
+from pup_finetune.rendering.families import DEEPSEEK_V4
 from pup_finetune.storage import DirectoryLock, canonical_json
 
 TOOLS: list[dict[str, Any]] = [
@@ -317,3 +321,39 @@ def test_cases_from_dataset_use_kept_test_rows_only(tmp_path: Path) -> None:
         row.id for row in dataset.rows_for_split("validation")
     }
     assert all(case.split == "validation" for case in validation)
+
+
+def replay_case(case_id: str, *prefix: dict[str, Any]) -> ReplayCase:
+    return ReplayCase(
+        id=case_id,
+        row_id=case_id,
+        trace_id=None,
+        message_index=len(prefix),
+        prefix=prefix,
+        tools=(),
+        reference={"role": "assistant", "content": "Hi."},
+    )
+
+
+def test_a_case_any_model_refuses_is_left_out_with_the_first_model_that_does() -> None:
+    user = {"role": "user", "content": "Hi."}
+    cases = [
+        replay_case("fine", user),
+        replay_case("after-system", {"role": "system", "content": "Be brief."}),
+        replay_case("marker", {"role": "user", "content": "Hi <|end|>"}),
+    ]
+    # DeepSeek's check loads no tokenizer; the fake renderer refuses its own markers.
+    renderers = {"fake-model": FakeRenderer(), "deepseek": DEEPSEEK_V4.renderer()}
+
+    refused = refusals(cases, renderers)
+
+    assert {case_id: refusal.model for case_id, refusal in refused.items()} == {
+        "after-system": "deepseek",
+        "marker": "fake-model",
+    }
+    assert {refusal.code for refusal in refused.values()} == {"unsupported_message"}
+    warning = refusal_warning(refused, cases=3, models=2)
+    assert warning is not None
+    assert warning.startswith("2 of 3 test cases are left out for every model")
+    assert "deepseek and fake-model" in warning
+    assert refusal_warning({}, cases=3) is None

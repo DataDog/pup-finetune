@@ -700,7 +700,8 @@ Source lives under `src/pup_finetune/`.
   `heartbeat_s`, `state.json` is also saved on a timer so its heartbeat stays fresh.
 - `rendering/` - chat rows to model tokens and completions back to messages. `tokens.py` has
   `TokenizedExample`, the provider-neutral, next-token-shifted token and weight arrays;
-  `base.py` has the `Renderer` protocol and `RendererError`. `hf.py` has
+  `base.py` has the `Renderer` protocol and `RendererError` (`prompt_refusal` says, loading
+  no tokenizer, which prompts `generation_prompt_tokens` refuses). `hf.py` has
   `HFChatTemplateRenderer`, the one renderer every provider shares: the model's Hugging Face
   chat template and tokenizer at a pinned revision, one example per trainable assistant turn
   (the prompt tokenized whole, as the template tokenizes it: its text encoded whole, or
@@ -723,10 +724,12 @@ Source lives under `src/pup_finetune/`.
   `families.py` is the model-family table (`qwen3_8`, `qwen3_5`, `glm5_3`, `kimi_k3`,
   `deepseek_v4`, `muse_glimmer`), each entry a tokenizer, revision, parser and stop tokens,
   and when it needs them `trust_remote_code` (Kimi K3 only), a `chat_encoder` (DeepSeek-V4)
-  and a `rewrite`, a `MessageRewrite` that turns each message into the messages the template
-  renders faithfully, by name and version in the renderer identity (Muse Glimmer writes text
-  beside tool calls as its own message to the user; its template's date is pinned in
-  `chat_template_kwargs`).
+  a `rewrite`, a `MessageRewrite` that turns each message into the messages the template
+  renders faithfully (Muse Glimmer writes text beside tool calls as its own message to the
+  user; its template's date is pinned in `chat_template_kwargs`), and a `check`, a
+  `PromptCheck` that refuses a prompt the template opens no assistant turn after, and a
+  trained turn after it, with `unsupported_message` (DeepSeek-V4 needs a user or tool message
+  before each turn); both by name and version in the renderer identity.
   The `hf` extra includes `tiktoken`, which Kimi K3's tokenizer code imports.
 - `evaluation/` - replay evaluation, provider-neutral. `cases.py` turns a dataset's kept
   test-split rows into `ReplayCase`s (`cases_from_dataset`, `build_cases`): one per trained
@@ -758,7 +761,8 @@ Source lives under `src/pup_finetune/`.
   `results.jsonl` as it completes, so a rerun skips finished pairs; `evaluation.json` is the
   identity a rerun must match (`evaluation_identity`; a mismatch is a `SettingsConflict`, exit 2,
   asking for a new `--out-dir`); a sampler or judge failure is an error result, counted apart and out of
-  every rate; `cancel` stops new pairs and keeps finished ones (any other error waits for the
+  every rate, and a generation whose prompt the renderer refused (`RendererError`) is one a
+  rerun never retries (`is_final`, counted as `errors_unrenderable`); `cancel` stops new pairs and keeps finished ones (any other error waits for the
   pairs in flight, then propagates). `summarize` writes
   `summary.json`: per-target pass rates (judge and metrics), per-trajectory agreement, the
   paired wins, regressions and ties, and `tuned_minus_base` with a seeded paired bootstrap
@@ -767,7 +771,9 @@ Source lives under `src/pup_finetune/`.
   the cases it does not replay as `skipped`), plus the agreement-not-task-success `CAVEAT`. A `Publisher` (default `NoopPublisher`) gets a complete evaluation and returns
   what it reports, the outcome's `publication`. `runner.py` is what `evaluate` and `train
   --evaluate` run: `plan_evaluation` (an `EvalPlan`: cases, judge, settings and `Publishing`,
-  whether the dataset's push receipt allows publishing), calibration (`prepare_eval_dir`
+  whether the dataset's push receipt allows publishing; cases whose prompt the run's renderer
+  refuses are left out, `refused`, and the preview counts them as `excluded_cases` and
+  `excluded_by_reason`, through `cases.py`'s `refusals`), calibration (`prepare_eval_dir`
   stores a passing one), `replay` with the plan's publisher, `replay_result` and
   `evaluation_exit_code`, `plan_standalone` and `StandaloneEvaluation` for `evaluate`, and
   `EvaluateAfterTraining`, the `after_finalize` hook that evaluates in the training session
@@ -804,8 +810,9 @@ Source lives under `src/pup_finetune/`.
   before it; Anthropic also a prefix that opens or ends on an assistant turn; Anthropic is
   judged on the turns its client sends, `anthropic_messages.py`'s conversion; Fireworks and
   the fake take any), with `compare_skips` over cases; it takes the `compare.json` path and imports nothing from `replay.py`, which imports it.
-  `benchmark.py` is `benchmark`: `plan_benchmark` (the test split's cases, the judge and
-  one `Candidate` per base model), `execute` (the judge calibrated once, then each model
+  `benchmark.py` is `benchmark`: `plan_benchmark` (the test split's cases, less those any
+  model's renderer refuses, for every model, the judge and one `Candidate` per base model;
+  a session is sized on the prompts its renderer takes), `execute` (the judge calibrated once, then each model
   replayed in a session of its own into `OUT/<model>` through `run_replay` with the model as
   its one target, so each resumes; a model whose session fails is an error entry and the
   others still run), `leaderboard` (judge pass rate with a bootstrap CI over trajectories,
@@ -940,6 +947,8 @@ Qwen3.8-like Python template (optionally merging `\n\n` across the prompt bounda
 GLM-5-like one (`glm5_like`), and extra special tokens (`DEEPSEEK_SPECIALS`) for a fake behind
 an encoder; `FakeXtmlTokenizer` renders Kimi K3's XTML as its tokenizer code does, control
 tokens apart from message text (`tokenizes_chat`).
+`tests/fakes/rows.py` has `import_with_refused_test_row`, the tool-use fixture rows imported
+with one test-split row whose prompt the fake renderer refuses.
 `tests/fakes/chat_api.py` has `FakeChatApi`, an OpenAI-compatible chat completions endpoint
 (scripted responses or errors first, then an answer function) and `matching_judge`.
 `tests/fakes/fireworks_api.py` has `FakeFireworksApi`, the Fireworks model and account routes

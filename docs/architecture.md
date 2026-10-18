@@ -92,6 +92,9 @@ an assistant message. `transformers` comes from the optional `hf` extra and load
   inference side: the prompt a sampler continues, where it stops, and how a completion becomes
   an OpenAI assistant message plus a `format_valid` flag. `parse_response` takes the prompt's
   tools, since a format can write argument values untyped (Qwen3.8 writes strings unquoted).
+- `prompt_refusal` is the error `generation_prompt_tokens` would raise for what the messages
+  hold, found without a tokenizer, so planning can leave out a case no sampler could
+  continue.
 - `identity()` pins the tokenizer, its revision, the template hash and the renderer and parser
   versions. A run records it, and a mismatch on resume means "prepare a new run".
 
@@ -153,7 +156,15 @@ faithfully. Muse Glimmer's template drops the text of a message that has tool ca
 text renders first as its own message to the user that does not end the turn (`end_turn`
 false), as the template writes such a message. Its template also writes today's date into
 the default system message of a conversation that has none, so the family pins
-`current_date` in `chat_template_kwargs`. Only
+`current_date` in `chat_template_kwargs`. A family's `check` refuses, with
+`unsupported_message`, a prompt after which its template opens no assistant turn, and any
+trained turn after such a prompt: DeepSeek's own encoder writes a turn after a system or
+assistant message, or at the start, with no `<｜Assistant｜>` before it, so `deepseek_v4`
+needs a user or tool message before each turn it trains or samples. The renderer's
+`prompt_refusal` runs that check without a tokenizer, so `evaluate` and `benchmark` leave
+such test cases out at planning (`excluded_cases`), and `benchmark` leaves them out for
+every model so each is ranked on the same cases. A refusal that still reaches a sampler is an
+error result a rerun never retries. Only
 `supervised_example` raises `not_prefix_stable`; a per-turn failure carries its own code, so
 the loop never retries it per turn.
 

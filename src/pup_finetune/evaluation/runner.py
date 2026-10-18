@@ -98,7 +98,7 @@ from pup_finetune.storage import (
 from pup_finetune.training.records import StoppedReason, TrainResult
 
 if TYPE_CHECKING:
-    from pup_finetune.evaluation.cases import ReplayCase
+    from pup_finetune.evaluation.cases import Refusal, ReplayCase
     from pup_finetune.evaluation.compare import CompareTarget
     from pup_finetune.evaluation.judge import Judgment
     from pup_finetune.evaluation.replay import EvalDir, Publisher, ReplaySummary
@@ -431,6 +431,9 @@ class EvalPlan:
     differ from the defaults, and the judge (see :meth:`evaluate_command`)."""
     compare: CompareTarget | None = None
     """The compare model: ``--compare-model``'s, else the one the directory has attached."""
+    refused: Mapping[str, Refusal] = field(default_factory=dict)
+    """The test cases left out of :attr:`cases` because the run's renderer refuses their
+    prompt, by case id (:func:`~pup_finetune.evaluation.cases.refusals`)."""
     compare_skips: Mapping[str, str] = field(init=False)
     """The cases the compare model's API refuses, by case id, with the reason; none
     without a compare model (:func:`~pup_finetune.evaluation.compare.compare_skips`)."""
@@ -595,6 +598,13 @@ class EvalPlan:
             found.append("test cases, generated answers and scores -> Datadog (experiments)")
         return found
 
+    def refusal_warnings(self) -> list[str]:
+        from pup_finetune.evaluation.cases import refusal_warning
+
+        total = len(self.cases) + len(self.refused)
+        warning = refusal_warning(self.refused, cases=total)
+        return [] if warning is None else [warning]
+
     def _refuse_another_compare(self, eval_dir: EvalDir) -> None:
         """Raise the conflict --confirm would raise for another compare model than the one
         ``eval_dir`` keeps: fail the preview now, never offer that --confirm."""
@@ -652,11 +662,12 @@ class EvalPlan:
         """The calls the evaluation makes. With ``tuned_checkpoint`` (a standalone run), what
         ``--out-dir`` already holds under the same settings is left out of the counts."""
         from pup_finetune.datadog.experiments import experiment_name
+        from pup_finetune.evaluation.cases import refused_by_reason
         from pup_finetune.evaluation.compare import require_sent, skipped_warning
         from pup_finetune.evaluation.replay import CAVEAT, COMPARE
 
         settings = self.settings
-        warnings: list[str] = []
+        warnings = self.refusal_warnings()
         targets = self.targets
         replays = self.replays
         skips = Counter(self.compare_skips.values())
@@ -760,6 +771,8 @@ class EvalPlan:
             "out_dir": display_path(self.out_dir),
             "rows": {"test": trajectories},
             "cases": len(self.cases),
+            "excluded_cases": len(self.refused),
+            "excluded_by_reason": refused_by_reason(self.refused),
             "trajectories": trajectories,
             "targets": target_names,
             **(
@@ -898,7 +911,7 @@ def plan_evaluation(
     being trained or the run's tuned model: the model id the run promotes to
     (:func:`~pup_finetune.runs.model_id_for_run`) or, once known, the ``promoted`` model.
     """
-    from pup_finetune.evaluation.cases import cases_from_dataset
+    from pup_finetune.evaluation.cases import cases_from_dataset, refusals
     from pup_finetune.evaluation.compare import resolve_compare, stored_compare
     from pup_finetune.evaluation.judge import check_judge_differs
     from pup_finetune.evaluation.replay import EvalDir
@@ -933,13 +946,22 @@ def plan_evaluation(
             "no assistant turn to replay",
             hint="import more rows so the test split holds some conversations",
         )
+    refused = refusals(cases, {profile.alias: get_provider(provider, runtime).renderer(profile)})
+    if len(refused) == len(cases):
+        first = next(iter(refused.values()))
+        raise UsageError(
+            f"nothing to evaluate: the chat format of {profile.alias} cannot continue any of "
+            f"the {len(cases)} test cases' prompts ({first.code}: {first.detail})",
+            hint="import rows whose test conversations the model's chat format takes",
+        )
     return EvalPlan(
         run_id=run_id,
         run_dir=run_dir,
         provider=provider,
         profile=profile,
         rendering=dict(rendering),
-        cases=cases,
+        cases=[case for case in cases if case.id not in refused],
+        refused=refused,
         judge=judge_config,
         judge_source=judge_source,
         settings=settings,
@@ -1198,14 +1220,17 @@ def replay_result(
     status = "partial"
     if outcome.complete:
         status = "complete_with_errors" if errors else "complete"
-    warnings: list[str] = []
+    warnings = plan.refusal_warnings()
     hint = None
     publication = _publication(plan, outcome)
+    unrenderable = sum(int(target["errors_unrenderable"]) for target in summary["targets"].values())
     if errors:
         hint = (
             f"{errors} case(s) ended in an error, left out of every rate (see the file "
-            "files.results names); run next_command to retry them"
+            "files.results names)"
         )
+        if errors > unrenderable:
+            hint += "; run next_command to retry them"
         too_long = {
             name: target.get("errors_too_long_by_stage") or {}
             for name, target in summary["targets"].items()
@@ -1223,6 +1248,11 @@ def replay_result(
                 f". {compared} of them are longer than the compare model's context window, "
                 "which a retry cannot fix: compare with another --compare-model in a new "
                 "--out-dir"
+            )
+        if unrenderable:
+            hint += (
+                f". {unrenderable} of them have a prompt the model's chat format cannot "
+                "continue, which a retry cannot fix, so next_command never retries them"
             )
         if publication["status"] in _SENT:
             hint += (
@@ -1276,7 +1306,11 @@ def replay_result(
         warnings.append(
             "publishing the evaluation was cancelled; run next_command to publish the rest"
         )
-    retry = status != "complete" or publication["status"] in {"failed", "cancelled"}
+    retry = (
+        status == "partial"
+        or errors > unrenderable
+        or publication["status"] in {"failed", "cancelled"}
+    )
     return finite_json(
         {
             "status": status,
@@ -1485,10 +1519,21 @@ def _settings_record(plan: EvalPlan) -> dict[str, Any]:
     }
 
 
-def _is_complete(status: str, publication: str | None) -> bool:
-    """Whether an evaluation is done: every pair judged without error, and its publishing
-    neither failed nor was cancelled (either is what a rerun continues)."""
-    return status == "complete" and publication not in {"failed", "cancelled", "pending"}
+def _is_complete(status: str, publication: str | None, summary: object) -> bool:
+    """Whether an evaluation is done: every pair judged, without an error a retry could fix,
+    and its publishing neither failed nor was cancelled (either is what a rerun continues)."""
+    final = status == "complete_with_errors" and _errors_final(summary)
+    return (status == "complete" or final) and publication not in {"failed", "cancelled", "pending"}
+
+
+def _errors_final(summary: object) -> bool:
+    """Whether every error in ``summary`` is a prompt the renderer refused, which a rerun
+    never retries."""
+    if not isinstance(summary, Mapping):
+        return False
+    return all(
+        target["errors"] == target["errors_unrenderable"] for target in summary["targets"].values()
+    )
 
 
 def record_evaluation(plan: EvalPlan, outcome: Mapping[str, Any]) -> None:
@@ -1510,7 +1555,7 @@ def record_evaluation(plan: EvalPlan, outcome: Mapping[str, Any]) -> None:
     entry = {
         "settings": settings,
         "status": status,
-        "complete": _is_complete(status, published),
+        "complete": _is_complete(status, published, summary),
         "publication": published,
         "headline": headline(summary) if isinstance(summary, Mapping) else None,
         "recorded_at": utcnow().isoformat(timespec="seconds").replace("+00:00", "Z"),

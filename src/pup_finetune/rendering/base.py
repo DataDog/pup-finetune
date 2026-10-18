@@ -141,6 +141,15 @@ class Renderer(Protocol):
         """The prompt a sampler continues to generate the next assistant turn."""
         ...
 
+    def prompt_refusal(
+        self, messages: Sequence[ChatMessage], tools: Sequence[ToolSpec]
+    ) -> RendererError | None:
+        """The :class:`RendererError` :meth:`generation_prompt_tokens` raises for ``messages``
+        because of what they hold, or ``None``; it loads no tokenizer, so planning can leave
+        out a case no sampler could continue. Training refuses a trained turn after such a
+        prompt with the same error."""
+        ...
+
     def decode(self, tokens: Sequence[int]) -> str:
         """Token ids back to text, special tokens included."""
         ...

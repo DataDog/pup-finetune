@@ -324,3 +324,96 @@ def test_the_pinned_revision_encoder_and_stop_token(renderer: HFChatTemplateRend
     assert identity["parser"] == "deepseek_dsml"
     assert identity["prefix_stable"] == "true"
     assert [renderer.decode([t]) for t in renderer.stop_token_ids] == [EOS]
+
+
+def _call(index: int, name: str = "f", arguments: str = "{}") -> dict[str, Any]:
+    return {
+        "id": f"c{index}",
+        "type": "function",
+        "function": {"name": name, "arguments": arguments},
+    }
+
+
+F_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "f",
+        "description": "d",
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+ODD_SHAPES: dict[str, list[ChatMessage]] = {
+    "system_then_assistant": [
+        {"role": "system", "content": "S"},
+        {"role": "assistant", "content": "A", "reasoning_content": "R"},
+    ],
+    "assistant_first": [
+        {"role": "assistant", "content": "A", "reasoning_content": "R"},
+        {"role": "user", "content": "U"},
+        {"role": "assistant", "content": "B"},
+    ],
+    "two_assistants": [
+        {"role": "user", "content": "U"},
+        {"role": "assistant", "content": "A", "reasoning_content": "R1"},
+        {"role": "assistant", "content": "B", "reasoning_content": "R2"},
+    ],
+    "two_assistants_then_user": [
+        {"role": "user", "content": "U"},
+        {"role": "assistant", "content": "A", "reasoning_content": "R1"},
+        {"role": "assistant", "content": "B", "reasoning_content": "R2"},
+        {"role": "user", "content": "V"},
+        {"role": "assistant", "content": "C"},
+    ],
+    "calls": [
+        {"role": "user", "content": "U"},
+        {
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "R1",
+            "tool_calls": [_call(1), _call(2, "g", '{"x": 1}')],
+        },
+        {"role": "tool", "tool_call_id": "c2", "content": "T2"},
+        {"role": "tool", "tool_call_id": "c1", "content": "T1"},
+        {"role": "assistant", "content": "Done.", "reasoning_content": "R2"},
+    ],
+    "calls_over_two_user_turns": [
+        {"role": "system", "content": "S"},
+        {"role": "user", "content": "U"},
+        {"role": "assistant", "content": "", "reasoning_content": "R1", "tool_calls": [_call(1)]},
+        {"role": "tool", "tool_call_id": "c1", "content": "T1"},
+        {"role": "assistant", "content": "Mid.", "reasoning_content": "R2"},
+        {"role": "user", "content": "V"},
+        {"role": "assistant", "content": "", "reasoning_content": "R3", "tool_calls": [_call(3)]},
+        {"role": "tool", "tool_call_id": "c3", "content": "T3"},
+        {"role": "assistant", "content": "End.", "reasoning_content": "R4"},
+    ],
+    "user_text_after_a_tool_result": [
+        {"role": "user", "content": "U"},
+        {"role": "assistant", "content": "", "tool_calls": [_call(1)]},
+        {"role": "tool", "tool_call_id": "c1", "content": "T1"},
+        {"role": "user", "content": "More"},
+        {"role": "assistant", "content": "Ok.", "reasoning_content": "R"},
+    ],
+}
+"""Shapes the fixture rows lack: a turn with no user or tool message before it, and tool
+calls in rows that declare no tools, where tool results count as user turns."""
+
+
+@pytest.mark.parametrize("shape", sorted(ODD_SHAPES))
+@pytest.mark.parametrize("tools", [[], [F_TOOL]], ids=["no_tools", "tools"])
+def test_the_encoder_matches_deepseek_s_on_every_prefix_of_odd_shapes(
+    official: ModuleType, shape: str, tools: list[Any]
+) -> None:
+    messages = ODD_SHAPES[shape]
+    for end in range(1, len(messages) + 1):
+        expected = official_render(official, messages[:end], tools)
+        assert render(messages[:end], tools) == expected, end
+
+
+@pytest.mark.parametrize("shape", ["system_then_assistant", "assistant_first", "two_assistants"])
+def test_a_trained_turn_with_no_user_or_tool_message_before_it_is_refused(
+    renderer: HFChatTemplateRenderer, shape: str
+) -> None:
+    with pytest.raises(RendererError, match="user or tool message") as caught:
+        renderer.per_turn_examples(ODD_SHAPES[shape], [])
+    assert caught.value.code == RendererErrorCode.UNSUPPORTED_MESSAGE

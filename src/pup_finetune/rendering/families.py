@@ -13,14 +13,15 @@ trying, and, for models that stop by emitting the next role tag instead of an en
 token, which tag follows an assistant message. A family may also run its tokenizer's own code
 from the model's repository at the pinned commit (``trust_remote_code``), render through a
 :mod:`~pup_finetune.rendering.encoders` encoder when the tokenizer ships no chat template
-(``chat_encoder``), and rewrite messages into the form its template renders faithfully
-(``rewrite``). Adding a family is adding an entry here, plus a parser when its output format
+(``chat_encoder``), rewrite messages into the form its template renders faithfully
+(``rewrite``), and refuse a prompt after which its template opens no assistant turn
+(``check``). Adding a family is adding an entry here, plus a parser when its output format
 is new. Adapted from the Baseten provider work by Fouad Wahabi.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
@@ -32,6 +33,7 @@ from pup_finetune.rendering.hf import (
     ChatTokenizer,
     HFChatTemplateRenderer,
     MessageRewrite,
+    PromptCheck,
 )
 from pup_finetune.rendering.parsers import PARSERS, get_parser
 
@@ -58,6 +60,9 @@ class ModelFamily:
     tokenizer that ships no chat template."""
     rewrite: MessageRewrite | None = None
     """How messages are rewritten before the template renders them."""
+    check: PromptCheck | None = None
+    """Which prompts the template opens no assistant turn after: refused, with any trained turn
+    after them."""
 
     def __post_init__(self) -> None:
         if not COMMIT_SHA.fullmatch(self.revision):
@@ -95,6 +100,7 @@ class ModelFamily:
             trust_remote_code=self.trust_remote_code,
             chat_encoder=get_encoder(self.chat_encoder) if self.chat_encoder else None,
             rewrite=self.rewrite,
+            check=self.check,
             name=self.key,
             tokenizer=tokenizer,
         )
@@ -155,6 +161,15 @@ KIMI_K3 = ModelFamily(
 Python and encodes message text apart from its control tokens; preserved reasoning, maximum
 thinking effort."""
 
+
+def _deepseek_after_user_or_tool(messages: Sequence[Mapping[str, Any]]) -> str | None:
+    # After a system or assistant message, or none, DeepSeek's own encoder writes the turn
+    # straight after it with no assistant tag, so the prompt opens no turn to sample from.
+    if messages and messages[-1].get("role") in ("user", "tool"):
+        return None
+    return "DeepSeek-V4's chat format opens an assistant turn only after a user or tool message"
+
+
 DEEPSEEK_V4 = ModelFamily(
     key="deepseek_v4",
     tokenizer_model="deepseek-ai/DeepSeek-V4-Flash-0731",
@@ -165,6 +180,7 @@ DEEPSEEK_V4 = ModelFamily(
     # With tools every turn keeps its reasoning and prefixes the whole render; without
     # tools, turns before the last user turn lose theirs, and such rows render per turn.
     prefix_stable=True,
+    check=PromptCheck("assistant_after_user_or_tool", "1", _deepseek_after_user_or_tool),
 )
 """DeepSeek-V4 Flash 0731, whose repository ships its chat format as Python
 (``encoding/encoding_dsv4.py``) and no template: DSML tool calls, thinking mode."""

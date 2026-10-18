@@ -25,6 +25,8 @@ from pup_finetune.errors import ExternalError
 from pup_finetune.evaluation import benchmark as benchmark_module
 from pup_finetune.inference import ChatCompletion
 from pup_finetune.providers.base import Sampler
+from pup_finetune.providers.fake import FakeRenderer
+from tests.fakes.rows import import_with_refused_test_row
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
 
@@ -235,3 +237,38 @@ def test_a_run_directory_is_not_a_dataset(dataset: Path, tmp_path: Path) -> None
 
     assert result.exit_code == 2
     assert "not a dataset" in result.stderr
+
+
+def test_a_case_a_model_refuses_is_left_out_for_every_model(tmp_path: Path) -> None:
+    dataset, refused = import_with_refused_test_row(tmp_path)
+    preview = output(invoke("benchmark", str(dataset), "--models", "fake-model"))
+    excluded = preview["preview"]["excluded_cases"]
+    assert excluded > 0
+    assert preview["preview"]["excluded_by_reason"] == {"unsupported_message": excluded}
+    assert any(" test cases are left out: " in w for w in preview["preview"]["warnings"])
+
+    result = rerun(preview["next_command"])
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["status"] == "complete"
+    results = (dataset / "benchmark" / "fake-model" / "results.jsonl").read_text()
+    assert refused not in results
+
+
+def test_a_prompt_refused_while_sampling_never_stops_the_benchmark(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A renderer whose check misses what it then refuses, while sizing the session too.
+    monkeypatch.setattr(FakeRenderer, "prompt_refusal", lambda self, messages, tools: None)
+    dataset, _ = import_with_refused_test_row(tmp_path)
+
+    result = invoke("benchmark", str(dataset), "--models", "fake-model", "--confirm")
+
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["status"] == "complete_with_errors"
+    [entry] = data["leaderboard"]
+    assert entry["errors_unrenderable"] == entry["errors"] > 0
+    assert entry["cases"] > 0
+    assert "which a retry cannot fix" in data["hint"]
+    assert "benchmark" not in (data["next_command"] or "")

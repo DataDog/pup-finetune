@@ -277,6 +277,15 @@ class FakeRenderer:
         segments = [*self._segments(messages, tools, trainable=set()), _Segment(_ASSISTANT_HEADER)]
         return [token for segment in segments for token in self.tokenize(segment.text)]
 
+    def prompt_refusal(
+        self, messages: Sequence[ChatMessage], tools: Sequence[ToolSpec]
+    ) -> RendererError | None:
+        try:
+            self._segments(messages, tools, trainable=set())
+        except RendererError as exc:
+            return exc
+        return None
+
     def render_completion(self, message: ChatMessage) -> str:
         """The completion text of an assistant ``message``, ``<|end|>`` included."""
         return self._assistant_body(message, where="the completion") + _END

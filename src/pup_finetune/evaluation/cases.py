@@ -31,14 +31,16 @@ from __future__ import annotations
 
 import hashlib
 import itertools
-from collections.abc import Iterable
+from collections import Counter
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.schema import Message, TrainingRow
 from pup_finetune.data.split import SPLITS, SplitName
-from pup_finetune.rendering.base import ChatMessage, ToolSpec
+from pup_finetune.display import joined
+from pup_finetune.rendering.base import ChatMessage, Renderer, ToolSpec
 
 _HASH_SPACE = 2**64
 
@@ -221,4 +223,46 @@ def cases_from_dataset(
         seed=seed,
         include_untrained=include_untrained,
         split=split,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class Refusal:
+    """Why a case is left out at planning: ``model``'s renderer refuses its prompt
+    (:meth:`~pup_finetune.rendering.base.Renderer.prompt_refusal`), so no sampler of that
+    model could continue it. ``code`` is the renderer's stable error code."""
+
+    model: str
+    code: str
+    detail: str
+
+
+def refusals(cases: Sequence[ReplayCase], renderers: Mapping[str, Renderer]) -> dict[str, Refusal]:
+    """The cases a renderer of ``renderers`` (by model) refuses, by case id, each with the
+    first model that refuses it."""
+    found: dict[str, Refusal] = {}
+    for case in cases:
+        for model, renderer in renderers.items():
+            error = renderer.prompt_refusal(case.prefix, case.tools)
+            if error is not None:
+                found[case.id] = Refusal(model, error.code.value, error.detail)
+                break
+    return found
+
+
+def refused_by_reason(refused: Mapping[str, Refusal]) -> dict[str, int]:
+    return dict(sorted(Counter(refusal.code for refusal in refused.values()).items()))
+
+
+def refusal_warning(refused: Mapping[str, Refusal], *, cases: int, models: int = 1) -> str | None:
+    """What a preview and a result warn about the ``refused`` cases of ``cases``, ``None``
+    when there are none; with several ``models``, each case is left out for all of them."""
+    if not refused:
+        return None
+    first = next(iter(refused.values()))
+    refusing = joined(sorted({refusal.model for refusal in refused.values()}))
+    every = " for every model, so each is ranked on the same cases" if models > 1 else ""
+    return (
+        f"{len(refused)} of {cases} test cases are left out{every}: the chat format of "
+        f"{refusing} cannot continue their prompt ({first.code}: {first.detail})"
     )

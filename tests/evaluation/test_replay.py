@@ -36,7 +36,7 @@ from pup_finetune.evaluation.replay import (
 )
 from pup_finetune.inference import JudgeConfig
 from pup_finetune.providers.base import CheckpointRef, Generation, Sampler
-from pup_finetune.rendering.base import ChatMessage, ToolSpec
+from pup_finetune.rendering.base import ChatMessage, RendererError, RendererErrorCode, ToolSpec
 
 CKPT = CheckpointRef(
     kind="training", name="t1s4-abcd", uri="fake://ckpt/t1", epoch=1, step=4, created_in_session="s"
@@ -934,3 +934,34 @@ def test_a_target_replays_only_cases_the_evaluation_holds(tmp_path: Path) -> Non
             CASES[:2], {}, Judge(), out_dir=tmp_path, identity=identity(CASES[:2]),
             replays={"base": CASES[:2], "tuned": CASES},
         )  # fmt: skip
+
+
+class RefusingSampler(ScriptedSampler):
+    """Refuses to render the prompt of the questions in ``refuse``, as a renderer does."""
+
+    def __init__(self, refuse: Iterable[str]) -> None:
+        super().__init__()
+        self.refuse = set(refuse)
+
+    def generate(
+        self, messages: list[ChatMessage], tools: list[ToolSpec], *, max_tokens: int
+    ) -> Generation:
+        if str(messages[-1]["content"]) in self.refuse:
+            with self._lock:
+                self.calls.append(str(messages[-1]["content"]))
+            raise RendererError(RendererErrorCode.UNSUPPORTED_MESSAGE, "no turn opens here")
+        return super().generate(messages, tools, max_tokens=max_tokens)
+
+
+def test_a_prompt_the_renderer_refuses_is_an_error_a_rerun_never_retries(tmp_path: Path) -> None:
+    out = tmp_path / "eval"
+    tuned = RefusingSampler({q(CASES[0])})
+    outcome = replay(out, {"base": ScriptedSampler(), "tuned": tuned}, Judge())
+    tuned_summary = outcome.summary["targets"]["tuned"]
+    assert (tuned_summary["errors"], tuned_summary["errors_unrenderable"]) == (1, 1)
+    assert outcome.summary["targets"]["base"]["errors_unrenderable"] == 0
+    assert remaining_work(EvalDir(out), {"tuned": CASES})["tuned"]["generate"] == 0
+
+    again = RefusingSampler({q(CASES[0])})
+    replay(out, {"base": ScriptedSampler(), "tuned": again}, Judge())
+    assert again.calls == []

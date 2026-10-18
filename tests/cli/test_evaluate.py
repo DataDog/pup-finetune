@@ -42,6 +42,7 @@ from pup_finetune.runs import RunDir, RunState, model_id_for_run
 from pup_finetune.runtime import Runtime
 from pup_finetune.storage import append_jsonl
 from pup_finetune.training.budget import Budget
+from tests.fakes.rows import import_with_refused_test_row
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
 
@@ -1170,3 +1171,55 @@ def test_generations_cut_off_at_max_tokens_are_counted_and_warned_about(run_dir:
     truncated = data["headline"]["truncated"]
     assert truncated["base"] > 0 and truncated["tuned"] > 0
     assert any("reached --max-tokens (2)" in warning for warning in data["warnings"])
+
+
+def results_of(eval_dir: Path) -> list[dict[str, Any]]:
+    path = eval_dir / "results.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def test_a_case_whose_prompt_the_model_refuses_is_left_out_at_planning(tmp_path: Path) -> None:
+    dataset, refused = import_with_refused_test_row(tmp_path)
+    run = tmp_path / "run"
+    assert invoke(*train_args(dataset, run, "--confirm")).exit_code == 0
+
+    preview = output(invoke("evaluate", str(run), "--no-publish"))
+    excluded = preview["preview"]["excluded_cases"]
+    assert excluded > 0
+    assert preview["preview"]["excluded_by_reason"] == {"unsupported_message": excluded}
+    assert any(" test cases are left out: " in w for w in preview["preview"]["warnings"])
+
+    result = rerun(preview["next_command"])
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["status"] == "complete"
+    assert any(" test cases are left out: " in w for w in data["warnings"])
+    rows = {record["row_id"] for record in results_of(run / "eval")}
+    assert rows and refused not in rows
+
+
+def test_a_prompt_refused_while_sampling_is_an_error_no_rerun_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A renderer whose check misses what its sampler then refuses: the backstop.
+    monkeypatch.setattr(FakeRenderer, "prompt_refusal", lambda self, messages, tools: None)
+    dataset, refused = import_with_refused_test_row(tmp_path)
+    run = tmp_path / "run"
+    assert invoke(*train_args(dataset, run, "--confirm")).exit_code == 0
+
+    result = invoke("evaluate", str(run), "--no-publish", "--confirm")
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["status"] == "complete_with_errors"
+    unrenderable = [record for record in results_of(run / "eval") if record["status"] == "error"]
+    assert {record["row_id"] for record in unrenderable} == {refused}
+    assert {record["error"]["type"] for record in unrenderable} == {"RendererError"}
+    summary = json.loads((run / "eval" / "summary.json").read_text())
+    for target in summary["targets"].values():
+        assert target["errors_unrenderable"] == target["errors"] > 0
+    assert "which a retry cannot fix" in data["hint"]
+    assert "evaluate" not in (data["next_command"] or "")
+    assert output(invoke("status", str(run)))["next_command"].split()[2] == "deploy"
+
+    again = invoke("evaluate", str(run), "--no-publish")
+    assert output(again)["preview"]["generation_calls"] == 0
