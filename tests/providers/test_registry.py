@@ -242,6 +242,9 @@ def test_any_name_of_a_model_names_the_providers_that_offer_it() -> None:
     assert providers.providers_for_model("only", USER) == ["one"]
     assert providers.providers_for_model("shared", USER) == ["one"]
     assert providers.providers_for_model("org/Shared", USER) == ["one", "two"]
+    # A provider id or tokenizer name matches in any case; an alias only exactly.
+    assert providers.providers_for_model("ORG/shared", USER) == ["one", "two"]
+    assert providers.providers_for_model("Only", USER) == []
     # A development-only provider's models are unknown outside development mode.
     assert providers.providers_for_model("dev-m", USER) == []
     assert providers.providers_for_model("dev-m", DEV) == ["dev"]
@@ -258,6 +261,8 @@ def test_any_name_of_a_model_names_the_providers_that_offer_it() -> None:
         ({"a": ("b", "a")}, "must start with it"),
         ({"a": ()}, "must start with it"),
         ({"a": ("a", "org/A"), "b": ("b", "org/A")}, "'org/A' names two of its models"),
+        ({"a": ("a", "org/A"), "b": ("b", "org/a")}, "'org/a' names two of its models"),
+        ({"a": ("a", "org/A"), "org/a": ("org/a",)}, "'org/a' names two of its models"),
     ],
 )
 def test_a_model_table_must_name_each_model_once_alias_first(

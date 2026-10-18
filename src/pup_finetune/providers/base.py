@@ -87,11 +87,17 @@ class ModelProfile:
         return tuple(dict.fromkeys((self.alias, self.base_model, self.tokenizer_model)))
 
 
+def selects(names: Sequence[str], name: str) -> bool:
+    """Whether ``name`` selects the profile whose :attr:`~ModelProfile.names` are ``names``:
+    its alias exactly, or its provider model id or Hugging Face tokenizer in any case."""
+    return name == names[0] or name.casefold() in {other.casefold() for other in names[1:]}
+
+
 def find_profile(profiles: Sequence[ModelProfile], name: str, *, provider: str) -> ModelProfile:
-    """The profile of ``provider``'s ``profiles`` that ``name`` selects (any of its
-    :attr:`~ModelProfile.names`); a :class:`UsageError` listing the aliases for any other."""
+    """The profile of ``provider``'s ``profiles`` that ``name`` selects (:func:`selects`); a
+    :class:`UsageError` listing the aliases for any other."""
     for profile in profiles:
-        if name in profile.names:
+        if selects(profile.names, name):
             return profile
     known = ", ".join(profile.alias for profile in profiles)
     raise UsageError(

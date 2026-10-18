@@ -39,7 +39,7 @@ from types import MappingProxyType
 from typing import Any, Final, Literal
 
 from pup_finetune.errors import FinetuneError, UsageError, install_hint
-from pup_finetune.providers.base import Provider, RemoteJobs, SupportsRemote
+from pup_finetune.providers.base import Provider, RemoteJobs, SupportsRemote, selects
 from pup_finetune.redaction import redact
 from pup_finetune.runtime import Runtime
 
@@ -187,9 +187,9 @@ def register_provider(
         if not names or names[0] != alias:
             raise ValueError(f"provider {name!r}: the names of {alias!r} must start with it")
         for model_name in names:
-            if model_name in seen:
+            if model_name.casefold() in seen:
                 raise ValueError(f"provider {name!r}: {model_name!r} names two of its models")
-            seen.add(model_name)
+            seen.add(model_name.casefold())
     entry = ProviderInfo(
         name=name,
         target=target,
@@ -371,13 +371,14 @@ def known_models(runtime: Runtime) -> dict[str, Mapping[str, tuple[str, ...]]]:
 
 
 def providers_for_model(model: str, runtime: Runtime) -> list[str]:
-    """The providers ``runtime`` may use with a profile that ``model`` names (its alias, the
-    provider's model id or its tokenizer), sorted: what ``train`` infers ``--provider``
-    from. Imports no provider module."""
+    """The providers ``runtime`` may use with a profile that ``model`` names (its alias, or
+    in any case the provider's model id or its tokenizer: :func:`~pup_finetune.providers.
+    base.selects`), sorted: what ``train`` infers ``--provider`` from. Imports no provider
+    module."""
     return [
         name
         for name, models in known_models(runtime).items()
-        if any(model in names for names in models.values())
+        if any(selects(names, model) for names in models.values())
     ]
 
 
