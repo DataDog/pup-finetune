@@ -29,7 +29,11 @@ from pup_finetune.providers import fake as fake_module
 from pup_finetune.providers.base import ModelProfile, Sampler
 from pup_finetune.providers.fake import FakeRenderer
 from pup_finetune.rendering.base import ChatMessage, RendererError, RendererErrorCode, ToolSpec
-from tests.fakes.rows import import_with_opening_assistant_test_row, import_with_refused_test_row
+from tests.fakes.rows import (
+    import_with_opening_assistant_test_row,
+    import_with_refused_test_row,
+    import_with_unprompted_test_split,
+)
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
 
@@ -460,6 +464,17 @@ def test_a_turn_with_no_message_before_it_is_left_out_for_every_model(tmp_path: 
     results = (dataset / "benchmark" / "fake-model" / "results.jsonl").read_text()
     assert f'"{opened}:0"' not in results
     assert f'"{opened}:' in results
+
+
+def test_a_test_split_with_no_prompt_points_to_the_rows_not_to_a_model(tmp_path: Path) -> None:
+    dataset = import_with_unprompted_test_split(tmp_path)
+
+    result = invoke("benchmark", str(dataset), "--models", "fake-model")
+
+    assert result.exit_code == 2
+    assert f"Error [usage]: nothing to benchmark: the test split of {dataset} " in result.stderr
+    assert "empty_prompt" in result.stderr
+    assert "fake-model" not in result.stderr
 
 
 def test_the_preview_fails_without_the_key_of_a_provider_it_generates_with(

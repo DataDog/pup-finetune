@@ -426,11 +426,11 @@ def plan_benchmark(
     dataset in ``dataset_dir``.
 
     Raises :class:`UsageError` for fewer than one model, a model given twice, a missing
-    package, a judge that is one of the models, a test split with no case, a model that can
-    replay none of its cases, or models that share none.
+    package, a judge that is one of the models, a test split with no case or none with a
+    prompt, a model that can replay none of its cases, or models that share none.
     """
     from pup_finetune.curation.pipeline import require_in_datadog
-    from pup_finetune.evaluation.cases import build_cases, exclusions
+    from pup_finetune.evaluation.cases import EMPTY_PROMPT, build_cases, exclusions
     from pup_finetune.evaluation.judge import check_judge_differs
 
     dataset = DatasetDir(dataset_dir)
@@ -472,7 +472,16 @@ def plan_benchmark(
         if any(other.target == candidate.target for other in candidates):
             raise UsageError(f"--models names {candidate.target} twice")
         if len(candidate.excluded) == len(cases):
-            first = next(iter(candidate.excluded.values()))
+            refused = [e for e in candidate.excluded.values() if e.code != EMPTY_PROMPT]
+            if not refused:
+                raise UsageError(
+                    f"nothing to benchmark: the test split of {display_path(dataset.path)} has "
+                    f"{len(cases)} test cases, and none has a message before its recorded turn "
+                    f"({EMPTY_PROMPT})",
+                    hint="import rows whose test conversations have a message before each "
+                    "assistant turn",
+                )
+            first = refused[0]
             raise UsageError(
                 f"nothing to benchmark with {candidate.target}: it cannot replay any of the "
                 f"{len(cases)} test cases ({first.code}: {first.detail})",
