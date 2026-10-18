@@ -145,6 +145,22 @@ def test_bad_models_are_usage_errors(dataset: Path, models: str, message: str) -
     assert message in result.stderr
 
 
+def test_a_whole_entry_that_names_a_model_is_never_split(dataset: Path) -> None:
+    result = invoke("benchmark", str(dataset), "--models", "fake/tokenizer")
+
+    assert result.exit_code == 2, result.stderr
+    [model] = output(result)["preview"]["models"]
+    assert (model["model"], model["provider"]) == ("fake-model", "fake")
+
+
+def test_a_provider_prefix_takes_only_that_provider_s_models(dataset: Path) -> None:
+    result = invoke("benchmark", str(dataset), "--models", "fake/no-such-model")
+
+    assert result.exit_code == 2
+    assert "fake offers no model 'no-such-model'" in result.stderr
+    assert "models list --provider fake" in result.stderr
+
+
 def test_a_model_several_providers_offer_needs_its_provider_named(
     dataset: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

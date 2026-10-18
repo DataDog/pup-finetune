@@ -84,16 +84,22 @@ DOC = CommandDoc(
 
 
 def model_and_provider(entry: str, runtime: Runtime) -> tuple[str, str]:
-    """One ``--models`` entry as ``(model, provider)``: ``PROVIDER/MODEL``, or a model that
-    one provider offers (:func:`~pup_finetune.cli.train.provider_for_model`). A model several
-    providers offer is a usage error naming the entries that pick one."""
-    head, slash, rest = entry.partition("/")
-    if slash and head in known_providers(runtime):
-        return rest, head
+    """One ``--models`` entry as ``(model, provider)``: a model that one provider offers
+    (:func:`~pup_finetune.cli.train.provider_for_model`), else ``PROVIDER/MODEL``. A whole
+    entry that names a model wins, so a tokenizer name such as ``org/name`` is never split.
+    A model several providers offer is a usage error naming the entries that pick one."""
     found = providers_for_model(entry, runtime)
     if len(found) > 1:
         choices = ", ".join(f"{name}/{entry}" for name in found)
         raise UsageError(f"{entry} is offered by {joined(found)}", hint=f"name one of {choices}")
+    head, slash, rest = entry.partition("/")
+    if not found and slash and head in known_providers(runtime):
+        if head not in providers_for_model(rest, runtime):
+            raise UsageError(
+                f"{head} offers no model {rest!r}",
+                hint=f"`pup finetune models list --provider {head}` shows every name it accepts",
+            )
+        return rest, head
     return entry, provider_for_model(entry, None, runtime)[0]
 
 
