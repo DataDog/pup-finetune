@@ -1166,8 +1166,9 @@ def recommend(
     serve wins.
     """
     scored = [entry for entry in board if entry.get("headline_pass_rate") is not None]
+    which = "the judge and every evaluator" if headline == "all" else f"the evaluator {headline}"
     if not scored:
-        what = "a judged case" if headline == "judge" else f"a case {headline} scored"
+        what = "a judged case" if headline == "judge" else f"a case {which} scored"
         return {
             "verdict": "no_result",
             "model": None,
@@ -1175,7 +1176,7 @@ def recommend(
         }
     best = scored[0]
     rate = float(best["headline_pass_rate"])
-    matches = "matches the recorded answers" if headline == "judge" else f"passes {headline}"
+    matches = "matches the recorded answers" if headline == "judge" else f"passes {which}"
     close = [str(entry["model"]) for entry in scored[1:] if entry.get("within_noise_of_best")]
     if rate >= target_pass_rate:
         verdict = "base_meets_target"

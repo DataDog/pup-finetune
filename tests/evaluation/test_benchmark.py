@@ -235,6 +235,22 @@ def test_recommend_says_a_base_model_at_the_target_may_need_no_training() -> Non
     assert found["model"] == "a"
 
 
+@pytest.mark.parametrize(
+    ("rate", "reason"),
+    [
+        (0.95, "a already passes the judge and every evaluator on 95% of the cases"),
+        (0.5, "a passes the judge and every evaluator best (50% of the cases)"),
+        (None, "no model has a case the judge and every evaluator scored yet"),
+    ],
+)
+def test_recommend_by_all_names_the_judge_and_every_evaluator(
+    rate: float | None, reason: str
+) -> None:
+    found = recommend([entry("a", rate)], target_pass_rate=0.9, headline="all")
+
+    assert reason in found["reason"]
+
+
 def test_recommend_without_any_judged_case() -> None:
     found = recommend([entry("a", None)], target_pass_rate=0.9)
 
@@ -293,7 +309,7 @@ def test_the_headline_evaluator_ranks_the_models_and_drives_the_recommendation(
     recommendation = found["recommendation"]
     assert (recommendation["model"], recommendation["headline"]) == ("fake-model", "short")
     assert (recommendation["pass_rate"], recommendation["verdict"]) == (1.0, "base_meets_target")
-    assert "passes short" in recommendation["reason"]
+    assert "passes the evaluator short" in recommendation["reason"]
 
 
 @pytest.mark.parametrize("order", [1, -1])
