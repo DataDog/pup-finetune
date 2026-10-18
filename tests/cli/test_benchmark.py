@@ -620,3 +620,28 @@ def test_a_rerun_with_nothing_left_records_the_spec_s_headline_and_files(
     assert stored["headline"] == "no_card_numbers"
     assert stored["evaluators"][0]["file"] == str(moved / "checks.py")
     assert output(invoke(*args))["recommendation"]["headline"] == "no_card_numbers"
+
+
+def test_the_share_command_continues_the_evaluators_without_the_spec(
+    dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec_dir = tmp_path / "spec"
+    shutil.copytree(ROWS.parent.parent / "evaluators", spec_dir)
+    spec = spec_dir / "checks.toml"
+    spec.write_text('[[evaluator]]\nname = "no_card_numbers"\ntype = "check"\nfile = "checks.py"\n')
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--evaluators", str(spec))
+    assert invoke(*args, "--confirm").exit_code == 0
+    shutil.rmtree(dataset / "replay_cache")
+    loadable = FakeProvider.renderer
+    monkeypatch.setattr(FakeProvider, "renderer", unloadable)
+    warning = output(invoke(*args, "--confirm"))["warnings"][-1]
+    shared = re.search(r"run `(.+)` to share them", warning)
+    assert shared is not None and "--evaluators" not in shared[1]
+    spec.write_text(
+        spec.read_text() + '[[evaluator]]\nname = "text_when_expected"\ntype = "check"\n'
+        'file = "checks.py"\nfunction = "answers_in_text"\n'
+    )
+    monkeypatch.setattr(FakeProvider, "renderer", loadable)
+    assert rerun(shared[1]).exit_code == 0
+    stored = json.loads((dataset / "benchmark" / "fake-model" / "evaluators.json").read_text())
+    assert [item["name"] for item in stored["evaluators"]] == ["no_card_numbers"]

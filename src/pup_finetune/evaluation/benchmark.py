@@ -360,9 +360,10 @@ class BenchmarkPlan:
             finite_json(self.judge.identity())
         )
 
-    def command(self) -> list[str]:
+    def command(self, *, evaluators: bool = True) -> list[str]:
         """The ``benchmark`` command for this plan, without ``--confirm``: the models and the
-        judge always, the other settings when they differ from the defaults."""
+        judge always, the other settings when they differ from the defaults. Without
+        ``evaluators`` it leaves out ``--evaluators``, which a run attached already."""
         settings = self.settings
         defaults = BenchmarkSettings(out_dir=self.dataset_dir / DEFAULT_OUT_DIR_NAME)
         words = [*PROGRAM, "benchmark", display_path(self.dataset_dir)]
@@ -374,7 +375,7 @@ class BenchmarkPlan:
         if settings.max_rows is not None:
             words += ["--max-rows", str(settings.max_rows)]
         words += ["--judge-model", self.judge.spec]
-        spec = None if self.evaluators is None else self.evaluators.pinned
+        spec = None if self.evaluators is None or not evaluators else self.evaluators.pinned
         if spec is not None and spec.is_file():
             words += ["--evaluators", display_path(spec)]
         if settings.concurrency != defaults.concurrency:
@@ -851,7 +852,7 @@ def _share(
     eval_dir = EvalDir(plan.model_dir(candidate))
     if not eval_dir.has_work() or not stamped(eval_dir):
         return
-    rerun = f"{shlex.join(plan.command())} --confirm"
+    rerun = f"{shlex.join(plan.command(evaluators=False))} --confirm"
     try:
         inputs = inputs if inputs is not None else _inputs(plan, candidate)
     except (FinetuneError, OSError) as exc:
