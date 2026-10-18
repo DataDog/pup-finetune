@@ -112,7 +112,8 @@ A chat endpoint renders the conversation with the chat template, tokenizes the w
 as the template does, and the model generates the completion after it. For a Jinja template
 that is the rendered text encoded as **one** string; Kimi K3's tokenizer renders the chat in
 its repository's Python code (`trust_remote_code`) and encodes message text apart from its
-control tokens, so text that spells a control token stays text (`ChatTokenizer.render_tokens`).
+control tokens, so text that spells a control token stays text (`ChatTokenizer.render_tokens`,
+used only for such a tokenizer: `tokenizes_chat`).
 DeepSeek-V4 ships its chat format as Python and no template, so its family renders through
 `rendering/encoders.py`'s `DeepSeekV4Encoder`, which the `tokenizer` tests hold to DeepSeek's
 own encoder and test vectors at the pinned commit. Training must see the same tokens, so by
@@ -127,7 +128,9 @@ Chat templates are often prefix-stable as text and still not as tokens: a tokeni
 characters across the point where generation starts. Qwen3.8's prompt ends `<think>\n` and an
 empty reasoning block continues `\n`, which the whole conversation encodes as one `\n\n`
 token. In that case the completion is the rest of the rendered turn encoded on its own after
-the prompt's tokens, as the model would generate it.
+the prompt's tokens, as the model would generate it. A tokenizer that tokenizes the chat
+itself never merges there; a turn whose tokens still do not extend its prompt's is refused,
+since re-encoding would turn message text that spells a control token into that token.
 
 One example per row with every assistant turn trainable costs O(turns) tokens rather than
 O(turns²), but it is only correct when the renderer is **prefix-stable** for that row: for

@@ -26,12 +26,13 @@ from pup_finetune.rendering import (
     hf,
 )
 from pup_finetune.rendering.hf import HFChatTemplateRenderer, TransformersTokenizer
-from pup_finetune.rendering.parsers import Qwen3XmlToolParser
+from pup_finetune.rendering.parsers import KimiXtmlParser, Qwen3XmlToolParser
 from pup_finetune.training.datums import build_examples
 from tests.fakes.tokenizer import (
     DOUBLE_NEWLINE_ID,
     SPECIAL_IDS,
     FakeChatTokenizer,
+    FakeXtmlTokenizer,
     qwen3_8_like,
     role_tag_after,
     role_tag_template,
@@ -770,3 +771,69 @@ def test_training_renders_rows_the_fast_path_refuses_per_turn() -> None:
     # Without the merge the same rows take the fast path, one example each.
     fast = build_examples(rows, stable, max_seq_len=4096)
     assert [len(row.examples) for row in fast.examples] == [1, 1]
+
+
+def xtml_renderer(tokenizer: FakeXtmlTokenizer) -> HFChatTemplateRenderer:
+    return HFChatTemplateRenderer(
+        "example/tiny-xtml",
+        SHA,
+        response_parser=KimiXtmlParser(),
+        stop_tokens=["<|end_of_msg|>"],
+        prefix_stable=True,
+        tokenizer=tokenizer,
+    )
+
+
+def test_each_turn_renders_the_template_once_for_its_prompt_and_once_whole() -> None:
+    tokenizer = FakeChatTokenizer()
+    renderer(tokenizer).per_turn_examples(TOOL_ROW, [WEATHER_TOOL])
+    assert [call["add_generation_prompt"] for call in tokenizer.calls] == [True, False] * 2
+
+
+LITERAL_CONTROL_ROW: list[ChatMessage] = [
+    {"role": "user", "content": "How do I close a channel?"},
+    {"role": "assistant", "content": "Write <|close|> then the channel's name."},
+]
+
+
+def test_a_tokenizer_that_tokenizes_the_chat_keeps_text_that_spells_a_control_token() -> None:
+    tokenizer = FakeXtmlTokenizer()
+    r = xtml_renderer(tokenizer)
+    (turn,) = r.per_turn_examples(LITERAL_CONTROL_ROW, [])
+    assert [call["add_generation_prompt"] for call in tokenizer.calls] == [True, False]
+    trained = [t for t, w in zip(turn.target_tokens, turn.weights, strict=True) if w]
+    response = tokenizer.segment_ids([("Write <|close|> then the channel's name.", False)])
+    assert response == [ord(char) for char in "Write <|close|> then the channel's name."]
+    assert any(trained[i : i + len(response)] == response for i in range(len(trained)))
+    assert r.supervised_example(LITERAL_CONTROL_ROW, []) == turn
+    prompt = r.generation_prompt_tokens(LITERAL_CONTROL_ROW[:1], [])
+    assert prompt == list(turn.input_tokens[: len(prompt)])
+
+
+class _BoundaryRetokenizingXtml(FakeXtmlTokenizer):
+    """Spells the prompt's last control token as text inside the whole turn: the same text,
+    other tokens."""
+
+    def render_tokens(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        tools: Sequence[Mapping[str, Any]] | None,
+        add_generation_prompt: bool,
+        template_kwargs: Mapping[str, Any],
+    ) -> list[int]:
+        options = {"tools": tools, "template_kwargs": template_kwargs}
+        ids = super().render_tokens(
+            messages, add_generation_prompt=add_generation_prompt, **options
+        )
+        if add_generation_prompt:
+            return ids
+        boundary = len(super().render_tokens(messages[:-1], add_generation_prompt=True, **options))
+        return [*ids[: boundary - 1], *map(ord, "<|sep|>"), *ids[boundary:]]
+
+
+def test_a_tokenizer_that_tokenizes_the_chat_never_re_encodes_a_turn_after_its_prompt() -> None:
+    r = xtml_renderer(_BoundaryRetokenizingXtml())
+    with pytest.raises(RendererError) as excinfo:
+        r.per_turn_examples(LITERAL_CONTROL_ROW, [])
+    assert excinfo.value.code == RendererErrorCode.PROMPT_MISMATCH

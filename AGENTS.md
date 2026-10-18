@@ -703,16 +703,18 @@ Source lives under `src/pup_finetune/`.
   `base.py` has the `Renderer` protocol and `RendererError`. `hf.py` has
   `HFChatTemplateRenderer`, the one renderer every provider shares: the model's Hugging Face
   chat template and tokenizer at a pinned revision, one example per trainable assistant turn
-  (the prompt tokenized whole, as the template tokenizes it: `ChatTokenizer.render_tokens`,
-  then the completion through its stop token, re-encoded after the prompt when a token merges
-  across the boundary), and a per-row-checked one-example fast path for families that pin
-  `prefix_stable` (every trainable turn a token prefix of the whole render). It also has the
-  narrow `ChatTokenizer` seam (tests inject `tests/fakes/tokenizer.py`), the lazily imported
-  `transformers` adapter (the `hf` extra; `load_tokenizer` passes `trust_remote_code` only
-  for a family that sets it, always with the pinned revision as `revision` and
-  `code_revision`, refuses a tokenizer class from any other repository or commit, and a
-  remote tokenizer's identity is its pinned `model@revision`), and `ChatEncoder` and
-  `EncodedChatTokenizer`, for a tokenizer that ships no chat template.
+  (the prompt tokenized whole, as the template tokenizes it: its text encoded whole, or
+  `ChatTokenizer.render_tokens` when the tokenizer's own code tokenizes the chat,
+  `tokenizes_chat`; then the completion through its stop token, re-encoded after the prompt
+  when a token merges across the boundary, which a `tokenizes_chat` tokenizer refuses
+  instead; two template renders per turn), and a per-row-checked one-example fast path for
+  families that pin `prefix_stable` (every trainable turn a token prefix of the whole
+  render). It also has the narrow `ChatTokenizer` seam (tests inject
+  `tests/fakes/tokenizer.py`), the lazily imported `transformers` adapter (the `hf` extra;
+  `load_tokenizer` passes `trust_remote_code` only for a family that sets it, always with the
+  pinned revision as `revision` and `code_revision`, refuses a tokenizer class from any other
+  repository or commit, and a remote tokenizer's identity is its pinned `model@revision`),
+  and `ChatEncoder` and `EncodedChatTokenizer`, for a tokenizer that ships no chat template.
   `encoders.py` has those encoders (`DeepSeekV4Encoder`, DeepSeek-V4's
   `encoding/encoding_dsv4.py` for the messages we train on, held to it by the `tokenizer`
   tests). `parsers.py` has the `ResponseParser`s (`Qwen3XmlToolParser`,
@@ -934,7 +936,8 @@ one `FakePup` with `FakeDatasetsApi`.
 `tests/fakes/tokenizer.py` has `FakeChatTokenizer`, a character-level chat tokenizer with a
 Qwen3.8-like Python template (optionally merging `\n\n` across the prompt boundary) or a
 GLM-5-like one (`glm5_like`), and extra special tokens (`DEEPSEEK_SPECIALS`) for a fake behind
-an encoder; its `render_tokens` encodes the rendered text whole.
+an encoder; `FakeXtmlTokenizer` renders Kimi K3's XTML as its tokenizer code does, control
+tokens apart from message text (`tokenizes_chat`).
 `tests/fakes/chat_api.py` has `FakeChatApi`, an OpenAI-compatible chat completions endpoint
 (scripted responses or errors first, then an answer function) and `matching_judge`.
 `tests/fakes/fireworks_api.py` has `FakeFireworksApi`, the Fireworks model and account routes

@@ -35,11 +35,13 @@ with ``not_prefix_stable`` and :func:`~pup_finetune.training.datums.build_exampl
 per turn instead, so ``prefix_stable`` never claims more than each row delivers.
 
 **The template's own tokens.** Prompts and turns are tokenized as the template tokenizes
-them (:meth:`ChatTokenizer.render_tokens`): for a Jinja template that is the rendered text
-encoded whole; a tokenizer whose own code renders the chat (``trust_remote_code``, Kimi K3)
-may encode message text apart from its control tokens, so text that spells a control token
-stays text. A family whose tokenizer ships no chat template renders through a
-:class:`ChatEncoder` instead (:class:`EncodedChatTokenizer`, :mod:`.encoders`).
+them: for a Jinja template that is the rendered text encoded whole. A tokenizer whose own
+code renders the chat (``trust_remote_code``, Kimi K3; :attr:`ChatTokenizer.tokenizes_chat`)
+encodes message text apart from its control tokens, so text that spells a control token stays
+text; its tokens come from :meth:`ChatTokenizer.render_tokens`, and a turn whose tokens do
+not extend its prompt's is refused rather than re-encoded. A family whose tokenizer ships no
+chat template renders through a :class:`ChatEncoder` instead (:class:`EncodedChatTokenizer`,
+:mod:`.encoders`).
 
 ``transformers`` comes from the optional ``hf`` extra and is imported only when a tokenizer
 is first needed, never when this module is imported. A family's ``trust_remote_code`` is
@@ -62,7 +64,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from importlib import metadata
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import Any, ClassVar, Protocol
 
 from pup_finetune.errors import ExternalError, UsageError, install_hint
 from pup_finetune.redaction import redact
@@ -109,7 +111,15 @@ class ChatTokenizer(Protocol):
         add_generation_prompt: bool,
         template_kwargs: Mapping[str, Any],
     ) -> list[int]:
-        """``messages`` rendered through the chat template, as the template tokenizes them."""
+        """``messages`` rendered and tokenized by the tokenizer's own code; renderers call
+        it only when :attr:`tokenizes_chat` is true."""
+        ...
+
+    @property
+    def tokenizes_chat(self) -> bool:
+        """Whether the tokenizer's own code renders and tokenizes the chat, keeping message
+        text apart from its control tokens, so :meth:`render_tokens`, not
+        :meth:`render_text` encoded whole, is the template's tokens."""
         ...
 
     def encode(self, text: str) -> list[int]:
@@ -204,6 +214,10 @@ class TransformersTokenizer:
         if isinstance(token_id, int) and self.encode(token) == [token_id]:
             return token_id
         return None
+
+    @property
+    def tokenizes_chat(self) -> bool:
+        return self._remote_code is not None and not self._jinja_template()
 
     @property
     def chat_template(self) -> str:
@@ -347,6 +361,8 @@ class EncodedChatTokenizer:
 
     def token_id(self, token: str) -> int | None:
         return self.tokenizer.token_id(token)
+
+    tokenizes_chat: ClassVar[bool] = False
 
     @property
     def chat_template(self) -> str:
@@ -620,6 +636,8 @@ class HFChatTemplateRenderer:
         where: str,
     ) -> list[int]:
         tokenizer = self._chat_tokenizer()
+        if not tokenizer.tokenizes_chat:
+            return self._encode(self._render(messages, tools, generation=generation, where=where))
         try:
             tokens = tokenizer.render_tokens(
                 messages,
@@ -648,24 +666,18 @@ class HFChatTemplateRenderer:
     ) -> _Turn:
         """Assistant turn ``index`` after its own generation prompt; see the module docs."""
         where = f"messages[{index}]"
-        prompt_text = self._render(messages[:index], tools, generation=True, where=where)
-        text = self._render(messages[: index + 1], tools, generation=False, where=where)
-        if not text.startswith(prompt_text):
-            raise RendererError(
-                RendererErrorCode.PROMPT_MISMATCH,
-                f"{where}: the rendered turn does not extend its generation prompt",
-            )
-        prompt = self._tokens(messages[:index], tools, generation=True, where=where)
-        tokens = self._tokens(messages[: index + 1], tools, generation=False, where=where)
-        if tokens[: len(prompt)] != prompt:
-            # The tokenizer merged across the boundary; the model generates after the prompt.
-            whole = tokens
-            tokens = prompt + self._encode(text[len(prompt_text) :])
-            if self.decode(tokens) != self.decode(whole):
+        if self._chat_tokenizer().tokenizes_chat:
+            prompt = self._tokens(messages[:index], tools, generation=True, where=where)
+            tokens = self._tokens(messages[: index + 1], tools, generation=False, where=where)
+            if tokens[: len(prompt)] != prompt:
+                # Re-encoding text would turn message text that spells a control token into
+                # that token, which this tokenizer never does.
                 raise RendererError(
                     RendererErrorCode.PROMPT_MISMATCH,
-                    f"{where}: encoding the turn after its prompt changed its text",
+                    f"{where}: the rendered turn does not extend its generation prompt",
                 )
+        else:
+            prompt, tokens = self._text_turn(messages, tools, index, where)
         if len(tokens) <= len(prompt):
             raise RendererError(
                 RendererErrorCode.NO_TRAINABLE_TOKENS, f"{where}: the turn rendered no tokens"
@@ -690,6 +702,29 @@ class HFChatTemplateRenderer:
         raise RendererError(
             RendererErrorCode.TEMPLATE_ERROR, f"{where}: the turn does not end with a stop token"
         )
+
+    def _text_turn(
+        self, messages: list[dict[str, Any]], tools: list[ToolSpec] | None, index: int, where: str
+    ) -> tuple[list[int], list[int]]:
+        """The prompt and turn tokens of a template whose tokens are its text encoded whole."""
+        prompt_text = self._render(messages[:index], tools, generation=True, where=where)
+        text = self._render(messages[: index + 1], tools, generation=False, where=where)
+        if not text.startswith(prompt_text):
+            raise RendererError(
+                RendererErrorCode.PROMPT_MISMATCH,
+                f"{where}: the rendered turn does not extend its generation prompt",
+            )
+        prompt, tokens = self._encode(prompt_text), self._encode(text)
+        if tokens[: len(prompt)] == prompt:
+            return prompt, tokens
+        # The tokenizer merged across the boundary; the model generates after the prompt.
+        joined = prompt + self._encode(text[len(prompt_text) :])
+        if self.decode(joined) != self.decode(tokens):
+            raise RendererError(
+                RendererErrorCode.PROMPT_MISMATCH,
+                f"{where}: encoding the turn after its prompt changed its text",
+            )
+        return prompt, joined
 
 
 def _template_failure(where: str, exc: Exception) -> RendererError:

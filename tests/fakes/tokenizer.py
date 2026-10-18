@@ -13,6 +13,7 @@ Each special token is one id and every other character is its own id (its code p
     tokenizer = FakeChatTokenizer(template=role_tag_template)  # any template function
     tokenizer = FakeChatTokenizer(template=glm5_like)  # GLM-5-like, role tags as stops
     tokenizer = FakeChatTokenizer(specials=DEEPSEEK_SPECIALS)  # more special tokens
+    tokenizer = FakeXtmlTokenizer()  # Kimi-K3-like: its own code renders and tokenizes
 
 :func:`qwen3_8_like` follows the real Qwen3.8 template: ``<|im_start|>role\\n...<|im_end|>\\n``
 turns, ``<think>`` blocks on assistant turns (kept in history unless the template argument
@@ -21,6 +22,8 @@ turns and a generation prompt that opens ``<think>\\n``. With ``merge_newlines``
 reasoning block's newline merges with that prompt's trailing one, as BPE does. Like a real
 template, it raises on an empty conversation and on tool arguments that are not a mapping.
 Every render is recorded in ``calls``. :func:`glm5_like` follows the real GLM-5 template.
+:class:`FakeXtmlTokenizer` renders Kimi K3's XTML channels the way its tokenizer code does,
+control tokens apart from message text, so text that spells a control token stays text.
 """
 
 from __future__ import annotations
@@ -81,6 +84,8 @@ class FakeChatTokenizer:
         }
         self.text_of = {**_TEXT_OF, **{token_id: token for token, token_id in self.ids.items()}}
 
+    tokenizes_chat = False
+
     @property
     def chat_template(self) -> str:
         return self.template_name
@@ -93,6 +98,16 @@ class FakeChatTokenizer:
         add_generation_prompt: bool,
         template_kwargs: Mapping[str, Any],
     ) -> str:
+        self._record(messages, tools, add_generation_prompt, template_kwargs)
+        return self.template(messages, tools, add_generation_prompt, template_kwargs)
+
+    def _record(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[Mapping[str, Any]] | None,
+        add_generation_prompt: bool,
+        template_kwargs: Mapping[str, Any],
+    ) -> None:
         self.calls.append(
             {
                 "messages": copy.deepcopy([dict(m) for m in messages]),
@@ -103,7 +118,6 @@ class FakeChatTokenizer:
         )
         if not messages:
             raise ValueError("No messages provided.")
-        return self.template(messages, tools, add_generation_prompt, template_kwargs)
 
     def render_tokens(
         self,
@@ -281,3 +295,103 @@ DEEPSEEK_SPECIALS: tuple[str, ...] = (
     "<｜Assistant｜>",  # noqa: RUF001
 )
 """DeepSeek-V4's special tokens, for a fake behind its chat encoder."""
+
+XTML_CONTROLS: tuple[str, ...] = ("<|open|>", "<|close|>", "<|sep|>", "<|end_of_msg|>")
+XTML_PROMPT_END = '<|open|>message role="assistant"<|sep|><|open|>think<|sep|>'
+
+Segment = tuple[str, bool]
+"""``(text, is_control)``: a control token, or text encoded without control tokens."""
+
+
+def _tag(name: str, *attributes: tuple[str, Any]) -> list[Segment]:
+    words = "".join(f' {key}="{value}"' for key, value in attributes)
+    return [("<|open|>", True), (f"{name}{words}", False), ("<|sep|>", True)]
+
+
+def _close(name: str) -> list[Segment]:
+    return [("<|close|>", True), (name, False), ("<|sep|>", True)]
+
+
+def xtml_segments(
+    messages: Sequence[Mapping[str, Any]],
+    tools: Sequence[Mapping[str, Any]] | None,
+    add_generation_prompt: bool,
+) -> list[Segment]:
+    """Kimi K3's XTML: one message per turn, ending ``<|end_of_msg|>``; an assistant turn
+    holds a think channel, a response channel and, with calls, a tools channel of typed
+    arguments (strings raw, other values as JSON); the prompt opens the think channel."""
+    segments: list[Segment] = []
+    if tools:
+        declared = "\n".join(json.dumps(dict(tool), sort_keys=True) for tool in tools)
+        segments += [*_tag("tools_declare"), (declared, False), *_close("tools_declare")]
+    for message in messages:
+        role = message["role"]
+        segments += _tag("message", ("role", role))
+        if role == "assistant":
+            segments += [*_tag("think"), (message.get("reasoning_content") or "", False)]
+            segments += [*_close("think"), *_tag("response"), (message.get("content") or "", False)]
+            segments += _close("response")
+            calls = message.get("tool_calls") or ()
+            if calls:
+                segments += _tag("tools")
+                for index, call in enumerate(calls, start=1):
+                    segments += _tag("call", ("tool", call["function"]["name"]), ("index", index))
+                    for key, value in _arguments(call).items():
+                        kind = _xtml_type(value)
+                        text = value if isinstance(value, str) else json.dumps(value)
+                        segments += [*_tag("argument", ("key", key), ("type", kind)), (text, False)]
+                        segments += _close("argument")
+                    segments += _close("call")
+                segments += _close("tools")
+        else:
+            segments.append((message.get("content") or "", False))
+        segments += [*_close("message"), ("<|end_of_msg|>", True)]
+    if add_generation_prompt:
+        segments += [*_tag("message", ("role", "assistant")), *_tag("think")]
+    return [(text, control) for text, control in segments if text]
+
+
+def _xtml_type(value: Any) -> str:
+    if isinstance(value, bool):
+        return "boolean"
+    if value is None:
+        return "null"
+    if isinstance(value, int | float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    return "object" if isinstance(value, Mapping) else "array"
+
+
+class FakeXtmlTokenizer(FakeChatTokenizer):
+    """A Kimi-K3-like tokenizer whose own code renders the chat (:func:`xtml_segments`) and
+    encodes message text apart from its control tokens."""
+
+    tokenizes_chat = True
+
+    def __init__(self) -> None:
+        super().__init__(
+            template=lambda messages, tools, generation, _: "".join(
+                text for text, _ in xtml_segments(messages, tools, generation)
+            ),
+            template_name="fake-kimi-k3-like-v1",
+            specials=XTML_CONTROLS,
+        )
+
+    def render_tokens(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        tools: Sequence[Mapping[str, Any]] | None,
+        add_generation_prompt: bool,
+        template_kwargs: Mapping[str, Any],
+    ) -> list[int]:
+        self._record(messages, tools, add_generation_prompt, template_kwargs)
+        return self.segment_ids(xtml_segments(messages, tools, add_generation_prompt))
+
+    def segment_ids(self, segments: Sequence[Segment]) -> list[int]:
+        """``segments`` as ids: each control token one id, text one id per character."""
+        ids: list[int] = []
+        for text, control in segments:
+            ids += [self.ids[text]] if control else [ord(char) for char in text]
+        return ids
