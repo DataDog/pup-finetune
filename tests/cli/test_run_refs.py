@@ -419,7 +419,7 @@ def test_runs_with_none_suggests_training() -> None:
     assert data["warnings"] == []
     assert data["next_command"] is None
     assert [step["command"] for step in data["next_steps"]] == [
-        "pup finetune train --dataset <DIR> --model <MODEL>"
+        "pup finetune train --provider <PROVIDER> --dataset <DIR> --model <MODEL>"
     ]
 
 

@@ -530,9 +530,17 @@ def _next_by_state(
                 "it previews first)",
             ),
             step(
-                template("train", "--dataset", directory, "--model", "<MODEL>"),
-                "preview a training run on the kept rows (free); choose the model with the "
-                "user (its provider is inferred, and the run goes in runs/RUN_ID)",
+                template(
+                    "train",
+                    "--provider",
+                    "<PROVIDER>",
+                    "--dataset",
+                    directory,
+                    "--model",
+                    "<MODEL>",
+                ),
+                "preview a training run on the kept rows (free); choose the model and its "
+                "provider with the user (`models list` shows them; the run goes in runs/RUN_ID)",
             ),
         ]
     else:

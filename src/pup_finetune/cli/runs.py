@@ -58,7 +58,9 @@ def runs(
         next_command = None
         next_steps = [
             step(
-                template("train", "--dataset", "<DIR>", "--model", "<MODEL>"),
+                template(
+                    "train", "--provider", "<PROVIDER>", "--dataset", "<DIR>", "--model", "<MODEL>"
+                ),
                 "preview a training run (free); it goes in runs/RUN_ID",
             )
         ]

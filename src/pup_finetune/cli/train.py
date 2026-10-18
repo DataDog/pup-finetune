@@ -1291,8 +1291,8 @@ def resume(
         flag = exc.message.partition(" ")[0]
         exc.hint = (
             f"the run was recorded with {flag}, and a resume trains with its recorded "
-            f"settings: start a new run without {flag} (`pup finetune train --dataset "
-            "<DIR> --model <MODEL>`)"
+            f"settings: start a new run without {flag} (`pup finetune train --provider "
+            "<PROVIDER> --dataset <DIR> --model <MODEL>`)"
         )
         raise
     provider, inputs = load_run_inputs(run, runtime, finalize_only=mode == "finalize")
@@ -1390,7 +1390,10 @@ def run_next(
         next_command = None
         steps.append(
             step(
-                template("train", "--dataset", "<DIR>", "--model", "<MODEL>"), NOTHING_TRAINED_STEP
+                template(
+                    "train", "--provider", "<PROVIDER>", "--dataset", "<DIR>", "--model", "<MODEL>"
+                ),
+                NOTHING_TRAINED_STEP,
             )
         )
     elif phase == "completed":
@@ -1620,7 +1623,7 @@ def _newest_run() -> Path:
         raise NotARunDir(
             f"no run under {RUNS_DIR}/ to show",
             hint="pass a run directory or run id, or start a run with `pup finetune train "
-            "--dataset <DIR> --model <MODEL>`",
+            "--provider <PROVIDER> --dataset <DIR> --model <MODEL>`",
         )
     info(f"the newest run under {RUNS_DIR}/: {display_path(found)}")
     return found

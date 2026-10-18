@@ -70,7 +70,10 @@ def test_a_dataset_given_to_a_run_command_is_named_as_one(dataset: Path, command
     assert f"Error [not_a_run_dir]: {dataset} is a dataset directory, not a training run" in (
         result.stderr
     )
-    assert f"`pup finetune train --dataset {dataset} --model <MODEL>`" in result.stderr
+    assert (
+        f"`pup finetune train --provider <PROVIDER> --dataset {dataset} --model <MODEL>`"
+        in result.stderr
+    )
     assert "run.json does not exist" not in result.stderr
 
 

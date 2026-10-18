@@ -44,7 +44,7 @@ def _q(path: Path) -> str:
 
 
 def _train_command(dataset: Path) -> str:
-    return f"`pup finetune train --dataset {_q(dataset)} --model <MODEL>`"
+    return f"`pup finetune train --provider <PROVIDER> --dataset {_q(dataset)} --model <MODEL>`"
 
 
 def _is_run(path: Path) -> bool:
