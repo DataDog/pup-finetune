@@ -129,6 +129,7 @@ PROFILES: Final[tuple[ModelProfile, ...]] = (
         "zai-org/GLM-5.3-Flash",
         GLM5_3,
         max_seq_len=131_072,
+        supports_reasoning=True,
         notes="GLM-5.3 Flash; it stops by emitting the next role tag.",
     ),
     _profile(

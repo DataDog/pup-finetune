@@ -224,7 +224,7 @@ def test_profiles_take_their_tokenizer_from_the_family() -> None:
         assert profile.trust_remote_code == family.trust_remote_code
     assert by_alias["qwen3p5-9b"].supports_reasoning
     assert by_alias["qwen3p8-27b"].supports_reasoning
-    assert not by_alias["glm-5p3-flash"].supports_reasoning
+    assert by_alias["glm-5p3-flash"].supports_reasoning
 
 
 def test_an_unknown_model_lists_the_known_aliases() -> None:
