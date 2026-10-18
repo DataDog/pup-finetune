@@ -59,7 +59,7 @@ false and a best-effort message. These tool-call formats are covered:
 
   (without the line breaks, which are added here).
 - :class:`MuseAtemParser`, Muse Glimmer's ATEM messages after an open ``<|start|>assistant``:
-  reasoning to ``self``, then either text to ``user`` or one message per tool call::
+  reasoning to ``self``, text to ``user``, then one message per tool call::
 
        to=self<|message|>reasoning<|eom|><|start|>assistant to=get_weather<|message|>
       <atem:function_calls>
@@ -650,8 +650,8 @@ _ATEM_MARKERS = ("<|start|>", "<|message|>", "<|eom|>", _ATEM_END)
 @dataclass(frozen=True, slots=True)
 class MuseAtemParser:
     """Muse Glimmer's format: after the generation prompt's ``<|start|>assistant``, an
-    optional message to ``self`` (the reasoning), then a message to ``user`` (the text) or
-    one message per tool call, each addressed to the function it calls; messages are
+    optional message to ``self`` (the reasoning), an optional message to ``user`` (the text),
+    then one message per tool call, each addressed to the function it calls; messages are
     joined by ``<|eom|><|start|>assistant`` and the turn ends ``<|eot|>``.
 
     The template writes string values raw and other values as JSON, so a value is read with
@@ -660,7 +660,7 @@ class MuseAtemParser:
     """
 
     name: ClassVar[str] = "muse_atem"
-    version: ClassVar[str] = "1"
+    version: ClassVar[str] = "2"
 
     def parse(self, text: str, tools: Sequence[ToolSpec] = ()) -> ParsedResponse:
         body = text.rstrip().removesuffix(_ATEM_END)
@@ -673,9 +673,9 @@ class MuseAtemParser:
         valid = bool(found) and len(found) == len(messages)
         content = ""
         calls: list[tuple[str, dict[str, Any]]] = []
-        if valid and len(found) == 1 and found[0]["to"] == "user":
-            content = found[0]["body"]
-        elif valid:
+        if valid and found[0]["to"] == "user":
+            content, found = found[0]["body"], found[1:]
+        if valid:
             properties = _properties(tools)
             parsed = [_atem_call(message, properties) for message in found]
             if None in parsed:

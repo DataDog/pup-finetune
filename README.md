@@ -175,8 +175,8 @@ name `--provider` for them. The run goes in `runs/<run id>`. `--detach` trains i
 spend with `--max-train-tokens`, or `--max-spend-usd` with `--hourly-rate-usd`. The epoch with
 the best validation loss is kept, also when a cap stops the run: promoted to a Fireworks model,
 or recorded as the run's `deployable_checkpoint` on Baseten, which has no promotion. Fireworks
-also trains `deepseek-v4-flash-0731` and `muse-glimmer-30b` (whose rows need a system
-message). The Baseten models are `qwen3p5-9b`, `glm-5p3-flash`, `qwen3p8-27b` and `kimi-k3`:
+also trains `deepseek-v4-flash-0731` and `muse-glimmer-30b`. The Baseten models are
+`qwen3p5-9b`, `glm-5p3-flash`, `qwen3p8-27b` and `kimi-k3`:
 `pup finetune train --dataset datasets/my-agent --model qwen3p5-9b --detach`.
 
 `--remote` (Baseten only) runs the training loop in a Baseten CPU job, so training continues

@@ -7,13 +7,13 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import re
 from typing import Any
 
 import pytest
 
-from pup_finetune.rendering import RendererError, hf
-from pup_finetune.rendering.base import RendererErrorCode
+from pup_finetune.rendering import TokenizedExample, hf
 from pup_finetune.rendering.families import (
     DEEPSEEK_V4,
     FAMILIES,
@@ -25,8 +25,15 @@ from pup_finetune.rendering.families import (
     ModelFamily,
     get_family,
 )
+from pup_finetune.rendering.hf import HFChatTemplateRenderer
 from pup_finetune.rendering.parsers import GlmXmlToolParser, Qwen3XmlToolParser
-from tests.fakes.tokenizer import SPECIAL_IDS, FakeChatTokenizer, glm5_like
+from tests.fakes.tokenizer import (
+    MUSE_SPECIALS,
+    SPECIAL_IDS,
+    FakeChatTokenizer,
+    glm5_like,
+    muse_like,
+)
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
 
@@ -190,42 +197,74 @@ def test_deepseek_v4_renders_through_its_encoder_not_the_tokenizer_s_template() 
     )
 
 
-@pytest.mark.parametrize(
-    ("messages", "reason"),
-    [
-        ([{"role": "user", "content": "Hi."}, {"role": "assistant", "content": "Hey."}], "date"),
-        (
-            [
-                {"role": "system", "content": "S"},
-                {"role": "user", "content": "Hi."},
-                {
-                    "role": "assistant",
-                    "content": "Looking.",
-                    "tool_calls": [
-                        {
-                            "id": "c",
-                            "type": "function",
-                            "function": {"name": "f", "arguments": "{}"},
-                        }
-                    ],
-                },
-            ],
-            "drops the text",
-        ),
-    ],
-)
-def test_muse_glimmer_refuses_what_its_template_renders_unfaithfully(
-    messages: list[dict[str, Any]], reason: str
-) -> None:
-    renderer = MUSE_GLIMMER.renderer(tokenizer=FakeChatTokenizer())
-    for render in (
-        renderer.per_turn_examples,
-        renderer.supervised_example,
-        renderer.generation_prompt_tokens,
-    ):
-        with pytest.raises(RendererError, match=reason) as caught:
-            render(messages, [])
-        assert caught.value.code == RendererErrorCode.UNSUPPORTED_MESSAGE
-    fine = [{"role": "system", "content": "S"}, *messages[-2:]]
-    fine[-1] = {**fine[-1], "content": ""}
-    assert MUSE_GLIMMER.check is not None and MUSE_GLIMMER.check(fine) is None
+def muse_renderer() -> HFChatTemplateRenderer:
+    return MUSE_GLIMMER.renderer(
+        tokenizer=FakeChatTokenizer(template=muse_like, specials=MUSE_SPECIALS)
+    )
+
+
+def trained(renderer: HFChatTemplateRenderer, example: TokenizedExample) -> str:
+    return renderer.decode(
+        [t for t, w in zip(example.target_tokens, example.weights, strict=True) if w > 0]
+    )
+
+
+def test_muse_glimmer_pins_the_date_of_its_default_system_message() -> None:
+    renderer = muse_renderer()
+    messages = [{"role": "user", "content": "Hi."}, {"role": "assistant", "content": "Hey."}]
+    (example,) = renderer.per_turn_examples(messages, [])
+    assert "Current date: 2026-01-04." in renderer.decode(example.input_tokens)
+    assert trained(renderer, example) == " to=user<|message|>Hey.<|eot|>"
+    assert renderer.supervised_example(messages, []) == example
+
+
+MUSE_TEXT_AND_CALL: list[dict[str, Any]] = [
+    {"role": "system", "content": "S"},
+    {"role": "user", "content": "Hi."},
+    {
+        "role": "assistant",
+        "content": "Looking.",
+        "reasoning_content": "Use f.",
+        "tool_calls": [
+            {"id": "c", "type": "function", "function": {"name": "f", "arguments": '{"x": "1"}'}}
+        ],
+    },
+    {"role": "tool", "tool_call_id": "c", "content": "done"},
+    {"role": "assistant", "content": "Done."},
+]
+
+
+def test_muse_glimmer_writes_text_beside_tool_calls_as_its_own_message_to_the_user() -> None:
+    renderer = muse_renderer()
+    first, second = renderer.per_turn_examples(MUSE_TEXT_AND_CALL, [])
+    text = trained(renderer, first)
+    assert text == (
+        " to=self<|message|>Use f.<|eom|>"
+        "<|start|>assistant to=user<|message|>Looking.<|eom|>"
+        '<|start|>assistant to=f<|message|><atem:function_calls>\n<atem:invoke name="f">\n'
+        '<atem:parameter name="x">1</atem:parameter>\n</atem:invoke>\n</atem:function_calls>'
+        "<|eot|>"
+    )
+    parsed = renderer.parse_response(text)
+    assert parsed.format_valid
+    assert parsed.message["content"] == "Looking."
+    assert parsed.message["reasoning_content"] == "Use f."
+    assert json.loads(parsed.message["tool_calls"][0]["function"]["arguments"]) == {"x": 1}
+    assert "Looking.<|eom|>" in renderer.decode(second.input_tokens)
+    without_reasoning = [
+        {key: value for key, value in message.items() if key != "reasoning_content"}
+        for message in MUSE_TEXT_AND_CALL
+    ]
+    whole = renderer.supervised_example(without_reasoning, [])
+    turns = renderer.per_turn_examples(without_reasoning, [])
+    assert trained(renderer, whole) == "".join(trained(renderer, turn) for turn in turns)
+
+
+def test_a_family_s_message_rewrite_is_in_the_renderer_identity() -> None:
+    assert muse_renderer().identity()["message_rewrite"] == "muse_text_before_calls@1"
+    plain = QWEN3_8.renderer(tokenizer=FakeChatTokenizer())
+    assert plain.identity()["message_rewrite"] == "none"
+    assert MUSE_GLIMMER.rewrite is not None
+    assert MUSE_GLIMMER.rewrite.messages([{"role": "user", "content": "Hi."}]) == [
+        {"role": "user", "content": "Hi."}
+    ]

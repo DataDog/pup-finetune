@@ -672,10 +672,23 @@ def test_muse_several_calls_read_with_the_declared_types() -> None:
     ]
 
 
+def test_muse_text_to_the_user_before_the_calls() -> None:
+    text = atem(
+        " to=self<|message|>Look it up.",
+        " to=user<|message|>Checking Paris.",
+        atem_call("lookup", ("code", "75")),
+    )
+    parsed = MUSE.parse(text, [lookup_tool(code="string")])
+    assert parsed.format_valid
+    assert parsed.message["content"] == "Checking Paris."
+    assert parsed.message["reasoning_content"] == "Look it up."
+    assert calls(parsed.message) == [("lookup", {"code": "75"})]
+
+
 @pytest.mark.parametrize(
     "text",
     [
-        atem(" to=user<|message|>Sunny.", atem_call("f")),
+        atem(atem_call("f"), " to=user<|message|>Late text."),
         atem(atem_call("f"), " to=self<|message|>Late reasoning."),
         atem(" to=user<|message|>One.", " to=user<|message|>Two."),
         atem(atem_call("f").replace(" to=f", " to=g")),

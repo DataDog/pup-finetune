@@ -148,9 +148,12 @@ per turn, as does `qwen3_5` (Qwen3.5 also drops reasoning before the last user t
 turn boundary of GLM-5.3 is a special token, so `glm5_3` takes the fast path, as do
 `kimi_k3` and `muse_glimmer` (both keep reasoning in history) and `deepseek_v4` (whose rows
 without tools render per turn: it drops reasoning before the last user turn when no tool is
-declared). A family's `check` refuses a row its template cannot render faithfully, with
-`unsupported_message`: Muse Glimmer's template writes the current date into a conversation
-without a system message, and drops a message's text beside its tool calls. Only
+declared). A family's `rewrite` turns each message into the messages its template renders
+faithfully. Muse Glimmer's template drops the text of a message that has tool calls, so the
+text renders first as its own message to the user that does not end the turn (`end_turn`
+false), as the template writes such a message. Its template also writes today's date into
+the default system message of a conversation that has none, so the family pins
+`current_date` in `chat_template_kwargs`. Only
 `supervised_example` raises `not_prefix_stable`; a per-turn failure carries its own code, so
 the loop never retries it per turn.
 

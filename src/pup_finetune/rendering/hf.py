@@ -81,7 +81,7 @@ from pup_finetune.storage import canonical_json
 
 RENDERER = "hf-chat-template"
 """The implementation name recorded in :meth:`HFChatTemplateRenderer.identity`."""
-RENDERER_VERSION = "1"
+RENDERER_VERSION = "2"
 """Bumped whenever the tokens rendered for some conversation change."""
 
 INSTALL_HINT = install_hint("hf")
@@ -425,6 +425,21 @@ def transformers_version() -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class MessageRewrite:
+    """How a family rewrites messages before its template renders them, by name and version:
+    the version is bumped whenever the rewrite changes, and the renderer's identity records
+    both. ``apply`` maps each message to one or more messages, independently of the others,
+    so a rewritten prefix is a prefix of the rewritten conversation."""
+
+    name: str
+    version: str
+    apply: Callable[[Mapping[str, Any]], list[dict[str, Any]]]
+
+    def messages(self, messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        return [rewritten for message in messages for rewritten in self.apply(message)]
+
+
+@dataclass(frozen=True, slots=True)
 class _Turn:
     """One assistant turn rendered against its own prefix: ``tokens[start:]`` is trained."""
 
@@ -446,8 +461,7 @@ class HFChatTemplateRenderer:
     it is appended to that turn's completion as its stop target. ``chat_template_kwargs`` are
     passed to every template render. ``trust_remote_code`` loads the tokenizer with its
     repository's code; ``chat_encoder`` renders the chat for a tokenizer without a template;
-    ``check`` names why the template cannot render a conversation (``None`` when it can), and
-    such a row is refused with ``unsupported_message``.
+    ``rewrite`` rewrites the messages each render is given.
     """
 
     def __init__(
@@ -462,7 +476,7 @@ class HFChatTemplateRenderer:
         next_role_tag: Callable[[ChatMessage], str] | None = None,
         trust_remote_code: bool = False,
         chat_encoder: ChatEncoder | None = None,
-        check: Callable[[Sequence[ChatMessage]], str | None] | None = None,
+        rewrite: MessageRewrite | None = None,
         name: str = RENDERER,
         tokenizer: ChatTokenizer | None = None,
     ) -> None:
@@ -481,7 +495,7 @@ class HFChatTemplateRenderer:
         self._next_role_tag = next_role_tag
         self._trust_remote_code = trust_remote_code
         self._encoder = chat_encoder
-        self._check = check
+        self._rewrite = rewrite
         self._name = name
         self._tokenizer = (
             EncodedChatTokenizer(tokenizer, chat_encoder)
@@ -519,7 +533,6 @@ class HFChatTemplateRenderer:
         still trains exactly what the per-turn examples would.
         """
         turns = _trainable_turns(messages)
-        self._refuse_unsupported(messages)
         if any(message.get("reasoning_content") for message in messages):
             raise RendererError(
                 RendererErrorCode.NOT_PREFIX_STABLE, "rows with reasoning_content render per turn"
@@ -546,7 +559,6 @@ class HFChatTemplateRenderer:
         self, messages: list[ChatMessage], tools: list[ToolSpec]
     ) -> list[TokenizedExample]:
         turns = _trainable_turns(messages)
-        self._refuse_unsupported(messages)
         prepared = template_messages(messages)
         declared = list(tools) or None
         return [self._turn(prepared, declared, index).example() for index in turns]
@@ -555,7 +567,6 @@ class HFChatTemplateRenderer:
         self, messages: list[ChatMessage], tools: list[ToolSpec]
     ) -> list[int]:
         """The prompt the template renders for the next turn, tokenized as the template does."""
-        self._refuse_unsupported(messages)
         prepared = template_messages(messages)
         return self._tokens(prepared, list(tools) or None, generation=True, where="the prompt")
 
@@ -579,6 +590,7 @@ class HFChatTemplateRenderer:
             "chat_template_kwargs": canonical_json(dict(self._template_kwargs)),
             "stop_tokens": canonical_json(list(self._stop_tokens)),
             "prefix_stable": "true" if self._prefix_stable else "false",
+            "message_rewrite": _pinned(self._rewrite),
             "transformers_version": transformers_version(),
         }
 
@@ -598,10 +610,8 @@ class HFChatTemplateRenderer:
                 )
             return self._tokenizer
 
-    def _refuse_unsupported(self, messages: Sequence[ChatMessage]) -> None:
-        reason = self._check(messages) if self._check is not None else None
-        if reason is not None:
-            raise RendererError(RendererErrorCode.UNSUPPORTED_MESSAGE, reason)
+    def _template_view(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return messages if self._rewrite is None else self._rewrite.messages(messages)
 
     def _stop_ids(self) -> tuple[int, ...]:
         if self._stop_token_ids is None:
@@ -619,7 +629,7 @@ class HFChatTemplateRenderer:
         tokenizer = self._chat_tokenizer()
         try:
             return tokenizer.render_text(
-                messages,
+                self._template_view(messages),
                 tools=tools,
                 add_generation_prompt=generation,
                 template_kwargs=self._template_kwargs,
@@ -640,7 +650,7 @@ class HFChatTemplateRenderer:
             return self._encode(self._render(messages, tools, generation=generation, where=where))
         try:
             tokens = tokenizer.render_tokens(
-                messages,
+                self._template_view(messages),
                 tools=tools,
                 add_generation_prompt=generation,
                 template_kwargs=self._template_kwargs,
@@ -725,6 +735,10 @@ class HFChatTemplateRenderer:
                 f"{where}: encoding the turn after its prompt changed its text",
             )
         return prompt, joined
+
+
+def _pinned(rule: MessageRewrite | None) -> str:
+    return "none" if rule is None else f"{rule.name}@{rule.version}"
 
 
 def _template_failure(where: str, exc: Exception) -> RendererError:

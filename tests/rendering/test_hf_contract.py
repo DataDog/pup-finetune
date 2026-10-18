@@ -20,7 +20,6 @@ from collections.abc import Callable
 
 import pytest
 
-from pup_finetune.rendering import ChatMessage
 from pup_finetune.rendering.families import (
     DEEPSEEK_V4,
     GLM5_3,
@@ -120,7 +119,3 @@ class TestHFChatTemplateRendererOnMuseGlimmer(RendererContract):
         self, muse_glimmer_tokenizer: TransformersTokenizer
     ) -> Callable[[], HFChatTemplateRenderer]:
         return lambda: MUSE_GLIMMER.renderer(tokenizer=muse_glimmer_tokenizer)
-
-    @pytest.fixture
-    def preamble(self) -> list[ChatMessage]:
-        return [{"role": "system", "content": "You help."}]

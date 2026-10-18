@@ -723,8 +723,10 @@ Source lives under `src/pup_finetune/`.
   `families.py` is the model-family table (`qwen3_8`, `qwen3_5`, `glm5_3`, `kimi_k3`,
   `deepseek_v4`, `muse_glimmer`), each entry a tokenizer, revision, parser and stop tokens,
   and when it needs them `trust_remote_code` (Kimi K3 only), a `chat_encoder` (DeepSeek-V4)
-  and a `check` that refuses rows the template cannot render faithfully
-  (`unsupported_message`; Muse Glimmer needs a system message and text without tool calls).
+  and a `rewrite`, a `MessageRewrite` that turns each message into the messages the template
+  renders faithfully, by name and version in the renderer identity (Muse Glimmer writes text
+  beside tool calls as its own message to the user; its template's date is pinned in
+  `chat_template_kwargs`).
   The `hf` extra includes `tiktoken`, which Kimi K3's tokenizer code imports.
 - `evaluation/` - replay evaluation, provider-neutral. `cases.py` turns a dataset's kept
   test-split rows into `ReplayCase`s (`cases_from_dataset`, `build_cases`): one per trained
@@ -975,9 +977,7 @@ or compare model whose client they fake.
 `ProviderContract` suites every provider subclasses (`tests/providers/test_fake_contract.py`
 runs them against the fake provider; `tests/providers/fireworks/` against Fireworks on its fakes;
 `tests/providers/baseten/` against Baseten on its fake; `tests/rendering/test_hf_contract.py`
-runs the `RendererContract` on each family's real tokenizer under `-m tokenizer`, and
-`RendererContract.preamble` is what every contract conversation starts with, a system message
-for Muse Glimmer).
+runs the `RendererContract` on each family's real tokenizer under `-m tokenizer`).
 Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds canonical rows and
 `llmobs/` raw Export API pages.
 

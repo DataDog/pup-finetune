@@ -13,21 +13,26 @@ trying, and, for models that stop by emitting the next role tag instead of an en
 token, which tag follows an assistant message. A family may also run its tokenizer's own code
 from the model's repository at the pinned commit (``trust_remote_code``), render through a
 :mod:`~pup_finetune.rendering.encoders` encoder when the tokenizer ships no chat template
-(``chat_encoder``), and refuse conversations its template cannot render faithfully
-(``check``). Adding a family is adding an entry here, plus a parser when its output format is
-new. Adapted from the Baseten provider work by Fouad Wahabi.
+(``chat_encoder``), and rewrite messages into the form its template renders faithfully
+(``rewrite``). Adding a family is adding an entry here, plus a parser when its output format
+is new. Adapted from the Baseten provider work by Fouad Wahabi.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
 from pup_finetune.rendering.base import ChatMessage
 from pup_finetune.rendering.encoders import ENCODERS, get_encoder
-from pup_finetune.rendering.hf import COMMIT_SHA, ChatTokenizer, HFChatTemplateRenderer
+from pup_finetune.rendering.hf import (
+    COMMIT_SHA,
+    ChatTokenizer,
+    HFChatTemplateRenderer,
+    MessageRewrite,
+)
 from pup_finetune.rendering.parsers import PARSERS, get_parser
 
 
@@ -51,8 +56,8 @@ class ModelFamily:
     chat_encoder: str | None = None
     """The :data:`~pup_finetune.rendering.encoders.ENCODERS` key that renders the chat, for a
     tokenizer that ships no chat template."""
-    check: Callable[[Sequence[ChatMessage]], str | None] | None = None
-    """Why the template cannot render a conversation faithfully, or ``None`` when it can."""
+    rewrite: MessageRewrite | None = None
+    """How messages are rewritten before the template renders them."""
 
     def __post_init__(self) -> None:
         if not COMMIT_SHA.fullmatch(self.revision):
@@ -89,7 +94,7 @@ class ModelFamily:
             next_role_tag=self.next_role_tag,
             trust_remote_code=self.trust_remote_code,
             chat_encoder=get_encoder(self.chat_encoder) if self.chat_encoder else None,
-            check=self.check,
+            rewrite=self.rewrite,
             name=self.key,
             tokenizer=tokenizer,
         )
@@ -165,17 +170,17 @@ DEEPSEEK_V4 = ModelFamily(
 (``encoding/encoding_dsv4.py``) and no template: DSML tool calls, thinking mode."""
 
 
-def _muse_check(messages: Sequence[ChatMessage]) -> str | None:
-    if not any(message.get("role") == "system" for message in messages):
-        return (
-            "Muse Glimmer's template writes the current date into a conversation without a "
-            "system message, so it needs one to render the same every day"
-        )
-    for message in messages:
-        if message.get("tool_calls") and str(message.get("content") or "").strip():
-            return "Muse Glimmer's template drops the text of a message that has tool calls"
-    return None
+def _muse_text_before_calls(message: Mapping[str, Any]) -> list[dict[str, Any]]:
+    # The template writes only the calls of a message that has both. ATEM writes such text as
+    # its own message to the user that does not end the turn (``end_turn``), before the calls.
+    if not (message.get("tool_calls") and str(message.get("content") or "").strip()):
+        return [dict(message)]
+    text = {key: value for key, value in message.items() if key != "tool_calls"}
+    calls = {key: value for key, value in message.items() if key not in _MUSE_TEXT}
+    return [{**text, "end_turn": False}, calls]
 
+
+_MUSE_TEXT = frozenset({"content", "reasoning_content"})
 
 MUSE_GLIMMER = ModelFamily(
     key="muse_glimmer",
@@ -183,13 +188,17 @@ MUSE_GLIMMER = ModelFamily(
     revision="a4e59da52a7bc87ae7251dd5545c0dd437c44b68",
     parser="muse_atem",
     stop_tokens=("<|eot|>",),
+    # Without a system message the template writes the day's date into the default one; the
+    # date is pinned, to the template's knowledge cutoff, so a row renders the same every day.
+    chat_template_kwargs={"current_date": "2026-01-04"},
     # Reasoning stays in history and each turn ends on <|eot|>, so its tokens prefix the
     # whole render.
     prefix_stable=True,
-    check=_muse_check,
+    rewrite=MessageRewrite("muse_text_before_calls", "1", _muse_text_before_calls),
 )
 """Muse Glimmer with its official template: ATEM messages to ``self``, ``user`` or a tool,
-preserved reasoning; conversations need a system message."""
+preserved reasoning, text beside tool calls as its own message to the user, and the date of
+the default system message pinned."""
 
 FAMILIES: Mapping[str, ModelFamily] = MappingProxyType(
     {

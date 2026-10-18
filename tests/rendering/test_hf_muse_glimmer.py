@@ -20,8 +20,7 @@ from typing import Any
 import pytest
 
 from pup_finetune.data.jsonl import read_rows, to_provider_dict
-from pup_finetune.rendering import ChatMessage, RendererError, TokenizedExample
-from pup_finetune.rendering.base import RendererErrorCode
+from pup_finetune.rendering import ChatMessage, TokenizedExample
 from pup_finetune.rendering.families import MUSE_GLIMMER
 from pup_finetune.rendering.hf import (
     HFChatTemplateRenderer,
@@ -34,9 +33,8 @@ pytestmark = pytest.mark.tokenizer
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
 TEMPLATE_SHA256 = "cfc67e5f349f37690dfd31ed1f18bc4442a9dd32fe39a648f993cb4eb3cae678"
-REFUSED_ROWS = {"row-calendar-003", "row-units-001"}
-"""Fixture rows the template cannot render faithfully: text beside tool calls, and no
-system message."""
+TEXT_BESIDE_CALLS_ROW = "row-calendar-003"
+NO_SYSTEM_ROW = "row-units-001"
 
 WEATHER_TOOL: dict[str, Any] = {
     "type": "function",
@@ -94,21 +92,27 @@ def render_text(muse_glimmer_tokenizer: TransformersTokenizer) -> Callable[..., 
 
     def render(messages: list[ChatMessage], tools: list[Any], *, generation: bool) -> str:
         return muse_glimmer_tokenizer.render_text(
-            template_messages(messages),
+            prepared(messages),
             tools=tools or None,
             add_generation_prompt=generation,
-            template_kwargs={},
+            template_kwargs=MUSE_GLIMMER.chat_template_kwargs,
         )
 
     return render
+
+
+def prepared(messages: list[ChatMessage]) -> list[dict[str, Any]]:
+    """``messages`` as the renderer gives them to the template."""
+    assert MUSE_GLIMMER.rewrite is not None
+    return MUSE_GLIMMER.rewrite.messages(template_messages(messages))
 
 
 def fixture_rows() -> list[dict[str, Any]]:
     return [{"id": row.id, **to_provider_dict(row)} for row in read_rows(ROWS)]
 
 
-def renderable_rows() -> list[dict[str, Any]]:
-    return [row for row in fixture_rows() if row["id"] not in REFUSED_ROWS]
+def row(row_id: str) -> dict[str, Any]:
+    return next(found for found in fixture_rows() if found["id"] == row_id)
 
 
 def trained(renderer: HFChatTemplateRenderer, example: TokenizedExample) -> str:
@@ -165,7 +169,7 @@ def test_the_template_renders_messages_to_self_user_and_tools_as_verified(
 def test_the_mask_is_exactly_each_assistant_completion_and_its_stop(
     renderer: HFChatTemplateRenderer, render_text: Callable[..., str]
 ) -> None:
-    for row in renderable_rows():
+    for row in fixture_rows():
         messages, tools = row["messages"], row.get("tools", [])
         turns = [
             i for i, m in enumerate(messages) if m["role"] == "assistant" and m.get("weight") != 0
@@ -184,16 +188,17 @@ def test_prompts_are_tokenized_as_the_template_tokenizes_them(
     renderer: HFChatTemplateRenderer, muse_glimmer_tokenizer: TransformersTokenizer
 ) -> None:
     raw = muse_glimmer_tokenizer._tokenizer
-    for row in renderable_rows():
+    for row in fixture_rows():
         messages, tools = row["messages"], row.get("tools", [])
         for turn in (i for i, m in enumerate(messages) if m["role"] == "assistant"):
             tokens = renderer.generation_prompt_tokens(messages[:turn], tools)
             encoded = raw.apply_chat_template(
-                template_messages(messages[:turn]),
+                prepared(messages[:turn]),
                 tools=tools or None,
                 add_generation_prompt=True,
                 tokenize=True,
                 return_dict=False,
+                **MUSE_GLIMMER.chat_template_kwargs,
             )
             assert tokens == list(encoded), (row["id"], turn)
 
@@ -235,25 +240,36 @@ def test_only_the_assistant_replies_are_trained_and_history_keeps_reasoning(
     assert "HISTORY_SENTINEL" in history
 
 
-@pytest.mark.parametrize(
-    ("messages", "reason"),
-    [
-        (
-            [{"role": "user", "content": "Hi."}, {"role": "assistant", "content": "Hello."}],
-            "current date",
-        ),
-        (call_turn(("get_weather", {"city": "Paris"}), content="Checking."), "drops the text"),
-    ],
-)
-def test_a_conversation_the_template_cannot_render_faithfully_is_refused(
-    renderer: HFChatTemplateRenderer, messages: list[ChatMessage], reason: str
+def test_a_conversation_without_a_system_message_renders_the_pinned_date(
+    renderer: HFChatTemplateRenderer,
 ) -> None:
-    for render in (renderer.per_turn_examples, renderer.supervised_example):
-        with pytest.raises(RendererError, match=reason) as caught:
-            render(messages, [WEATHER_TOOL])
-        assert caught.value.code == RendererErrorCode.UNSUPPORTED_MESSAGE
+    found = row(NO_SYSTEM_ROW)
+    assert all(message["role"] != "system" for message in found["messages"])
+    examples = renderer.per_turn_examples(found["messages"], found.get("tools", []))
+    history = renderer.decode(examples[0].input_tokens)
+    assert "You are a helpful AI assistant.\nKnowledge cutoff: 2026-01-04." in history
+    assert "\nCurrent date: 2026-01-04." in history
+
+
+def test_text_beside_tool_calls_is_its_own_message_to_the_user(
+    renderer: HFChatTemplateRenderer,
+) -> None:
+    messages = call_turn(("get_weather", {"city": "Paris"}), content="Checking Paris.")
+    [example] = renderer.per_turn_examples(messages, [WEATHER_TOOL])
+    text = trained(renderer, example)
+    assert text.startswith(
+        " to=user<|message|>Checking Paris.<|eom|><|start|>assistant to=get_weather<|message|>"
+    )
+    assert text.endswith("</atem:function_calls><|eot|>")
+    parsed = renderer.parse_response(text, [WEATHER_TOOL])
+    assert parsed.format_valid
+    assert parsed.message["content"] == "Checking Paris."
+    assert parsed.message["tool_calls"][0]["function"]["name"] == "get_weather"
+    found = row(TEXT_BESIDE_CALLS_ROW)
+    beside = [m for m in found["messages"] if m.get("tool_calls") and m.get("content")]
+    assert beside, "the fixture row holds text beside tool calls"
     result = build_examples(fixture_rows(), renderer, max_seq_len=131_072)
-    assert {row.row_id for row in result.rejected} == REFUSED_ROWS
+    assert not result.rejected
 
 
 def test_muse_glimmer_is_token_prefix_stable_so_a_row_is_one_example(
@@ -261,7 +277,7 @@ def test_muse_glimmer_is_token_prefix_stable_so_a_row_is_one_example(
 ) -> None:
     assert renderer.prefix_stable
     plain: set[str] = set()
-    for row in renderable_rows():
+    for row in fixture_rows():
         messages, tools = row["messages"], row.get("tools", [])
         if any(message.get("reasoning_content") for message in messages):
             continue
@@ -269,7 +285,7 @@ def test_muse_glimmer_is_token_prefix_stable_so_a_row_is_one_example(
         whole = renderer.supervised_example(messages, tools)
         turns = renderer.per_turn_examples(messages, tools)
         assert trained(renderer, whole) == "".join(trained(renderer, t) for t in turns), row["id"]
-    result = build_examples(renderable_rows(), renderer, max_seq_len=131_072)
+    result = build_examples(fixture_rows(), renderer, max_seq_len=131_072)
     assert not result.rejected
     assert {row.row_id for row in result.examples if len(row.examples) == 1} >= plain
 

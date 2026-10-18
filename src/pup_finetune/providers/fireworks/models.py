@@ -84,7 +84,10 @@ SPECS: Final[tuple[ProfileSpec, ...]] = (
         family="muse_glimmer",
         max_seq_len=131_072,
         supports_reasoning=True,
-        notes="Muse Glimmer 30B; every row needs a system message.",
+        notes=(
+            "Muse Glimmer 30B; training pins the date its template writes without a system "
+            "message, where a deployed model's endpoint may write today's."
+        ),
     ),
 )
 """Every supported model. ``max_seq_len`` is the ``trainingContextLength`` Fireworks reports for

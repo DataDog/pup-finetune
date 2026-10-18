@@ -29,6 +29,7 @@ control tokens apart from message text, so text that spells a control token stay
 from __future__ import annotations
 
 import copy
+import datetime
 import json
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
@@ -395,3 +396,68 @@ class FakeXtmlTokenizer(FakeChatTokenizer):
         for text, control in segments:
             ids += [self.ids[text]] if control else [ord(char) for char in text]
         return ids
+
+
+MUSE_SPECIALS: tuple[str, ...] = (
+    "<|begin_of_text|>",
+    "<|start|>",
+    "<|message|>",
+    "<|eom|>",
+    "<|eot|>",
+)
+
+
+def _atem(call: Mapping[str, Any]) -> str:
+    function = call["function"]
+    parameters = "".join(
+        f'<atem:parameter name="{key}">'
+        f"{value if isinstance(value, str) else json.dumps(value)}</atem:parameter>\n"
+        for key, value in _arguments(call).items()
+    )
+    return (
+        f'<atem:function_calls>\n<atem:invoke name="{function["name"]}">\n{parameters}'
+        "</atem:invoke>\n</atem:function_calls>"
+    )
+
+
+def muse_like(
+    messages: Sequence[Mapping[str, Any]],
+    tools: Sequence[Mapping[str, Any]] | None,
+    add_generation_prompt: bool,
+    template_kwargs: Mapping[str, Any],
+) -> str:
+    """The Muse Glimmer template's structure: a default system message carrying a date
+    (``current_date``, else today's) when there is none, reasoning to ``self``, one message
+    per tool call that writes no text beside the calls, text to a ``recipient`` that ends the
+    turn unless ``end_turn`` is false, and a prompt that opens ``<|start|>assistant``."""
+    parts = ["<|begin_of_text|>"]
+    if not any(message["role"] == "system" for message in messages):
+        today = template_kwargs.get("current_date") or datetime.date.today().isoformat()
+        parts.append(f"<|start|>system<|message|>Default.\nCurrent date: {today}.<|eot|>")
+    for index, message in enumerate(messages):
+        role, content = message["role"], message.get("content") or ""
+        last = index == len(messages) - 1
+        end_token = "<|eom|>" if not last and messages[index + 1]["role"] == role else "<|eot|>"
+        if role in ("system", "user"):
+            parts.append(f"<|start|>{role}<|message|>{content}<|eot|>")
+        elif role == "tool":
+            parts.append(f"<|start|>tool<|message|>{content}<|eot|>")
+        elif role == "assistant":
+            if message.get("reasoning_content"):
+                parts.append(
+                    f"<|start|>assistant to=self<|message|>{message['reasoning_content']}<|eom|>"
+                )
+            calls = message.get("tool_calls") or ()
+            for position, call in enumerate(calls):
+                parts.append(f"<|start|>assistant to={call['function']['name']}<|message|>")
+                parts.append(_atem(call) + (end_token if position == len(calls) - 1 else "<|eom|>"))
+            if not calls:
+                recipient = message.get("recipient") or "user"
+                end_turn = message.get("end_turn")
+                if end_turn is None:
+                    end_turn = recipient == "user"
+                parts.append(f"<|start|>assistant to={recipient}<|message|>{content}")
+                parts.append("<|eot|>" if end_turn else "<|eom|>")
+    if add_generation_prompt:
+        parts.append("<|start|>assistant")
+    return "".join(parts)

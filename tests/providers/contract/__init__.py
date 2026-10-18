@@ -197,17 +197,6 @@ def _completion_runs(
     return {turn: (start, end) for turn, start, end in zip(turns, starts, ends, strict=True)}
 
 
-def _with(preamble: list[ChatMessage], messages: list[ChatMessage]) -> list[ChatMessage]:
-    """``messages`` after ``preamble``, unless they already open with its role."""
-    if preamble and messages[0].get("role") == preamble[0].get("role"):
-        return [dict(message) for message in messages]
-    return [*(dict(message) for message in preamble), *(dict(message) for message in messages)]
-
-
-def _conversations(preamble: list[ChatMessage]) -> list[Conversation]:
-    return [(_with(preamble, messages), list(tools)) for messages, tools in _CONVERSATIONS]
-
-
 def _full_render(
     renderer: Renderer, messages: list[ChatMessage], tools: list[ToolSpec]
 ) -> TokenizedExample | None:
@@ -235,18 +224,10 @@ class RendererContract:
     def renderer(self, renderer_factory: Callable[[], Renderer]) -> Renderer:
         return renderer_factory()
 
-    @pytest.fixture
-    def preamble(self) -> list[ChatMessage]:
-        """Messages every conversation of the contract starts with; a renderer whose template
-        needs a system message gives one."""
-        return []
-
     @pytest.fixture(params=range(len(_CONVERSATIONS)), ids=["plain", "tool_calls", "untrained"])
-    def conversation(
-        self, request: pytest.FixtureRequest, preamble: list[ChatMessage]
-    ) -> Conversation:
-        messages, tools = _conversations(preamble)[request.param]
-        return messages, tools
+    def conversation(self, request: pytest.FixtureRequest) -> Conversation:
+        messages, tools = _CONVERSATIONS[request.param]
+        return [dict(message) for message in messages], list(tools)
 
     def _examples(
         self, renderer: Renderer, messages: list[ChatMessage], tools: list[ToolSpec]
@@ -278,16 +259,14 @@ class RendererContract:
         assert renderer.identity() == identity
 
     def test_equal_identities_render_the_same_tokens(
-        self, renderer_factory: Callable[[], Renderer], preamble: list[ChatMessage]
+        self, renderer_factory: Callable[[], Renderer]
     ) -> None:
         first, second = renderer_factory(), renderer_factory()
         assert first.identity() == second.identity()
         # Rendering unrelated text first must not shift what either renders afterwards.
-        warm_up: list[ChatMessage] = _with(
-            preamble, [{"role": "user", "content": "Zebras and quokkas, 1729."}]
-        )
+        warm_up: list[ChatMessage] = [{"role": "user", "content": "Zebras and quokkas, 1729."}]
         first.generation_prompt_tokens(warm_up, [])
-        for messages, tools in _conversations(preamble):
+        for messages, tools in _CONVERSATIONS:
             examples = first.per_turn_examples(messages, tools)
             assert examples == second.per_turn_examples(messages, tools)
             full = _full_render(first, messages, tools)
@@ -343,16 +322,11 @@ class RendererContract:
                 assert parsed.format_valid
                 assert _comparable(parsed.message) == _comparable(rendered[turn])
 
-    def test_weight_zero_turns_are_never_trained(
-        self, renderer: Renderer, preamble: list[ChatMessage]
-    ) -> None:
-        messages = _with(
-            preamble,
-            [
-                {"role": "user", "content": "Hi."},
-                {"role": "assistant", "content": "Hello.", "weight": 0},
-            ],
-        )
+    def test_weight_zero_turns_are_never_trained(self, renderer: Renderer) -> None:
+        messages: list[ChatMessage] = [
+            {"role": "user", "content": "Hi."},
+            {"role": "assistant", "content": "Hello.", "weight": 0},
+        ]
         with pytest.raises(RendererError) as excinfo:
             renderer.per_turn_examples(messages, [])
         assert excinfo.value.code == "no_trainable_tokens"
@@ -360,10 +334,8 @@ class RendererContract:
             with pytest.raises(RendererError):
                 renderer.supervised_example(messages, [])
 
-    def test_parse_response_round_trips_rendered_messages(
-        self, renderer: Renderer, preamble: list[ChatMessage]
-    ) -> None:
-        for messages, tools in _conversations(preamble):
+    def test_parse_response_round_trips_rendered_messages(self, renderer: Renderer) -> None:
+        for messages, tools in _CONVERSATIONS:
             for turn in _assistant_turns(messages):
                 trained = [*messages[:turn], {**messages[turn], "weight": 1}]
                 example = renderer.per_turn_examples(trained, tools)[-1]
@@ -373,21 +345,16 @@ class RendererContract:
                 assert parsed.format_valid
                 assert _comparable(parsed.message) == _comparable(messages[turn])
 
-    def test_parse_response_keeps_declared_argument_types(
-        self, renderer: Renderer, preamble: list[ChatMessage]
-    ) -> None:
+    def test_parse_response_keeps_declared_argument_types(self, renderer: Renderer) -> None:
         call = {
             "id": "call_1",
             "type": "function",
             "function": {"name": "lookup", "arguments": json.dumps(_TYPED_ARGUMENTS)},
         }
-        messages = _with(
-            preamble,
-            [
-                {"role": "user", "content": "Look up record 123."},
-                {"role": "assistant", "content": "", "tool_calls": [call]},
-            ],
-        )
+        messages: list[ChatMessage] = [
+            {"role": "user", "content": "Look up record 123."},
+            {"role": "assistant", "content": "", "tool_calls": [call]},
+        ]
         example = renderer.per_turn_examples(messages, [_LOOKUP_TOOL])[-1]
         tokens, weights = _unshifted(example)
         completion = [t for t, w in zip(tokens, weights, strict=True) if w > 0]
