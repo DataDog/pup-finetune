@@ -575,13 +575,15 @@ class EvalPlan:
             return 0
         return 3 * min(CALIBRATION_CASES, len(self.cases))
 
-    def evaluate_command(self, *, pin: bool | None = None) -> list[str]:
+    def evaluate_command(self, *, pin: bool | None = None, evaluators: bool = False) -> list[str]:
         """The standalone ``evaluate`` command for this plan, without ``--confirm``.
 
         For ``evaluate`` it repeats the settings that differ from the defaults, and always
         the judge, which decides where the data goes; the identity check of
         ``evaluation.json`` refuses any drift. After ``train --evaluate`` (or with ``pin``)
         every setting is pinned, so the command continues the evaluation that run started.
+        Only the preview's command repeats ``--evaluators`` (with ``evaluators``): a run
+        attaches every evaluator in it, and later commands continue them without the flag.
         """
         return evaluate_words(
             self.run_dir,
@@ -589,7 +591,7 @@ class EvalPlan:
             self.judge.spec,
             pin=not self.standalone if pin is None else pin,
             compare_spec=None if self.compare is None else self.compare.spec,
-            evaluators=self.evaluators_spec,
+            evaluators=self.evaluators_spec if evaluators else None,
         )
 
     @property
@@ -1933,7 +1935,6 @@ def _replay_next(
             plan.judge.spec,
             pin=not plan.standalone,
             compare_spec="<MODEL>",
-            evaluators=plan.evaluators_spec,
         )
         steps.append(
             step(
@@ -2129,7 +2130,6 @@ def _settings_record(plan: EvalPlan) -> dict[str, Any]:
         "publish": settings.publish,
         "reuse": settings.reuse,
         **({"compare_model": plan.compare.spec} if plan.compare is not None else {}),
-        **({"evaluators": str(plan.evaluators_spec)} if plan.evaluators_spec is not None else {}),
     }
 
 
@@ -2201,7 +2201,6 @@ class RecordedEvaluation:
             self.judge_model,
             pin=True,
             compare_spec=self.settings.compare_model,
-            evaluators=self.settings.evaluators,
         )
         return shlex.join(words)
 
@@ -2254,7 +2253,6 @@ def _recorded(run_dir: Path, entry: object) -> RecordedEvaluation | None:
             publish=bool(settings.get("publish", True)),
             compare_model=str(settings["compare_model"]) if settings.get("compare_model") else None,
             reuse=bool(settings.get("reuse", True)),
-            evaluators=Path(str(settings["evaluators"])) if settings.get("evaluators") else None,
         )
     except (KeyError, TypeError, ValueError):
         return None

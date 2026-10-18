@@ -303,7 +303,7 @@ def evaluate(
     offline = evaluation.plan.offline
     if confirm and not offline:
         require_writable(runtime, f"evaluating on {evaluation.provider.name}", what=PAID_RUN)
-    rerun = [*evaluation.plan.evaluate_command(), "--confirm"]
+    rerun = [*evaluation.plan.evaluate_command(evaluators=True), "--confirm"]
     preview = _with_source(_with_defaults_used(evaluation.preview(), current_context()), source)
     require_confirm(
         confirm, preview, shlex.join(rerun), read_only=runtime.read_only and not offline

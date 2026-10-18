@@ -224,6 +224,23 @@ def test_a_stored_set_s_command_runs_only_the_evaluators_it_previewed(
     ]  # fmt: skip
 
 
+def test_steps_after_a_run_continue_its_evaluators_without_the_spec(
+    run_dir: Path, spec: Path
+) -> None:
+    data = output(invoke("evaluate", str(run_dir), "--evaluators", str(spec), "--confirm"))
+    assert data["publication"]["status"] == "skipped"
+    marker = spec.with_name("ran")
+    grow(spec, marker)
+    steps = data["next_steps"] + output(invoke("status", str(run_dir)))["next_steps"]
+    confirmed = [s["command"] for s in steps if s["command"].endswith("--confirm")]
+    assert len(confirmed) == 2
+    assert not [s["command"] for s in steps if "--evaluators" in s["command"]]
+    for command in confirmed:
+        result = rerun(command)
+        assert result.exit_code == 0, result.stderr
+    assert not marker.exists()
+
+
 def test_a_changed_rubric_conflicts_and_a_renamed_one_scores(
     run_dir: Path, spec: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
