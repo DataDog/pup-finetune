@@ -838,11 +838,12 @@ Source lives under `src/pup_finetune/`.
   `identity()` frozen by name in
   `evaluators.json` (`attach_evaluators` under the lock: the list only grows, a change is a
   `SettingsConflict` naming a new version beside it or a free `--out-dir`), `resolve_evaluators`
-  (the flag, which commands then repeat, else the stored record; a stored check loads only
-  with cases left) and `scorers`, which `run_replay` runs on every pair missing an entry
-  (`replay.outcome` reads a result for the judge, an evaluator or `all`). Evaluators are
-  scored per directory, never shared through the store; their metrics go only with spans
-  being published, and one added after is a warning.
+  (the flag, which no `--confirm` command but the preview's repeats, since a run attaches the
+  whole spec; else the stored record, in a benchmark the longest of its models'; a stored
+  check loads only with cases left) and `scorers`, which `run_replay` runs on every pair
+  missing an entry (`replay.outcome` reads a result for the judge, an evaluator or `all`).
+  Evaluators are scored per directory, never shared through the store; their metrics go only
+  with spans being published, and one added after is a warning.
 - `providers/` - the provider seam. `base.py` has the neutral types (`ModelProfile`,
   `TrainSpec`, `CheckpointRef`, `StepMetrics`, ...) and the `Provider`, `TrainingBackend`,
   `TrainingSession` and `Sampler` protocols; `__init__.py` is the lazy registry
