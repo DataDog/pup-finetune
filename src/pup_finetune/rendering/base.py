@@ -114,6 +114,12 @@ class Renderer(Protocol):
         """Token ids that end an assistant turn; samplers stop on any of them."""
         ...
 
+    def check_tokens(self) -> None:
+        """Raise :class:`~pup_finetune.errors.UsageError` when a stop token, or a control
+        token of the response parser, is not one token of the tokenizer, as the first sampler
+        would."""
+        ...
+
     def supervised_example(
         self, messages: list[ChatMessage], tools: list[ToolSpec]
     ) -> TokenizedExample:

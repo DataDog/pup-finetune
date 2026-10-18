@@ -521,6 +521,9 @@ class HFChatTemplateRenderer:
     def stop_token_ids(self) -> list[int]:
         return list(self._stop_ids())
 
+    def check_tokens(self) -> None:
+        self._stop_ids()
+
     def supervised_example(
         self, messages: list[ChatMessage], tools: list[ToolSpec]
     ) -> TokenizedExample:

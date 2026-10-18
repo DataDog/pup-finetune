@@ -454,6 +454,8 @@ def test_stop_token_ids_resolve_the_family_names() -> None:
     )
     with pytest.raises(UsageError, match="not a single token"):
         _ = unknown.stop_token_ids
+    with pytest.raises(UsageError, match="not a single token"):
+        unknown.check_tokens()
 
 
 def test_identity_pins_tokenizer_template_parser_and_transformers() -> None:
@@ -901,6 +903,8 @@ def test_a_control_token_that_is_not_one_token_fails_with_the_stop_tokens() -> N
     )
     with pytest.raises(UsageError, match=re.escape("'<|nope|>' is not a single token")):
         _ = r.stop_token_ids
+    with pytest.raises(UsageError, match=re.escape("'<|nope|>' is not a single token")):
+        r.check_tokens()
 
 
 def test_parsing_a_completion_reuses_the_control_token_ids(

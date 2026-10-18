@@ -96,7 +96,6 @@ def write_error(plan: BenchmarkPlan, candidate: Candidate, case: ReplayCase, kin
 
 
 def replaying(plan: BenchmarkPlan, model: str, case_ids: set[str]) -> BenchmarkPlan:
-    """``plan`` with ``model`` able to replay only ``case_ids``."""
     refused = Exclusion("unsupported_message", "refused")
     candidates = tuple(
         candidate
@@ -155,7 +154,6 @@ def test_unfinished_models_are_unranked_in_the_order_given(plan: BenchmarkPlan) 
 
 
 def test_a_model_that_replays_few_cases_never_lifts_another_s_rate(plan: BenchmarkPlan) -> None:
-    # fake-model passes only the one case fake-b can replay, which fake-b passes too.
     first = plan.cases[0].id
     plan = replaying(plan, "fake-b", {first})
     full, narrow = plan.candidates
@@ -174,7 +172,6 @@ def test_a_model_that_replays_few_cases_never_lifts_another_s_rate(plan: Benchma
 
 
 def test_an_unfinished_model_never_narrows_the_comparison(plan: BenchmarkPlan) -> None:
-    # fake-model finished at 1 in 5; fake-b judged only the case fake-model passes.
     first = plan.cases[0].id
     finished, unfinished = plan.candidates
     write_results(plan, finished, {case.id: case.id == first for case in plan.cases})
@@ -228,7 +225,6 @@ def test_a_model_is_finished_once_a_rerun_cannot_change_it(
 
 
 def test_the_target_is_decided_on_the_model_s_own_rate(plan: BenchmarkPlan) -> None:
-    # fake-b cannot replay the one case fake-model fails, so on the common cases it passes all.
     failed = plan.cases[0].id
     plan = replaying(plan, "fake-b", {case.id for case in plan.cases if case.id != failed})
     best, worse = plan.candidates

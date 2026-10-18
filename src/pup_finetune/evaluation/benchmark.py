@@ -468,7 +468,7 @@ def plan_benchmark(
         provider = get_provider(provider_name, runtime)
         profile = provider.resolve_model(alias)
         renderer = provider.renderer(profile)
-        _resolve_stop_tokens(renderer)
+        renderer.check_tokens()
         candidate = Candidate(
             provider=provider_name,
             profile=profile,
@@ -526,13 +526,6 @@ def plan_benchmark(
             hint="benchmark the models that leave cases out on their own",
         )
     return plan
-
-
-def _resolve_stop_tokens(renderer: Renderer) -> None:
-    """Resolve ``renderer``'s stop tokens, and with them its parser's control tokens, which
-    raises for a family where one is not a single token of its tokenizer: the preview fails
-    then, before any paid call, instead of the model's session."""
-    renderer.stop_token_ids  # noqa: B018
 
 
 def _stored_judge(out_dir: Path, candidates: Sequence[Candidate]) -> str | None:
@@ -733,8 +726,6 @@ def _by_trajectory(cases: Sequence[ReplayCase], values: Mapping[str, float]) -> 
 def _entry(
     plan: BenchmarkPlan, candidate: Candidate, error: Mapping[str, Any] | None
 ) -> tuple[dict[str, Any], dict[str, bool]]:
-    """``candidate``'s entry, unranked, from its own results alone; and the judge verdict of
-    each case it has an ``ok`` result for, by case id. Its directory is read once."""
     from pup_finetune.evaluation.bootstrap import paired_bootstrap_ci
     from pup_finetune.evaluation.cases import EMPTY_PROMPT, excluded_by_reason
     from pup_finetune.evaluation.replay import EvalDir, summarize

@@ -511,7 +511,6 @@ def test_the_preview_fails_without_the_key_of_a_provider_it_generates_with(
     result = invoke("benchmark", str(dataset), "--models", models)
 
     assert result.exit_code == 2
-    # train's preflight refuses a missing key with the same error (test_train_fireworks.py).
     missing = "Error [usage]: no fireworks API key found for generating with keyed/fake-model\n"
     assert result.stderr.startswith(missing)
     assert "--confirm" not in result.stdout
@@ -558,10 +557,10 @@ def test_the_retry_hint_names_only_the_models_a_rerun_can_advance(
 def test_a_model_whose_stop_tokens_do_not_resolve_fails_the_preview(
     dataset: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def unresolved(self: FakeRenderer) -> list[int]:
+    def unresolved(self: FakeRenderer) -> None:
         raise UsageError("'<|end|>' is not a single token of the fake/tokenizer tokenizer")
 
-    monkeypatch.setattr(FakeRenderer, "stop_token_ids", property(unresolved))
+    monkeypatch.setattr(FakeRenderer, "check_tokens", unresolved)
 
     result = invoke("benchmark", str(dataset), "--models", "fake-model")
 

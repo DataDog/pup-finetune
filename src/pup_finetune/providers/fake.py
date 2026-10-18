@@ -233,6 +233,9 @@ class FakeRenderer:
     def stop_token_ids(self) -> list[int]:
         return [_SPECIAL_IDS[_END]]
 
+    def check_tokens(self) -> None:
+        """The fake's stop token is always one token."""
+
     # The tokenizer: words and whitespace runs, each id derived from the word, so every
     # renderer (in any process) gives the same text the same ids.
 

@@ -251,6 +251,7 @@ class RendererContract:
     def test_names_itself(self, renderer: Renderer) -> None:
         assert renderer.name
         assert renderer.stop_token_ids
+        renderer.check_tokens()
 
     def test_identity_pins_the_render(self, renderer: Renderer) -> None:
         identity = renderer.identity()
