@@ -207,8 +207,8 @@ pup finetune benchmark datasets/my-agent --models qwen3p5-9b,baseten/glm-5p3-fla
 pass rate with a confidence interval, and the result ranks the finished models on the test
 cases every one of them answered and recommends one to fine-tune. A base model at or above
 `--target-pass-rate` (90% by default) on its own cases, judged on at least 90% of the test
-cases, may need no training, and models within noise of the best are named, so the cheapest
-to serve can win.
+cases with a prompt, may need no training, and models within noise of the best are named, so
+the cheapest to serve can win.
 Results go in `datasets/my-agent/benchmark`; rerun the command to continue one that stopped.
 
 ### A cheap first run

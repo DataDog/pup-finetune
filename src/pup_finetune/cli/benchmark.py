@@ -67,7 +67,7 @@ DOC = CommandDoc(
         "the cases every one of them answered; a model a rerun can still advance is listed "
         "unranked and never narrows them. The best one is worth fine-tuning below "
         "--target-pass-rate; at or above it on its own cases, judged on at least 90% of the "
-        "test cases, it may need no training. "
+        "test cases with a prompt, it may need no training. "
         "Models within noise of the best are named, so the cheapest to serve can be chosen. "
         "Tools are not executed, so the scores measure agreement with the recorded behavior, "
         "not task success.",
