@@ -18,11 +18,12 @@ start is recorded as an error and the others still run.
 
 Each model replays the cases it can (:func:`~pup_finetune.evaluation.cases.exclusions`) and
 its directory is identified by those cases and its renderer, never by the other models, so
-adding or dropping a model reuses every finished one. :func:`leaderboard` ranks the models on
-the cases every ranked model has a result for, by judge pass rate, with a 95% bootstrap CI over
-trajectories and each one's paired gap to the best; :func:`recommend` names the model to
-fine-tune, or says the best base model already reaches ``--target-pass-rate``. Like
-``evaluate``, the scores measure agreement with the recorded answers, not task success.
+adding or dropping a model reuses every finished one. :func:`leaderboard` gives each model its
+own judge pass rate, with a 95% bootstrap CI over trajectories, and ranks the finished ones on
+the cases every one of them answered, with each one's paired gap to the best; a model still
+running is listed unranked. :func:`recommend` names the model to fine-tune, or says the best
+base model already reaches ``--target-pass-rate`` on its own cases. Like ``evaluate``, the
+scores measure agreement with the recorded answers, not task success.
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 from pup_finetune.data.dataset_dir import DatasetDir
-from pup_finetune.display import display_path
+from pup_finetune.display import display_path, joined
 from pup_finetune.errors import ExternalError, SettingsConflict, UsageError
 from pup_finetune.evaluation.runner import (
     CALIBRATION_CASES,
@@ -90,9 +91,11 @@ __all__ = [
     "DEFAULT_OUT_DIR_NAME",
     "DEFAULT_TARGET_PASS_RATE",
     "LOW_PASS_RATE",
+    "TARGET_COVERAGE",
     "BenchmarkPlan",
     "BenchmarkSettings",
     "Candidate",
+    "Leaderboard",
     "execute",
     "exit_code",
     "leaderboard",
@@ -107,6 +110,10 @@ LOW_PASS_RATE: Final = 0.25
 MIN_TRAJECTORIES: Final = 30
 """Fewer test conversations than this is a warning: the intervals are too wide to choose."""
 RESULT_FILE: Final = "benchmark.json"
+TARGET_COVERAGE: Final = 0.9
+"""The share of the test cases with a prompt that a model's judged cases must cover before its
+own judge pass rate can show it meets ``--target-pass-rate``: a rate on fewer says too little
+about the rest of the agent's conversations to call fine-tuning unneeded."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -178,8 +185,8 @@ class BenchmarkPlan:
         """The cases ``candidate`` replays: every test case it can."""
         return [case for case in self.cases if case.id not in candidate.excluded]
 
-    def common_cases(self) -> list[ReplayCase]:
-        """The cases every model replays: at most what the models are ranked on."""
+    def replayed_by_every_model(self) -> list[ReplayCase]:
+        """The cases every model replays: the most the finished models can be compared on."""
         return [
             case
             for case in self.cases
@@ -382,7 +389,7 @@ class BenchmarkPlan:
             "out_dir": display_path(self.out_dir),
             "rows": {"test": self.trajectories},
             "cases": len(self.cases),
-            "common_cases": len(self.common_cases()),
+            "replayed_by_every_model": len(self.replayed_by_every_model()),
             "trajectories": self.trajectories,
             "models": models,
             "judge_model": self.judge.spec,
@@ -508,7 +515,7 @@ def plan_benchmark(
         settings=settings,
         runtime=runtime,
     )
-    if not plan.common_cases():
+    if not plan.replayed_by_every_model():
         raise UsageError(
             "the models share no test case they can all replay, so they cannot be ranked on "
             "the same cases",
@@ -696,33 +703,19 @@ def _calibration_failed(plan: BenchmarkPlan, report: Mapping[str, Any]) -> dict[
 # --- ranking ------------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class Leaderboard:
+    """Every model's entry, ranked ones first, best first, then the unranked ones in the order
+    given; and :attr:`common_cases`, the size of the set the ranked ones are compared on."""
+
+    entries: list[dict[str, Any]]
+    common_cases: int
+    """How many cases every finished model with a judged case has an ``ok`` result for."""
+
+
 def _passed(result: Mapping[str, Any]) -> bool:
     judgment = result.get("judgment")
     return bool(judgment.get("passed")) if isinstance(judgment, Mapping) else False
-
-
-def _ok_passes(plan: BenchmarkPlan, candidate: Candidate) -> dict[str, bool]:
-    """Whether each case with an ``ok`` result passed the judge, by case id."""
-    from pup_finetune.evaluation.replay import EvalDir
-
-    results = EvalDir(plan.model_dir(candidate)).read_results()
-    found: dict[str, bool] = {}
-    for case in plan.cases_for(candidate):
-        result = results.get((candidate.target, case.id))
-        if result is not None and result.get("status") == "ok":
-            found[case.id] = _passed(result)
-    return found
-
-
-def _passes(plan: BenchmarkPlan) -> dict[str, dict[str, bool]]:
-    return {candidate.target: _ok_passes(plan, candidate) for candidate in plan.candidates}
-
-
-def _ranked_on(passes: Mapping[str, Mapping[str, bool]]) -> set[str]:
-    """The cases every model with a judged case has an ``ok`` result for: what the models are
-    ranked on, so each is compared on the same cases."""
-    judged = [set(found) for found in passes.values() if found]
-    return set.intersection(*judged) if judged else set()
 
 
 def _by_trajectory(cases: Sequence[ReplayCase], values: Mapping[str, float]) -> list[list[float]]:
@@ -734,13 +727,12 @@ def _by_trajectory(cases: Sequence[ReplayCase], values: Mapping[str, float]) -> 
 
 
 def _entry(
-    plan: BenchmarkPlan,
-    candidate: Candidate,
-    error: Mapping[str, Any] | None,
-    passes: Mapping[str, bool],
-) -> dict[str, Any]:
+    plan: BenchmarkPlan, candidate: Candidate, error: Mapping[str, Any] | None
+) -> tuple[dict[str, Any], dict[str, bool]]:
+    """``candidate``'s entry, unranked, from its own results alone; and the judge verdict of
+    each case it has an ``ok`` result for, by case id. Its directory is read once."""
     from pup_finetune.evaluation.bootstrap import paired_bootstrap_ci
-    from pup_finetune.evaluation.cases import excluded_by_reason
+    from pup_finetune.evaluation.cases import EMPTY_PROMPT, excluded_by_reason
     from pup_finetune.evaluation.replay import EvalDir, summarize
 
     eval_dir = EvalDir(plan.model_dir(candidate))
@@ -749,6 +741,12 @@ def _entry(
     target = summarize(
         cases, results, generations, seed=plan.settings.seed, replays={candidate.target: cases}
     )["targets"][candidate.target]
+    passes = {
+        case.id: _passed(result)
+        for case in cases
+        if (result := results.get((candidate.target, case.id))) is not None
+        and result.get("status") == "ok"
+    }
     interval = paired_bootstrap_ci(
         _by_trajectory(cases, {key: float(value) for key, value in passes.items()}),
         seed=plan.settings.seed,
@@ -758,80 +756,86 @@ def _entry(
         for (name, _), record in generations.items()
         if name == candidate.target and isinstance(record.get("latency_s"), int | float)
     ]
+    retryable = target["errors"] - target["errors_unrenderable"]
     if error is not None:
         status = "error"
     elif target["pending"]:
         status = "partial"
     else:
         status = "complete_with_errors" if target["errors"] else "complete"
-    return {
+    excluded = excluded_by_reason(candidate.excluded)
+    prompted = len(plan.cases) - excluded.get(EMPTY_PROMPT, 0)
+    entry = {
         "model": candidate.target,
         "provider": candidate.provider,
         "base_model": candidate.profile.base_model,
         "status": status,
+        "finished": error is None and not target["pending"] and not retryable,
+        "rank": None,
         "judge_pass_rate": sum(passes.values()) / len(passes) if passes else None,
         "ci95": None if interval is None else list(interval),
-        "cases": target["completed"],
+        "judged_cases": len(passes),
+        "coverage": len(passes) / prompted,
+        "common_pass_rate": None,
+        "gap_to_best": None,
+        "within_noise_of_best": None,
+        "cases": len(cases),
         "excluded_cases": len(candidate.excluded),
-        "excluded_by_reason": excluded_by_reason(candidate.excluded),
+        "excluded_by_reason": excluded,
         "errors": target["errors"],
         "errors_unrenderable": target["errors_unrenderable"],
         "pending": target["pending"],
         "latency_p50_s": statistics.median(latencies) if latencies else None,
-        "gap_to_best": None,
-        "within_noise_of_best": None,
         "error": None if error is None else dict(error),
         "out_dir": display_path(eval_dir.path),
     }
+    return entry, passes
 
 
 def leaderboard(
     plan: BenchmarkPlan, errors: Mapping[str, Mapping[str, Any]] | None = None
-) -> list[dict[str, Any]]:
-    """Every model, best judge pass rate first (models without one last, in the order
-    given). The rates, their 95% bootstrap CIs over trajectories and each model's gap to the
-    best (the mean paired difference, with its CI) are over the same cases: those every model
-    with a judged case has an ``ok`` result for. A model is within noise of the best when that
+) -> Leaderboard:
+    """Every model, with its judge pass rate and 95% bootstrap CI over trajectories on its own
+    judged cases, ranked when it is finished (nothing pending, no error a rerun retries, no
+    session error) and has a judged case.
+
+    The ranked models are compared on the cases every one of them has an ``ok`` result for, so
+    a model still running never narrows the comparison: each one's pass rate there
+    (``common_pass_rate``) orders them, and each one's gap to the best (the mean paired
+    difference, with its CI) is over those cases. A model is within noise of the best when that
     CI reaches 0 or there are too few cases for one."""
     from pup_finetune.evaluation.bootstrap import paired_bootstrap_ci
 
     errors = errors or {}
-    passes = _passes(plan)
-    common = _ranked_on(passes)
-    shared = {
-        target: {case_id: passed for case_id, passed in found.items() if case_id in common}
-        for target, found in passes.items()
-    }
-    entries = [
-        _entry(plan, candidate, errors.get(candidate.target), shared[candidate.target])
-        for candidate in plan.candidates
+    scored = [
+        _entry(plan, candidate, errors.get(candidate.target)) for candidate in plan.candidates
     ]
-    order = sorted(
-        range(len(entries)),
-        key=lambda i: (
-            entries[i]["judge_pass_rate"] is None,
-            -(entries[i]["judge_pass_rate"] or 0),
-        ),
-    )
-    board = [entries[i] for i in order]
-    if not board or board[0]["judge_pass_rate"] is None:
-        return board
-    best = shared[board[0]["model"]]
-    for entry in board[1:]:
-        if entry["judge_pass_rate"] is None:
-            continue
-        other = shared[entry["model"]]
-        differences = {case_id: float(best[case_id]) - float(other[case_id]) for case_id in common}
-        interval = paired_bootstrap_ci(
-            _by_trajectory(plan.cases, differences), seed=plan.settings.seed
-        )
-        entry["gap_to_best"] = {
-            "judge_pass_rate": sum(differences.values()) / len(differences),
-            "ci95": None if interval is None else list(interval),
-            "n_cases": len(differences),
-        }
-        entry["within_noise_of_best"] = interval is None or interval[0] <= 0
-    return board
+    compared = [(entry, passes) for entry, passes in scored if entry["finished"] and passes]
+    common = set.intersection(*(set(passes) for _, passes in compared)) if compared else set()
+    ranked: list[tuple[dict[str, Any], dict[str, bool]]] = []
+    if common:
+        for entry, passes in compared:
+            entry["common_pass_rate"] = sum(passes[case_id] for case_id in common) / len(common)
+        ranked = sorted(compared, key=lambda item: -item[0]["common_pass_rate"])
+        best = ranked[0][1]
+        for rank, (entry, passes) in enumerate(ranked, start=1):
+            entry["rank"] = rank
+            if rank == 1:
+                continue
+            differences = {
+                case_id: float(best[case_id]) - float(passes[case_id]) for case_id in common
+            }
+            interval = paired_bootstrap_ci(
+                _by_trajectory(plan.cases, differences), seed=plan.settings.seed
+            )
+            entry["gap_to_best"] = {
+                "judge_pass_rate": sum(differences.values()) / len(differences),
+                "ci95": None if interval is None else list(interval),
+            }
+            entry["within_noise_of_best"] = interval is None or interval[0] <= 0
+    entries = [entry for entry, _ in ranked]
+    entries += [entry for entry, _ in scored if entry["rank"] is None]
+    return Leaderboard(entries, common_cases=len(common))
 
 
 def _pct(rate: float) -> str:
@@ -839,35 +843,54 @@ def _pct(rate: float) -> str:
 
 
 def recommend(board: Sequence[Mapping[str, Any]], *, target_pass_rate: float) -> dict[str, Any]:
-    """The model to fine-tune, from a :func:`leaderboard`.
+    """The model to fine-tune, from a :attr:`Leaderboard.entries`: the best ranked one.
 
-    ``verdict`` is ``fine_tune`` (the best model is below ``target_pass_rate``: fine-tune
-    it), ``base_meets_target`` (the best base model already reaches it, so fine-tuning may
-    add little) or ``no_result`` (no model has a judged case). Models within noise of the
-    best are named too: any of them is as good a start, so the cheapest to serve wins.
+    ``verdict`` is ``base_meets_target`` when that model's own judge pass rate reaches
+    ``target_pass_rate`` and its judged cases cover at least :data:`TARGET_COVERAGE` of the
+    test cases with a prompt (fine-tuning may add little), ``fine_tune`` otherwise, or
+    ``no_result`` when no model is ranked. Only finished models are ranked, so a model still
+    running changes neither the choice nor the verdict; the reason says the results are
+    partial then. Models within noise of the best are named too: any of them is as good a
+    start, so the cheapest to serve wins.
     """
-    scored = [entry for entry in board if entry.get("judge_pass_rate") is not None]
-    if not scored:
-        return {
-            "verdict": "no_result",
-            "model": None,
-            "reason": "no model has a judged case yet, so there is nothing to compare",
-        }
-    best = scored[0]
-    rate = float(best["judge_pass_rate"])
-    close = [str(entry["model"]) for entry in scored[1:] if entry.get("within_noise_of_best")]
-    if rate >= target_pass_rate:
-        verdict = "base_meets_target"
-        reason = (
-            f"{best['model']} already matches the recorded answers on {_pct(rate)} of the "
-            f"cases, at or above the {_pct(target_pass_rate)} target, so fine-tuning may add "
-            "little: check whether the remaining misses matter before training"
-        )
-    else:
+    ranked = [entry for entry in board if entry.get("rank") is not None]
+    unfinished = [str(entry["model"]) for entry in board if not entry.get("finished")]
+    partial = (
+        f"; results are partial: {joined(unfinished)} can still advance, and a rerun may "
+        "change this"
+        if unfinished
+        else ""
+    )
+    if not ranked:
+        if any(entry.get("finished") and entry.get("judged_cases") for entry in board):
+            reason = "the finished models share no judged case, so none can be ranked"
+        elif any(entry.get("judged_cases") for entry in board):
+            reason = "no finished model has a judged case, so none is ranked yet"
+        else:
+            reason = "no model has a judged case yet, so there is nothing to compare"
+        return {"verdict": "no_result", "model": None, "reason": reason + partial}
+    best = ranked[0]
+    rate, coverage = float(best["judge_pass_rate"]), float(best["coverage"])
+    close = [str(entry["model"]) for entry in ranked[1:] if entry.get("within_noise_of_best")]
+    own = (
+        f"{best['model']} ranks first and matches {_pct(rate)} of the recorded answers on its "
+        f"{best['judged_cases']} judged cases"
+    )
+    if rate < target_pass_rate:
+        verdict = "fine_tune"
+        reason = f"{own}, below the {_pct(target_pass_rate)} target: fine-tune it"
+    elif coverage < TARGET_COVERAGE:
         verdict = "fine_tune"
         reason = (
-            f"{best['model']} matches the recorded answers best ({_pct(rate)} of the cases), "
-            f"below the {_pct(target_pass_rate)} target: fine-tune it"
+            f"{own}, but they cover only {_pct(coverage)} of the test cases, under the "
+            f"{_pct(TARGET_COVERAGE)} needed to say it meets the {_pct(target_pass_rate)} "
+            "target: fine-tune it"
+        )
+    else:
+        verdict = "base_meets_target"
+        reason = (
+            f"{own}, at or above the {_pct(target_pass_rate)} target, so fine-tuning may add "
+            "little: check whether the remaining misses matter before training"
         )
     if close:
         reason += (
@@ -879,23 +902,25 @@ def recommend(board: Sequence[Mapping[str, Any]], *, target_pass_rate: float) ->
         "model": best["model"],
         "provider": best["provider"],
         "judge_pass_rate": rate,
+        "coverage": coverage,
         "target_pass_rate": target_pass_rate,
         "within_noise": close,
-        "reason": reason,
+        "reason": reason + partial,
     }
 
 
 def _result(
     plan: BenchmarkPlan,
-    board: list[dict[str, Any]],
+    board: Leaderboard,
     *,
     calibration: Mapping[str, Any] | None,
     cancelled: bool,
 ) -> dict[str, Any]:
     from pup_finetune.evaluation.replay import CAVEAT
 
-    recommendation = recommend(board, target_pass_rate=plan.settings.target_pass_rate)
-    statuses = {entry["status"] for entry in board}
+    entries = board.entries
+    recommendation = recommend(entries, target_pass_rate=plan.settings.target_pass_rate)
+    statuses = {entry["status"] for entry in entries}
     if cancelled or "partial" in statuses:
         status = "partial"
     elif statuses == {"complete"}:
@@ -904,14 +929,8 @@ def _result(
         status = "complete_with_errors"
     warnings: list[str] = []
     hint = None
-    unrenderable = sum(int(entry["errors_unrenderable"]) for entry in board)
-    failed = [
-        entry["model"]
-        for entry in board
-        if entry["error"] is not None
-        or entry["pending"]
-        or entry["errors"] > entry["errors_unrenderable"]
-    ]
+    unrenderable = sum(int(entry["errors_unrenderable"]) for entry in entries)
+    failed = [entry["model"] for entry in entries if not entry["finished"]]
     if failed:
         hint = (
             f"{', '.join(failed)} {'has' if len(failed) == 1 else 'have'} no result for every "
@@ -935,12 +954,12 @@ def _result(
         {
             "status": status,
             "recommendation": recommendation,
-            "leaderboard": board,
+            "leaderboard": entries,
             "dataset": display_path(plan.dataset_dir),
             "out_dir": display_path(plan.out_dir),
             "judge_model": plan.judge.spec,
             "cases": len(plan.cases),
-            "common_cases": len(_ranked_on(_passes(plan))),
+            "common_cases": board.common_cases,
             "trajectories": plan.trajectories,
             "cancelled": cancelled,
             "calibration": None
@@ -951,7 +970,7 @@ def _result(
             "hint": hint,
             "files": {
                 "result": display_path(plan.out_dir / RESULT_FILE),
-                "models": {entry["model"]: entry["out_dir"] for entry in board},
+                "models": {entry["model"]: entry["out_dir"] for entry in entries},
             },
             **_next(plan, recommendation, retry=bool(failed)),
         }
@@ -999,4 +1018,5 @@ def exit_code(result: Mapping[str, Any]) -> int:
         return 1
     if result.get("status") != "complete_with_errors":
         return 0
-    return 1 if any(entry.get("cases") == 0 for entry in result.get("leaderboard") or []) else 0
+    entries = result.get("leaderboard") or []
+    return 1 if any(entry.get("judged_cases") == 0 for entry in entries) else 0

@@ -166,8 +166,9 @@ assistant message, or at the start, with no `<｜Assistant｜>` before it, so `d
 needs a user or tool message before each turn it trains or samples. The renderer's
 `prompt_refusal` runs that check without a tokenizer, so `evaluate` and `benchmark` leave
 such test cases out at planning (`excluded_cases`), as they do a turn with no message before
-it (`empty_prompt`) for every model. Each benchmarked model replays the cases it can, and the
-leaderboard ranks the models on the cases every ranked model has a result for. A refusal that
+it (`empty_prompt`) for every model. Each benchmarked model replays the cases it can and gets
+its own pass rate; the leaderboard ranks the finished models on the cases every one of them
+has a result for, so a model a rerun can still advance never narrows them. A refusal that
 still reaches a sampler is an error result a rerun never retries. Only
 `supervised_example` raises `not_prefix_stable`; a per-turn failure carries its own code, so
 the loop never retries it per turn.

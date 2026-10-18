@@ -202,10 +202,12 @@ the judge `evaluate` uses (paid; it previews first):
 pup finetune benchmark datasets/my-agent --models qwen3p5-9b,baseten/glm-5p3-flash
 ```
 
-`PROVIDER/MODEL` names the provider of a model both offer. The result ranks the models by
-judge pass rate with a confidence interval, on the test cases every model answered, and
-recommends one to fine-tune. A base model at or above `--target-pass-rate` (90% by default) may need no
-training, and models within noise of the best are named, so the cheapest to serve can win.
+`PROVIDER/MODEL` names the provider of a model both offer. Each model gets its own judge
+pass rate with a confidence interval, and the result ranks the finished models on the test
+cases every one of them answered and recommends one to fine-tune. A base model at or above
+`--target-pass-rate` (90% by default) on its own cases, judged on at least 90% of the test
+cases, may need no training, and models within noise of the best are named, so the cheapest
+to serve can win.
 Results go in `datasets/my-agent/benchmark`; rerun the command to continue one that stopped.
 
 ### A cheap first run

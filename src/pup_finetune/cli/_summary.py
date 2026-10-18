@@ -525,8 +525,8 @@ def evaluate_summary(result: Mapping[str, Any]) -> Summary | None:
 
 
 def benchmark_summary(result: Mapping[str, Any]) -> Summary | None:
-    """``benchmark``: the cases and judge, each model's judge agreement with its CI and gap
-    to the best, the recommendation and the caveat."""
+    """``benchmark``: the cases and judge, each model's judge agreement on its own cases with
+    its CI, the gap of each ranked one to the best, the recommendation and the caveat."""
     status = result.get("status")
     if status == "calibration_failed":
         return _evaluation_parts(result, compact=False)
@@ -534,25 +534,30 @@ def benchmark_summary(result: Mapping[str, Any]) -> Summary | None:
     if status is None or not board:
         return None
     what = {"complete": "complete", "partial": "partial"}.get(str(status), "complete with errors")
+    common = result.get("common_cases")
+    ranked = f"ranked on the {common} every finished model answered" if common else "none ranked"
     headline = (
         f"benchmark {what}: {_n(len(board), 'model')} on {_n(result.get('cases'), 'case')} from "
-        f"{_n(result.get('trajectories'), 'test conversation')}, ranked on the "
-        f"{result.get('common_cases')} every ranked model answered; judge "
+        f"{_n(result.get('trajectories'), 'test conversation')}, {ranked}; judge "
         f"{result.get('judge_model')}"
     )
     width = max(len(str(entry.get("model"))) for entry in board) + 2
     rows = []
     for entry in board:
         ci = entry.get("ci95")
-        interval = f" [{_percent(ci[0])}, {_percent(ci[1])}]" if isinstance(ci, list) else ""
+        text = f" [{_percent(ci[0])}, {_percent(ci[1])}]" if isinstance(ci, list) else ""
+        if entry.get("judged_cases"):
+            text += f" on {_n(entry.get('judged_cases'), 'case')}"
         gap = entry.get("gap_to_best")
         if isinstance(gap, Mapping) and isinstance(gap.get("judge_pass_rate"), int | float):
             noise = ", within noise" if entry.get("within_noise_of_best") else ""
-            interval += f"  {_points(-float(gap['judge_pass_rate']))} vs best{noise}"
+            text += f"  {_points(-float(gap['judge_pass_rate']))} vs best{noise}"
         elif entry.get("status") == "error":
-            interval = f"  {_error_text(entry.get('error')) or 'error'}"
+            text = f"  {_error_text(entry.get('error')) or 'error'}"
+        elif not entry.get("finished"):
+            text += "  unfinished, not ranked"
         rows.append(
-            f"{entry.get('model')!s:<{width}}{_percent(entry.get('judge_pass_rate'))}{interval}"
+            f"{entry.get('model')!s:<{width}}{_percent(entry.get('judge_pass_rate'))}{text}"
         )
     recommendation = result.get("recommendation") or {}
     verdict = {

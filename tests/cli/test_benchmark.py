@@ -93,7 +93,8 @@ def test_confirm_ranks_recommends_and_leads_to_training(dataset: Path) -> None:
     assert data["status"] == "complete"
     [entry] = data["leaderboard"]
     assert entry["model"] == "fake-model"
-    assert entry["cases"] == preview["preview"]["cases"]
+    assert entry["judged_cases"] == preview["preview"]["cases"]
+    assert entry["rank"] == 1
     assert data["recommendation"]["verdict"] == "fine_tune"
     assert data["recommendation"]["model"] == "fake-model"
     assert data["next_command"] == (
@@ -313,7 +314,7 @@ def test_a_case_a_model_cannot_replay_is_left_out_for_it(tmp_path: Path) -> None
     excluded = model["excluded_cases"]
     assert excluded > 0
     assert model["excluded_by_reason"] == {"unsupported_message": excluded}
-    assert model["cases"] == preview["common_cases"] == preview["cases"] - excluded
+    assert model["cases"] == preview["replayed_by_every_model"] == preview["cases"] - excluded
     assert any("test cases are left out for fake-model, " in w for w in preview["warnings"])
 
     result = rerun(
@@ -341,7 +342,8 @@ def test_a_prompt_refused_while_sampling_never_stops_the_benchmark(
     assert data["status"] == "complete_with_errors"
     [entry] = data["leaderboard"]
     assert entry["errors_unrenderable"] == entry["errors"] > 0
-    assert entry["cases"] > 0
+    assert entry["judged_cases"] > 0
+    assert entry["finished"] is True
     assert "which a retry cannot fix" in data["hint"]
     assert "benchmark" not in (data["next_command"] or "")
 
@@ -422,7 +424,7 @@ def test_adding_a_model_reuses_the_finished_ones_and_ranks_on_the_shared_cases(
     shy = by_model["shy/fake-model"]
     assert 0 < shy["excluded_cases"] < preview["preview"]["cases"]
     assert shy["excluded_by_reason"] == {"unsupported_message": shy["excluded_cases"]}
-    assert preview["preview"]["common_cases"] == shy["cases"]
+    assert preview["preview"]["replayed_by_every_model"] == shy["cases"]
     for model in finished:
         assert by_model[model]["already_done"] == preview["preview"]["cases"]
         assert by_model[model]["generation_calls"] == 0
@@ -444,8 +446,8 @@ def test_adding_a_model_reuses_the_finished_ones_and_ranks_on_the_shared_cases(
     data = output(result)
     assert data["status"] == "complete"
     assert data["common_cases"] == shy["cases"]
-    gaps = [entry["gap_to_best"] for entry in data["leaderboard"][1:]]
-    assert [gap["n_cases"] for gap in gaps] == [shy["cases"]] * 2
+    assert [entry["rank"] for entry in data["leaderboard"]] == [1, 2, 3]
+    assert all(entry["gap_to_best"] is not None for entry in data["leaderboard"][1:])
 
 
 def test_a_changed_renderer_conflicts_with_the_finished_results(
@@ -548,6 +550,9 @@ def test_the_retry_hint_names_only_the_models_a_rerun_can_advance(
     assert statuses == {"fake/fake-model": "complete_with_errors", "twin/fake-model": "error"}
     assert data["hint"].startswith("twin/fake-model has no result for every case")
     assert data["next_command"].startswith("pup finetune benchmark")
+    recommendation = data["recommendation"]
+    assert recommendation["model"] == "fake/fake-model"
+    assert "results are partial: twin/fake-model can still advance" in recommendation["reason"]
 
 
 def test_a_model_whose_stop_tokens_do_not_resolve_fails_the_preview(

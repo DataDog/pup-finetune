@@ -823,11 +823,15 @@ Source lives under `src/pup_finetune/`.
   each resumes; each model's directory is identified by its own cases and renderer identity,
   `BenchmarkPlan.identity`, never by the other models, so adding or dropping a model reuses
   the finished ones; a model whose session fails is an error entry and the others still
-  run), `leaderboard` (judge pass rate on the cases every model with a judged case has an
-  `ok` result for, `common_cases`, with a bootstrap CI over trajectories, and each model's
-  paired gap to the best on those cases) and `recommend` (`fine_tune`,
-  `base_meets_target` at `--target-pass-rate`, or `no_result`; models within noise of the
-  best are named).
+  run), `leaderboard` (a `Leaderboard`: each model's judge pass rate with a bootstrap CI
+  over trajectories on its own judged cases, `judged_cases` and `coverage`; the finished
+  models, with nothing pending, no error a rerun retries and no session error, ranked on the
+  cases every one of them has an `ok` result for, `common_cases`, by their rate there, with
+  each one's paired gap to the best; a model a rerun can still advance listed unranked,
+  never narrowing that set) and `recommend` (`fine_tune`; `base_meets_target` when the best
+  ranked model's own rate reaches `--target-pass-rate` and its judged cases cover
+  `TARGET_COVERAGE`, 90% of the test cases with a prompt; or `no_result`; the reason says
+  when results are partial, and models within noise of the best are named).
   The package exports its names lazily, so importing the runner (the CLI does, for every
   command) loads no judge client. `targets.py` makes the two samplers from a session: the live training
   session's best sampler checkpoint, or the best training checkpoint loaded and saved again
