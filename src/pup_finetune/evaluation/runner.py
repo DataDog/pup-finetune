@@ -1692,7 +1692,6 @@ def record_evaluation(plan: EvalPlan, outcome: Mapping[str, Any]) -> None:
         evaluations = record.get("evaluations")
         found = dict(evaluations) if isinstance(evaluations, Mapping) else {}
         key = str(settings["out_dir"])
-        found.pop(key, None)  # the newest last
         found[key] = entry
         run.write_evaluations({"latest": key, "evaluations": found})
     except (FinetuneError, OSError) as exc:
@@ -1739,8 +1738,9 @@ def recorded_evaluation(run_dir: Path) -> RecordedEvaluation | None:
     evaluations = record.get("evaluations") if record else None
     if not isinstance(evaluations, Mapping):
         return None
+    latest = record.get("latest") if record else None
     entries: list[RecordedEvaluation] = []
-    for entry in evaluations.values():
+    for _, entry in sorted(evaluations.items(), key=lambda item: _age(item, latest)):
         found = _recorded(run_dir, entry)
         if found is not None:
             entries.append(found)
@@ -1748,6 +1748,14 @@ def recorded_evaluation(run_dir: Path) -> RecordedEvaluation | None:
         return None
     complete = [entry for entry in entries if entry.complete]
     return (complete or entries)[-1]
+
+
+def _age(item: tuple[str, object], latest: object) -> tuple[str, bool]:
+    """Orders ``evaluation.json``'s entries (its keys are sorted) oldest first, ``latest``
+    last of those recorded in the same second."""
+    key, entry = item
+    recorded_at = entry.get("recorded_at") if isinstance(entry, Mapping) else None
+    return str(recorded_at or ""), key == latest
 
 
 def _recorded(run_dir: Path, entry: object) -> RecordedEvaluation | None:

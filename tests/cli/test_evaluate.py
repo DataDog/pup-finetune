@@ -1009,6 +1009,21 @@ def test_status_after_evaluate_confirm_no_longer_says_evaluate(run_dir: Path) ->
     assert output(invoke("status", str(run_dir)))["next_command"] is None
 
 
+def test_status_shows_the_newest_evaluation_whatever_its_directory_is_named(
+    run_dir: Path,
+) -> None:
+    for name in ("zz", "aa"):
+        args = ("evaluate", str(run_dir), "--out-dir", str(run_dir / name), "--no-publish")
+        assert invoke(*args, "--confirm").exit_code == 0
+    status = output(invoke("status", str(run_dir)))
+    assert status["evaluation"]["out_dir"] == display(run_dir / "aa")
+    record = json.loads((run_dir / "evaluation.json").read_text())
+    record["evaluations"]["aa"]["recorded_at"] = "2000-01-01T00:00:00Z"
+    (run_dir / "evaluation.json").write_text(json.dumps(record))
+    status = output(invoke("status", str(run_dir)))
+    assert status["evaluation"]["out_dir"] == display(run_dir / "zz")
+
+
 SPEND = ("--max-spend-usd", "1000", "--hourly-rate-usd", "1")
 
 
