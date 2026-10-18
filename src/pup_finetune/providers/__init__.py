@@ -317,8 +317,8 @@ def require_key(
     """Raise the :class:`UsageError` (exit 2) a ``train`` preview's preflight raises when no
     source has the API key provider ``name`` signs in with, naming ``needed_by``; with
     ``warnings`` (a read-only preview, which offers no ``--confirm`` to fail), append it there
-    instead. An offline provider needs no key. Reads no key into the result and makes no
-    call."""
+    instead. A provider that signs in with no key (the fake) needs none. Never returns the
+    key, and makes no call."""
     from pup_finetune import credentials
 
     credential = provider_info(name, runtime).credential

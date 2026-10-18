@@ -237,16 +237,11 @@ class BenchmarkPlan:
         small for the intervals to separate models."""
         from pup_finetune.evaluation.cases import exclusion_warning
 
-        warnings = [
-            warning
+        found = (
+            exclusion_warning(candidate.excluded, cases=len(self.cases), model=candidate.target)
             for candidate in self.candidates
-            if (
-                warning := exclusion_warning(
-                    candidate.excluded, cases=len(self.cases), model=candidate.target
-                )
-            )
-            is not None
-        ]
+        )
+        warnings = [warning for warning in found if warning is not None]
         if self.trajectories < MIN_TRAJECTORIES:
             warnings.append(
                 f"the test split holds only {self.trajectories} conversations, so the "
@@ -703,6 +698,10 @@ def _ok_passes(plan: BenchmarkPlan, candidate: Candidate) -> dict[str, bool]:
     return found
 
 
+def _passes(plan: BenchmarkPlan) -> dict[str, dict[str, bool]]:
+    return {candidate.target: _ok_passes(plan, candidate) for candidate in plan.candidates}
+
+
 def _ranked_on(passes: Mapping[str, Mapping[str, bool]]) -> set[str]:
     """The cases every model with a judged case has an ``ok`` result for: what the models are
     ranked on, so each is compared on the same cases."""
@@ -781,7 +780,7 @@ def leaderboard(
     from pup_finetune.evaluation.bootstrap import paired_bootstrap_ci
 
     errors = errors or {}
-    passes = {candidate.target: _ok_passes(plan, candidate) for candidate in plan.candidates}
+    passes = _passes(plan)
     common = _ranked_on(passes)
     shared = {
         target: {case_id: passed for case_id, passed in found.items() if case_id in common}
@@ -925,9 +924,7 @@ def _result(
             "out_dir": display_path(plan.out_dir),
             "judge_model": plan.judge.spec,
             "cases": len(plan.cases),
-            "common_cases": len(
-                _ranked_on({c.target: _ok_passes(plan, c) for c in plan.candidates})
-            ),
+            "common_cases": len(_ranked_on(_passes(plan))),
             "trajectories": plan.trajectories,
             "cancelled": cancelled,
             "calibration": None
