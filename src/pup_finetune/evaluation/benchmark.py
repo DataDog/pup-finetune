@@ -61,6 +61,7 @@ from pup_finetune.providers import (
     providers_for_model,
     require_packages,
 )
+from pup_finetune.providers import require_key as require_provider_key
 from pup_finetune.providers.base import (
     Generation,
     LoraConfig,
@@ -351,10 +352,17 @@ class BenchmarkPlan:
             for candidate in self.candidates
             if (remote := candidate.profile.remote_code_warning()) is not None
         ]
+        # --confirm would fail on a key nothing provides: fail now, never offer it. A
+        # read-only preview offers none, so it only warns.
+        soft = warnings if self.runtime.read_only else None
+        for model in models:
+            if model["generation_calls"]:
+                needed_by = f"generating with {model['model']}"
+                require_provider_key(
+                    model["provider"], self.runtime, needed_by=needed_by, warnings=soft
+                )
         if judge_calls + calibration:
-            # --confirm would fail on a key nothing provides: fail now, never offer it. A
-            # read-only preview offers none, so it only warns.
-            require_key(self.judge, warnings=warnings if self.runtime.read_only else None)
+            require_key(self.judge, warnings=soft)
         billing = [
             get_provider(name, self.runtime).sampling_billing(
                 SamplingUsage(calls=calls, max_tokens_per_call=settings.max_tokens)

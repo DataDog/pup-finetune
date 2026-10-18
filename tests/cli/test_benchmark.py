@@ -462,6 +462,35 @@ def test_a_turn_with_no_message_before_it_is_left_out_for_every_model(tmp_path: 
     assert f'"{opened}:' in results
 
 
+def test_the_preview_fails_without_the_key_of_a_provider_it_generates_with(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(providers, "_REGISTRY", dict(providers._REGISTRY))
+    providers.register_provider(
+        "keyed",
+        "pup_finetune.providers.fake:FakeProvider",
+        dev_only=True,
+        models={"fake-model": ("fake-model",)},
+        credential="fireworks",
+        offline=True,
+    )
+    models = "fake/fake-model,keyed/fake-model"
+
+    result = invoke("benchmark", str(dataset), "--models", models)
+
+    assert result.exit_code == 2
+    assert "no fireworks API key found for generating with keyed/fake-model" in result.stderr
+    assert "--confirm" not in result.stdout
+
+    monkeypatch.setenv("PUP_READ_ONLY", "1")
+    read_only = output(invoke("benchmark", str(dataset), "--models", models))
+    assert read_only["next_command"] is None
+    assert any(
+        warning.startswith("no fireworks API key found for generating with keyed/fake-model")
+        for warning in read_only["preview"]["warnings"]
+    )
+
+
 def test_the_retry_hint_names_only_the_models_a_rerun_can_advance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

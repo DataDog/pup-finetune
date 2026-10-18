@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Final, Literal
 
-from pup_finetune.errors import FinetuneError, UsageError, install_hint
+from pup_finetune.errors import ExternalError, FinetuneError, UsageError, install_hint
 from pup_finetune.providers.base import Provider, RemoteJobs, SupportsRemote, selects
 from pup_finetune.redaction import redact
 from pup_finetune.runtime import Runtime
@@ -65,6 +65,7 @@ __all__ = [
     "registered_providers",
     "remote_jobs",
     "require_deploys",
+    "require_key",
     "require_packages",
     "require_remote",
     "require_supported_flags",
@@ -308,6 +309,30 @@ def require_packages(name: str, runtime: Runtime, step: Step) -> None:
             f"{_DOING[step]} on {info.label} needs the {package.label}, {why}",
             hint=package.fix,
         )
+
+
+def require_key(
+    name: str, runtime: Runtime, *, needed_by: str, warnings: list[str] | None = None
+) -> None:
+    """Raise the :class:`UsageError` (exit 2) a ``train`` preview's preflight raises when no
+    source has the API key provider ``name`` signs in with, naming ``needed_by``; with
+    ``warnings`` (a read-only preview, which offers no ``--confirm`` to fail), append it there
+    instead. An offline provider needs no key. Reads no key into the result and makes no
+    call."""
+    from pup_finetune import credentials
+
+    credential = provider_info(name, runtime).credential
+    if credential is None:
+        return
+    found = credentials.key_source(credential)
+    if isinstance(found, credentials.KeyUnreadable):
+        raise ExternalError(found.detail, hint=found.fix, source="the OS keychain")
+    if found is not None:
+        return
+    error = credentials.missing_key_error(credential, needed_by=needed_by)
+    if warnings is None:
+        raise error
+    warnings.append(f"{error.message}: {error.hint}")
 
 
 def require_supported_flags(name: str, runtime: Runtime, values: Mapping[str, Any]) -> None:
