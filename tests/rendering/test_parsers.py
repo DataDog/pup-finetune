@@ -597,6 +597,10 @@ def test_kimi_several_typed_calls_and_unescaped_attributes() -> None:
     "tools",
     [
         kimi_call("f", 2),
+        pytest.param(
+            kimi_call("f", 1).replace('index="1"', f'index="{"1" * 4301}"'), id="huge_index"
+        ),
+        pytest.param(kimi_call("f", 1).replace('index="1"', 'index="01"'), id="padded_index"),
         kimi_call("f", 1, ("x", "number", "true")),
         kimi_call("f", 1, ("x", "boolean", "1")),
         kimi_call("f", 1, ("x", "object", "not json")),

@@ -611,7 +611,7 @@ def _unescape(value: str) -> str:
 
 def _kimi_call(call: re.Match[str], position: int) -> tuple[str, dict[str, Any]] | None:
     arguments_found = _sequence(call["arguments"], _KIMI_ARGUMENT, "")
-    if arguments_found is None or int(call["index"]) != position:
+    if arguments_found is None or call["index"] != str(position):
         return None
     arguments: dict[str, Any] = {}
     for argument in arguments_found:
