@@ -615,12 +615,13 @@ class KimiXtmlParser:
     malformed tools channel stays in ``content`` as raw text.
 
     Kimi's tokenizer encodes message text apart from its control tokens, so text may spell
-    one. :meth:`parse_segments` splits structure only at the sampled control tokens;
-    :meth:`parse`, given text alone, takes every spelling as a control token.
+    one. :meth:`parse_segments` splits structure only at the sampled control tokens, and a
+    reply whose text holds a character that stands in for one there is format-invalid, kept
+    whole as sampled; :meth:`parse`, given text alone, takes every spelling as a control token.
     """
 
     name: ClassVar[str] = "kimi_xtml"
-    version: ClassVar[str] = "2"
+    version: ClassVar[str] = "3"
     control_tokens: ClassVar[tuple[str, ...]] = _KIMI_CONTROLS
 
     def parse(self, text: str, tools: Sequence[ToolSpec] = ()) -> ParsedResponse:
@@ -629,14 +630,16 @@ class KimiXtmlParser:
     def parse_segments(
         self, segments: Sequence[Segment], tools: Sequence[ToolSpec] = ()
     ) -> ParsedResponse:
+        if any(_marked(part, _XTML_TOKENS) for part, control in segments if not control):
+            raw = "".join(part for part, _ in segments).removesuffix(_XTML_TEXT.end)
+            return ParsedResponse(_assistant(raw, None, []), format_valid=False)
         text = "".join(_STAND_IN[part] if control else part for part, control in segments)
-        planted = any(_marked(part, _XTML_TOKENS) for part, control in segments if not control)
         parsed = _parse_xtml(text, _XTML_TOKENS)
         message = {
             key: value.translate(_SPELLING) if key in ("content", "reasoning_content") else value
             for key, value in parsed.message.items()
         }
-        return ParsedResponse(message, format_valid=parsed.format_valid and not planted)
+        return ParsedResponse(message, format_valid=parsed.format_valid)
 
 
 def _parse_xtml(text: str, xtml: _Xtml) -> ParsedResponse:

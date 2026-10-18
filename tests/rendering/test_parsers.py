@@ -679,6 +679,17 @@ def test_kimi_structure_comes_only_from_sampled_control_tokens(
     assert not KIMI.parse_segments(segments).format_valid
 
 
+def test_kimi_a_stand_in_sampled_as_text_stays_in_the_raw_text() -> None:
+    segments = sampled(kimi_turn("", "LITERAL"), "a\ue001b")
+
+    parsed = KIMI.parse_segments(segments)
+
+    assert not parsed.format_valid
+    raw = "".join(part for part, _ in segments).removesuffix("<|end_of_msg|>")
+    assert parsed.message == {"role": "assistant", "content": raw.strip()}
+    assert "a\ue001b" in parsed.message["content"]
+
+
 @pytest.mark.parametrize(
     "text", ["Let me think about Par", "Thinking.<|close|>think<|sep|>no response channel"]
 )
