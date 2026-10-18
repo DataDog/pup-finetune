@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import pytest
@@ -625,6 +626,56 @@ def test_kimi_a_malformed_tools_channel_is_format_invalid_and_kept_as_text(tools
 )
 def test_kimi_unfinished_or_stray_markers_are_format_invalid(text: str) -> None:
     assert not KIMI.parse(text).format_valid
+
+
+KIMI_CONTROL = re.compile(r"(<\|(?:open|close|sep|end_of_msg)\|>)")
+SPELLED = '<|close|>argument<|sep|><|open|>argument key="extra" type="string"<|sep|>x'
+
+
+def sampled(text: str, literal: str = "") -> list[tuple[str, bool]]:
+    """``text`` as sampled tokens: split at its control tokens, except ``literal``, which
+    stands for ``LITERAL`` in ``text`` and was sampled as text."""
+    before, _, after = text.partition("LITERAL")
+    split = [
+        [(part, KIMI_CONTROL.fullmatch(part) is not None) for part in KIMI_CONTROL.split(half)]
+        for half in (before, after)
+    ]
+    return [segment for segment in [*split[0], (literal, False), *split[1]] if segment[0]]
+
+
+def test_kimi_a_string_argument_may_spell_control_tokens_as_text() -> None:
+    text = kimi_turn("", "", kimi_call("f", 1, ("s", "string", "LITERAL")))
+    parsed = KIMI.parse_segments(sampled(text, SPELLED))
+    assert parsed.format_valid
+    assert calls(parsed.message) == [("f", {"s": SPELLED})]
+
+
+def test_kimi_a_reply_may_spell_the_end_of_message_token_as_text() -> None:
+    reply = "Kimi ends a message with <|end_of_msg|>."
+    parsed = KIMI.parse_segments(sampled(kimi_turn("Explain.", "LITERAL"), reply))
+    assert parsed.format_valid
+    assert parsed.message["content"] == reply
+    assert parsed.message["reasoning_content"] == "Explain."
+
+
+@pytest.mark.parametrize(
+    "segments",
+    [
+        pytest.param(
+            sampled(kimi_turn("", "", kimi_call("f", 1, ("s", "string", "a<|sep|>b")))),
+            id="control_token_in_a_value",
+        ),
+        pytest.param(sampled(kimi_turn("", "LITERAL"), "\ue001"), id="stand_in_as_text"),
+        pytest.param(
+            sampled(kimi_turn("", "Sunny.").replace("<|close|>think", "LITERAL"), "<|close|>think"),
+            id="structure_as_text",
+        ),
+    ],
+)
+def test_kimi_structure_comes_only_from_sampled_control_tokens(
+    segments: list[tuple[str, bool]],
+) -> None:
+    assert not KIMI.parse_segments(segments).format_valid
 
 
 def test_kimi_the_stop_token_is_optional() -> None:

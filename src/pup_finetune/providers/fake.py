@@ -286,6 +286,11 @@ class FakeRenderer:
             return exc
         return None
 
+    def parse_completion(
+        self, tokens: Sequence[int], tools: Sequence[ToolSpec] = ()
+    ) -> ParsedResponse:
+        return self.parse_response(self.decode(tokens), tools)
+
     def render_completion(self, message: ChatMessage) -> str:
         """The completion text of an assistant ``message``, ``<|end|>`` included."""
         return self._assistant_body(message, where="the completion") + _END
@@ -1027,7 +1032,7 @@ class FakeSampler:
         stop_reason = "stop"
         if len(completion) > max_tokens:
             completion, stop_reason = completion[:max_tokens], "length"
-        parsed = self.renderer.parse_response(self.renderer.decode(completion), tools)
+        parsed = self.renderer.parse_completion(completion, tools)
         return Generation(
             message=parsed.message,
             format_valid=parsed.format_valid,

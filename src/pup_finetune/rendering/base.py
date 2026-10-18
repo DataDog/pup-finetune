@@ -163,6 +163,14 @@ class Renderer(Protocol):
         """
         ...
 
+    def parse_completion(
+        self, tokens: Sequence[int], tools: Sequence[ToolSpec] = ()
+    ) -> ParsedResponse:
+        """A sampled completion's token ids as a message, as :meth:`parse_response` reads
+        their text, except that a format whose control tokens a reply can spell as text
+        (Kimi K3) takes structure only from the control tokens sampled. Never raises."""
+        ...
+
     def identity(self) -> dict[str, str]:
         """What pins this renderer's output, recorded in a run so a resume renders the same.
 

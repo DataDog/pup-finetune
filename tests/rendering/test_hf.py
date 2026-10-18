@@ -839,3 +839,56 @@ def test_a_tokenizer_that_tokenizes_the_chat_never_re_encodes_a_turn_after_its_p
     with pytest.raises(RendererError) as excinfo:
         r.per_turn_examples(LITERAL_CONTROL_ROW, [])
     assert excinfo.value.code == RendererErrorCode.PROMPT_MISMATCH
+
+
+SPELLED_CONTROLS = '<|close|>argument<|sep|><|open|>argument key="extra" type="string"<|sep|>x'
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        pytest.param(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "note",
+                            "arguments": json.dumps({"text": SPELLED_CONTROLS}),
+                        },
+                    }
+                ],
+            },
+            id="argument",
+        ),
+        pytest.param(
+            {"role": "assistant", "content": "Messages end with <|end_of_msg|>."}, id="content"
+        ),
+    ],
+)
+def test_a_sampled_completion_takes_structure_only_from_its_control_tokens(
+    reply: ChatMessage,
+) -> None:
+    r = xtml_renderer(FakeXtmlTokenizer())
+    (turn,) = r.per_turn_examples([LITERAL_CONTROL_ROW[0], reply], [])
+    completion = [t for t, w in zip(turn.target_tokens, turn.weights, strict=True) if w]
+
+    parsed = r.parse_completion(completion)
+
+    assert parsed.format_valid
+    assert parsed.message["content"] == reply["content"]
+    expected = [json.loads(c["function"]["arguments"]) for c in reply.get("tool_calls", [])]
+    found = [json.loads(c["function"]["arguments"]) for c in parsed.message.get("tool_calls", [])]
+    assert found == expected
+
+
+def test_a_parser_without_control_tokens_reads_the_completion_s_text() -> None:
+    r = renderer()
+    (turn,) = r.per_turn_examples(TOOL_ROW[:3], [WEATHER_TOOL])
+    completion = [t for t, w in zip(turn.target_tokens, turn.weights, strict=True) if w]
+    assert r.parse_completion(completion, [WEATHER_TOOL]) == r.parse_response(
+        r.decode(completion), [WEATHER_TOOL]
+    )

@@ -75,7 +75,7 @@ from pup_finetune.rendering.base import (
     RendererErrorCode,
     ToolSpec,
 )
-from pup_finetune.rendering.parsers import ResponseParser
+from pup_finetune.rendering.parsers import ControlTokenParser, ResponseParser, Segment
 from pup_finetune.rendering.tokens import TokenizedExample
 from pup_finetune.storage import canonical_json
 
@@ -599,6 +599,24 @@ class HFChatTemplateRenderer:
 
     def parse_response(self, text: str, tools: Sequence[ToolSpec] = ()) -> ParsedResponse:
         return self._parser.parse(text, tools)
+
+    def parse_completion(
+        self, tokens: Sequence[int], tools: Sequence[ToolSpec] = ()
+    ) -> ParsedResponse:
+        if not isinstance(self._parser, ControlTokenParser):
+            return self._parser.parse(self.decode(tokens), tools)
+        controls = {self._single_token(token): token for token in self._parser.control_tokens}
+        segments: list[Segment] = []
+        start = 0
+        for index, token in enumerate(tokens):
+            if token in controls:
+                if start < index:
+                    segments.append((self.decode(tokens[start:index]), False))
+                segments.append((controls[token], True))
+                start = index + 1
+        if start < len(tokens):
+            segments.append((self.decode(tokens[start:]), False))
+        return self._parser.parse_segments(segments, tools)
 
     def identity(self) -> dict[str, str]:
         template = self._chat_tokenizer().chat_template

@@ -351,6 +351,7 @@ class RendererContract:
                 parsed = renderer.parse_response(renderer.decode(completion), tools)
                 assert parsed.format_valid
                 assert _comparable(parsed.message) == _comparable(messages[turn])
+                assert renderer.parse_completion(completion, tools) == parsed
 
     def test_parse_response_keeps_declared_argument_types(self, renderer: Renderer) -> None:
         call = {

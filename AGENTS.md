@@ -720,7 +720,9 @@ Source lives under `src/pup_finetune/`.
   `encoding/encoding_dsv4.py` for the messages we train on, held to it by the `tokenizer`
   tests). `parsers.py` has the `ResponseParser`s (`Qwen3XmlToolParser`,
   `Qwen3_5XmlToolParser`, `GlmXmlToolParser`, `JsonToolCallParser`, `DeepSeekDsmlParser`,
-  `KimiXtmlParser`, `MuseAtemParser`) that turn sampled text back into a message;
+  `KimiXtmlParser`, `MuseAtemParser`) that turn sampled text back into a message (a
+  `ControlTokenParser`, Kimi's, is also given the completion split at its control tokens, so
+  text that spells one stays text: `Renderer.parse_completion`, which the samplers call);
   `families.py` is the model-family table (`qwen3_8`, `qwen3_5`, `glm5_3`, `kimi_k3`,
   `deepseek_v4`, `muse_glimmer`), each entry a tokenizer, revision, parser and stop tokens,
   and when it needs them `trust_remote_code` (Kimi K3 only), a `chat_encoder` (DeepSeek-V4)

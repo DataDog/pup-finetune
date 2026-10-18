@@ -92,6 +92,9 @@ an assistant message. `transformers` comes from the optional `hf` extra and load
   inference side: the prompt a sampler continues, where it stops, and how a completion becomes
   an OpenAI assistant message plus a `format_valid` flag. `parse_response` takes the prompt's
   tools, since a format can write argument values untyped (Qwen3.8 writes strings unquoted).
+  Samplers call `parse_completion` with the sampled token ids: it parses their text, except
+  that Kimi K3's parser, whose control tokens a reply can spell as text, takes structure only
+  from the control tokens sampled.
 - `prompt_refusal` is the error `generation_prompt_tokens` would raise for what the messages
   hold, found without a tokenizer, so planning can leave out a case no sampler could
   continue.

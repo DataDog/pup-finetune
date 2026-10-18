@@ -71,6 +71,12 @@ false and a best-effort message. These tool-call formats are covered:
 Each strips one trailing end-of-turn token. Model families pick a parser by name from
 :data:`PARSERS`. A parser is also given the tools the prompt declared: the XML formats need
 their parameter types to read a value back (see :class:`Qwen3XmlToolParser`).
+
+Kimi K3's tokenizer keeps message text apart from its control tokens, so a reply may spell
+``<|close|>`` as text. A :class:`ControlTokenParser` such as :class:`KimiXtmlParser` is also
+given the sampled completion split at its control tokens
+(:meth:`~pup_finetune.rendering.base.Renderer.parse_completion`), and reads structure only
+from the tokens themselves.
 """
 
 from __future__ import annotations
@@ -81,7 +87,7 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, ClassVar, Protocol
+from typing import Any, ClassVar, Protocol, runtime_checkable
 
 from pup_finetune.rendering.base import ChatMessage, ParsedResponse, ToolSpec
 from pup_finetune.storage import loads_finite
@@ -122,6 +128,28 @@ class ResponseParser(Protocol):
         ``tools`` are the tools the prompt declared, in OpenAI format. A parser may read
         argument types from them, and accepts tools of any shape without raising.
         """
+        ...
+
+
+Segment = tuple[str, bool]
+"""``(text, is_control)``: one control token's spelling, or text sampled between them."""
+
+
+@runtime_checkable
+class ControlTokenParser(ResponseParser, Protocol):
+    """A parser for a format whose control tokens a reply can also spell as text: given the
+    completion split at those tokens, it reads structure only from the tokens."""
+
+    @property
+    def control_tokens(self) -> tuple[str, ...]:
+        """The control tokens, as their tokenizer spells them."""
+        ...
+
+    def parse_segments(
+        self, segments: Sequence[Segment], tools: Sequence[ToolSpec] = ()
+    ) -> ParsedResponse:
+        """The completion, split into :data:`Segment` runs at :attr:`control_tokens`, as a
+        message. Never raises."""
         ...
 
 
@@ -526,29 +554,54 @@ def _dsml_call(invoke: re.Match[str]) -> tuple[str, dict[str, Any]] | None:
     return invoke.group(1), arguments
 
 
-_XTML_OPEN = re.escape("<|open|>")
-_XTML_CLOSE = re.escape("<|close|>")
-_XTML_SEP = re.escape("<|sep|>")
-_KIMI_END = "<|end_of_msg|>"
-_KIMI_MESSAGE_CLOSE = "<|close|>message<|sep|>"
-_KIMI_CHANNELS = re.compile(
-    rf"(?P<reasoning>.*?){_XTML_CLOSE}think{_XTML_SEP}"
-    rf"{_XTML_OPEN}response{_XTML_SEP}(?P<content>.*?){_XTML_CLOSE}response{_XTML_SEP}"
-    rf"(?:{_XTML_OPEN}tools{_XTML_SEP}(?P<calls>.*){_XTML_CLOSE}tools{_XTML_SEP})?",
-    re.DOTALL,
-)
-_KIMI_CALL = re.compile(
-    rf'{_XTML_OPEN}call tool="(?P<name>[^"]+)" index="(?P<index>\d+)"{_XTML_SEP}'
-    rf"(?P<arguments>.*?){_XTML_CLOSE}call{_XTML_SEP}",
-    re.DOTALL,
-)
-_KIMI_ARGUMENT = re.compile(
-    rf'{_XTML_OPEN}argument key="(?P<key>[^"]*)" '
-    rf'type="(?P<type>string|number|boolean|null|object|array)"{_XTML_SEP}'
-    rf"(?P<value>.*?){_XTML_CLOSE}argument{_XTML_SEP}",
-    re.DOTALL,
-)
-_KIMI_MARKERS = ("<|open|>", "<|close|>", "<|sep|>", _KIMI_END)
+@dataclass(frozen=True, slots=True)
+class _Xtml:
+    """Kimi K3's XTML grammar, with its control tokens spelled as given: as text, or as
+    stand-ins for sampled control tokens."""
+
+    end: str
+    message_close: str
+    think_close: str
+    markers: tuple[str, ...]
+    channels: re.Pattern[str]
+    call: re.Pattern[str]
+    argument: re.Pattern[str]
+
+
+def _xtml(open_tag: str, close_tag: str, sep: str, end: str) -> _Xtml:
+    o, c, s = map(re.escape, (open_tag, close_tag, sep))
+    return _Xtml(
+        end=end,
+        message_close=f"{close_tag}message{sep}",
+        think_close=f"{close_tag}think{sep}",
+        markers=(open_tag, close_tag, sep, end),
+        channels=re.compile(
+            rf"(?P<reasoning>.*?){c}think{s}{o}response{s}(?P<content>.*?){c}response{s}"
+            rf"(?:{o}tools{s}(?P<calls>.*){c}tools{s})?",
+            re.DOTALL,
+        ),
+        call=re.compile(
+            rf'{o}call tool="(?P<name>[^"]+)" index="(?P<index>\d+)"{s}'
+            rf"(?P<arguments>.*?){c}call{s}",
+            re.DOTALL,
+        ),
+        argument=re.compile(
+            rf'{o}argument key="(?P<key>[^"]*)" '
+            rf'type="(?P<type>string|number|boolean|null|object|array)"{s}'
+            rf"(?P<value>.*?){c}argument{s}",
+            re.DOTALL,
+        ),
+    )
+
+
+_KIMI_CONTROLS = ("<|open|>", "<|close|>", "<|sep|>", "<|end_of_msg|>")
+_KIMI_STAND_INS = ("\ue000", "\ue001", "\ue002", "\ue003")
+"""Private-use characters that stand in for the sampled control tokens, so text that spells
+a control token never matches the grammar."""
+_XTML_TEXT = _xtml(*_KIMI_CONTROLS)
+_XTML_TOKENS = _xtml(*_KIMI_STAND_INS)
+_STAND_IN = dict(zip(_KIMI_CONTROLS, _KIMI_STAND_INS, strict=True))
+_SPELLING = str.maketrans(dict(zip(_KIMI_STAND_INS, _KIMI_CONTROLS, strict=True)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -562,36 +615,57 @@ class KimiXtmlParser:
     (``&quot;``, ``&amp;``). Calls must be numbered from 1 in order. Text without the
     channels is format-invalid, its reasoning kept; a malformed tools channel stays in
     ``content`` as raw text.
+
+    Kimi's tokenizer encodes message text apart from its control tokens, so text may spell
+    one. :meth:`parse_segments` splits structure only at the sampled control tokens;
+    :meth:`parse`, given text alone, takes every spelling as a control token.
     """
 
     name: ClassVar[str] = "kimi_xtml"
-    version: ClassVar[str] = "1"
+    version: ClassVar[str] = "2"
+    control_tokens: ClassVar[tuple[str, ...]] = _KIMI_CONTROLS
 
     def parse(self, text: str, tools: Sequence[ToolSpec] = ()) -> ParsedResponse:
-        body = text.removesuffix(_KIMI_END)
-        closed = body.endswith(_KIMI_MESSAGE_CLOSE)
-        channels = _KIMI_CHANNELS.fullmatch(body.removesuffix(_KIMI_MESSAGE_CLOSE))
-        if channels is None:
-            reasoning = body.partition("<|close|>think<|sep|>")[0]
-            return ParsedResponse(_assistant("", reasoning, []), format_valid=False)
-        content, reasoning = channels["content"], channels["reasoning"]
-        calls: list[tuple[str, dict[str, Any]]] = []
-        valid = closed
-        if channels["calls"] is not None:
-            parsed = [
-                _kimi_call(match, position)
-                for position, match in enumerate(
-                    _sequence(channels["calls"], _KIMI_CALL, "") or [], start=1
-                )
-            ]
-            if not parsed or None in parsed:
-                valid = False
-                content += channels["calls"]
-            else:
-                calls = [call for call in parsed if call is not None]
-        if any(marker in reasoning or marker in content for marker in _KIMI_MARKERS):
+        return _parse_xtml(text, _XTML_TEXT)
+
+    def parse_segments(
+        self, segments: Sequence[Segment], tools: Sequence[ToolSpec] = ()
+    ) -> ParsedResponse:
+        text = "".join(_STAND_IN[part] if control else part for part, control in segments)
+        planted = any(_marked(part, _XTML_TOKENS) for part, control in segments if not control)
+        parsed = _parse_xtml(text, _XTML_TOKENS)
+        message = {
+            key: value.translate(_SPELLING) if key in ("content", "reasoning_content") else value
+            for key, value in parsed.message.items()
+        }
+        return ParsedResponse(message, format_valid=parsed.format_valid and not planted)
+
+
+def _parse_xtml(text: str, xtml: _Xtml) -> ParsedResponse:
+    body = text.removesuffix(xtml.end)
+    closed = body.endswith(xtml.message_close)
+    channels = xtml.channels.fullmatch(body.removesuffix(xtml.message_close))
+    if channels is None:
+        reasoning = body.partition(xtml.think_close)[0]
+        return ParsedResponse(_assistant("", reasoning, []), format_valid=False)
+    content, reasoning = channels["content"], channels["reasoning"]
+    calls: list[tuple[str, dict[str, Any]]] = []
+    valid = closed
+    if channels["calls"] is not None:
+        parsed = [
+            _kimi_call(match, position, xtml)
+            for position, match in enumerate(
+                _sequence(channels["calls"], xtml.call, "") or [], start=1
+            )
+        ]
+        if not parsed or None in parsed:
             valid = False
-        return ParsedResponse(_assistant(content, reasoning, calls), format_valid=valid)
+            content += channels["calls"]
+        else:
+            calls = [call for call in parsed if call is not None]
+    if _marked(reasoning, xtml) or _marked(content, xtml):
+        valid = False
+    return ParsedResponse(_assistant(content, reasoning, calls), format_valid=valid)
 
 
 _KIMI_TYPES: Mapping[str, tuple[type, ...]] = MappingProxyType(
@@ -609,14 +683,21 @@ def _unescape(value: str) -> str:
     return value.replace("&quot;", '"').replace("&amp;", "&")
 
 
-def _kimi_call(call: re.Match[str], position: int) -> tuple[str, dict[str, Any]] | None:
-    arguments_found = _sequence(call["arguments"], _KIMI_ARGUMENT, "")
-    if arguments_found is None or call["index"] != str(position):
+def _marked(text: str, xtml: _Xtml) -> bool:
+    """Whether ``text`` holds a control token, which no name, key or value may."""
+    return any(marker in text for marker in xtml.markers)
+
+
+def _kimi_call(
+    call: re.Match[str], position: int, xtml: _Xtml
+) -> tuple[str, dict[str, Any]] | None:
+    arguments_found = _sequence(call["arguments"], xtml.argument, "")
+    if arguments_found is None or call["index"] != str(position) or _marked(call["name"], xtml):
         return None
     arguments: dict[str, Any] = {}
     for argument in arguments_found:
         key, kind = _unescape(argument["key"]), argument["type"]
-        if key in arguments:
+        if key in arguments or _marked(argument["key"] + argument["value"], xtml):
             return None
         if kind == "string":
             arguments[key] = argument["value"]
