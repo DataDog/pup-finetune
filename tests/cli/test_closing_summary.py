@@ -428,11 +428,11 @@ CHECKS_AGREEMENT = {
 
 
 def test_a_triage_with_checks_counts_the_rows_they_dropped() -> None:
-    result = {**EXAMPLES["dataset triage"], "checks": {"failed": 4, "rows_checked": 22}}
-    found = summarize("dataset triage", result)
+    checks = {"failed": 4, "rows_checked": 22, "labels": {"applied": 3, "unchanged": 1}}
+    found = summarize("dataset triage", {**EXAMPLES["dataset triage"], "checks": checks})
     assert found is not None
     assert found.lines[0] == (
-        "triage complete: 12 kept, 3 dropped, 1 undecided, 2 too long, 4 dropped by checks"
+        "triage complete: 12 kept, 3 dropped, 1 undecided, 2 too long, 3 newly dropped by checks"
     )
 
 

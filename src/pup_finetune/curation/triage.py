@@ -565,6 +565,9 @@ class TriagePlan:
     """Rows not reviewed because a check labeled them, without ``checks``."""
     stale_check_labels: list[str] = field(default_factory=list)
     """Rows the checks ran on whose ``by: check`` label every check now passes."""
+    checks_to_label: int = 0
+    """Rows of :attr:`checked` whose label would change: unlabeled, labeled by a judge, or
+    for another reason."""
 
     @property
     def judged_by(self) -> Criteria:
@@ -669,10 +672,14 @@ class TriagePlan:
                 f"{counted(len(self.rows), 'row')} you or the agent labeled, and report how "
                 "often they agree; nothing is labeled"
             )
-        if self.checked and self.references is None:
-            action = (
-                f"label the {counted(len(self.checked), 'row')} the checks fail (free), {action}"
+        if self.checks_to_label and self.references is None:
+            fail = counted(len(self.checked), "row")
+            which = (
+                f"the {fail}"
+                if self.checks_to_label == len(self.checked)
+                else f"{self.checks_to_label} of the {fail}"
             )
+            action = f"label {which} the checks fail (free), {action}"
         preview: dict[str, Any] = {
             "action": action,
             "billing": "; ".join(
@@ -975,6 +982,12 @@ def plan_triage(
         rows_checked=len(rows) if checks is not None else 0,
         skipped_checked=skipped_checked,
         stale_check_labels=stale_checked,
+        checks_to_label=sum(
+            1
+            for row_id, failure in checked.items()
+            if (label := labels.get(row_id)) is None
+            or (label.keep, label.reason, label.by) != (False, failure.label_reason, "check")
+        ),
     )
 
 

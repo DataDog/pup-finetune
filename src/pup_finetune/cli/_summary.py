@@ -731,7 +731,7 @@ def triage_summary(result: Mapping[str, Any]) -> Summary:
         f"{result.get('undecided', 0)} undecided, {result.get('too_long', 0)} too long"
     )
     if isinstance(checks := result.get("checks"), Mapping):
-        headline += f", {checks.get('failed', 0)} dropped by checks"
+        headline += f", {(checks.get('labels') or {}).get('applied', 0)} newly dropped by checks"
     details = [calls]
     reasons = [
         f"{entry.get('reason')} ({entry.get('count')})"

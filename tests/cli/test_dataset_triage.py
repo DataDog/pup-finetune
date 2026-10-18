@@ -720,7 +720,7 @@ def test_checks_run_first_and_the_council_judges_only_the_rest(
     data = output(result)
     assert data["rows_reviewed"] == rows - 3
     assert data["checks"]["labels"] == {"applied": 3, "unchanged": 0}
-    assert "too long, 3 dropped by checks;" in result.stderr
+    assert "too long, 3 newly dropped by checks;" in result.stderr
     judged = {
         json.loads(line)["row_id"] for line in (dataset / JUDGMENTS_FILE).read_text().splitlines()
     }
@@ -790,6 +790,39 @@ def test_checks_alone_on_a_triaged_dataset_offer_no_council(
     data = output(invoke(*args))
     assert data["pipeline"]["triage"] == "complete"
     assert not any("--rubric" in s["command"] for s in data["next_steps"])
+
+
+def test_checks_count_only_the_labels_they_change(
+    dataset: Path, chat: FakeChatApi, tmp_path: Path
+) -> None:
+    subset = row_file(tmp_path, "row-plain-001", "row-inventory-001")
+    checks = ["dataset", "triage", str(dataset), "--checks", str(ROW_CHECKS)]
+    assert invoke(*checks, "--rows", str(subset)).exit_code == 0
+    args = [*checks, "--rule", "stay on topic", "--judges", "fireworks/j1"]
+    preview = output(invoke(*args))["preview"]
+    assert preview["action"].startswith("label 1 of the 3 rows the checks fail (free), have")
+    result = invoke(*args, "--confirm")
+    assert result.exit_code == 0, result.stderr
+    assert "too long, 1 newly dropped by checks;" in result.stderr
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(
+        "".join(
+            json.dumps({"id": row.id, "keep": True, "reason": "fine"}) + "\n"
+            for row in DatasetDir(dataset).rows()
+            if row.id not in CHECKED
+        )
+    )
+    other = tmp_path / "other"
+    assert invoke("dataset", "import", str(other), "--file", str(ROWS)).exit_code == 0
+    assert invoke("dataset", "triage", str(other), "--checks", str(ROW_CHECKS)).exit_code == 0
+    assert invoke("dataset", "label", str(other), "--file", str(labels)).exit_code == 0
+    refused = invoke("dataset", "triage", str(other), *args[3:])
+    assert refused.exit_code == 2
+    data = output(refused)
+    assert data["preview"]["refused"] == (
+        "there is no row to review: every accepted row is labeled by you, the agent or a check"
+    )
+    assert data["next_command"] is None
 
 
 def test_an_edited_check_file_reports_stale_check_labels(

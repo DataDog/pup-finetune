@@ -342,11 +342,11 @@ def triage_rows(
             preview["refused"] = refused
             preview["refused_hint"] = template_hint
     hint = template_hint if refused is not None else None
-    if refused is None and not plan.rows and not plan.checked:
+    if refused is None and not plan.rows and not plan.checks_to_label:
         among = "row --rows names" if rows is not None else "accepted row"
         refused = "there is no row to review: " + (
             f"every {among} is labeled by you, the agent or a check"
-            if plan.skipped_checked
+            if plan.skipped_checked or plan.checked
             else f"every {among} is labeled by you or the agent"
             if plan.skipped_labeled
             else "the dataset has no accepted rows"
