@@ -240,7 +240,7 @@ To choose the model, first compare candidates on the test split (paid; it previe
 
 ```sh
 pup finetune benchmark datasets/my-agent --models qwen3p5-9b,baseten/glm-5p3-flash
-pup finetune train --dataset datasets/my-agent --model <MODEL> --detach
+pup finetune train --provider <PROVIDER> --dataset datasets/my-agent --model <MODEL> --detach
 pup finetune status ft-20261007183443-a8b181 --watch --timeout 90s
 ```
 
@@ -314,6 +314,7 @@ Check:
 
 - [ ] The user authorized this deployment after seeing the billing line.
 - [ ] The smoke test passed, and the user knows the undeploy command.
+- [ ] The user knows `muse-glimmer-30b` may write today's date where training pinned one.
 
 ## Provider notes
 
@@ -322,7 +323,7 @@ Check:
 | `--model` | Base model | Notes |
 | --- | --- | --- |
 | `qwen3p5-9b` | `Qwen/Qwen3.5-9B` | Supports reasoning |
-| `glm-5p3-flash` | `zai-org/GLM-5.3-Flash` | No reasoning |
+| `glm-5p3-flash` | `zai-org/GLM-5.3-Flash` | Supports reasoning |
 | `qwen3p8-27b` | `Qwen/Qwen3.8-27B` | Supports reasoning |
 | `kimi-k3` | `moonshotai/Kimi-K3` | Supports reasoning; its tokenizer runs code from its repository |
 

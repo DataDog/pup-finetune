@@ -187,7 +187,7 @@ def test_every_provider_and_model_passed_exists(doc: Path) -> None:
                 name = name or offered_by[0]
                 get_provider(name, Runtime()).resolve_model(model)
                 providers.add(name)
-            elif name is not None:
+            elif name is not None and not name.startswith("<"):
                 get_provider(name, Runtime())
                 providers.add(name)
     assert {"fireworks", "baseten"} <= providers, f"{doc.name} names only {providers}"

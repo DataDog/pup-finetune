@@ -76,7 +76,10 @@ SPECS: Final[tuple[ProfileSpec, ...]] = (
         family="deepseek_v4",
         max_seq_len=65_536,
         supports_reasoning=True,
-        notes="DeepSeek-V4 Flash 0731; reasoning is kept in history when tools are declared.",
+        notes=(
+            "DeepSeek-V4 Flash 0731; reasoning is kept in history when tools are declared, "
+            "and each turn needs a user or tool message before it."
+        ),
     ),
     ProfileSpec(
         alias="muse-glimmer-30b",
