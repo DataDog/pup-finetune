@@ -822,6 +822,20 @@ def _prepare(plan: BenchmarkPlan, candidate: Candidate, inputs: Mapping[str, Any
     )
 
 
+def _attach(plan: BenchmarkPlan, candidate: Candidate) -> None:
+    """Attach the plan's evaluators to ``candidate``'s directory, which has nothing left to
+    replay, so their headline and spec's files are recorded as a replay would."""
+    from pup_finetune.evaluation.evaluators import attach_evaluators
+    from pup_finetune.evaluation.replay import EvalDir
+
+    if plan.evaluators is None:
+        return
+    eval_dir = EvalDir(plan.model_dir(candidate))
+    with eval_dir.lock():
+        eval_dir.check_identity(plan.identity(candidate))
+        attach_evaluators(eval_dir.evaluators_path, plan.evaluators)
+
+
 def _share(
     plan: BenchmarkPlan,
     candidate: Candidate,
@@ -877,6 +891,7 @@ def _replay_model(
     remaining = plan.remaining(candidate)
     if not remaining["judge"] and not any(remaining.get("evaluators", {}).values()):
         # A rerun of a complete model shares what an earlier one could not.
+        _attach(plan, candidate)
         _share(plan, candidate, inputs, warnings)
         return None
     config = plan.judge

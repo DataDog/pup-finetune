@@ -601,3 +601,22 @@ def test_a_stored_set_s_command_runs_only_the_evaluators_it_previewed(
     assert rerun(preview["next_command"]).exit_code == 0
     stored = json.loads((dataset / "benchmark" / "fake-model" / "evaluators.json").read_text())
     assert [item["name"] for item in stored["evaluators"]] == ["no_card_numbers"]
+
+
+def test_a_rerun_with_nothing_left_records_the_spec_s_headline_and_files(
+    dataset: Path, tmp_path: Path
+) -> None:
+    spec_dir = tmp_path / "spec"
+    shutil.copytree(ROWS.parent.parent / "evaluators", spec_dir)
+    check = '[[evaluator]]\nname = "no_card_numbers"\ntype = "check"\nfile = "checks.py"\n'
+    (spec_dir / "checks.toml").write_text(check)
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--confirm")
+    assert invoke(*args, "--evaluators", str(spec_dir / "checks.toml")).exit_code == 0
+    moved = tmp_path / "moved"
+    spec_dir.rename(moved)
+    (moved / "checks.toml").write_text(f'headline = "no_card_numbers"\n{check}')
+    assert invoke(*args, "--evaluators", str(moved / "checks.toml")).exit_code == 0
+    stored = json.loads((dataset / "benchmark" / "fake-model" / "evaluators.json").read_text())
+    assert stored["headline"] == "no_card_numbers"
+    assert stored["evaluators"][0]["file"] == str(moved / "checks.py")
+    assert output(invoke(*args))["recommendation"]["headline"] == "no_card_numbers"
