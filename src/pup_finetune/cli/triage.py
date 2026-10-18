@@ -399,6 +399,18 @@ def triage_rows(
     }
     if complete:
         merge_next(data, dataset_next(dataset, directory, summary=summary))
+        if checks is not None:
+            finish = template("dataset", "triage", directory, "--rubric", "<RUBRIC_FILE>")
+            data["next_steps"] = [
+                step(
+                    shlex.join(every_row),
+                    "finish the triage over every row with the same rubric, judges and checks, "
+                    "reusing the votes cast (paid; it previews first)",
+                )
+                if entry["command"] == finish
+                else entry
+                for entry in data["next_steps"]
+            ]
         data["hint"] = (
             "review a sample of the decisions with the user (`dataset sample "
             "--include-dropped`) before training; correct any with `dataset label`"

@@ -731,6 +731,18 @@ def test_checks_run_first_and_the_council_judges_only_the_rest(
     assert output(without)["preview"]["rows"]["skipped_checked"] == 3
 
 
+def test_a_checked_sample_finishes_with_the_checks(dataset: Path, chat: FakeChatApi) -> None:
+    args = ["dataset", "triage", str(dataset), "--rule", "stay on topic"]
+    args += ["--checks", str(ROW_CHECKS), "--judges", "fireworks/j1"]
+    result = invoke(*args, "--max-rows", "4", "--confirm")
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert (data["status"], data["pipeline"]["triage"]) == ("complete", "incomplete")
+    commands = [entry["command"] for entry in data["next_steps"]]
+    assert shlex.join(["pup", "finetune", *args]) in commands
+    assert not any(command.endswith(" --rubric <RUBRIC_FILE>") for command in commands)
+
+
 def test_an_edited_check_file_reports_stale_check_labels(
     dataset: Path, chat: FakeChatApi, tmp_path: Path
 ) -> None:
