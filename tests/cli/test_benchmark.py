@@ -509,7 +509,9 @@ def test_the_preview_fails_without_the_key_of_a_provider_it_generates_with(
     result = invoke("benchmark", str(dataset), "--models", models)
 
     assert result.exit_code == 2
-    assert "no fireworks API key found for generating with keyed/fake-model" in result.stderr
+    # train's preflight refuses a missing key with the same error (test_train_fireworks.py).
+    missing = "Error [usage]: no fireworks API key found for generating with keyed/fake-model\n"
+    assert result.stderr.startswith(missing)
     assert "--confirm" not in result.stdout
 
     monkeypatch.setenv("PUP_READ_ONLY", "1")

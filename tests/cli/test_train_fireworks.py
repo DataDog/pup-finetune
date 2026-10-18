@@ -119,6 +119,26 @@ def _no_session_left(fw: FakeFireworksTrainingClient) -> bool:
     return not any(state.alive for state in fw.sessions.values())
 
 
+def test_the_preview_without_a_key_is_a_usage_error(
+    dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fw: CrashingFireworks
+) -> None:
+    def keyless(name: str, runtime: Runtime) -> Provider:
+        return FireworksProvider(
+            runtime,
+            env={},
+            transport=FakeFireworksApi().transport,
+            tokenizer=FakeChatTokenizer(),
+            training_client=lambda _key: fw,
+        )
+
+    monkeypatch.setattr(train_module, "get_provider", keyless)
+
+    result = train(dataset, tmp_path / "run")
+
+    assert result.exit_code == 2
+    assert result.stderr.startswith("Error [usage]: no fireworks API key found\n")
+
+
 def test_train_on_fireworks_runs_end_to_end(
     dataset: Path, tmp_path: Path, fw: CrashingFireworks
 ) -> None:
