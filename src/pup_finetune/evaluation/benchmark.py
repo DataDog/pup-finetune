@@ -461,7 +461,7 @@ def plan_benchmark(
         provider = get_provider(provider_name, runtime)
         profile = provider.resolve_model(alias)
         renderer = provider.renderer(profile)
-        renderer.stop_token_ids  # noqa: B018 - a family whose tokens do not resolve fails here
+        _resolve_stop_tokens(renderer)
         candidate = Candidate(
             provider=provider_name,
             profile=profile,
@@ -506,6 +506,13 @@ def plan_benchmark(
             hint="benchmark the models that leave cases out on their own",
         )
     return plan
+
+
+def _resolve_stop_tokens(renderer: Renderer) -> None:
+    """Resolve ``renderer``'s stop tokens, and with them its parser's control tokens, which
+    raises for a family where one is not a single token of its tokenizer: the preview fails
+    then, before any paid call, instead of the model's session."""
+    renderer.stop_token_ids  # noqa: B018
 
 
 def _stored_judge(out_dir: Path, candidates: Sequence[Candidate]) -> str | None:
