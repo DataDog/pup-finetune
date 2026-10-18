@@ -113,7 +113,7 @@ def test_rows_only_checks_labeled_are_still_to_review() -> None:
     checked = output(invoke("triage", "ds", "--checks", str(checks)))
     assert checked["next_command"] == "pup finetune dataset sample ds --count 20"
     assert [step["command"] for step in checked["next_steps"]] == [
-        f"pup finetune dataset triage ds --checks {checks} --rubric <RUBRIC_FILE>",
+        f"pup finetune dataset triage ds --checks {checks} --rubric <RUBRIC_FILE> --max-rows 20",
         "pup finetune dataset label ds --file <LABELS_FILE>",
     ]
     shown = output(invoke("show", "ds"))

@@ -673,8 +673,10 @@ def test_checks_alone_label_at_once_with_no_judge_and_no_key(
     assert labels["row-plain-001"].reason == "check declares_tools: the row declares no tools"
     assert {label.by for label in labels.values()} == {"check"}
     council = shlex.join(["pup", "finetune", "dataset", "triage", str(dataset)])
-    council += f" --checks {ROW_CHECKS} --rubric <RUBRIC_FILE>"
+    council += f" --checks {ROW_CHECKS} --rubric <RUBRIC_FILE> --max-rows 20"
     assert data["next_steps"][0]["command"] == council
+    why = data["next_steps"][0]["why"]
+    assert "`pup finetune dataset triage --print-template` prints a rubric" in why
     assert not (dataset / JUDGMENTS_FILE).exists()
     again = invoke("dataset", "triage", str(dataset), "--checks", str(ROW_CHECKS), "--confirm")
     assert again.exit_code == 0, again.stderr
@@ -764,6 +766,30 @@ def test_dataset_show_finishes_a_checked_sample_with_its_checks(
     entry = next(s for s in steps if s["command"].startswith(finish))
     assert entry["command"] == finish
     assert f"{checks}, which no longer exists" in entry["why"]
+
+
+def test_checks_alone_on_an_incomplete_triage_offer_one_step_to_finish_it(
+    dataset: Path, chat: FakeChatApi
+) -> None:
+    args = ["dataset", "triage", str(dataset), "--rule", "stay on topic"]
+    assert invoke(*args, "--judges", "fireworks/j1", "--max-rows", "4", "--confirm").exit_code == 0
+    checks = ["dataset", "triage", str(dataset), "--checks", str(ROW_CHECKS)]
+    data = output(invoke(*checks, "--max-rows", "6"))
+    assert data["pipeline"]["triage"] == "incomplete"
+    councils = [s for s in data["next_steps"] if "--rubric" in s["command"]]
+    finish = shlex.join(["pup", "finetune", *checks]) + " --rubric <RUBRIC_FILE>"
+    assert [s["command"] for s in councils] == [finish]
+    assert councils[0]["why"].startswith("finish the triage")
+
+
+def test_checks_alone_on_a_triaged_dataset_offer_no_council(
+    dataset: Path, chat: FakeChatApi
+) -> None:
+    args = ["dataset", "triage", str(dataset), "--checks", str(ROW_CHECKS)]
+    assert invoke(*args, "--rule", "x", "--judges", "fireworks/j1", "--confirm").exit_code == 0
+    data = output(invoke(*args))
+    assert data["pipeline"]["triage"] == "complete"
+    assert not any("--rubric" in s["command"] for s in data["next_steps"])
 
 
 def test_an_edited_check_file_reports_stale_check_labels(

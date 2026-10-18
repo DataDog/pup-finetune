@@ -31,7 +31,7 @@ from pup_finetune.cli._common import CommandResult, current_context, run_command
 from pup_finetune.cli._dirs import require_dataset_dir
 from pup_finetune.cli._flags import flag_name, given, require_alone, require_enablers
 from pup_finetune.cli._presentation import CommandDoc, Safety, default_note, describe
-from pup_finetune.cli.dataset import dataset_next, merge_next
+from pup_finetune.cli.dataset import REVIEW_SAMPLE_SIZE, dataset_next, merge_next
 from pup_finetune.curation import triage
 from pup_finetune.curation.pipeline import pipeline_state
 from pup_finetune.data.dataset_dir import DatasetDir
@@ -311,7 +311,8 @@ def triage_rows(
         labeling += ["--max-rows", str(max_rows)]
     rerun = [*args, "--reset-triage"] if reset_triage else args
     if criteria is None:
-        return _checks_result(dataset, directory, plan, triage.apply_check_labels(plan), args)
+        report = triage.apply_check_labels(plan)
+        return _checks_result(dataset, directory, plan, report, args, every_row)
     settings = {
         "rows_file": str(rows) if rows is not None else None,
         "max_rows": max_rows,
@@ -475,8 +476,10 @@ def _checks_result(
     plan: triage.TriagePlan,
     report: triage.TriageReport,
     args: list[str],
+    every_row: list[str],
 ) -> dict[str, Any]:
-    """The result of a run with ``--checks`` alone, which labeled the rows they fail."""
+    """The result of a run with ``--checks`` alone, which labeled the rows they fail.
+    ``every_row`` is ``args`` without ``--rows`` and ``--max-rows``."""
     summary = dataset.summary()
     stale = plan.stale_check_labels
     data: dict[str, Any] = {
@@ -495,18 +498,12 @@ def _checks_result(
     if plan.references is not None:
         data["agreement"] = {"checks": plan.check_agreement()}
     merge_next(data, dataset_next(dataset, directory, summary=summary))
-    if plan.rows:
-        council = template(*args[len(PROGRAM) :], "--rubric", "<RUBRIC_FILE>")
-        why = (
-            "measure the judge council against your labels on the rows the checks pass"
-            if plan.references is not None
-            else "have the judge council review the rows the checks pass"
-        )
-        # It pins --checks, so it stands for the first council step the dataset's state offers.
-        first = template("dataset", "triage", directory, "--rubric", "<RUBRIC_FILE>", "--max-rows")
+    council = _council_after_checks(dataset, plan, data["pipeline"]["triage"], args, every_row)
+    if council is not None:
+        # It pins --checks, so it stands for the council steps the dataset's state offers.
         data["next_steps"] = [
-            step(council, f"{why} (paid; it previews first)"),
-            *(s for s in data["next_steps"] if not s["command"].startswith(f"{first} ")),
+            council,
+            *(s for s in data["next_steps"] if not _council_step(s, directory)),
         ]
     if stale:
         data["hint"] = (
@@ -515,6 +512,48 @@ def _checks_result(
             "judge them"
         )
     return data
+
+
+def _council_after_checks(
+    dataset: DatasetDir,
+    plan: triage.TriagePlan,
+    state: str,
+    args: list[str],
+    every_row: list[str],
+) -> dict[str, str] | None:
+    """The council step after a run with ``--checks`` alone, pinning them, for the triage
+    ``state``; ``None`` when the council has no row to label."""
+    paid = "paid; it previews first"
+    if plan.references is None and state == "incomplete":
+        return step(
+            template(*every_row[len(PROGRAM) :], "--rubric", "<RUBRIC_FILE>"),
+            "finish the triage: the same --rubric and --judges resume it, reusing the votes "
+            f"cast, and --checks keeps the rows a check fails from the judges ({paid})",
+        )
+    words = [*args[len(PROGRAM) :], "--rubric", "<RUBRIC_FILE>"]
+    if plan.references is not None:
+        if not plan.rows:
+            return None
+        why = "measure the judge council against your labels on the rows the checks pass"
+    else:
+        labels = dataset.labels()
+        unjudged = any(
+            (label := labels.get(row.id)) is None or label.by == "check" for row in plan.rows
+        )
+        if not unjudged and state != "unreadable":
+            return None
+        why = "have the judge council review the rows the checks pass"
+        if args == every_row:
+            words += ["--max-rows", str(REVIEW_SAMPLE_SIZE)]
+    if state == "unreadable":
+        words.append("--reset-triage")
+        why = f"the triage files cannot be read (see the warning): fix or remove them, or {why}"
+        why += ", discarding every vote"
+    return step(
+        template(*words),
+        f"{why} ({paid}; `pup finetune dataset triage --print-template` prints a rubric to "
+        "start from)",
+    )
 
 
 def _row_ids(path: Path) -> frozenset[str]:
