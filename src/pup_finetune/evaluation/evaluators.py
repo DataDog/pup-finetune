@@ -506,14 +506,19 @@ def _identity(item: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def evaluators_conflict(
-    stored: Mapping[str, Any] | None, wanted: EvaluatorSet, *, out_dir: Path
+    stored: Mapping[str, Any] | None,
+    wanted: EvaluatorSet,
+    *,
+    out_dir: Path,
+    flag_dir: Path | None = None,
 ) -> SettingsConflict | None:
     """Why ``wanted`` cannot score in ``out_dir``, which has ``stored`` attached: an
-    evaluator it drops or changes, with a free ``--out-dir``; ``None`` when it can."""
+    evaluator it drops or changes, with a free ``--out-dir`` beside ``flag_dir`` (the
+    directory that flag names, ``out_dir`` by default); ``None`` when it can."""
     if stored is None:
         return None
     current = {evaluator.name: evaluator for evaluator in wanted.evaluators}
-    fresh = quoted(free_sibling(out_dir))
+    fresh = quoted(free_sibling(flag_dir or out_dir))
     for item in stored.get("evaluators") or []:
         name = item.get("name")
         evaluator = current.get(name)

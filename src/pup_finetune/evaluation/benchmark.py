@@ -252,6 +252,7 @@ class BenchmarkPlan:
                     stored_evaluators(eval_dir.evaluators_path),
                     self.evaluators,
                     out_dir=eval_dir.path,
+                    flag_dir=self.out_dir,
                 )
             ):
                 raise conflict
@@ -662,10 +663,9 @@ def plan_benchmark(
         cases = sample_conversations(cases, settings.max_rows, seed=settings.seed)
         sampled_from = conversations
     model_dirs = [EvalDir(settings.out_dir / candidate.target) for candidate in candidates]
-    stored = next(
-        (found for d in model_dirs if (found := stored_evaluators(d.evaluators_path)) is not None),
-        None,
-    )
+    records = [r for d in model_dirs if (r := stored_evaluators(d.evaluators_path)) is not None]
+    # Lists only grow, so the longest holds every other directory's evaluators.
+    stored = max(records, key=lambda record: len(record["evaluators"]), default=None)
 
     def pending(name: str) -> bool:
         return any(

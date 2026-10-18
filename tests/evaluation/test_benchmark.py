@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import dataclasses
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -23,17 +24,24 @@ from pup_finetune.evaluation.benchmark import (
     BenchmarkSettings,
     Candidate,
     leaderboard,
+    plan_benchmark,
     recommend,
     sample_conversations,
 )
 from pup_finetune.evaluation.cases import ReplayCase, cases_from_dataset
-from pup_finetune.evaluation.evaluators import CheckEvaluator, EvaluatorSet
+from pup_finetune.evaluation.evaluators import (
+    CheckEvaluator,
+    EvaluatorSet,
+    attach_evaluators,
+    load_spec,
+)
 from pup_finetune.evaluation.fake_judge import fake_judge_config
 from pup_finetune.evaluation.replay import EvalDir
 from pup_finetune.providers.fake import FAKE_PROFILE, FakeProvider
 from pup_finetune.runtime import Runtime
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
+CHECKS = ROWS.parent.parent / "evaluators" / "checks.py"
 
 
 @pytest.fixture
@@ -286,3 +294,27 @@ def test_the_headline_evaluator_ranks_the_models_and_drives_the_recommendation(
     assert (recommendation["model"], recommendation["headline"]) == ("fake-model", "short")
     assert (recommendation["pass_rate"], recommendation["verdict"]) == (1.0, "base_meets_target")
     assert "passes short" in recommendation["reason"]
+
+
+@pytest.mark.parametrize("order", [1, -1])
+def test_a_rerun_without_evaluators_continues_the_largest_attached_set(
+    plan: BenchmarkPlan, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, order: int
+) -> None:
+    monkeypatch.setenv("PUP_FINETUNE_DEV", "1")
+    runtime = Runtime.from_env()
+    profiles = [candidate.profile for candidate in plan.candidates]
+    monkeypatch.setattr(FakeProvider, "models", lambda self: profiles)
+    shutil.copy(CHECKS, tmp_path / "checks.py")
+    check = '[[evaluator]]\nname = "no_card_numbers"\ntype = "check"\nfile = "checks.py"\n'
+    text = check.replace('"no_card_numbers"', '"text"') + 'function = "answers_in_text"\n'
+    for candidate, body in zip(plan.candidates, (check, check + text), strict=True):
+        spec = tmp_path / f"{candidate.target}.toml"
+        spec.write_text(body)
+        eval_dir = EvalDir(plan.model_dir(candidate))
+        eval_dir.create()
+        found = load_spec(spec, judge=plan.judge, runtime=runtime)
+        attach_evaluators(eval_dir.evaluators_path, found)
+    models = [("fake-model", "fake"), ("fake-b", "fake")][::order]
+    again = plan_benchmark(runtime, plan.dataset_dir, models, plan.settings)
+    assert again.evaluator_names == ["no_card_numbers", "text"]
+    assert again.preview()["evaluators"]["source"] == "evaluation directory"

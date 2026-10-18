@@ -645,3 +645,15 @@ def test_the_share_command_continues_the_evaluators_without_the_spec(
     assert rerun(shared[1]).exit_code == 0
     stored = json.loads((dataset / "benchmark" / "fake-model" / "evaluators.json").read_text())
     assert [item["name"] for item in stored["evaluators"]] == ["no_card_numbers"]
+
+
+def test_a_conflict_s_hint_names_a_free_benchmark_directory(dataset: Path, tmp_path: Path) -> None:
+    spec_dir = tmp_path / "spec"
+    shutil.copytree(ROWS.parent.parent / "evaluators", spec_dir)
+    spec = spec_dir / "evals.toml"
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--evaluators", str(spec))
+    assert invoke(*args, "--confirm").exit_code == 0
+    spec.write_text(spec.read_text().replace('name = "polite"', 'name = "polite_v2"'))
+    conflict = invoke(*args)
+    assert conflict.exit_code == 2
+    assert f"pass --out-dir {dataset / 'benchmark-2'}" in conflict.stderr
