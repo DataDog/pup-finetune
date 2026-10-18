@@ -731,7 +731,8 @@ Source lives under `src/pup_finetune/`.
   user; its template's date is pinned in `chat_template_kwargs`), and a `check`, a
   `PromptCheck` that refuses a prompt the template opens no assistant turn after, and a
   trained turn after it, with `unsupported_message` (DeepSeek-V4 needs a user or tool message
-  before each turn); both by name and version in the renderer identity.
+  before each turn); each by name and version in the renderer identity, which leaves out
+  what a family does not have.
   The `hf` extra includes `tiktoken`, which Kimi K3's tokenizer code imports.
 - `evaluation/` - replay evaluation, provider-neutral. `cases.py` turns a dataset's kept
   test-split rows into `ReplayCase`s (`cases_from_dataset`, `build_cases`): one per trained

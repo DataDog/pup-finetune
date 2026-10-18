@@ -81,7 +81,7 @@ from pup_finetune.storage import canonical_json
 
 RENDERER = "hf-chat-template"
 """The implementation name recorded in :meth:`HFChatTemplateRenderer.identity`."""
-RENDERER_VERSION = "2"
+RENDERER_VERSION = "1"
 """Bumped whenever the tokens rendered for some conversation change."""
 
 INSTALL_HINT = install_hint("hf")
@@ -620,6 +620,10 @@ class HFChatTemplateRenderer:
 
     def identity(self) -> dict[str, str]:
         template = self._chat_tokenizer().chat_template
+        rules: dict[str, MessageRewrite | PromptCheck | None] = {
+            "message_rewrite": self._rewrite,
+            "prompt_check": self._check,
+        }
         return {
             "renderer": RENDERER,
             "renderer_version": RENDERER_VERSION,
@@ -632,8 +636,11 @@ class HFChatTemplateRenderer:
             "chat_template_kwargs": canonical_json(dict(self._template_kwargs)),
             "stop_tokens": canonical_json(list(self._stop_tokens)),
             "prefix_stable": "true" if self._prefix_stable else "false",
-            "message_rewrite": _pinned(self._rewrite),
-            "prompt_check": _pinned(self._check),
+            **{
+                key: f"{rule.name}@{rule.version}"
+                for key, rule in rules.items()
+                if rule is not None
+            },
             "transformers_version": transformers_version(),
         }
 
@@ -785,10 +792,6 @@ class HFChatTemplateRenderer:
                 f"{where}: encoding the turn after its prompt changed its text",
             )
         return prompt, joined
-
-
-def _pinned(rule: MessageRewrite | PromptCheck | None) -> str:
-    return "none" if rule is None else f"{rule.name}@{rule.version}"
 
 
 def _template_failure(where: str, exc: Exception) -> RendererError:

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import re
 from typing import Any
@@ -37,6 +38,51 @@ from tests.fakes.tokenizer import (
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
 
+MAIN_IDENTITIES: dict[str, dict[str, str]] = {
+    "qwen3_8": {
+        "renderer": "hf-chat-template",
+        "renderer_version": "1",
+        "name": "qwen3_8",
+        "parser": "qwen3_xml",
+        "parser_version": "3",
+        "tokenizer": "Qwen/Qwen3.8-27B",
+        "tokenizer_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+        "chat_template_sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+        "chat_template_kwargs": "{}",
+        "stop_tokens": '["<|im_end|>"]',
+        "prefix_stable": "false",
+    },
+    "qwen3_5": {
+        "renderer": "hf-chat-template",
+        "renderer_version": "1",
+        "name": "qwen3_5",
+        "parser": "qwen3_5_xml",
+        "parser_version": "1",
+        "tokenizer": "Qwen/Qwen3.5-9B",
+        "tokenizer_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+        "chat_template_sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+        "chat_template_kwargs": "{}",
+        "stop_tokens": '["<|im_end|>"]',
+        "prefix_stable": "false",
+    },
+    "glm5_3": {
+        "renderer": "hf-chat-template",
+        "renderer_version": "1",
+        "name": "glm5_3",
+        "parser": "glm_xml",
+        "parser_version": "1",
+        "tokenizer": "zai-org/GLM-5.3-Flash",
+        "tokenizer_revision": "eb9eb208eb0d988989d07a6a12d0fdeb5f52574a",
+        "chat_template_sha256": "0c4099f3382d6c92700dfb99725025360966fd73032f0ecf32377c0d9e6309c5",
+        "chat_template_kwargs": "{}",
+        "stop_tokens": '["<|user|>","<|observation|>"]',
+        "prefix_stable": "true",
+    },
+}
+"""What ``main``'s renderer identity is for each family it shipped, real template included
+(``transformers_version`` aside): a run trained there resumes and evaluates only while the
+identity stays the same."""
+
 
 def family(**overrides: Any) -> ModelFamily:
     fields: dict[str, Any] = {
@@ -47,6 +93,30 @@ def family(**overrides: Any) -> ModelFamily:
         "stop_tokens": ("<|im_end|>",),
     }
     return ModelFamily(**{**fields, **overrides})
+
+
+@pytest.mark.parametrize("shipped", [QWEN3_8, QWEN3_5, GLM5_3], ids=lambda f: f.key)
+def test_a_family_main_shipped_keeps_main_s_renderer_identity(shipped: ModelFamily) -> None:
+    template = "a template"
+    identity = shipped.renderer(tokenizer=FakeChatTokenizer(template_name=template)).identity()
+    assert identity == {
+        **MAIN_IDENTITIES[shipped.key],
+        "chat_template_sha256": hashlib.sha256(template.encode()).hexdigest(),
+        "transformers_version": hf.transformers_version(),
+    }
+
+
+@pytest.mark.tokenizer
+@pytest.mark.parametrize("shipped", [QWEN3_8, QWEN3_5, GLM5_3], ids=lambda f: f.key)
+def test_a_family_main_shipped_keeps_main_s_identity_with_its_real_template(
+    shipped: ModelFamily, request: pytest.FixtureRequest
+) -> None:
+    tokenizer = request.getfixturevalue(f"{shipped.key}_tokenizer")
+    identity = shipped.renderer(tokenizer=tokenizer).identity()
+    assert identity == {
+        **MAIN_IDENTITIES[shipped.key],
+        "transformers_version": hf.transformers_version(),
+    }
 
 
 def test_every_family_is_pinned_to_a_commit() -> None:
@@ -262,8 +332,7 @@ def test_muse_glimmer_writes_text_beside_tool_calls_as_its_own_message_to_the_us
 
 def test_a_family_s_message_rewrite_is_in_the_renderer_identity() -> None:
     assert muse_renderer().identity()["message_rewrite"] == "muse_text_before_calls@1"
-    plain = QWEN3_8.renderer(tokenizer=FakeChatTokenizer())
-    assert plain.identity()["message_rewrite"] == "none"
+    assert "message_rewrite" not in QWEN3_8.renderer(tokenizer=FakeChatTokenizer()).identity()
     assert MUSE_GLIMMER.rewrite is not None
     assert MUSE_GLIMMER.rewrite.messages([{"role": "user", "content": "Hi."}]) == [
         {"role": "user", "content": "Hi."}
