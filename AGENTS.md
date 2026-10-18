@@ -705,10 +705,9 @@ Source lives under `src/pup_finetune/`.
   `HFChatTemplateRenderer`, the one renderer every provider shares: the model's Hugging Face
   chat template and tokenizer at a pinned revision, one example per trainable assistant turn
   (the prompt tokenized whole, as the template tokenizes it: its text encoded whole, or
-  `ChatTokenizer.render_tokens` when the tokenizer's own code tokenizes the chat,
-  `tokenizes_chat`; then the completion through its stop token, re-encoded after the prompt
-  when a token merges across the boundary, which a `tokenizes_chat` tokenizer refuses
-  instead; two template renders per turn), and a per-row-checked one-example fast path for
+  `ChatTokenizer.render_tokens` when the tokenizer's own code tokenizes the chat (`None`
+  otherwise); then the completion through its stop token, re-encoded after the prompt when a
+  token merges across the boundary, which a tokenizer with `render_tokens` refuses instead; two template renders per turn), and a per-row-checked one-example fast path for
   families that pin `prefix_stable` (every trainable turn a token prefix of the whole
   render). It also has the narrow `ChatTokenizer` seam (tests inject
   `tests/fakes/tokenizer.py`), the lazily imported `transformers` adapter (the `hf` extra;
@@ -956,9 +955,11 @@ one `FakePup` with `FakeDatasetsApi`.
 Qwen3.8-like Python template (optionally merging `\n\n` across the prompt boundary) or a
 GLM-5-like one (`glm5_like`), and extra special tokens (`DEEPSEEK_SPECIALS`) for a fake behind
 an encoder; `FakeXtmlTokenizer` renders Kimi K3's XTML as its tokenizer code does, control
-tokens apart from message text (`tokenizes_chat`).
-`tests/fakes/rows.py` has `import_with_refused_test_row`, the tool-use fixture rows imported
-with one test-split row whose prompt the fake renderer refuses.
+tokens apart from message text (`render_tokens`).
+`tests/fakes/rows.py` has `import_with_edited_test_row`, the tool-use fixture rows imported
+with one test-split row edited, and two edits: `import_with_refused_test_row` (a prompt the
+fake renderer refuses) and `import_with_opening_assistant_test_row` (a row that opens with
+an assistant turn).
 `tests/fakes/chat_api.py` has `FakeChatApi`, an OpenAI-compatible chat completions endpoint
 (scripted responses or errors first, then an answer function) and `matching_judge`.
 `tests/fakes/fireworks_api.py` has `FakeFireworksApi`, the Fireworks model and account routes

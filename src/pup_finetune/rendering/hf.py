@@ -36,10 +36,10 @@ per turn instead, so ``prefix_stable`` never claims more than each row delivers.
 
 **The template's own tokens.** Prompts and turns are tokenized as the template tokenizes
 them: for a Jinja template that is the rendered text encoded whole. A tokenizer whose own
-code renders the chat (``trust_remote_code``, Kimi K3; :attr:`ChatTokenizer.tokenizes_chat`)
-encodes message text apart from its control tokens, so text that spells a control token stays
-text; its tokens come from :meth:`ChatTokenizer.render_tokens`, and a turn whose tokens do
-not extend its prompt's is refused rather than re-encoded. A family whose tokenizer ships no
+code renders the chat (``trust_remote_code``, Kimi K3) encodes message text apart from its
+control tokens, so text that spells a control token stays text; its tokens come from
+:attr:`ChatTokenizer.render_tokens`, and a turn whose tokens do not extend its prompt's is
+refused rather than re-encoded. A family whose tokenizer ships no
 chat template renders through a :class:`ChatEncoder` instead (:class:`EncodedChatTokenizer`,
 :mod:`.encoders`).
 
@@ -89,6 +89,19 @@ COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
 """A full, lowercase git commit SHA: how tokenizer revisions are pinned (match with fullmatch)."""
 
 
+class RenderTokens(Protocol):
+    """``messages`` rendered through the chat template, as token ids."""
+
+    def __call__(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        tools: Sequence[Mapping[str, Any]] | None,
+        add_generation_prompt: bool,
+        template_kwargs: Mapping[str, Any],
+    ) -> list[int]: ...
+
+
 class ChatTokenizer(Protocol):
     """The narrow tokenizer surface rendering needs; :class:`TransformersTokenizer` adapts HF."""
 
@@ -103,23 +116,11 @@ class ChatTokenizer(Protocol):
         """``messages`` rendered through the chat template, as text."""
         ...
 
-    def render_tokens(
-        self,
-        messages: Sequence[Mapping[str, Any]],
-        *,
-        tools: Sequence[Mapping[str, Any]] | None,
-        add_generation_prompt: bool,
-        template_kwargs: Mapping[str, Any],
-    ) -> list[int]:
-        """``messages`` rendered and tokenized by the tokenizer's own code; renderers call
-        it only when :attr:`tokenizes_chat` is true."""
-        ...
-
     @property
-    def tokenizes_chat(self) -> bool:
-        """Whether the tokenizer's own code renders and tokenizes the chat, keeping message
-        text apart from its control tokens, so :meth:`render_tokens`, not
-        :meth:`render_text` encoded whole, is the template's tokens."""
+    def render_tokens(self) -> RenderTokens | None:
+        """``messages`` rendered and tokenized by the tokenizer's own code, which keeps
+        message text apart from its control tokens; ``None`` when the template's tokens are
+        :meth:`render_text` encoded whole."""
         ...
 
     def encode(self, text: str) -> list[int]:
@@ -165,7 +166,13 @@ class TransformersTokenizer:
             raise TypeError(f"the chat template rendered {type(text).__name__}, not text")
         return text
 
-    def render_tokens(
+    @property
+    def render_tokens(self) -> RenderTokens | None:
+        if self._remote_code is None or self._jinja_template():
+            return None
+        return self._render_tokens
+
+    def _render_tokens(
         self,
         messages: Sequence[Mapping[str, Any]],
         *,
@@ -214,10 +221,6 @@ class TransformersTokenizer:
         if isinstance(token_id, int) and self.encode(token) == [token_id]:
             return token_id
         return None
-
-    @property
-    def tokenizes_chat(self) -> bool:
-        return self._remote_code is not None and not self._jinja_template()
 
     @property
     def chat_template(self) -> str:
@@ -336,22 +339,7 @@ class EncodedChatTokenizer:
     ) -> str:
         return self.encoder.render(messages, tools, add_generation_prompt=add_generation_prompt)
 
-    def render_tokens(
-        self,
-        messages: Sequence[Mapping[str, Any]],
-        *,
-        tools: Sequence[Mapping[str, Any]] | None,
-        add_generation_prompt: bool,
-        template_kwargs: Mapping[str, Any],
-    ) -> list[int]:
-        return self.encode(
-            self.render_text(
-                messages,
-                tools=tools,
-                add_generation_prompt=add_generation_prompt,
-                template_kwargs=template_kwargs,
-            )
-        )
+    render_tokens: ClassVar[None] = None
 
     def encode(self, text: str) -> list[int]:
         return self.tokenizer.encode(text)
@@ -361,8 +349,6 @@ class EncodedChatTokenizer:
 
     def token_id(self, token: str) -> int | None:
         return self.tokenizer.token_id(token)
-
-    tokenizes_chat: ClassVar[bool] = False
 
     @property
     def chat_template(self) -> str:
@@ -711,11 +697,11 @@ class HFChatTemplateRenderer:
         generation: bool,
         where: str,
     ) -> list[int]:
-        tokenizer = self._chat_tokenizer()
-        if not tokenizer.tokenizes_chat:
+        render_tokens = self._chat_tokenizer().render_tokens
+        if render_tokens is None:
             return self._encode(self._render(messages, tools, generation=generation, where=where))
         try:
-            tokens = tokenizer.render_tokens(
+            tokens = render_tokens(
                 self._template_view(messages),
                 tools=tools,
                 add_generation_prompt=generation,
@@ -742,7 +728,7 @@ class HFChatTemplateRenderer:
     ) -> _Turn:
         """Assistant turn ``index`` after its own generation prompt; see the module docs."""
         where = f"messages[{index}]"
-        if self._chat_tokenizer().tokenizes_chat:
+        if self._chat_tokenizer().render_tokens is not None:
             prompt = self._tokens(messages[:index], tools, generation=True, where=where)
             tokens = self._tokens(messages[: index + 1], tools, generation=False, where=where)
             if tokens[: len(prompt)] != prompt:

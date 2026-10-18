@@ -742,14 +742,7 @@ def test_the_transformers_adapter_renders_text_and_resolves_single_tokens() -> N
         "return_dict": False,
         "enable_thinking": False,
     }
-    tokens = adapter.render_tokens(
-        [{"role": "user", "content": "Hi"}],
-        tools=[],
-        add_generation_prompt=True,
-        template_kwargs={},
-    )
-    assert tokens == [72, 105]
-    assert stub.kwargs["tokenize"] is True
+    assert adapter.render_tokens is None
     assert adapter.encode("Hi") == [72, 105]
     assert adapter.decode([72, 1000]) == "H<|im_end|>"
     assert adapter.token_id("<|im_end|>") == 1000
@@ -759,6 +752,16 @@ def test_the_transformers_adapter_renders_text_and_resolves_single_tokens() -> N
     stub.chat_template = None  # type: ignore[assignment]
     with pytest.raises(ValueError, match="no chat template"):
         _ = adapter.chat_template
+    remote = TransformersTokenizer(stub, remote_code=f"example/tiny-chat@{SHA}")
+    assert remote.render_tokens is not None
+    tokens = remote.render_tokens(
+        [{"role": "user", "content": "Hi"}],
+        tools=[],
+        add_generation_prompt=True,
+        template_kwargs={},
+    )
+    assert tokens == [72, 105]
+    assert stub.kwargs["tokenize"] is True
 
 
 def test_training_renders_rows_the_fast_path_refuses_per_turn() -> None:

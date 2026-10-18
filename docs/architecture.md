@@ -119,7 +119,7 @@ as the template does, and the model generates the completion after it. For a Jin
 that is the rendered text encoded as **one** string; Kimi K3's tokenizer renders the chat in
 its repository's Python code (`trust_remote_code`) and encodes message text apart from its
 control tokens, so text that spells a control token stays text (`ChatTokenizer.render_tokens`,
-used only for such a tokenizer: `tokenizes_chat`).
+`None` for any other tokenizer).
 DeepSeek-V4 ships its chat format as Python and no template, so its family renders through
 `rendering/encoders.py`'s `DeepSeekV4Encoder`, which the `tokenizer` tests hold to DeepSeek's
 own encoder and test vectors at the pinned commit. Training must see the same tokens, so by

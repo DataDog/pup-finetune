@@ -85,7 +85,7 @@ class FakeChatTokenizer:
         }
         self.text_of = {**_TEXT_OF, **{token_id: token for token, token_id in self.ids.items()}}
 
-    tokenizes_chat = False
+    render_tokens: Any = None
 
     @property
     def chat_template(self) -> str:
@@ -119,24 +119,6 @@ class FakeChatTokenizer:
         )
         if not messages:
             raise ValueError("No messages provided.")
-
-    def render_tokens(
-        self,
-        messages: Sequence[Mapping[str, Any]],
-        *,
-        tools: Sequence[Mapping[str, Any]] | None,
-        add_generation_prompt: bool,
-        template_kwargs: Mapping[str, Any],
-    ) -> list[int]:
-        """:meth:`render_text` encoded whole, as a Jinja template's tokens are."""
-        return self.encode(
-            self.render_text(
-                messages,
-                tools=tools,
-                add_generation_prompt=add_generation_prompt,
-                template_kwargs=template_kwargs,
-            )
-        )
 
     def encode(self, text: str) -> list[int]:
         ids: list[int] = []
@@ -367,8 +349,6 @@ def _xtml_type(value: Any) -> str:
 class FakeXtmlTokenizer(FakeChatTokenizer):
     """A Kimi-K3-like tokenizer whose own code renders the chat (:func:`xtml_segments`) and
     encodes message text apart from its control tokens."""
-
-    tokenizes_chat = True
 
     def __init__(self) -> None:
         super().__init__(
