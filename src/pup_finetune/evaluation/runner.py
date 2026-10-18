@@ -98,7 +98,7 @@ from pup_finetune.storage import (
 from pup_finetune.training.records import StoppedReason, TrainResult
 
 if TYPE_CHECKING:
-    from pup_finetune.evaluation.cases import Refusal, ReplayCase
+    from pup_finetune.evaluation.cases import Exclusion, ReplayCase
     from pup_finetune.evaluation.compare import CompareTarget
     from pup_finetune.evaluation.judge import Judgment
     from pup_finetune.evaluation.replay import EvalDir, Publisher, ReplaySummary
@@ -431,9 +431,9 @@ class EvalPlan:
     differ from the defaults, and the judge (see :meth:`evaluate_command`)."""
     compare: CompareTarget | None = None
     """The compare model: ``--compare-model``'s, else the one the directory has attached."""
-    refused: Mapping[str, Refusal] = field(default_factory=dict)
-    """The test cases left out of :attr:`cases` because the run's renderer refuses their
-    prompt, by case id (:func:`~pup_finetune.evaluation.cases.refusals`)."""
+    excluded: Mapping[str, Exclusion] = field(default_factory=dict)
+    """The test cases left out of :attr:`cases` because the run's model cannot replay them,
+    by case id (:func:`~pup_finetune.evaluation.cases.exclusions`)."""
     compare_skips: Mapping[str, str] = field(init=False)
     """The cases the compare model's API refuses, by case id, with the reason; none
     without a compare model (:func:`~pup_finetune.evaluation.compare.compare_skips`)."""
@@ -598,11 +598,11 @@ class EvalPlan:
             found.append("test cases, generated answers and scores -> Datadog (experiments)")
         return found
 
-    def refusal_warnings(self) -> list[str]:
-        from pup_finetune.evaluation.cases import refusal_warning
+    def exclusion_warnings(self) -> list[str]:
+        from pup_finetune.evaluation.cases import exclusion_warning
 
-        total = len(self.cases) + len(self.refused)
-        warning = refusal_warning(self.refused, cases=total)
+        total = len(self.cases) + len(self.excluded)
+        warning = exclusion_warning(self.excluded, cases=total, model=self.profile.alias)
         return [] if warning is None else [warning]
 
     def _refuse_another_compare(self, eval_dir: EvalDir) -> None:
@@ -662,12 +662,12 @@ class EvalPlan:
         """The calls the evaluation makes. With ``tuned_checkpoint`` (a standalone run), what
         ``--out-dir`` already holds under the same settings is left out of the counts."""
         from pup_finetune.datadog.experiments import experiment_name
-        from pup_finetune.evaluation.cases import refused_by_reason
+        from pup_finetune.evaluation.cases import excluded_by_reason
         from pup_finetune.evaluation.compare import require_sent, skipped_warning
         from pup_finetune.evaluation.replay import CAVEAT, COMPARE
 
         settings = self.settings
-        warnings = self.refusal_warnings()
+        warnings = self.exclusion_warnings()
         if (remote := self.profile.remote_code_warning()) is not None:
             warnings.append(remote)
         targets = self.targets
@@ -773,8 +773,8 @@ class EvalPlan:
             "out_dir": display_path(self.out_dir),
             "rows": {"test": trajectories},
             "cases": len(self.cases),
-            "excluded_cases": len(self.refused),
-            "excluded_by_reason": refused_by_reason(self.refused),
+            "excluded_cases": len(self.excluded),
+            "excluded_by_reason": excluded_by_reason(self.excluded),
             "trajectories": trajectories,
             "targets": target_names,
             **(
@@ -913,7 +913,7 @@ def plan_evaluation(
     being trained or the run's tuned model: the model id the run promotes to
     (:func:`~pup_finetune.runs.model_id_for_run`) or, once known, the ``promoted`` model.
     """
-    from pup_finetune.evaluation.cases import cases_from_dataset, refusals
+    from pup_finetune.evaluation.cases import cases_from_dataset, exclusions
     from pup_finetune.evaluation.compare import resolve_compare, stored_compare
     from pup_finetune.evaluation.judge import check_judge_differs
     from pup_finetune.evaluation.replay import EvalDir
@@ -948,13 +948,13 @@ def plan_evaluation(
             "no assistant turn to replay",
             hint="import more rows so the test split holds some conversations",
         )
-    refused = refusals(cases, {profile.alias: get_provider(provider, runtime).renderer(profile)})
-    if len(refused) == len(cases):
-        first = next(iter(refused.values()))
+    excluded = exclusions(cases, get_provider(provider, runtime).renderer(profile))
+    if len(excluded) == len(cases):
+        first = next(iter(excluded.values()))
         raise UsageError(
-            f"nothing to evaluate: the chat format of {profile.alias} cannot continue any of "
-            f"the {len(cases)} test cases' prompts ({first.code}: {first.detail})",
-            hint="import rows whose test conversations the model's chat format takes",
+            f"nothing to evaluate: {profile.alias} cannot replay any of the {len(cases)} test "
+            f"cases ({first.code}: {first.detail})",
+            hint="import rows whose test conversations the model can replay",
         )
     return EvalPlan(
         run_id=run_id,
@@ -962,8 +962,8 @@ def plan_evaluation(
         provider=provider,
         profile=profile,
         rendering=dict(rendering),
-        cases=[case for case in cases if case.id not in refused],
-        refused=refused,
+        cases=[case for case in cases if case.id not in excluded],
+        excluded=excluded,
         judge=judge_config,
         judge_source=judge_source,
         settings=settings,
@@ -1222,7 +1222,7 @@ def replay_result(
     status = "partial"
     if outcome.complete:
         status = "complete_with_errors" if errors else "complete"
-    warnings = plan.refusal_warnings()
+    warnings = plan.exclusion_warnings()
     hint = None
     publication = _publication(plan, outcome)
     unrenderable = sum(int(target["errors_unrenderable"]) for target in summary["targets"].values())

@@ -739,8 +739,10 @@ Source lives under `src/pup_finetune/`.
   (`weight` not `0`) assistant message with a visible action, with the recorded prefix and
   tools as input and the recorded message as the reference, capped per trajectory
   (`max_cases_per_trajectory`) with evenly spaced, seeded picks that always keep the final
-  turn. Tools are never executed, so replay measures agreement with the recorded behavior, not
-  task success. `metrics.py` has the deterministic tool-call metrics (`MetricName`,
+  turn. `exclusions` names the cases a model cannot replay, each with a stable `code`: a turn
+  with no message before it (`empty_prompt`, for every provider) and a prompt the model's
+  renderer refuses (`prompt_refusal`, the renderer's code). Tools are never executed, so
+  replay measures agreement with the recorded behavior, not task success. `metrics.py` has the deterministic tool-call metrics (`MetricName`,
   `score_case`, `aggregate`; `None` when a metric does not apply) and `schema_errors`, a
   validator for the common JSON Schema subset tool declarations use. `judge.py` is the LLM
   judge: `judge` asks whether a candidate action is an acceptable substitute for the reference
@@ -774,9 +776,9 @@ Source lives under `src/pup_finetune/`.
   the cases it does not replay as `skipped`), plus the agreement-not-task-success `CAVEAT`. A `Publisher` (default `NoopPublisher`) gets a complete evaluation and returns
   what it reports, the outcome's `publication`. `runner.py` is what `evaluate` and `train
   --evaluate` run: `plan_evaluation` (an `EvalPlan`: cases, judge, settings and `Publishing`,
-  whether the dataset's push receipt allows publishing; cases whose prompt the run's renderer
-  refuses are left out, `refused`, and the preview counts them as `excluded_cases` and
-  `excluded_by_reason`, through `cases.py`'s `refusals`), calibration (`prepare_eval_dir`
+  whether the dataset's push receipt allows publishing; cases the run's model cannot replay
+  are left out, `excluded`, and the preview counts them as `excluded_cases` and
+  `excluded_by_reason`, through `cases.py`'s `exclusions`), calibration (`prepare_eval_dir`
   stores a passing one), `replay` with the plan's publisher, `replay_result` and
   `evaluation_exit_code`, `plan_standalone` and `StandaloneEvaluation` for `evaluate`, and
   `EvaluateAfterTraining`, the `after_finalize` hook that evaluates in the training session
@@ -813,14 +815,18 @@ Source lives under `src/pup_finetune/`.
   before it; Anthropic also a prefix that opens or ends on an assistant turn; Anthropic is
   judged on the turns its client sends, `anthropic_messages.py`'s conversion; Fireworks and
   the fake take any), with `compare_skips` over cases; it takes the `compare.json` path and imports nothing from `replay.py`, which imports it.
-  `benchmark.py` is `benchmark`: `plan_benchmark` (the test split's cases, less those any
-  model's renderer refuses, for every model, the judge and one `Candidate` per base model;
-  a session is sized on the prompts its renderer takes; a model is named `PROVIDER/ALIAS`
-  when another provider offers its alias, `Candidate.target`), `execute` (the judge
-  calibrated once, then each model replayed in a session of its own into `OUT/<model>`
-  through `run_replay` with the model as its one target, so each resumes; a model whose session fails is an error entry and the
-  others still run), `leaderboard` (judge pass rate with a bootstrap CI over trajectories,
-  and each model's paired gap to the best) and `recommend` (`fine_tune`,
+  `benchmark.py` is `benchmark`: `plan_benchmark` (the test split's cases, the judge and one
+  `Candidate` per base model, with its renderer identity and the cases it cannot replay,
+  `excluded`; a model is named `PROVIDER/ALIAS` when another provider offers its alias,
+  `Candidate.target`; a preview whose models share no case they all replay fails), `execute`
+  (the judge calibrated once, then each model replayed in a session of its own, sized on its
+  own cases, into `OUT/<model>` through `run_replay` with the model as its one target, so
+  each resumes; each model's directory is identified by its own cases and renderer identity,
+  `BenchmarkPlan.identity`, never by the other models, so adding or dropping a model reuses
+  the finished ones; a model whose session fails is an error entry and the others still
+  run), `leaderboard` (judge pass rate on the cases every model with a judged case has an
+  `ok` result for, `common_cases`, with a bootstrap CI over trajectories, and each model's
+  paired gap to the best on those cases) and `recommend` (`fine_tune`,
   `base_meets_target` at `--target-pass-rate`, or `no_result`; models within noise of the
   best are named).
   The package exports its names lazily, so importing the runner (the CLI does, for every

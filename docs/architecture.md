@@ -165,9 +165,10 @@ trained turn after such a prompt: DeepSeek's own encoder writes a turn after a s
 assistant message, or at the start, with no `<｜Assistant｜>` before it, so `deepseek_v4`
 needs a user or tool message before each turn it trains or samples. The renderer's
 `prompt_refusal` runs that check without a tokenizer, so `evaluate` and `benchmark` leave
-such test cases out at planning (`excluded_cases`), and `benchmark` leaves them out for
-every model so each is ranked on the same cases. A refusal that still reaches a sampler is an
-error result a rerun never retries. Only
+such test cases out at planning (`excluded_cases`), as they do a turn with no message before
+it (`empty_prompt`) for every model. Each benchmarked model replays the cases it can, and the
+leaderboard ranks the models on the cases every ranked model has a result for. A refusal that
+still reaches a sampler is an error result a rerun never retries. Only
 `supervised_example` raises `not_prefix_stable`; a per-turn failure carries its own code, so
 the loop never retries it per turn.
 

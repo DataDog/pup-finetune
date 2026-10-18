@@ -536,7 +536,9 @@ def benchmark_summary(result: Mapping[str, Any]) -> Summary | None:
     what = {"complete": "complete", "partial": "partial"}.get(str(status), "complete with errors")
     headline = (
         f"benchmark {what}: {_n(len(board), 'model')} on {_n(result.get('cases'), 'case')} from "
-        f"{_n(result.get('trajectories'), 'test conversation')}; judge {result.get('judge_model')}"
+        f"{_n(result.get('trajectories'), 'test conversation')}, ranked on the "
+        f"{result.get('common_cases')} every ranked model answered; judge "
+        f"{result.get('judge_model')}"
     )
     width = max(len(str(entry.get("model"))) for entry in board) + 2
     rows = []

@@ -28,7 +28,7 @@ from pup_finetune.evaluation.benchmark import (
 from pup_finetune.evaluation.cases import ReplayCase, cases_from_dataset
 from pup_finetune.evaluation.fake_judge import fake_judge_config
 from pup_finetune.evaluation.replay import EvalDir
-from pup_finetune.providers.fake import FAKE_PROFILE, FakeProvider
+from pup_finetune.providers.fake import FAKE_PROFILE, FakeProvider, FakeRenderer
 from pup_finetune.runtime import Runtime
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
@@ -43,11 +43,17 @@ def plan(tmp_path: Path) -> BenchmarkPlan:
     assert imported.exit_code == 0, imported.stderr
     cases = cases_from_dataset(dataset, split="test")
     assert len({case.row_id for case in cases}) >= 2
+    rendering = FakeRenderer().identity()
     return BenchmarkPlan(
         dataset_dir=dataset.path,
         candidates=(
-            Candidate(provider="fake", profile=FAKE_PROFILE),
-            Candidate(provider="fake", profile=dataclasses.replace(FAKE_PROFILE, alias="fake-b")),
+            Candidate(provider="fake", profile=FAKE_PROFILE, rendering=rendering, excluded={}),
+            Candidate(
+                provider="fake",
+                profile=dataclasses.replace(FAKE_PROFILE, alias="fake-b"),
+                rendering=rendering,
+                excluded={},
+            ),
         ),
         cases=cases,
         judge=fake_judge_config(),

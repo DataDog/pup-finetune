@@ -21,6 +21,10 @@ Only trained turns become cases by default: an assistant message with ``weight``
 left out of training on purpose (a turn the agent should not imitate), so comparing a model
 with it would reward the behavior training avoided. ``include_untrained=True`` keeps them.
 
+A model cannot replay a case whose turn has no message before it, or whose prompt its
+renderer refuses: :func:`exclusions` names such cases with a stable code, and ``evaluate``
+and ``benchmark`` leave them out for that model at planning.
+
 Messages and tools are in the OpenAI form :func:`~pup_finetune.data.jsonl.to_provider_dict`
 produces, minus ``weight``, which is training metadata a model never sees. The reference
 keeps its ``reasoning_content`` for display; the metrics ignore it
@@ -34,12 +38,11 @@ import itertools
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.schema import Message, TrainingRow
 from pup_finetune.data.split import SPLITS, SplitName
-from pup_finetune.display import joined
 from pup_finetune.rendering.base import ChatMessage, Renderer, ToolSpec
 
 _HASH_SPACE = 2**64
@@ -226,43 +229,42 @@ def cases_from_dataset(
     )
 
 
-@dataclass(frozen=True, slots=True)
-class Refusal:
-    """Why a case is left out at planning: ``model``'s renderer refuses its prompt
-    (:meth:`~pup_finetune.rendering.base.Renderer.prompt_refusal`), so no sampler of that
-    model could continue it. ``code`` is the renderer's stable error code."""
+EMPTY_PROMPT: Final = "empty_prompt"
+"""Why a case whose turn has no message before it is left out: there is no prompt to replay."""
 
-    model: str
+
+@dataclass(frozen=True, slots=True)
+class Exclusion:
+    """Why a model cannot replay a case, so it is left out at planning: ``code`` is
+    :data:`EMPTY_PROMPT`, or the renderer's stable error code when it refuses the prompt
+    (:meth:`~pup_finetune.rendering.base.Renderer.prompt_refusal`)."""
+
     code: str
     detail: str
 
 
-def refusals(cases: Sequence[ReplayCase], renderers: Mapping[str, Renderer]) -> dict[str, Refusal]:
-    """The cases a renderer of ``renderers`` (by model) refuses, by case id, each with the
-    first model that refuses it."""
-    found: dict[str, Refusal] = {}
+def exclusions(cases: Sequence[ReplayCase], renderer: Renderer) -> dict[str, Exclusion]:
+    """The cases that ``renderer``'s model cannot replay, by case id."""
+    found: dict[str, Exclusion] = {}
     for case in cases:
-        for model, renderer in renderers.items():
-            error = renderer.prompt_refusal(case.prefix, case.tools)
-            if error is not None:
-                found[case.id] = Refusal(model, error.code.value, error.detail)
-                break
+        if not case.prefix:
+            found[case.id] = Exclusion(EMPTY_PROMPT, "the recorded turn has no message before it")
+        elif (error := renderer.prompt_refusal(case.prefix, case.tools)) is not None:
+            found[case.id] = Exclusion(error.code.value, error.detail)
     return found
 
 
-def refused_by_reason(refused: Mapping[str, Refusal]) -> dict[str, int]:
-    return dict(sorted(Counter(refusal.code for refusal in refused.values()).items()))
+def excluded_by_reason(excluded: Mapping[str, Exclusion]) -> dict[str, int]:
+    return dict(sorted(Counter(exclusion.code for exclusion in excluded.values()).items()))
 
 
-def refusal_warning(refused: Mapping[str, Refusal], *, cases: int, models: int = 1) -> str | None:
-    """What a preview and a result warn about the ``refused`` cases of ``cases``, ``None``
-    when there are none; with several ``models``, each case is left out for all of them."""
-    if not refused:
+def exclusion_warning(excluded: Mapping[str, Exclusion], *, cases: int, model: str) -> str | None:
+    """What a preview and a result warn about the ``excluded`` cases of ``cases`` for
+    ``model``, ``None`` when there are none."""
+    if not excluded:
         return None
-    first = next(iter(refused.values()))
-    refusing = joined(sorted({refusal.model for refusal in refused.values()}))
-    every = " for every model, so each is ranked on the same cases" if models > 1 else ""
+    first = next(iter(excluded.values()))
     return (
-        f"{len(refused)} of {cases} test cases are left out{every}: the chat format of "
-        f"{refusing} cannot continue their prompt ({first.code}: {first.detail})"
+        f"{len(excluded)} of {cases} test cases are left out for {model}, which cannot replay "
+        f"them ({first.code}: {first.detail})"
     )

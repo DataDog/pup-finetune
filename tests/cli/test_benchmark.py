@@ -12,7 +12,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import shlex
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -26,9 +26,10 @@ from pup_finetune.errors import ExternalError
 from pup_finetune.evaluation import benchmark as benchmark_module
 from pup_finetune.inference import ChatCompletion
 from pup_finetune.providers import fake as fake_module
-from pup_finetune.providers.base import Sampler
+from pup_finetune.providers.base import ModelProfile, Sampler
 from pup_finetune.providers.fake import FakeRenderer
-from tests.fakes.rows import import_with_refused_test_row
+from pup_finetune.rendering.base import ChatMessage, RendererError, RendererErrorCode, ToolSpec
+from tests.fakes.rows import import_with_opening_assistant_test_row, import_with_refused_test_row
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
 
@@ -301,18 +302,23 @@ def test_a_run_directory_is_not_a_dataset(dataset: Path, tmp_path: Path) -> None
     assert "not a dataset" in result.stderr
 
 
-def test_a_case_a_model_refuses_is_left_out_for_every_model(tmp_path: Path) -> None:
+def test_a_case_a_model_cannot_replay_is_left_out_for_it(tmp_path: Path) -> None:
     dataset, refused = import_with_refused_test_row(tmp_path)
-    preview = output(invoke("benchmark", str(dataset), "--models", "fake-model"))
-    excluded = preview["preview"]["excluded_cases"]
+    preview = output(invoke("benchmark", str(dataset), "--models", "fake-model"))["preview"]
+    [model] = preview["models"]
+    excluded = model["excluded_cases"]
     assert excluded > 0
-    assert preview["preview"]["excluded_by_reason"] == {"unsupported_message": excluded}
-    assert any(" test cases are left out: " in w for w in preview["preview"]["warnings"])
+    assert model["excluded_by_reason"] == {"unsupported_message": excluded}
+    assert model["cases"] == preview["common_cases"] == preview["cases"] - excluded
+    assert any("test cases are left out for fake-model, " in w for w in preview["warnings"])
 
-    result = rerun(preview["next_command"])
+    result = rerun(
+        output(invoke("benchmark", str(dataset), "--models", "fake-model"))["next_command"]
+    )
     assert result.exit_code == 0, result.stderr
     data = output(result)
     assert data["status"] == "complete"
+    assert data["leaderboard"][0]["excluded_cases"] == excluded
     results = (dataset / "benchmark" / "fake-model" / "results.jsonl").read_text()
     assert refused not in results
 
@@ -346,3 +352,138 @@ def test_the_preview_says_when_a_tokenizer_runs_repository_code(
 
     notice = "the fake-model tokenizer runs Python code from the Hugging Face repository"
     assert any(warning.startswith(notice) for warning in preview["warnings"])
+
+
+class _ToolShyRenderer(FakeRenderer):
+    """The fake renderer, refusing every prompt that ends with a tool result."""
+
+    def prompt_refusal(
+        self, messages: Sequence[ChatMessage], tools: Sequence[ToolSpec]
+    ) -> RendererError | None:
+        if messages and messages[-1].get("role") == "tool":
+            return RendererError(RendererErrorCode.UNSUPPORTED_MESSAGE, "no turn after a tool")
+        return super().prompt_refusal(messages, tools)
+
+
+class ToolShyProvider(fake_module.FakeProvider):
+    """The fake provider with :class:`_ToolShyRenderer`."""
+
+    def renderer(self, profile: ModelProfile) -> FakeRenderer:
+        return _ToolShyRenderer(profile)
+
+
+def register_fake_model(monkeypatch: pytest.MonkeyPatch, **targets: str) -> None:
+    """Register each provider of ``targets`` (name to target), offering ``fake-model``."""
+    monkeypatch.setattr(providers, "_REGISTRY", dict(providers._REGISTRY))
+    for name, target in targets.items():
+        providers.register_provider(
+            name, target, dev_only=True, models={"fake-model": ("fake-model",)}, offline=True
+        )
+
+
+def test_adding_a_model_reuses_the_finished_ones_and_ranks_on_the_shared_cases(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    register_fake_model(
+        monkeypatch,
+        twin="pup_finetune.providers.fake:FakeProvider",
+        shy="tests.cli.test_benchmark:ToolShyProvider",
+    )
+    two = "fake/fake-model,twin/fake-model"
+    first = rerun(output(invoke("benchmark", str(dataset), "--models", two))["next_command"])
+    assert first.exit_code == 0, first.stderr
+    finished = {
+        model: (dataset / "benchmark" / model / "results.jsonl").read_bytes()
+        for model in two.split(",")
+    }
+
+    three = f"{two},shy/fake-model"
+    preview = output(invoke("benchmark", str(dataset), "--models", three))
+    by_model = {model["model"]: model for model in preview["preview"]["models"]}
+    shy = by_model["shy/fake-model"]
+    assert 0 < shy["excluded_cases"] < preview["preview"]["cases"]
+    assert shy["excluded_by_reason"] == {"unsupported_message": shy["excluded_cases"]}
+    assert preview["preview"]["common_cases"] == shy["cases"]
+    for model in finished:
+        assert by_model[model]["already_done"] == preview["preview"]["cases"]
+        assert by_model[model]["generation_calls"] == 0
+
+    opened: list[str] = []
+    base_sampler = benchmark_module._base_sampler
+
+    def recording(plan: Any, candidate: Any) -> Any:
+        opened.append(candidate.target)
+        return base_sampler(plan, candidate)
+
+    monkeypatch.setattr(benchmark_module, "_base_sampler", recording)
+    result = rerun(preview["next_command"])
+
+    assert result.exit_code == 0, result.stderr
+    assert opened == ["shy/fake-model"]
+    for model, results in finished.items():
+        assert (dataset / "benchmark" / model / "results.jsonl").read_bytes() == results
+    data = output(result)
+    assert data["status"] == "complete"
+    assert data["common_cases"] == shy["cases"]
+    gaps = [entry["gap_to_best"] for entry in data["leaderboard"][1:]]
+    assert [gap["n_cases"] for gap in gaps] == [shy["cases"]] * 2
+
+
+def test_a_changed_renderer_conflicts_with_the_finished_results(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preview = output(invoke("benchmark", str(dataset), "--models", "fake-model"))
+    assert rerun(preview["next_command"]).exit_code == 0
+    identity = FakeRenderer.identity
+    monkeypatch.setattr(
+        FakeRenderer, "identity", lambda self: {**identity(self), "parser_version": "2"}
+    )
+
+    result = invoke("benchmark", str(dataset), "--models", "fake-model")
+
+    assert result.exit_code == 2
+    assert "Error [settings_conflict]" in result.stderr
+    assert "changed: rendering" in result.stderr
+
+
+def test_a_turn_with_no_message_before_it_is_left_out_for_every_model(tmp_path: Path) -> None:
+    dataset, opened = import_with_opening_assistant_test_row(tmp_path)
+
+    preview = output(
+        invoke("benchmark", str(dataset), "--models", "fake-model", "--max-cases", "10")
+    )
+
+    [model] = preview["preview"]["models"]
+    assert model["excluded_by_reason"] == {"empty_prompt": 1}
+    result = rerun(preview["next_command"])
+    assert result.exit_code == 0, result.stderr
+    results = (dataset / "benchmark" / "fake-model" / "results.jsonl").read_text()
+    assert f'"{opened}:0"' not in results
+    assert f'"{opened}:' in results
+
+
+def test_the_retry_hint_names_only_the_models_a_rerun_can_advance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    register_fake_model(monkeypatch, twin="pup_finetune.providers.fake:FakeProvider")
+    # The fake renderer's check misses what it then refuses while sampling: final errors.
+    monkeypatch.setattr(FakeRenderer, "prompt_refusal", lambda self, messages, tools: None)
+    dataset, _ = import_with_refused_test_row(tmp_path)
+    base_sampler = benchmark_module._base_sampler
+
+    @contextmanager
+    def twin_has_no_capacity(plan: Any, candidate: Any) -> Iterator[Sampler]:
+        if candidate.provider == "twin":
+            raise ExternalError("no capacity for a sampler", source="fake")
+        with base_sampler(plan, candidate) as sampler:
+            yield sampler
+
+    monkeypatch.setattr(benchmark_module, "_base_sampler", twin_has_no_capacity)
+    models = "fake/fake-model,twin/fake-model"
+
+    data = output(invoke("benchmark", str(dataset), "--models", models, "--confirm"))
+
+    statuses = {entry["model"]: entry["status"] for entry in data["leaderboard"]}
+    assert statuses == {"fake/fake-model": "complete_with_errors", "twin/fake-model": "error"}
+    assert data["hint"].startswith("twin/fake-model has no result for every case")
+    assert data["next_command"].startswith("pup finetune benchmark")

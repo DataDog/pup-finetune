@@ -44,7 +44,7 @@ from pup_finetune.runs import RunDir, RunState, model_id_for_run
 from pup_finetune.runtime import Runtime
 from pup_finetune.storage import append_jsonl
 from pup_finetune.training.budget import Budget
-from tests.fakes.rows import import_with_refused_test_row
+from tests.fakes.rows import import_with_opening_assistant_test_row, import_with_refused_test_row
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
 
@@ -1180,6 +1180,21 @@ def results_of(eval_dir: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
+def test_a_turn_with_no_message_before_it_is_left_out_at_planning(tmp_path: Path) -> None:
+    dataset, opened = import_with_opening_assistant_test_row(tmp_path)
+    run = tmp_path / "run"
+    assert invoke(*train_args(dataset, run, "--confirm")).exit_code == 0
+
+    preview = output(invoke("evaluate", str(run), "--no-publish", "--max-cases", "10"))
+
+    assert preview["preview"]["excluded_by_reason"] == {"empty_prompt": 1}
+    result = rerun(preview["next_command"])
+    assert result.exit_code == 0, result.stderr
+    case_ids = {record["case_id"] for record in results_of(run / "eval")}
+    assert f"{opened}:0" not in case_ids
+    assert any(case_id.startswith(f"{opened}:") for case_id in case_ids)
+
+
 def test_a_case_whose_prompt_the_model_refuses_is_left_out_at_planning(tmp_path: Path) -> None:
     dataset, refused = import_with_refused_test_row(tmp_path)
     run = tmp_path / "run"
@@ -1189,13 +1204,15 @@ def test_a_case_whose_prompt_the_model_refuses_is_left_out_at_planning(tmp_path:
     excluded = preview["preview"]["excluded_cases"]
     assert excluded > 0
     assert preview["preview"]["excluded_by_reason"] == {"unsupported_message": excluded}
-    assert any(" test cases are left out: " in w for w in preview["preview"]["warnings"])
+    assert any(
+        " test cases are left out for fake-model, " in w for w in preview["preview"]["warnings"]
+    )
 
     result = rerun(preview["next_command"])
     assert result.exit_code == 0, result.stderr
     data = output(result)
     assert data["status"] == "complete"
-    assert any(" test cases are left out: " in w for w in data["warnings"])
+    assert any(" test cases are left out for fake-model, " in w for w in data["warnings"])
     rows = {record["row_id"] for record in results_of(run / "eval")}
     assert rows and refused not in rows
 

@@ -203,8 +203,8 @@ pup finetune benchmark datasets/my-agent --models qwen3p5-9b,baseten/glm-5p3-fla
 ```
 
 `PROVIDER/MODEL` names the provider of a model both offer. The result ranks the models by
-judge pass rate with a confidence interval and recommends one
-to fine-tune. A base model at or above `--target-pass-rate` (90% by default) may need no
+judge pass rate with a confidence interval, on the test cases every model answered, and
+recommends one to fine-tune. A base model at or above `--target-pass-rate` (90% by default) may need no
 training, and models within noise of the best are named, so the cheapest to serve can win.
 Results go in `datasets/my-agent/benchmark`; rerun the command to continue one that stopped.
 

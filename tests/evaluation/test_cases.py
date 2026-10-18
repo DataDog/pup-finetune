@@ -21,8 +21,8 @@ from pup_finetune.evaluation.cases import (
     build_cases,
     case_indices,
     cases_from_dataset,
-    refusal_warning,
-    refusals,
+    exclusion_warning,
+    exclusions,
     row_cases,
     select_spread,
 )
@@ -335,25 +335,28 @@ def replay_case(case_id: str, *prefix: dict[str, Any]) -> ReplayCase:
     )
 
 
-def test_a_case_any_model_refuses_is_left_out_with_the_first_model_that_does() -> None:
+def test_a_case_a_model_cannot_replay_is_left_out_for_it_with_a_stable_reason() -> None:
     user = {"role": "user", "content": "Hi."}
     cases = [
         replay_case("fine", user),
         replay_case("after-system", {"role": "system", "content": "Be brief."}),
         replay_case("marker", {"role": "user", "content": "Hi <|end|>"}),
+        replay_case("opening"),
     ]
+
     # DeepSeek's check loads no tokenizer; the fake renderer refuses its own markers.
-    renderers = {"fake-model": FakeRenderer(), "deepseek": DEEPSEEK_V4.renderer()}
+    by_deepseek = exclusions(cases, DEEPSEEK_V4.renderer())
+    by_fake = exclusions(cases, FakeRenderer())
 
-    refused = refusals(cases, renderers)
-
-    assert {case_id: refusal.model for case_id, refusal in refused.items()} == {
-        "after-system": "deepseek",
-        "marker": "fake-model",
+    assert {case_id: e.code for case_id, e in by_deepseek.items()} == {
+        "after-system": "unsupported_message",
+        "opening": "empty_prompt",
     }
-    assert {refusal.code for refusal in refused.values()} == {"unsupported_message"}
-    warning = refusal_warning(refused, cases=3, models=2)
+    assert {case_id: e.code for case_id, e in by_fake.items()} == {
+        "marker": "unsupported_message",
+        "opening": "empty_prompt",
+    }
+    warning = exclusion_warning(by_fake, cases=4, model="fake-model")
     assert warning is not None
-    assert warning.startswith("2 of 3 test cases are left out for every model")
-    assert "deepseek and fake-model" in warning
-    assert refusal_warning({}, cases=3) is None
+    assert warning.startswith("2 of 4 test cases are left out for fake-model, which cannot ")
+    assert exclusion_warning({}, cases=4, model="fake-model") is None
