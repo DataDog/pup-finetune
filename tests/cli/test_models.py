@@ -42,6 +42,7 @@ QWEN = {
     "default_lora_rank": 8,
     "trust_remote_code": False,
     "provider_options": ["max_seq_len"],
+    "notes": "Qwen3.8 27B; reasoning history is preserved in training.",
 }
 GLM = {
     "alias": "glm-5p3-flash",
@@ -57,6 +58,7 @@ GLM = {
     "default_lora_rank": 8,
     "trust_remote_code": False,
     "provider_options": ["max_seq_len"],
+    "notes": "GLM-5.3 Flash; it stops by emitting the next role tag.",
 }
 FIREWORKS_ALIASES = [
     "qwen3p8-27b",
@@ -119,6 +121,9 @@ def test_lists_the_fireworks_profiles_without_a_key() -> None:
     assert body["models"][:2] == [QWEN, GLM]
     trusting = [model["alias"] for model in body["models"] if model["trust_remote_code"]]
     assert trusting == ["kimi-k3"]
+    notes = {model["alias"]: model["notes"] for model in body["models"]}
+    assert "user or tool message" in notes["deepseek-v4-flash-0731"]
+    assert "date" in notes["muse-glimmer-30b"]
 
 
 def test_lists_the_fake_profiles_in_dev_mode(monkeypatch: pytest.MonkeyPatch) -> None:
