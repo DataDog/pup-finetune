@@ -1396,6 +1396,24 @@ def test_an_agreement_whose_labeled_rows_all_fail_a_check_is_a_usage_error(
     assert sorted(alone.checked) == ["row-1", "row-2"]
 
 
+def test_an_agreement_capped_to_rows_the_checks_fail_names_the_cap(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path)
+    label_rows(dataset, {"row-0": True, "row-1": False, "row-2": True})
+    module = checks_file(tmp_path)
+    # Reviewed in the order row-2, row-1, row-0: the first two fail a check.
+    with pytest.raises(UsageError, match="fail every labeled row --max-rows 2 takes") as caught:
+        plan_triage(dataset, RUBRIC, (J1,), max_rows=2, agreement=True, checks=module)
+    assert (caught.value.hint or "").startswith("raise --max-rows, ")
+    plan = plan_triage(dataset, RUBRIC, (J1,), max_rows=3, agreement=True, checks=module)
+    assert [row.id for row in plan.rows] == ["row-0"]
+
+
+def test_a_checks_agreement_with_no_labeled_row_compares_the_checks(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path, n=2)
+    with pytest.raises(UsageError, match=r"to compare the checks with$"):
+        plan_triage(dataset, None, (), agreement=True, checks=checks_file(tmp_path))
+
+
 @pytest.mark.parametrize(
     ("body", "problem"),
     [("return row['missing']", "KeyError"), ('return False, "\\ud800"', "lone surrogate")],
