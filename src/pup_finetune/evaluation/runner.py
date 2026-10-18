@@ -1794,8 +1794,11 @@ def replay_result(
     warnings: list[str] = [] if shared is None else [shared]
     hint = None
     publication = _publication(plan, outcome)
+    failed = {} if plan.evaluators is None else _evaluator_errors(plan)
+    checks = {check.name for check in plan.evaluators.checks} if plan.evaluators else set()
+    rescored = bool(errors) or any(failed[name]["errors"] for name in set(failed) - checks)
     if scoring:
-        warnings.append(scoring_warning(scoring))
+        warnings.append(scoring_warning(scoring, retried=rescored))
     if plan.evaluators is not None:
         reports = _reports(EvalDir(plan.out_dir))
         calibrate = not plan.settings.skip_calibration
@@ -1829,6 +1832,8 @@ def replay_result(
                 "included: a retry updates the local results only, so evaluate into a new "
                 "--out-dir to publish experiments with every result"
             )
+    if broken := _check_hint(failed, checks, plan.out_dir):
+        hint = broken if hint is None else f"{hint}. {broken}"
     if plan.compare is not None:
         skips = Counter(plan.compare_skips.values())
         skipped = skipped_warning(skips, spec=plan.compare.spec, cases=len(plan.cases))
@@ -1874,7 +1879,7 @@ def replay_result(
         warnings.append(
             "publishing the evaluation was cancelled; run next_command to publish the rest"
         )
-    retry = status != "complete" or publication["status"] in {"failed", "cancelled"}
+    retry = status == "partial" or rescored or publication["status"] in {"failed", "cancelled"}
     return finite_json(
         {
             "status": status,
@@ -1886,6 +1891,7 @@ def replay_result(
             "pending": outcome.pending,
             "cancelled": outcome.cancelled,
             "errors": errors,
+            **({} if plan.evaluators is None else {"evaluator_errors": failed}),
             "publication": publication,
             "warnings": warnings,
             "hint": hint,
@@ -1900,12 +1906,50 @@ def replay_result(
     )
 
 
-def scoring_warning(count: int) -> str:
-    """The warning for ``count`` evaluator entries an error left without a score."""
+def scoring_warning(count: int, *, retried: bool = True) -> str:
+    """The warning for ``count`` evaluator entries an error left without a score; one that
+    ``next_command`` does not retry points to the hint."""
     return (
         f"{count} evaluator score(s) are missing after an error (an evaluator's judge outage, "
-        "a check that raised, or the pair's own error), left out of their rates; run "
-        "next_command to retry them"
+        "a check that raised, or the pair's own error), left out of their rates; "
+        + ("run next_command to retry them" if retried else "the hint says how to fix them")
+    )
+
+
+def _evaluator_errors(plan: EvalPlan) -> dict[str, dict[str, Any]]:
+    """Each evaluator's entries that ended in an error over the plan's pairs, with the first
+    error (``{"stage", "type", "message"}``)."""
+    from pup_finetune.evaluation.replay import EvalDir
+
+    results = EvalDir(plan.out_dir).read_results()
+    found: dict[str, dict[str, Any]] = {
+        name: {"errors": 0, "first_error": None} for name in plan.evaluator_names
+    }
+    for target, cases in plan.replays.items():
+        for case in cases:
+            entries = (results.get((target, case.id)) or {}).get("evaluators")
+            for name, counted in found.items():
+                entry = entries.get(name) if isinstance(entries, Mapping) else None
+                if isinstance(entry, Mapping) and entry.get("status") == "error":
+                    counted["errors"] += 1
+                    counted["first_error"] = counted["first_error"] or entry.get("error")
+    return found
+
+
+def _check_hint(found: Mapping[str, Mapping[str, Any]], checks: set[str], out_dir: Path) -> str:
+    """The hint for the ``checks`` that raised in ``found``, which a retry cannot fix since
+    each runs its frozen file again; empty when none raised."""
+    raised = [
+        f"the check {name} raised on {entry['errors']} answer(s): "
+        + str((entry["first_error"] or {}).get("message")).removeprefix(f"check {name}: ")
+        for name, entry in found.items()
+        if name in checks and entry["errors"]
+    ]
+    if not raised:
+        return ""
+    return (
+        f"{'; '.join(raised)}; a retry runs the same frozen file, so fix the check in a new "
+        f"file under a new evaluator name, or pass --out-dir {quoted(free_sibling(out_dir))}"
     )
 
 

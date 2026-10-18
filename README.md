@@ -334,6 +334,8 @@ without examples is not calibrated, and the preview and the result warn. The res
 `headline` names the `evaluator` it leads with and has `evaluators`: each one's pass rate per
 model and tuned minus base with its interval, and `all`, which passes a case when the built-in
 judge and every evaluator pass it (one that does not apply counts as a pass).
+`evaluator_errors` counts each evaluator's errors with the first one. A check that raised is
+not retried, since its frozen file would raise again: the hint names it and how to fix it.
 
 Added to a complete evaluation, evaluators reuse every stored answer: nothing is generated
 again and no training session opens, so only their judges' calls are paid, and checks cost

@@ -23,6 +23,8 @@ from typer.testing import CliRunner, Result
 
 from pup_finetune import judges
 from pup_finetune.cli import app
+from pup_finetune.errors import ExternalError
+from pup_finetune.evaluation import runner as runner_module
 from pup_finetune.evaluation.fake_judge import FakeJudge
 from pup_finetune.inference import JudgeConfig
 from pup_finetune.providers.fake import FakeBackend
@@ -378,3 +380,61 @@ def test_read_only_allows_fake_evaluators_and_refuses_a_paid_one(
                      "--confirm")  # fmt: skip
     assert refused.exit_code == 2
     assert "read_only" in refused.stderr
+
+
+def test_a_check_that_raises_on_answers_is_named_and_not_retried(run_dir: Path, spec: Path) -> None:
+    (spec.parent / "strict.py").write_text(
+        "def same(case, candidate):\n    if candidate != case['reference']:\n"
+        "        raise ValueError('not the reference')\n    return True\n"
+    )
+    strict = spec.with_name("strict.toml")
+    strict.write_text('[[evaluator]]\nname = "same"\ntype = "check"\nfile = "strict.py"\n')
+    result = invoke(
+        "evaluate", str(run_dir), "--evaluators", str(strict), "--no-publish", "--confirm"
+    )
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    answers = 2 * data["headline"]["cases"]
+    assert data["status"] == "complete_with_errors"
+    found = data["evaluator_errors"]["same"]
+    assert (found["errors"], found["first_error"]["type"]) == (answers, "CheckError")
+    assert data["hint"] == (
+        f"the check same raised on {answers} answer(s): ValueError: not the reference; a retry "
+        "runs the same frozen file, so fix the check in a new file under a new evaluator name, "
+        f"or pass --out-dir {run_dir / 'eval-2'}"
+    )
+    assert data["next_command"] == f"pup finetune deploy {run_dir}"
+    assert not [warning for warning in data["warnings"] if "retry" in warning]
+    assert f"0 errors, {answers} evaluator error(s)" in result.stderr
+    assert f"complete with 0 errors and {answers} evaluator errors" in result.stderr
+
+
+class Outage:
+    """A judge that cannot be reached: every call raises."""
+
+    def complete(self, messages: Any, **kwargs: Any) -> Any:
+        raise ExternalError("the judge is down", source="judge")
+
+    def close(self) -> None:
+        pass
+
+
+def test_an_evaluator_judge_outage_is_retried(
+    run_dir: Path, spec: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    @contextmanager
+    def down(judges: Any) -> Iterator[dict[str, Any]]:
+        yield {"fake": Outage()}
+
+    monkeypatch.setattr(runner_module, "open_evaluator_clients", down)
+    spec.write_text('[[evaluator]]\nname = "tone"\ntype = "judge"\nrubric = "Pass when polite."\n')
+    result = invoke(
+        "evaluate", str(run_dir), "--evaluators", str(spec), "--no-publish", "--confirm"
+    )
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["evaluator_errors"]["tone"]["first_error"]["message"] == "judge: the judge is down"
+    assert data["hint"] is None
+    assert data["next_command"] == (
+        f"pup finetune evaluate {run_dir} --judge-model fake-judge --no-publish"
+    )

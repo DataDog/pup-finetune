@@ -134,7 +134,9 @@ fake provider and judge and not published, is allowed: nothing leaves the machin
 `resume` on the fake provider likewise). A changed `--max-tokens`, judge, seed or cap needs a
 new `--out-dir`. An evaluation whose pairs ended in errors (a sampler or judge outage) reports
 `complete_with_errors` with an error count and a `next_command` that retries them, and exits
-1 when a target has no verdict at all; a cancelled one reports `partial`.
+1 when a target has no verdict at all; a cancelled one reports `partial`. `evaluator_errors`
+counts each evaluator's errors with the first one; a check that raised is not retried (its
+frozen file raises again), and the hint names it with the fix.
 
 To build a dataset from your own Agent Observability traces (Datadog reads through pup, so
 both work with `PUP_READ_ONLY` set; test a filter with `pup llm-obs spans search` first):

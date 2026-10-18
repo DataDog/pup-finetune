@@ -336,6 +336,9 @@ def evaluation_view(result: Mapping[str, Any]) -> dict[str, Any]:
             for name in names
         },
         "errors": {name: int((summary.get("errors") or {}).get(name, 0)) for name in targets},
+        **(
+            {"evaluator_errors": result["evaluator_errors"]} if "evaluator_errors" in result else {}
+        ),
         "pending": result.get("pending"),
         "reused": {
             name: dict(target["reused"])

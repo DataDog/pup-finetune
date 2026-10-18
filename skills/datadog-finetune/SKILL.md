@@ -85,7 +85,7 @@ row-weather-002 (train, 2 turns, tools: get_weather)
 | `phase` `cancelled` with a `best_epoch` | Evaluate or deploy it as is. Resume only to train further, with a yes. |
 | `phase` `interrupted` or `failed` | Preview `resume` (step 5); `resume_mode` `finalize_only` retries only the promotion. |
 | evaluate `status` `complete` | Report the headline (step 6). |
-| evaluate `status` `complete_with_errors` | Its `next_command` retries the errors; it is paid, so ask first. |
+| evaluate `status` `complete_with_errors` | Its `next_command` retries the errors; it is paid, so ask first. A check that raised is not retried: its `hint` says how to fix it. |
 | evaluate `status` `partial` | Rerun the same command to continue. |
 | evaluate `status` `calibration_failed` | The judge (or the `evaluator` it names) failed its check. Pick another judge with the user. |
 | `publication.status` `failed` or `cancelled` | Its `next_command` publishes the rest. |

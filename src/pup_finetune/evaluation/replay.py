@@ -702,10 +702,11 @@ def run_replay(
     is needed only while one of its pairs still needs a generation, so a rerun with nothing
     left to generate may pass fewer. Holds the directory's lock throughout. ``on_progress``
     receives ``{"done", "total", "target", "case_id", "status", "passed", "no_verdict",
-    "reason", "error", "format_valid", "stop_reason", "max_tokens"}`` per finished pair
-    (``no_verdict`` the judge's answer's flaw, if it held no verdict; ``reason`` the
-    judgment's; ``error`` the error result's ``{"stage", "type", "message"}``;
-    ``format_valid`` and ``stop_reason`` the generation's, ``None`` without one).
+    "reason", "error", "format_valid", "stop_reason", "max_tokens", "evaluator_errors"}`` per
+    finished pair (``no_verdict`` the judge's answer's flaw, if it held no verdict; ``reason``
+    the judgment's; ``error`` the error result's ``{"stage", "type", "message"}``;
+    ``format_valid`` and ``stop_reason`` the generation's, ``None`` without one;
+    ``evaluator_errors`` how many of its evaluator entries ended in an error).
     ``publisher`` gets the evaluation once every pair has a result, and what it reports is
     the outcome's ``publication``; a :class:`LivePublisher` also starts before the first pair
     (its link is the outcome's ``link``) and publishes finished rows as the pairs run.
@@ -842,6 +843,8 @@ def _run_pool(
                 judgment = outcome.get("judgment")
                 judgment = judgment if isinstance(judgment, Mapping) else {}
                 generation = replay.generations.get((target, case.id)) or {}
+                entries = outcome.get("evaluators")
+                entries = entries.values() if isinstance(entries, Mapping) else []
                 on_progress(
                     {
                         "done": done_count,
@@ -856,6 +859,10 @@ def _run_pool(
                         "format_valid": generation.get("format_valid"),
                         "stop_reason": generation.get("stop_reason"),
                         "max_tokens": replay.max_tokens[target],
+                        "evaluator_errors": sum(
+                            isinstance(entry, Mapping) and entry.get("status") == "error"
+                            for entry in entries
+                        ),
                     }
                 )
 

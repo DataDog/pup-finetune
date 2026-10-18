@@ -472,9 +472,11 @@ def _evaluation_parts(result: Mapping[str, Any], *, compact: bool) -> Summary:
     headline_data = result["headline"]
     rates = headline_data["judge_pass_rate"]
     errors = int(sum(int(count) for count in (result.get("errors") or {}).values()))
+    scoring = sum(int(entry["errors"]) for entry in (result.get("evaluator_errors") or {}).values())
     what = {
         "complete": "complete",
-        "complete_with_errors": f"complete with {_n(errors, 'error')}",
+        "complete_with_errors": f"complete with {_n(errors, 'error')}"
+        + (f" and {_n(scoring, 'evaluator error')}" if scoring else ""),
         "partial": f"partial ({_n(result.get('pending', 0), 'pair')} left)",
     }.get(str(status), str(status))
     judge = result.get("judge_model")

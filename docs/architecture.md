@@ -376,7 +376,8 @@ provider, and talks to models only through the `Sampler` protocol.
   line carries their entries, so a pair is done once every attached evaluator scored it: an
   evaluator added to a complete evaluation scores the stored answers without a generation, a
   built-in judgment or a training session. An evaluator's outage, or a check that raises, is
-  that entry's error, in no rate. The summary adds each evaluator's rates and the composite
+  that entry's error, in no rate; a rerun retries an outage, but not a check, whose frozen
+  file raises again. The summary adds each evaluator's rates and the composite
   `all` (the judge and every evaluator pass), with paired deltas through the same bootstrap;
   the headline (`judge`, an evaluator or `all`) leads the result and ranks a benchmark. Only
   base answers and built-in verdicts go to the dataset's store; evaluators are scored per

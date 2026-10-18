@@ -277,11 +277,13 @@ class EvaluationProgress:
         self._passed = 0
         self._failed = 0
         self._errors = 0
+        self._scoring = 0
         self._shown = 0
         self._causes: Counter[str] = Counter()
 
     def __call__(self, event: Mapping[str, Any]) -> None:
         done, total = int(event.get("done") or 0), int(event.get("total") or 0)
+        self._scoring += int(event.get("evaluator_errors") or 0)
         if event.get("status") == "error":
             self._errors += 1
         elif event.get("passed") and not event.get("no_verdict"):
@@ -312,4 +314,5 @@ class EvaluationProgress:
                 f"evaluated {done}/{total} pairs ({percent}%): {self._passed} judged pass, "
                 f"{self._failed} judged fail{f' ({counted})' if counted else ''}, "
                 f"{self._errors} {'error' if self._errors == 1 else 'errors'}"
+                + (f", {self._scoring} evaluator error(s)" if self._scoring else "")
             )
