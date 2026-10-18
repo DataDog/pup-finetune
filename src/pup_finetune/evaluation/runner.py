@@ -1333,13 +1333,18 @@ def replay_result(
             "tuned_checkpoint": None
             if tuned_sampler is None
             else dataclasses.asdict(tuned_sampler),
-            **_replay_next(plan, status=status, publication=publication, retry=retry),
+            **_replay_next(
+                plan,
+                finished=_finished(status, summary),
+                publication=publication,
+                retry=retry,
+            ),
         }
     )
 
 
 def _replay_next(
-    plan: EvalPlan, *, status: str, publication: Mapping[str, Any], retry: bool
+    plan: EvalPlan, *, finished: bool, publication: Mapping[str, Any], retry: bool
 ) -> dict[str, Any]:
     """``next_command`` and ``next_steps`` after an evaluation.
 
@@ -1352,12 +1357,12 @@ def _replay_next(
     """
     rerun = plan.evaluate_command()
     pushing = (
-        _push_first(plan.publishing, shlex.join(rerun), plan.run_dir, complete=status == "complete")
+        _push_first(plan.publishing, shlex.join(rerun), plan.run_dir, complete=finished)
         if publication.get("status") == "skipped"
         else []
     )
     steps = list(pushing)
-    if status == "complete" and plan.compare is None:
+    if finished and plan.compare is None:
         compared = evaluate_words(
             plan.run_dir,
             plan.settings,
@@ -1522,10 +1527,15 @@ def _settings_record(plan: EvalPlan) -> dict[str, Any]:
 
 
 def _is_complete(status: str, publication: str | None, summary: object) -> bool:
-    """Whether an evaluation is done: every pair judged, without an error a retry could fix,
-    and its publishing neither failed nor was cancelled (either is what a rerun continues)."""
-    final = status == "complete_with_errors" and _errors_final(summary)
-    return (status == "complete" or final) and publication not in {"failed", "cancelled", "pending"}
+    """Whether an evaluation is done: :func:`_finished`, and its publishing neither failed nor
+    was cancelled (either is what a rerun continues)."""
+    return _finished(status, summary) and publication not in {"failed", "cancelled", "pending"}
+
+
+def _finished(status: str, summary: object) -> bool:
+    """Whether every pair is judged, without an error a retry could fix: a rerun makes no
+    model call."""
+    return status == "complete" or (status == "complete_with_errors" and _errors_final(summary))
 
 
 def _errors_final(summary: object) -> bool:

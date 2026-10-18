@@ -1244,6 +1244,26 @@ def test_a_prompt_refused_while_sampling_is_an_error_no_rerun_retries(
     assert output(again)["preview"]["generation_calls"] == 0
 
 
+def test_errors_no_retry_can_fix_leave_nothing_to_rerun_when_publishing_was_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(FakeRenderer, "prompt_refusal", lambda self, messages, tools: None)
+    dataset, _ = import_with_refused_test_row(tmp_path)
+    run = tmp_path / "run"
+    assert invoke(*train_args(dataset, run, "--confirm")).exit_code == 0
+
+    data = output(invoke("evaluate", str(run), "--confirm"))
+
+    assert data["status"] == "complete_with_errors"
+    assert data["publication"]["status"] == "skipped"
+    assert data["next_command"] is None
+    push, publish, *rest = data["next_steps"]
+    assert push["command"].startswith("pup finetune dataset push")
+    assert publish["command"].endswith("--confirm")
+    assert "makes no new model calls" in publish["why"]
+    assert [step["command"].split()[2] for step in rest][:1] == ["deploy"]
+
+
 def test_previews_say_when_the_tokenizer_runs_repository_code(
     dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
