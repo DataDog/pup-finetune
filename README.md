@@ -120,11 +120,13 @@ block (rows kept, dropped and unlabeled, triage, push), and its `next_command` f
 
 ### Review the rows
 
-Read a sample and record which rows to keep. `labels.jsonl` holds one
-`{"id": "<row id>", "keep": true, "reason": "..."}` per line; dropping a row needs a reason:
+Read a sample and record which rows to keep. `--markdown` also writes the sampled
+conversations in full to a private file, each with its labels line to copy. `labels.jsonl`
+holds one `{"id": "<row id>", "keep": true, "reason": "..."}` per line; dropping a row needs
+a reason:
 
 ```sh
-pup finetune dataset sample datasets/my-agent --count 20
+pup finetune dataset sample datasets/my-agent --count 20 --markdown datasets/review.md
 pup finetune dataset label datasets/my-agent --file labels.jsonl
 ```
 
@@ -334,7 +336,8 @@ A rerun with nothing left to judge needs no judge key.
 Dataset and run directories hold trace content: conversations, tool calls and tool results.
 `pup-finetune` creates them with `0700` permissions and their files with `0600`. When it
 creates `runs/` or `datasets/` in the working directory, it adds a `.gitignore` there so they
-stay out of version control.
+stay out of version control. `dataset sample --markdown FILE` writes the sampled conversations
+to `FILE` (`0600`); keep it under `datasets/` so git ignores it.
 
 Training, `evaluate` and `dataset triage` send conversation content to the providers you
 choose, and every preview lists each recipient in `data_recipients`. `PUP_READ_ONLY=true` (or

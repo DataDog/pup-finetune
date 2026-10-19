@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import shutil
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -129,6 +130,16 @@ def _read_only_deploy(w: World) -> list[str]:
     return ["deploy", str(w.run), "--confirm"]
 
 
+def _unwritable_markdown(w: World) -> list[str]:
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions")
+    locked = w.tmp / "locked"
+    locked.mkdir()
+    locked.chmod(0o500)
+    w.held.callback(locked.chmod, 0o700)
+    return ["dataset", "sample", str(w.dataset), "--markdown", str(locked / "review.md")]
+
+
 def _corrupt_state(w: World) -> list[str]:
     (w.run / "state.json").write_text("{not json")
     return ["status", str(w.run)]
@@ -199,6 +210,7 @@ MISTAKES: list[tuple[str, Setup, int, str]] = [
     ("--team without --remote", lambda w: w.train("--team", "T"), 2, "usage"),
     ("--remote with --detach", lambda w: w.train("--remote", "--detach"), 2, "usage"),
     ("--remote on a provider without it", lambda w: w.train("--remote"), 2, "usage"),
+    ("--markdown in an unwritable directory", _unwritable_markdown, 2, "usage"),
     # A preview is exit 2 too: nothing ran.
     ("train without --confirm", lambda w: w.train(), 2, "confirmation_required"),
     ("a remote write under PUP_READ_ONLY", _read_only_deploy, 2, "read_only"),

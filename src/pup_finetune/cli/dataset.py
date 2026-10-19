@@ -35,8 +35,10 @@ from pup_finetune.curation.pipeline import Pipeline, pipeline_state
 from pup_finetune.curation.samples import (
     DEFAULT_SAMPLE_SEED,
     DEFAULT_SAMPLE_SIZE,
+    REVIEW_FIRST_LINE,
     SampleSplit,
-    sample_rows,
+    pick_sample,
+    review_markdown,
 )
 from pup_finetune.data.convert import ReasoningMode
 from pup_finetune.data.dataset_dir import (
@@ -86,6 +88,7 @@ from pup_finetune.display import counted, display_path
 from pup_finetune.errors import SettingsConflict, UsageError, require_confirm, require_writable
 from pup_finetune.next_steps import command, step, template
 from pup_finetune.output import info
+from pup_finetune.storage import atomic_write_text, ensure_private_dir
 from pup_finetune.workspace import ParentSetup, ignore_new_parent
 
 SAMPLE_IDS_PER_SPLIT = 5
@@ -421,16 +424,25 @@ SAMPLE_DOC = CommandDoc(
     description=describe(
         "Show up to --count rows of DIR in brief, to review them before labeling: id, split, "
         "label, turns, tools, and the first user and final assistant messages cut to 300 "
-        "characters. The same --seed picks the same rows. Rows labeled drop are left out "
+        "characters. --markdown FILE also writes those rows in full to a private (0600) "
+        "Markdown file, each with a labels line to copy. Rows labeled drop are left out "
         "unless --include-dropped is passed.",
-        "A final message without text shows its tool calls as name(args). The full rows stay "
-        "in rows.jsonl.",
+        "The same --seed picks the same rows. A final message without text shows its tool "
+        "calls as name(args). The full rows stay in rows.jsonl. The Markdown file has the "
+        "`dataset label` command to run, then per row its split and label and the "
+        "conversation in reading order: the system prompt's first lines, the user messages, "
+        "the assistant messages with their reasoning and tool calls (a turn of weight 0 marked "
+        "not trained), the tool results and the final answer; long reasoning, tool calls and "
+        "tool results are cut, their length noted. An existing FILE is replaced only when it "
+        "is a review file.",
     ),
     examples=(
         "pup finetune dataset sample datasets/my-agent -n 20",
+        "pup finetune dataset sample datasets/my-agent -n 20 "
+        "--markdown datasets/my-agent-review.md",
         "pup finetune dataset sample datasets/my-agent --split test --include-dropped",
     ),
-    safety=local("shows rows"),
+    safety=local("shows rows; --markdown writes them to FILE"),
 )
 
 
@@ -444,6 +456,7 @@ def dataset_next(
     *,
     summary: Mapping[str, Any] | None = None,
     sampled: bool = False,
+    review: Path | None = None,
 ) -> dict[str, Any]:
     """The ``pipeline`` block of a dataset directory, and the ``next_command`` and
     ``next_steps`` it leads to.
@@ -457,7 +470,8 @@ def dataset_next(
     benchmarking) is a step only once every kept row is pushed as it is now. Kept copies of
     a request outside their group's split come first: a ``dataset label`` step with the drop
     labels the summary wrote for them. ``directory`` is the directory as the user typed it;
-    ``summary`` is the dataset's summary when the caller has it already. A pipeline file
+    ``summary`` is the dataset's summary when the caller has it already; ``review`` is the
+    Markdown file a sample wrote, whose labels lines the label step copies. A pipeline file
     that cannot be read adds ``warnings`` (see :func:`merge_next`).
     """
     summary = summary if summary is not None else dataset.summary()
@@ -469,7 +483,7 @@ def dataset_next(
         shown["warnings"] = list(state.warnings)
     if not state.accepted:
         return {**shown, "next_command": None, "next_steps": []}
-    following = _next_by_state(dataset, directory, state, push_step, sampled=sampled)
+    following = _next_by_state(dataset, directory, state, push_step, sampled=sampled, review=review)
     conflicts = summary["split_conflicts"]
     if conflicts["labels_file"] is not None:
         following["next_steps"].insert(
@@ -494,13 +508,18 @@ def _next_by_state(
     push_step: dict[str, str] | None,
     *,
     sampled: bool,
+    review: Path | None,
 ) -> dict[str, Any]:
     """:func:`dataset_next`'s ``next_command`` and ``next_steps`` for ``state``, which has
     accepted rows."""
     label_step = step(
         template("dataset", "label", directory, "--file", "<LABELS_FILE>"),
         'record keep/drop decisions: write <LABELS_FILE> first, one {"id", "keep", '
-        '"reason"} object per line (a reason is required to drop)',
+        '"reason"} object per line (a reason is required to drop)'
+        if review is None
+        else f"record keep/drop decisions: copy the labels line of each row you decided from "
+        f'{display_path(review)} into <LABELS_FILE>, with "keep": false and a reason on the '
+        "rows to drop",
     )
     triage_steps = (
         [
@@ -1189,31 +1208,89 @@ def sample(
         bool,
         typer.Option("--include-dropped", help="Also sample rows labeled drop."),
     ] = False,
+    markdown: Annotated[
+        Path | None,
+        typer.Option(
+            "--markdown",
+            metavar="FILE",
+            help="Also write the rows in full to FILE (.md).",
+            dir_okay=False,
+            show_default=False,
+        ),
+    ] = None,
     old_count: Annotated[
         int | None, typer.Option("--n", min=1, hidden=True, help="The old name of --count.")
     ] = None,
 ) -> dict[str, Any]:
     n = renamed("count", "old_count")
+    # The suffix keeps a typo from replacing a dataset's .json or .jsonl files.
+    if markdown is not None and markdown.suffix.lower() != ".md":
+        raise UsageError(f"--markdown must name a .md file, not {markdown}")
+    if markdown is not None and markdown.exists() and not _is_review_file(markdown):
+        raise UsageError(
+            f"{markdown} exists and is not a review file `dataset sample` wrote",
+            hint="choose another --markdown path, or remove the file first",
+        )
     require_dataset_dir(directory)
     dataset = DatasetDir(directory)
     dataset.settings()  # A UsageError when this is not a dataset directory.
-    rows, eligible = sample_rows(
-        dataset, n=n, split=split, seed=seed, include_dropped=include_dropped
-    )
-    result = {
+    picked = pick_sample(dataset, n=n, split=split, seed=seed, include_dropped=include_dropped)
+    result: dict[str, Any] = {
         "dataset_dir": display_path(dataset.path),
         "split": split,
         "seed": seed,
         "include_dropped": include_dropped,
-        "eligible": eligible,
-        "rows": rows,
+        "eligible": picked.eligible,
+        "rows": picked.described(),
         "rows_file": display_path(dataset.rows_path),
+        "markdown_file": None,
         "hint": (
             "review these rows with the user, then record decisions as JSON lines of "
             '{"id": ..., "keep": true|false, "reason": ...}; a reason is required to drop'
         ),
     }
-    return merge_next(result, dataset_next(dataset, directory, sampled=True))
+    review = markdown if markdown is not None and picked.picked else None
+    if markdown is not None and review is None:
+        result["notes"] = [
+            f"no row matched the sample, so {display_path(markdown)} was not written"
+        ]
+    if review is not None:
+        label_command = template("dataset", "label", directory, "--file", "<LABELS_FILE>")
+        text = review_markdown(
+            picked,
+            dataset_dir=display_path(dataset.path),
+            split=split,
+            seed=seed,
+            label_command=label_command,
+        )
+        replacing = review.exists()
+        try:
+            atomic_write_text(ensure_private_dir(review.parent) / review.name, text)
+        except OSError as exc:
+            raise UsageError(
+                f"cannot write --markdown {markdown}: {exc.strerror or exc}",
+                hint="choose a writable --markdown path",
+            ) from exc
+        shown = display_path(review)
+        result["markdown_file"] = shown
+        wrote = f"replaced the earlier review file {shown}" if replacing else f"wrote {shown}"
+        result["notes"] = [
+            f"{wrote} (0600): it holds trace content, so keep it out of git and do not share it"
+        ]
+        result["hint"] = (
+            f"review these rows with the user in {shown}, then copy the labels line of each "
+            'row you decided into a labels file, with "keep": false and a reason on the rows '
+            "to drop"
+        )
+    return merge_next(result, dataset_next(dataset, directory, sampled=True, review=review))
+
+
+def _is_review_file(path: Path) -> bool:
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            return REVIEW_FIRST_LINE.match(handle.readline()) is not None
+    except OSError:
+        return False
 
 
 def _push_brief(dataset: DatasetDir) -> dict[str, Any] | None:

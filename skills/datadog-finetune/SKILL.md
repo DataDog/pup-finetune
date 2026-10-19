@@ -165,15 +165,16 @@ Check:
 
 - [ ] The accepted rows and exclusion reasons look right to the user.
 - [ ] Every split is non-empty. Fix a skewed split by pulling more rows, never with the seed.
-- [ ] Trace content stays out of git: keep the dataset, label files and rubrics in `datasets/`.
+- [ ] Trace content stays out of git: keep the dataset, label and review files and rubrics
+      under `datasets/` (ignored).
 
 ## Step 3: review the rows
 
 Label by hand for a small dataset (up to about 200 rows), or when the user wants to decide.
-Show a sample in the format above and agree on each row:
+Show a sample in the format above and agree on each row (`--markdown` writes it in full):
 
 ```sh
-pup finetune dataset sample datasets/my-agent --count 20
+pup finetune dataset sample datasets/my-agent --count 20 --markdown datasets/my-agent-review.md
 pup finetune dataset label datasets/my-agent --file datasets/my-agent-labels.jsonl
 ```
 

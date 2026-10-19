@@ -80,7 +80,7 @@ What each command does without and with `--confirm`, where its data goes, and wh
 | `pup finetune dataset pull` | pulls rows into DIR | no `--confirm` | DIR: reads Datadog through pup | allowed |
 | `pup finetune dataset import` | imports rows into DIR | no `--confirm` | nowhere: local files | allowed |
 | `pup finetune dataset show` | shows the dataset | no `--confirm` | nowhere: local files | allowed |
-| `pup finetune dataset sample` | shows rows | no `--confirm` | nowhere: local files | allowed |
+| `pup finetune dataset sample` | shows rows; --markdown writes them to FILE | no `--confirm` | nowhere: local files | allowed |
 | `pup finetune dataset label` | records labels in DIR | no `--confirm` | nowhere: local files | allowed |
 | `pup finetune dataset triage` | previews the judge calls | runs the judges and labels rows (paid) | each judge's provider: Fireworks, Anthropic or OpenAI | allowed |
 | `pup finetune dataset push` | previews the records | pushes the kept rows (a remote write) | Datadog: an Agent Observability dataset | preview allowed; `--confirm` refused |
@@ -372,9 +372,9 @@ Safety: Free · local files only · PUP_READ_ONLY: allowed.
 
 ## `pup finetune dataset sample`
 
-Show up to --count rows of DIR in brief, to review them before labeling: id, split, label, turns, tools, and the first user and final assistant messages cut to 300 characters. The same --seed picks the same rows. Rows labeled drop are left out unless --include-dropped is passed.
+Show up to --count rows of DIR in brief, to review them before labeling: id, split, label, turns, tools, and the first user and final assistant messages cut to 300 characters. --markdown FILE also writes those rows in full to a private (0600) Markdown file, each with a labels line to copy. Rows labeled drop are left out unless --include-dropped is passed.
 
-A final message without text shows its tool calls as name(args). The full rows stay in rows.jsonl.
+The same --seed picks the same rows. A final message without text shows its tool calls as name(args). The full rows stay in rows.jsonl. The Markdown file has the `dataset label` command to run, then per row its split and label and the conversation in reading order: the system prompt's first lines, the user messages, the assistant messages with their reasoning and tool calls (a turn of weight 0 marked not trained), the tool results and the final answer; long reasoning, tool calls and tool results are cut, their length noted. An existing FILE is replaced only when it is a review file.
 
 ```
 pup finetune dataset sample [OPTIONS] DIR
@@ -390,11 +390,13 @@ pup finetune dataset sample [OPTIONS] DIR
 | `--split` | `train\|validation\|test\|all` | `all` | train, validation, test or all. |
 | `--seed` | `N` | `0` | Seed that picks the rows. |
 | `--include-dropped` |  |  | Also sample rows labeled drop. |
+| `--markdown` | `FILE` |  | Also write the rows in full to FILE (.md). |
 
 Examples:
 
 ```sh
 pup finetune dataset sample datasets/my-agent -n 20
+pup finetune dataset sample datasets/my-agent -n 20 --markdown datasets/my-agent-review.md
 pup finetune dataset sample datasets/my-agent --split test --include-dropped
 ```
 
