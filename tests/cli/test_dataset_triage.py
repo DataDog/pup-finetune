@@ -29,6 +29,7 @@ from pup_finetune.cli import app
 from pup_finetune.cli import triage as triage_cli
 from pup_finetune.curation.triage import JUDGMENTS_FILE, rubric_template
 from pup_finetune.data.dataset_dir import DatasetDir
+from pup_finetune.display import display_path
 from pup_finetune.inference import ChatClient, ChatCompleter
 from pup_finetune.judge_models import FIREWORKS_JUDGES as DEFAULT_JUDGES
 from tests.fakes.chat_api import API_KEY, BASE_URL, FakeChatApi, block
@@ -641,3 +642,287 @@ def test_agreement_on_rows_none_of_which_you_labeled_is_a_usage_error(
     )
     assert result.exit_code == 2
     assert "that --rows names carries a label" in result.stderr
+
+
+ROW_CHECKS = ROWS.parent.parent / "evaluators" / "row_checks.py"
+CHECKED = {"row-plain-001", "row-inventory-001", "row-weather-004"}
+
+
+def test_checks_alone_label_at_once_with_no_judge_and_no_key(
+    dataset: Path, chat: FakeChatApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("FIREWORKS_API_KEY", raising=False)
+    result = invoke("dataset", "triage", str(dataset), "--checks", str(ROW_CHECKS))
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["mode"] == "checks"
+    assert data["checks"] == {
+        "file": display_path(ROW_CHECKS),
+        "sha256": data["checks"]["sha256"],
+        "functions": ["declares_tools", "no_tool_errors"],
+        "rows_checked": accepted(dataset),
+        "failed": 3,
+        "failed_by_check": {"declares_tools": 1, "no_tool_errors": 2},
+        "labels": {"applied": 3, "unchanged": 0},
+    }
+    assert data["stale_check_labels"] == 0
+    assert "checks: 3 of 14 rows failed, 3 newly labeled drop" in result.stderr
+    assert chat.requests == []
+    labels = DatasetDir(dataset).labels()
+    assert set(labels) == CHECKED
+    assert labels["row-plain-001"].reason == "check declares_tools: the row declares no tools"
+    assert {label.by for label in labels.values()} == {"check"}
+    council = shlex.join(["pup", "finetune", "dataset", "triage", str(dataset)])
+    council += f" --checks {ROW_CHECKS} --rubric <RUBRIC_FILE> --max-rows 20"
+    assert data["next_steps"][0]["command"] == council
+    why = data["next_steps"][0]["why"]
+    assert "`pup finetune dataset triage --print-template` prints a rubric" in why
+    assert not (dataset / JUDGMENTS_FILE).exists()
+    again = invoke("dataset", "triage", str(dataset), "--checks", str(ROW_CHECKS), "--confirm")
+    assert again.exit_code == 0, again.stderr
+    assert output(again)["checks"]["labels"] == {"applied": 0, "unchanged": 3}
+
+
+@pytest.mark.parametrize(
+    "extra", [["--judges", "fireworks/j1"], ["--concurrency", "2"], ["--reset-triage"]]
+)
+def test_checks_alone_refuse_judge_flags(
+    dataset: Path, chat: FakeChatApi, extra: list[str]
+) -> None:
+    flag = extra[0]
+    result = invoke("dataset", "triage", str(dataset), "--checks", str(ROW_CHECKS), *extra)
+    assert result.exit_code == 2
+    assert f"{flag} needs --rubric or --rule (a run with --checks alone calls no judge)" in (
+        result.stderr
+    )
+    assert not (dataset / "labels.jsonl").exists()
+
+
+def test_checks_run_first_and_the_council_judges_only_the_rest(
+    dataset: Path, chat: FakeChatApi
+) -> None:
+    args = ["dataset", "triage", str(dataset), "--rule", "stay on topic"]
+    args += ["--checks", str(ROW_CHECKS), "--judges", "fireworks/j1"]
+    preview = invoke(*args)
+    assert preview.exit_code == 2, preview.stderr
+    data = output(preview)
+    rows = accepted(dataset)
+    assert data["preview"]["judge_calls"] == rows - 3
+    assert data["preview"]["checks"]["failed"] == 3
+    assert "labels" not in data["preview"]["checks"]
+    assert data["preview"]["action"].startswith("label the 3 rows the checks fail (free), have")
+    assert data["next_command"] == shlex.join(["pup", "finetune", *args, "--confirm"])
+    assert "  checks    3 of 14 rows fail: labeled drop, never judged" in preview.stderr
+    assert not (dataset / "labels.jsonl").exists()
+
+    result = invoke(*args, "--confirm")
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["rows_reviewed"] == rows - 3
+    assert data["checks"]["labels"] == {"applied": 3, "unchanged": 0}
+    assert "too long, 3 newly dropped by checks;" in result.stderr
+    judged = {
+        json.loads(line)["row_id"] for line in (dataset / JUDGMENTS_FILE).read_text().splitlines()
+    }
+    assert judged.isdisjoint(CHECKED) and len(judged) == rows - 3
+    by = {row_id: label.by for row_id, label in DatasetDir(dataset).labels().items()}
+    assert {row_id for row_id, source in by.items() if source == "check"} == CHECKED
+    assert data["pipeline"]["triage"] == "complete"
+
+    without = invoke("dataset", "triage", str(dataset), "--rule", "stay on topic")
+    assert output(without)["preview"]["rows"]["skipped_checked"] == 3
+
+
+def test_a_checked_sample_finishes_with_the_checks(dataset: Path, chat: FakeChatApi) -> None:
+    args = ["dataset", "triage", str(dataset), "--rule", "stay on topic"]
+    args += ["--checks", str(ROW_CHECKS), "--judges", "fireworks/j1"]
+    result = invoke(*args, "--max-rows", "4", "--confirm")
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert (data["status"], data["pipeline"]["triage"]) == ("complete", "incomplete")
+    commands = [entry["command"] for entry in data["next_steps"]]
+    assert shlex.join(["pup", "finetune", *args]) in commands
+    assert not any(command.endswith(" --rubric <RUBRIC_FILE>") for command in commands)
+
+
+def test_dataset_show_finishes_a_checked_sample_with_its_checks(
+    dataset: Path, chat: FakeChatApi, tmp_path: Path
+) -> None:
+    checks = tmp_path / "checks.py"
+    checks.write_text(ROW_CHECKS.read_text())
+    args = ["dataset", "triage", str(dataset), "--rule", "stay on topic"]
+    args += ["--judges", "fireworks/j1", "--max-rows", "4", "--confirm"]
+    assert invoke(*args, "--checks", str(ROW_CHECKS)).exit_code == 0
+    # The checks file is recorded but not frozen: another one resumes the same triage.
+    resumed = invoke(*args, "--checks", str(checks))
+    assert resumed.exit_code == 0, resumed.stderr
+    assert json.loads((dataset / "triage.json").read_text())["checks_file"] == str(checks)
+    finish = shlex.join(["pup", "finetune", "dataset", "triage", str(dataset)])
+    finish += " --rubric <RUBRIC_FILE>"
+    steps = output(invoke("dataset", "show", str(dataset)))["next_steps"]
+    assert f"{finish} --checks {shlex.quote(str(checks))}" in [s["command"] for s in steps]
+    checks.unlink()
+    steps = output(invoke("dataset", "show", str(dataset)))["next_steps"]
+    entry = next(s for s in steps if s["command"].startswith(finish))
+    assert entry["command"] == finish
+    assert f"{checks}, which no longer exists" in entry["why"]
+
+
+def test_checks_alone_on_an_incomplete_triage_offer_one_step_to_finish_it(
+    dataset: Path, chat: FakeChatApi
+) -> None:
+    args = ["dataset", "triage", str(dataset), "--rule", "stay on topic"]
+    assert invoke(*args, "--judges", "fireworks/j1", "--max-rows", "4", "--confirm").exit_code == 0
+    checks = ["dataset", "triage", str(dataset), "--checks", str(ROW_CHECKS)]
+    data = output(invoke(*checks, "--max-rows", "6"))
+    assert data["pipeline"]["triage"] == "incomplete"
+    councils = [s for s in data["next_steps"] if "--rubric" in s["command"]]
+    finish = shlex.join(["pup", "finetune", *checks]) + " --rubric <RUBRIC_FILE>"
+    assert [s["command"] for s in councils] == [finish]
+    assert councils[0]["why"].startswith("finish the triage")
+
+
+def test_checks_alone_on_a_triaged_dataset_offer_no_council(
+    dataset: Path, chat: FakeChatApi
+) -> None:
+    args = ["dataset", "triage", str(dataset), "--checks", str(ROW_CHECKS)]
+    assert invoke(*args, "--rule", "x", "--judges", "fireworks/j1", "--confirm").exit_code == 0
+    data = output(invoke(*args))
+    assert data["pipeline"]["triage"] == "complete"
+    assert not any("--rubric" in s["command"] for s in data["next_steps"])
+
+
+def test_checks_count_only_the_labels_they_change(
+    dataset: Path, chat: FakeChatApi, tmp_path: Path
+) -> None:
+    subset = row_file(tmp_path, "row-plain-001", "row-inventory-001")
+    checks = ["dataset", "triage", str(dataset), "--checks", str(ROW_CHECKS)]
+    assert invoke(*checks, "--rows", str(subset)).exit_code == 0
+    args = [*checks, "--rule", "stay on topic", "--judges", "fireworks/j1"]
+    preview = output(invoke(*args))["preview"]
+    assert preview["action"].startswith("label 1 of the 3 rows the checks fail (free), have")
+    result = invoke(*args, "--confirm")
+    assert result.exit_code == 0, result.stderr
+    assert "too long, 1 newly dropped by checks;" in result.stderr
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(
+        "".join(
+            json.dumps({"id": row.id, "keep": True, "reason": "fine"}) + "\n"
+            for row in DatasetDir(dataset).rows()
+            if row.id not in CHECKED
+        )
+    )
+    other = tmp_path / "other"
+    assert invoke("dataset", "import", str(other), "--file", str(ROWS)).exit_code == 0
+    assert invoke("dataset", "triage", str(other), "--checks", str(ROW_CHECKS)).exit_code == 0
+    assert invoke("dataset", "label", str(other), "--file", str(labels)).exit_code == 0
+    refused = invoke("dataset", "triage", str(other), *args[3:])
+    assert refused.exit_code == 2
+    data = output(refused)
+    assert data["preview"]["refused"] == (
+        "there is no row to review: every accepted row is labeled by you, the agent or a check"
+    )
+    assert data["next_command"] is None
+
+
+def test_an_edited_check_file_reports_stale_check_labels(
+    dataset: Path, chat: FakeChatApi, tmp_path: Path
+) -> None:
+    assert invoke("dataset", "triage", str(dataset), "--checks", str(ROW_CHECKS)).exit_code == 0
+    edited = tmp_path / "row_checks.py"
+    edited.write_text(ROW_CHECKS.read_text().split("\n\ndef no_tool_errors")[0] + "\n")
+    subset = row_file(tmp_path, "row-plain-001", "row-inventory-001", "row-weather-001")
+    args = ["dataset", "triage", str(dataset), "--checks", str(edited), "--rows", str(subset)]
+    result = invoke(*args)
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert (data["checks"]["rows_checked"], data["checks"]["failed"]) == (3, 1)
+    assert (data["stale_check_labels"], data["stale_check_label_ids"]) == (
+        1,
+        ["row-inventory-001"],
+    )
+    assert "dataset label" in data["hint"]
+
+
+def test_agreement_reports_the_checks_apart_from_the_council(
+    dataset: Path, chat: FakeChatApi, tmp_path: Path
+) -> None:
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(
+        "".join(
+            json.dumps({"id": row_id, "keep": keep, "reason": "synthetic"}) + "\n"
+            for row_id, keep in [
+                ("row-plain-001", False),
+                ("row-inventory-001", True),
+                ("row-calendar-001", True),
+            ]
+        )
+    )
+    assert invoke("dataset", "label", str(dataset), "--file", str(labels)).exit_code == 0
+    args = ["dataset", "triage", str(dataset), "--rule", "stay on topic"]
+    args += ["--checks", str(ROW_CHECKS), "--agreement"]
+    preview = invoke(*args)
+    assert preview.exit_code == 2, preview.stderr
+    card = "  checks    2 of 3 labeled rows fail: compared with your labels apart, never judged"
+    assert card in preview.stderr
+    result = invoke(*args, "--confirm")
+    assert result.exit_code == 0, result.stderr
+    agreement = output(result)["agreement"]
+    assert agreement["rows_compared"] == 1
+    assert agreement["checks"] == {
+        "declares_tools": {"failed": 1, "agree": 1},
+        "no_tool_errors": {"failed": 1, "agree": 0},
+    }
+    alone = invoke("dataset", "triage", str(dataset), "--checks", str(ROW_CHECKS), "--agreement")
+    assert alone.exit_code == 0, alone.stderr
+    assert output(alone)["agreement"]["checks"] == agreement["checks"]
+    assert "checks: 2 of 3 labeled rows failed, nothing labeled; checks against" in alone.stderr
+    council = output(alone)["next_steps"][0]
+    assert council["command"].endswith(" --agreement --rubric <RUBRIC_FILE>")
+    assert council["why"].startswith("measure the judge council against your labels")
+    assert {label.by for label in DatasetDir(dataset).labels().values()} == {"manual"}
+
+
+@pytest.mark.parametrize("confirm", [[], ["--confirm"]])
+def test_an_agreement_whose_labeled_rows_all_fail_a_check_is_refused(
+    dataset: Path, chat: FakeChatApi, tmp_path: Path, confirm: list[str]
+) -> None:
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(json.dumps({"id": "row-plain-001", "keep": False, "reason": "x"}) + "\n")
+    assert invoke("dataset", "label", str(dataset), "--file", str(labels)).exit_code == 0
+    args = ["dataset", "triage", str(dataset), "--rule", "stay on topic", "--agreement"]
+    result = invoke(*args, "--checks", str(ROW_CHECKS), "--judges", "fireworks/j1", *confirm)
+    assert result.exit_code == 2
+    assert result.stderr.startswith("Error [usage]: the checks fail every row labeled by you")
+    assert chat.requests == []
+    assert not (dataset / "triage.json").exists()
+    alone = invoke("dataset", "triage", str(dataset), "--checks", str(ROW_CHECKS), "--agreement")
+    assert alone.exit_code == 0, alone.stderr
+    assert not any("--rubric" in entry["command"] for entry in output(alone)["next_steps"])
+
+
+def test_a_check_that_raises_fails_the_preview_before_any_call(
+    dataset: Path, chat: FakeChatApi, tmp_path: Path
+) -> None:
+    broken = tmp_path / "broken.py"
+    broken.write_text("def broken(row):\n    return row['missing']\n")
+    result = invoke("dataset", "triage", str(dataset), "--rule", "x", "--checks", str(broken))
+    assert result.exit_code == 2
+    assert result.stderr.startswith("Error [usage]: the check broken failed on the row ")
+    assert "KeyError" in result.stderr
+    assert chat.requests == []
+    assert not (dataset / JUDGMENTS_FILE).exists()
+
+
+def test_dataset_show_never_loads_the_checks(
+    dataset: Path, chat: FakeChatApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert invoke("dataset", "triage", str(dataset), "--checks", str(ROW_CHECKS)).exit_code == 0
+
+    def refuse(path: Path) -> None:
+        raise AssertionError("user code loaded")
+
+    monkeypatch.setattr("pup_finetune.user_checks.load_checks", refuse)
+    shown = invoke("dataset", "show", str(dataset))
+    assert shown.exit_code == 0, shown.stderr
+    assert output(shown)["pipeline"]["rows"]["dropped"] == 3

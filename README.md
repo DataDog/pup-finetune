@@ -146,6 +146,14 @@ council of two judges, a row is kept only when both vote keep; add a third judge
 of two judges, two of three), so its remaining calls are not made, and a failed call does not
 leave it undecided.
 
+`--checks checks.py` runs your own Python row checks first, free and on this machine: each
+public function of the file gets a copy of every row reviewed (as `rows.jsonl` stores it) and
+returns `True`, `False` or `(False, "why")`, or `None` when it does not apply. A row one fails
+is labeled drop `by: check` and never sent to a judge. With `--checks` alone no judge runs, so
+`pup finetune dataset triage datasets/my-agent --checks checks.py` labels at once, without
+`--confirm`. A triage without `--checks` skips the rows a check labeled; checks are not frozen,
+so an edited file applies on the next run that passes it.
+
 ### Push the dataset
 
 Pushing creates an Agent Observability dataset with one record per kept row. `train` and
@@ -434,8 +442,8 @@ choose, and every preview lists each recipient in `data_recipients`. `PUP_READ_O
 stays allowed, and it still sends rows to the judges. `train --remote` uploads the train and
 validation rows, their split assignments, the run files and pup-finetune's source to Baseten
 storage for its job; the test split and dropped rows stay on this machine. The checks of
-`--evaluators` run on this machine and send nothing; its judges are recipients like the
-built-in judge.
+`--evaluators` and `dataset triage --checks` run on this machine and send nothing; the
+evaluators' judges are recipients like the built-in judge.
 [docs/data-format.md](docs/data-format.md)
 describes the rows, the exclusion codes and the files in a dataset directory.
 

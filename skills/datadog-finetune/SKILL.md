@@ -198,16 +198,16 @@ measure again (`--reset-triage`) until the user is satisfied. `--rows <ROWS_FILE
 per line) narrows either mode to those rows. With a council of two judges, a row is kept only
 when both vote keep; add a third with `--judges` for a true majority.
 
-Also check what no command does: answers that break the app's own output contract (invalid
-JSON, duplicate keys, two answers in one). Drop them with labels, or fix the records in
-Datadog and fetch the dataset (step 4). Show the user what you found. Rows `split_conflicts`
+Before the council, write `datasets/checks.py` with the user: the app's output contract (valid
+JSON, one answer) as a `def <name>(row)` per rule returning `True`, `False` or `(False, "why")`.
+`--checks datasets/checks.py` alone labels failing rows drop `by: check` at once, free, with no
+`--confirm`, and the council skips them. Show the user what you found. Rows `split_conflicts`
 names are copies of a request in two splits: with a yes, run the first `dataset label` step.
 
 Check:
 
 - [ ] The user saw a sample and agreed with the keep/drop decisions.
-- [ ] For triage: the user accepted the agreement, and no undecided rows or
-      `stale_judge_labels` are left undiscussed.
+- [ ] For triage: the user accepted the agreement and discussed undecided rows and stale labels.
 
 ## Step 4: push the dataset to Agent Observability
 

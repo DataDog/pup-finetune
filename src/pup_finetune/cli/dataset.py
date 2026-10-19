@@ -40,6 +40,7 @@ from pup_finetune.curation.samples import (
     pick_sample,
     review_markdown,
 )
+from pup_finetune.curation.triage import recorded_checks
 from pup_finetune.data.convert import ReasoningMode
 from pup_finetune.data.dataset_dir import (
     DatasetDir,
@@ -463,7 +464,8 @@ def dataset_next(
 
     With accepted rows and none labeled, the next command is a ``dataset sample`` to
     review (``None`` right after one, ``sampled``), and labeling them, by hand or with a
-    judge council, are the steps; a fetched dataset (``dataset fetch``) was curated in
+    judge council, are the steps (labels a check wrote count as none while rows are
+    unlabeled: no review decided them); a fetched dataset (``dataset fetch``) was curated in
     Datadog, so its rows go straight to training. A triage that is not complete gets a step
     to finish it. Once rows are labeled, the push is a step
     (:meth:`~pup_finetune.curation.pipeline.Pipeline.push_gap`). Training (and
@@ -522,13 +524,7 @@ def _next_by_state(
         "rows to drop",
     )
     triage_steps = (
-        [
-            step(
-                template("dataset", "triage", directory, "--rubric", "<RUBRIC_FILE>"),
-                "finish the triage: the same --rubric and --judges resume it, reusing the "
-                "votes cast (paid; it previews first)",
-            )
-        ]
+        [_finish_triage(dataset, directory)]
         if state.triage == "incomplete"
         else [
             step(
@@ -545,7 +541,7 @@ def _next_by_state(
     source = dataset.settings().get("source")
     # A fetched dataset was curated in Datadog: its rows are the ones to train on.
     fetched = isinstance(source, Mapping) and source.get("kind") == "datadog_dataset"
-    if not state.labeled and not fetched:
+    if state.labeled == state.checked and state.unlabeled and not fetched:
         triage_step = step(
             template(
                 "dataset",
@@ -593,6 +589,23 @@ def _next_by_state(
     else:
         steps.append(push_step)
     return {"next_command": None, "next_steps": steps}
+
+
+def _finish_triage(dataset: DatasetDir, directory: Path) -> dict[str, str]:
+    """The step that finishes an incomplete triage, with the last council's checks file
+    (never frozen) while it exists."""
+    words: list[object] = ["dataset", "triage", directory, "--rubric", "<RUBRIC_FILE>"]
+    why = "finish the triage: the same --rubric and --judges resume it, reusing the votes cast"
+    checks = recorded_checks(dataset)
+    if checks is not None and checks.is_file():
+        words += ["--checks", checks]
+        why += ", and --checks keeps the rows a check fails from the judges"
+    elif checks is not None:
+        why += (
+            f"; the last triage ran the checks in {display_path(checks)}, which no longer "
+            "exists: pass --checks FILE again, or the judges review rows a check would fail"
+        )
+    return step(template(*words), f"{why} (paid; it previews first)")
 
 
 def _pull_more_steps(dataset: DatasetDir, directory: Path, state: Pipeline) -> list[dict[str, str]]:
@@ -1311,7 +1324,8 @@ def _push_brief(dataset: DatasetDir) -> dict[str, Any] | None:
 def _read_label_file(path: Path, *, at: datetime) -> list[Label]:
     """The labels in ``path``, all ``manual``; ``at`` fills in lines that leave it out.
 
-    A line claiming ``"by": "judge"`` is refused: judge labels come only from the council."""
+    A line claiming ``"by": "judge"`` or ``"check"`` is refused: those labels come only from
+    ``dataset triage``."""
     labels = parse_labels(
         path,
         defaults={"at": at},
@@ -1320,12 +1334,13 @@ def _read_label_file(path: Path, *, at: datetime) -> list[Label]:
     )
     if not labels:
         raise UsageError(f"{path} has no labels")
-    judged = next((label.id for label in labels if label.by == "judge"), None)
-    if judged is not None:
+    claimed = next((label for label in labels if label.by != "manual"), None)
+    if claimed is not None:
+        by = "the judge council" if claimed.by == "judge" else "a check"
         raise UsageError(
-            f"{path} labels {judged!r} as decided by the judge council",
-            hint='leave "by" out: `dataset label` records your decisions, and judge labels '
-            "come only from `pup finetune dataset triage`",
+            f"{path} labels {claimed.id!r} as decided by {by}",
+            hint='leave "by" out: `dataset label` records your decisions, and judge and check '
+            "labels come only from `pup finetune dataset triage`",
         )
     return labels
 

@@ -13,6 +13,8 @@ Anthropic or OpenAI, by each judge's prefix), with no Datadog or other remote wr
 ``PUP_AUTO_APPROVE``. The council, the votes file and the labels live in
 :mod:`pup_finetune.curation.triage`. ``--agreement`` reviews the rows the agent or a person
 labeled instead, labels nothing, and reports how often the council agrees with them.
+``--checks`` runs the user's Python row checks first; with ``--checks`` alone no judge is
+called, so it labels at once, free and local like ``dataset label``, with no ``--confirm``.
 """
 
 from __future__ import annotations
@@ -27,17 +29,18 @@ import typer
 
 from pup_finetune.cli._common import CommandResult, current_context, run_command, with_settings
 from pup_finetune.cli._dirs import require_dataset_dir
-from pup_finetune.cli._flags import given, require_alone, require_enablers
+from pup_finetune.cli._flags import flag_name, given, require_alone, require_enablers
 from pup_finetune.cli._presentation import CommandDoc, Safety, default_note, describe
-from pup_finetune.cli.dataset import dataset_next, merge_next
+from pup_finetune.cli.dataset import REVIEW_SAMPLE_SIZE, dataset_next, merge_next
 from pup_finetune.curation import triage
 from pup_finetune.curation.pipeline import pipeline_state
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.display import display_path
 from pup_finetune.errors import UsageError, require_confirm
 from pup_finetune.judge_models import BY_KEY
-from pup_finetune.next_steps import PROGRAM, step
+from pup_finetune.next_steps import PROGRAM, step, template
 from pup_finetune.output import info
+from pup_finetune.user_checks import load_checks
 
 if TYPE_CHECKING:
     from pup_finetune.inference import ChatCompleter, JudgeProvider
@@ -74,7 +77,7 @@ RUN = "Run"
 
 DOC = CommandDoc(
     path="dataset triage",
-    short="Label rows with judge models (paid; previews without --confirm).",
+    short="Label rows with checks and judge models (judges paid; preview first).",
     description=describe(
         "Have each judge model vote keep or drop on each whole row of DIR against --rubric "
         "and/or --rule; a strict majority of keep votes keeps a row. Without --confirm, "
@@ -96,18 +99,23 @@ DOC = CommandDoc(
         "openai/gpt-5.4-mini and openai/gpt-6-astra with only OpenAI's, else Fireworks' "
         "deepseek-v4p1-flash and glm-5p3-flash. --agreement measures the council against rows you "
         "labeled first; --rows FILE (one row id per line) reviews only those rows in either "
-        "mode, and is not frozen; --print-template prints a rubric to start from.",
+        "mode, and is not frozen; --print-template prints a rubric to start from. --checks "
+        "FILE runs every public function of a Python file on each row reviewed first, free "
+        "and in this process: a row one fails is labeled drop by: check and never sent to a "
+        "judge (with --agreement, the checks are compared with your labels apart). --checks "
+        "alone calls no judge and labels at once, without --confirm; without --checks, rows "
+        "a check labeled are skipped.",
     ),
     examples=(
         "pup finetune dataset triage --print-template > rubric.md",
         "pup finetune dataset triage datasets/my-agent --rubric rubric.md --max-rows 20",
-        "pup finetune dataset triage datasets/my-agent --rubric rubric.md --judges glm-5p3-flash",
         "pup finetune dataset triage datasets/my-agent --rubric rubric.md --agreement",
+        "pup finetune dataset triage datasets/my-agent --checks checks.py",
     ),
     safety=Safety(
         data="sends rows to each judge's provider",
         recipients="each judge's provider: Fireworks, Anthropic or OpenAI",
-        without="previews the judge calls",
+        without="previews the judge calls (--checks alone labels at once, free)",
         confirm="runs the judges and labels rows (paid)",
         paid=True,
     ),
@@ -139,6 +147,19 @@ def triage_rows(
             "--rule",
             metavar="TEXT",
             help="A rule to judge by; repeatable.",
+            show_default=False,
+            rich_help_panel=RUBRIC,
+        ),
+    ] = None,
+    checks: Annotated[
+        Path | None,
+        typer.Option(
+            "--checks",
+            metavar="FILE",
+            help="Python row checks, run first (free).",
+            exists=True,
+            dir_okay=False,
+            readable=True,
             show_default=False,
             rich_help_panel=RUBRIC,
         ),
@@ -233,8 +254,11 @@ def triage_rows(
     if directory is None:
         raise UsageError("pass the dataset directory DIR", hint="or --print-template")
     rules = rule or []
+    checks_only = checks is not None and rubric is None and not rules
+    if checks_only:
+        _refuse_judge_flags()
     rubric_text = rubric.read_text(encoding="utf-8") if rubric is not None else None
-    criteria = triage.Criteria.build(rubric_text, rules)
+    criteria = None if checks_only else triage.Criteria.build(rubric_text, rules)
     template_task = None
     if rubric is not None and rubric_text is not None and triage.has_template_task(rubric_text):
         template_task = (
@@ -247,9 +271,12 @@ def triage_rows(
         raise UsageError(template_task, hint=template_hint)
     require_dataset_dir(directory)
     dataset = DatasetDir(directory)
+    module = load_checks(checks) if checks is not None else None
+    council: tuple[str, ...] = ()
+    council_source = ""
     if judges is not None:
         council, council_source = triage.parse_judges(judges), triage.COUNCIL_GIVEN
-    else:
+    elif not checks_only:
         council, council_source = triage.default_council(dataset, reset=reset_triage)
     _check_available(council)
     plan = triage.plan_triage(
@@ -260,13 +287,17 @@ def triage_rows(
         only=_row_ids(rows) if rows is not None else None,
         reset=reset_triage,
         agreement=agreement,
+        checks=module,
     )
     labeling = [*PROGRAM, "dataset", "triage", str(directory)]
     if rubric is not None:
         labeling += ["--rubric", str(rubric)]
     for text in rules:
         labeling += ["--rule", text]
-    labeling += ["--judges", ",".join(council)]
+    if checks is not None:
+        labeling += ["--checks", str(checks)]
+    if not checks_only:
+        labeling += ["--judges", ",".join(council)]
     if concurrency != triage.DEFAULT_CONCURRENCY:
         labeling += ["--concurrency", str(concurrency)]
     if allow_template_rubric and template_task is not None:
@@ -279,6 +310,9 @@ def triage_rows(
         args += ["--max-rows", str(max_rows)]
         labeling += ["--max-rows", str(max_rows)]
     rerun = [*args, "--reset-triage"] if reset_triage else args
+    if criteria is None:
+        report = triage.apply_check_labels(plan)
+        return _checks_result(dataset, directory, plan, report, args, every_row)
     settings = {
         "rows_file": str(rows) if rows is not None else None,
         "max_rows": max_rows,
@@ -308,10 +342,12 @@ def triage_rows(
             preview["refused"] = refused
             preview["refused_hint"] = template_hint
     hint = template_hint if refused is not None else None
-    if refused is None and not plan.rows:
+    if refused is None and not plan.rows and not plan.checks_to_label:
         among = "row --rows names" if rows is not None else "accepted row"
         refused = "there is no row to review: " + (
-            f"every {among} is labeled by you or the agent"
+            f"every {among} is labeled by you, the agent or a check"
+            if plan.skipped_checked or plan.checked
+            else f"every {among} is labeled by you or the agent"
             if plan.skipped_labeled
             else "the dataset has no accepted rows"
         )
@@ -334,6 +370,8 @@ def triage_rows(
         "status": "complete" if complete else "incomplete",
         "rows_reviewed": len(plan.rows),
         "rows_skipped_labeled": plan.skipped_labeled + report.skipped_labeled,
+        **({"rows_skipped_checked": plan.skipped_checked} if plan.skipped_checked else {}),
+        **({"checks": _checks(plan, report)} if plan.checks is not None else {}),
         "kept": counts["keep"],
         "dropped": counts["drop"],
         "undecided": counts["undecided"],
@@ -362,6 +400,17 @@ def triage_rows(
     }
     if complete:
         merge_next(data, dataset_next(dataset, directory, summary=summary))
+        if checks is not None:
+            data["next_steps"] = [
+                step(
+                    shlex.join(every_row),
+                    "finish the triage over every row with the same rubric, judges and checks, "
+                    "reusing the votes cast (paid; it previews first)",
+                )
+                if _council_step(entry, directory)
+                else entry
+                for entry in data["next_steps"]
+            ]
         data["hint"] = (
             "review a sample of the decisions with the user (`dataset sample "
             "--include-dropped`) before training; correct any with `dataset label`"
@@ -391,6 +440,122 @@ def triage_rows(
     return CommandResult(data, exit_code=1) if report.failures else data
 
 
+def _refuse_judge_flags() -> None:
+    """With ``--checks`` alone, a :class:`UsageError` for an option only judges use."""
+    ctx = current_context()
+    for name in ("judges", "concurrency", "reset_triage"):
+        if ctx is not None and given(ctx, name):
+            flag = flag_name(ctx.command, name)
+            raise UsageError(
+                f"{flag} needs --rubric or --rule (a run with --checks alone calls no judge)",
+                hint=f"pass --rubric FILE or --rule TEXT too, or leave {flag} out",
+            )
+
+
+def _checks(plan: triage.TriagePlan, report: triage.TriageReport) -> dict[str, Any]:
+    """The plan's ``checks`` block, with the check labels ``report`` recorded."""
+    labels = report.check_labels
+    return {
+        **plan.checks_block(),
+        "labels": {
+            "applied": labels.applied if labels else 0,
+            "unchanged": labels.unchanged if labels else 0,
+        },
+    }
+
+
+def _council_step(entry: Mapping[str, str], directory: Path) -> bool:
+    """Whether ``entry`` is a council step of the dataset's state (``dataset_next``)."""
+    council = template("dataset", "triage", directory, "--rubric", "<RUBRIC_FILE>")
+    return entry["command"] == council or entry["command"].startswith(f"{council} ")
+
+
+def _checks_result(
+    dataset: DatasetDir,
+    directory: Path,
+    plan: triage.TriagePlan,
+    report: triage.TriageReport,
+    args: list[str],
+    every_row: list[str],
+) -> dict[str, Any]:
+    """The result of a run with ``--checks`` alone, which labeled the rows they fail.
+    ``every_row`` is ``args`` without ``--rows`` and ``--max-rows``."""
+    summary = dataset.summary()
+    stale = plan.stale_check_labels
+    data: dict[str, Any] = {
+        "dataset_dir": display_path(dataset.path),
+        "mode": "checks",
+        "rows_skipped_labeled": plan.skipped_labeled + report.skipped_labeled,
+        "checks": _checks(plan, report),
+        "stale_check_labels": len(stale),
+        "stale_check_label_ids": stale[: triage.FAILURES_SHOWN],
+        "dataset": {
+            "accepted": summary["accepted"],
+            "kept": summary["kept"],
+            "dropped": summary["dropped"],
+        },
+    }
+    if plan.references is not None:
+        data["agreement"] = {"checks": plan.check_agreement()}
+    merge_next(data, dataset_next(dataset, directory, summary=summary))
+    council = _council_after_checks(dataset, plan, data["pipeline"]["triage"], args, every_row)
+    if council is not None:
+        # It pins --checks, so it stands for the council steps the dataset's state offers.
+        data["next_steps"] = [
+            council,
+            *(s for s in data["next_steps"] if not _council_step(s, directory)),
+        ]
+    if stale:
+        data["hint"] = (
+            f"{len(stale)} rows keep a check label every check now passes, and a label is never "
+            "withdrawn: relabel them with `dataset label`, or add --rubric to have the council "
+            "judge them"
+        )
+    return data
+
+
+def _council_after_checks(
+    dataset: DatasetDir,
+    plan: triage.TriagePlan,
+    state: str,
+    args: list[str],
+    every_row: list[str],
+) -> dict[str, str] | None:
+    """The council step after a run with ``--checks`` alone, pinning them, for the triage
+    ``state``; ``None`` when the council has no row to label."""
+    paid = "paid; it previews first"
+    if plan.references is None and state == "incomplete":
+        return step(
+            template(*every_row[len(PROGRAM) :], "--rubric", "<RUBRIC_FILE>"),
+            "finish the triage: the same --rubric and --judges resume it, reusing the votes "
+            f"cast, and --checks keeps the rows a check fails from the judges ({paid})",
+        )
+    words = [*args[len(PROGRAM) :], "--rubric", "<RUBRIC_FILE>"]
+    if plan.references is not None:
+        if not plan.rows:
+            return None
+        why = "measure the judge council against your labels on the rows the checks pass"
+    else:
+        labels = dataset.labels()
+        unjudged = any(
+            (label := labels.get(row.id)) is None or label.by == "check" for row in plan.rows
+        )
+        if not unjudged and state != "unreadable":
+            return None
+        why = "have the judge council review the rows the checks pass"
+        if args == every_row:
+            words += ["--max-rows", str(REVIEW_SAMPLE_SIZE)]
+    if state == "unreadable":
+        words.append("--reset-triage")
+        why = f"the triage files cannot be read (see the warning): fix or remove them, or {why}"
+        why += ", discarding every vote"
+    return step(
+        template(*words),
+        f"{why} ({paid}; `pup finetune dataset triage --print-template` prints a rubric to "
+        "start from)",
+    )
+
+
 def _row_ids(path: Path) -> frozenset[str]:
     """The row ids in ``path``, one per line; blank lines are ignored."""
     return frozenset(
@@ -416,6 +581,7 @@ def _agreement_result(
         "status": "complete" if report.complete else "incomplete",
         "rows_reviewed": len(plan.rows),
         "agreement": agreement.to_json(),
+        **({"checks": _checks(plan, report)} if plan.checks is not None else {}),
         "judges": list(plan.judges),
         "rubric_hash": criteria.sha256[: triage.RUBRIC_HASH_SHOWN],
         "calls_made": report.calls_made,
@@ -426,6 +592,8 @@ def _agreement_result(
         "failure_counts": report.failure_counts(),
         "judgments_file": display_path(dataset.path / triage.JUDGMENTS_FILE),
     }
+    if plan.checks is not None:
+        data["agreement"]["checks"] = plan.check_agreement()
     if (noisy := triage.noisy_agreement(len(plan.rows))) is not None:
         data["warnings"] = [noisy]
     if report.failures:

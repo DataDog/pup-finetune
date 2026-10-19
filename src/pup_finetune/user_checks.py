@@ -28,6 +28,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Final
 
+from pup_finetune.data.schema import lone_surrogate
 from pup_finetune.display import display_path
 from pup_finetune.errors import UsageError
 from pup_finetune.redaction import redact
@@ -138,6 +139,11 @@ def call(check: str, function: Check, *args: Any) -> CheckVerdict:
         and isinstance(answer[0], bool)
         and isinstance(answer[1], str)
     ):
+        if (surrogate := lone_surrogate(answer[1])) is not None:
+            raise CheckError(
+                check,
+                f"returned a reason with a lone surrogate ({surrogate}); UTF-8 cannot encode it",
+            )
         return CheckVerdict(answer[0], answer[1].strip()[:REASON_LIMIT])
     raise CheckError(
         check,
