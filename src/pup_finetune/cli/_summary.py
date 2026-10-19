@@ -639,8 +639,10 @@ def sample_summary(result: Mapping[str, Any]) -> Summary:
     )
     if not result.get("include_dropped"):
         headline += ", rows labeled drop left out"
-    full = f"full rows: {result.get('rows_file')}"
-    return _summary(headline, [full], next_command=result.get("next_command"))
+    lines = [f"full rows: {result.get('rows_file')}"]
+    if result.get("markdown_file"):
+        lines.append(f"review file: {result['markdown_file']} (0600; it holds trace content)")
+    return _summary(headline, lines, next_command=result.get("next_command"))
 
 
 def triage_summary(result: Mapping[str, Any]) -> Summary:

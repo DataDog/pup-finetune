@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,8 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from pup_finetune.cli import app
+from pup_finetune.curation.labels import Label, apply_labels
+from pup_finetune.curation.samples import JUDGE_LINE_NOTE
 from pup_finetune.data.dataset_dir import DatasetDir
 
 ROWS_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "rows"
@@ -295,6 +298,199 @@ def test_sample_needs_a_dataset_directory(tmp_path: Path) -> None:
     result = invoke("sample", str(tmp_path / "missing"))
     assert result.exit_code == 2
     assert "is not a dataset directory" in result.stderr
+
+
+# --- sample --markdown -------------------------------------------------------------------
+
+
+def test_sample_writes_a_private_review_file_whose_labels_lines_label_the_rows(
+    dataset: Path, tmp_path: Path
+) -> None:
+    from pup_finetune.cli._summary import summarize
+
+    review = tmp_path / "review" / "sample.md"
+    result = invoke("sample", str(dataset), "--count", "3", "--markdown", str(review))
+    data = output_json(result)
+    assert stat.S_IMODE(review.stat().st_mode) == 0o600
+    assert stat.S_IMODE(review.parent.stat().st_mode) == 0o700
+    assert data["markdown_file"] == str(review.resolve())
+    assert data["rows_file"] == str((dataset / "rows.jsonl").resolve())
+    assert "0600" in data["notes"][0] and "trace content" in data["notes"][0]
+    assert f"note: {data['notes'][0]}" in result.stderr
+    found = summarize("dataset sample", data)
+    assert found is not None and any(data["markdown_file"] in line for line in found.lines)
+    label_step = data["next_steps"][0]
+    assert label_step["command"].endswith("--file <LABELS_FILE>")
+    assert data["markdown_file"] in label_step["why"]
+    text = review.read_text()
+    assert text.index("## How to record decisions") < text.index(
+        f"```sh\n{label_step['command']}\n```"
+    )
+    assert "trace content" in text.split("---")[0]
+    for heading in ("### System prompt", "### User", "### Assistant", "### Final answer"):
+        assert heading in text
+    ids = [row["id"] for row in data["rows"]]
+    assert re.findall(r"^## \d+\. `([^`]+)`$", text, re.MULTILINE) == ids
+    assert text.count("- Label: none") == 3
+    lines = re.findall(r'^\{"id": .*\}$', text, re.MULTILINE)
+    assert lines == [json.dumps({"id": row_id, "keep": True, "reason": ""}) for row_id in ids]
+
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(
+        "\n".join([lines[0].replace('true, "reason": ""', 'false, "reason": "x"'), *lines[1:]])
+    )
+    assert output_json(label(dataset, labels))["label"] == {
+        "file": str(labels),
+        "labels": 3,
+        "applied": 3,
+        "unchanged": 0,
+        "kept": 2,
+        "dropped": 1,
+    }
+
+
+def test_a_review_file_renders_tool_calls_and_results_and_notes_what_it_cuts(
+    tmp_path: Path,
+) -> None:
+    system = "\n".join(f"rule {index}" for index in range(30))
+    arguments = json.dumps({"key": "k1", "note": "y" * 3000})
+    row = {
+        "id": "long-row",
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": "look up ```k1```"},
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "check k1 first",
+                "weight": 0,
+                "tool_calls": [
+                    {"id": "c1", "function": {"name": "lookup", "arguments": arguments}}
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "x" * 5000},
+            {"role": "assistant", "content": "k1 is set."},
+        ],
+        "tools": [{"type": "function", "function": {"name": "lookup"}}],
+    }
+    rows = tmp_path / "rows.jsonl"
+    rows.write_text(json.dumps(row) + "\n")
+    target, review = tmp_path / "ds", tmp_path / "review.md"
+    assert invoke("import", str(target), "--file", str(rows)).exit_code == 0
+    sample(target, "--markdown", str(review))
+    text = review.read_text()
+    assert f"_{len(system):,} characters, 30 lines; the first 34 characters are shown._" in text
+    assert "rule 4\n```" in text and "rule 5" not in text
+    assert "````text\nlook up ```k1```\n````" in text
+    pretty = json.dumps(json.loads(arguments), indent=2)
+    assert (
+        "### Assistant (not trained: weight 0)\n\nReasoning:\n\n```text\ncheck k1 first\n```\n\n"
+        f"Tool call `lookup` (`c1`):\n\n```json\n{pretty[:2000]}\n```\n\n"
+        f"_Cut: {len(pretty):,} characters, 4 lines in all; the first 2,000 characters are shown"
+    ) in text
+    assert "### Tool result: `lookup` (`c1`)\n\n```text\n" + "x" * 2000 + "\n```" in text
+    assert "_Cut: 5,000 characters, 1 line in all; the first 2,000 characters are shown" in text
+    assert "### Final answer\n\n```text\nk1 is set.\n```" in text
+
+
+def test_a_review_file_holds_the_rows_split_and_count_pick(dataset: Path, tmp_path: Path) -> None:
+    review = tmp_path / "train.md"
+    data = sample(
+        dataset, "--split", "train", "--count", "2", "--seed", "7", "--markdown", str(review)
+    )
+    text = review.read_text()
+    ids = re.findall(r"^## \d+\. `([^`]+)`$", text, re.MULTILINE)
+    assert ids == [row["id"] for row in data["rows"]] and len(ids) == 2
+    assert re.findall(r"^- Split: (\S+)$", text, re.MULTILINE) == ["train", "train"]
+    assert "Sampled from the train split with seed 7." in text
+
+
+def test_a_review_file_copies_a_rows_current_label(dataset: Path, tmp_path: Path) -> None:
+    dropped, reason = FIXTURE_IDS[0], "off topic ![x](http://attacker.example/p.png)"
+    file = label_file(tmp_path, {"id": dropped, "keep": False, "reason": reason})
+    output_json(label(dataset, file))
+    review = tmp_path / "review.md"
+    sample(dataset, "--count", "100", "--include-dropped", "--markdown", str(review))
+    text = review.read_text()
+    assert f"- Label: drop (manual): `{reason}`\n" in text
+    assert json.dumps({"id": dropped, "keep": False, "reason": reason}) in text
+
+
+def test_a_review_file_does_not_copy_a_judge_label_into_its_labels_line(
+    dataset: Path, tmp_path: Path
+) -> None:
+    judged = FIXTURE_IDS[0]
+    apply_labels(DatasetDir(dataset), [Label(id=judged, keep=True, reason="on task", by="judge")])
+    review = tmp_path / "review.md"
+    sample(dataset, "--count", "100", "--markdown", str(review))
+    text = review.read_text()
+    section = text[text.index(f". `{judged}`\n") :].split("\n---\n")[0]
+    assert "- Label: keep (judge): `on task`" in section
+    assert f"### Labels line\n\n{JUDGE_LINE_NOTE}\n\n```json\n" in section
+    assert json.dumps({"id": judged, "keep": True, "reason": ""}) in section
+    assert text.count(JUDGE_LINE_NOTE) == 1
+    assert "keeps its current label (unlabeled rows stay unlabeled)" in text
+
+
+def test_every_labels_line_of_a_review_file_with_a_judge_drop_is_a_valid_label(
+    dataset: Path, tmp_path: Path
+) -> None:
+    judged = FIXTURE_IDS[0]
+    apply_labels(DatasetDir(dataset), [Label(id=judged, keep=False, reason="off task", by="judge")])
+    review = tmp_path / "review.md"
+    sample(dataset, "--count", "100", "--include-dropped", "--markdown", str(review))
+    lines = re.findall(r'^\{"id": .*\}$', review.read_text(), re.MULTILINE)
+    assert len(lines) == len(FIXTURE_IDS)
+    assert json.dumps({"id": judged, "keep": True, "reason": ""}) in lines
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text("\n".join(lines) + "\n")
+    assert output_json(label(dataset, labels))["label"]["dropped"] == 0
+
+
+def test_sample_replaces_only_a_review_file_it_wrote(dataset: Path, tmp_path: Path) -> None:
+    rubric, notes = tmp_path / "rubric.md", tmp_path / "notes.md"
+    rubric.write_text("# Task\n\nKeep rows that answer the question.\n")
+    notes.write_text("# Review: Q3 planning notes\n")
+    for path in (rubric, notes):
+        before = path.read_bytes()
+        result = invoke("sample", str(dataset), "--markdown", str(path))
+        assert (result.exit_code, result.stdout) == (2, "")
+        assert "exists and is not a review file" in _ANSI.sub("", result.stderr)
+        assert path.read_bytes() == before
+    review = tmp_path / "review.md"
+    sample(dataset, "--count", "1", "--markdown", str(review))
+    data = sample(dataset, "--count", "2", "--markdown", str(review))
+    assert data["notes"][0].startswith(f"replaced the earlier review file {review.resolve()} ")
+    assert review.read_text().startswith("# Review: 2 of ")
+
+
+def test_sample_writes_no_review_file_when_no_row_matches(tmp_path: Path) -> None:
+    target, review = tmp_path / "ds", tmp_path / "review.md"
+    result = invoke("import", str(target), "--file", str(TOOL_USE), "--test-fraction", "0")
+    assert result.exit_code == 0, result.stderr
+    data = sample(target, "--split", "test", "--markdown", str(review))
+    assert (data["rows"], data["markdown_file"]) == ([], None)
+    assert not review.exists()
+    assert data["notes"] == [f"no row matched the sample, so {review.resolve()} was not written"]
+    assert data["hint"].startswith("review these rows with the user, then record")
+
+
+def test_sample_refuses_a_markdown_path_that_is_a_directory_or_not_markdown(
+    dataset: Path, tmp_path: Path
+) -> None:
+    folder = tmp_path / "review.md"
+    folder.mkdir()
+    rows = (dataset / "rows.jsonl").read_bytes()
+    for path, error in (
+        (folder, "is a directory"),
+        (dataset / "rows.jsonl", "--markdown must name a .md file"),
+    ):
+        result = invoke("sample", str(dataset), "--markdown", str(path))
+        assert result.exit_code == 2
+        assert result.stdout == ""
+        assert error in _ANSI.sub("", result.stderr)
+    assert (dataset / "rows.jsonl").read_bytes() == rows
+    assert list(folder.iterdir()) == []
 
 
 # --- read-only mode ---------------------------------------------------------------------
