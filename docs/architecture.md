@@ -179,8 +179,9 @@ the loop never retries it per turn.
 A tokenizer that cannot be loaded fails every row alike, so the renderer reports it as an
 `ExternalError` (a `UsageError` when the `hf` extra is missing) rather than rejecting rows.
 A benchmark plans a model whose renderer cannot load as an error entry and runs the others;
-without the renderer its identity cannot be checked, so its results are not scored, and
-planning reads only the judge and evaluators its directory froze.
+without the renderer its identity cannot be checked, so its results are not scored. Planning
+still reads the judge and evaluators its directory froze, and which of them have work left, as
+for every model.
 
 The Qwen3.8 response parser knows its generation prompt opens `<think>`: sampled text that
 never reaches `</think>` (cut off at the token limit) is all reasoning and `format_valid` is

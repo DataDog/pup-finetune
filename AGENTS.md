@@ -863,9 +863,9 @@ Source lives under `src/pup_finetune/`.
   one `Candidate` per base model, with its renderer identity and the cases of that sample it
   cannot replay, `excluded`; a model is named `PROVIDER/ALIAS` when another provider offers
   its alias, `Candidate.target`; a model whose renderer cannot load is planned as an error,
-  `Candidate.unavailable`, its results not scored (planning reads only the judge and
-  evaluators it froze); a preview whose models share no case they
-  all replay fails), `execute` (the judge calibrated once, then each model replayed in a
+  `Candidate.unavailable`, its results not scored (planning reads the judge and evaluators it
+  froze, and which of them have work left); a preview whose models share no case they all
+  replay fails), `execute` (the judge calibrated once, then each model replayed in a
   session of its own, sized on its own cases, into `OUT/<model>` through `run_replay` with the
   model as its one target, so each resumes; each model's directory is identified by its own
   cases and renderer identity, `BenchmarkPlan.identity`, never by the other models, so adding
@@ -877,18 +877,18 @@ Source lives under `src/pup_finetune/`.
   `Leaderboard`: each model's headline pass rate, the judge's unless `--evaluators` names
   another, with a bootstrap CI over trajectories on its own cases, its judge pass rate,
   `judged_cases`, `headline_cases` (the cases its headline scored, the rate's denominator) and
-  `coverage` (their share of the test cases with a prompt), and its answers `truncated` at `--max-tokens` or
-  `unparseable`, each a warning; the finished models, with no session error, nothing pending,
-  no error a rerun retries and no score the headline still needs, ranked on the cases the
-  headline scored for every one of them, `common_cases`, by their headline rate there, with
-  each one's paired gap to the best; a model a rerun can still advance listed unranked, never
-  narrowing that set; `rerun`, whether a rerun has work left, an evaluator score outside the
-  headline included, but not a check that raised, whose frozen file raises again: the hint
-  names it, as `evaluate`'s does) and `recommend` (`fine_tune`; `base_meets_target` when the
-  best ranked model's own headline rate reaches `--target-pass-rate` and its
-  `headline_cases` cover `TARGET_COVERAGE`, 90% of the test cases with a prompt; or
-  `no_result`; the reason quotes that count and says when results are partial, and models
-  within noise of the best are named).
+  `coverage` (their share of the test cases with a prompt), and its answers `truncated` at
+  `--max-tokens` or `unparseable`, each a warning; the finished models, with no session error,
+  nothing pending, no error a rerun retries and no score the headline still needs, ranked on
+  the cases the headline scored for every one of them, `common_cases`, by their headline rate
+  there, with each one's paired gap to the best; a model a rerun can still advance listed
+  unranked, never narrowing that set; `rerun`, whether a rerun has work left, an evaluator
+  score outside the headline included, but not a check that raised, whose frozen file raises
+  again: the hint names it, as `evaluate`'s does) and `recommend` (`fine_tune`;
+  `base_meets_target` when the best ranked model's own headline rate reaches
+  `--target-pass-rate` and its `headline_cases` cover `TARGET_COVERAGE`, 90% of the test cases
+  with a prompt; or `no_result`; the reason quotes that count and says when results are
+  partial, and models within noise of the best are named).
   The package exports its names lazily, so importing the runner (the CLI does, for every
   command) loads no judge client. `targets.py` makes the two samplers from a session: the live training
   session's best sampler checkpoint, or the best training checkpoint loaded and saved again
