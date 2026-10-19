@@ -88,6 +88,9 @@ uv run pup-finetune undeploy /tmp/run --confirm  # deletes it; the model is kept
 uv run pup-finetune evaluate /tmp/run --compare-model fake-compare --confirm
                                      # adds the offline compare target to the same
                                      # directory: compare pairs only, no training session
+uv run pup-finetune evaluate /tmp/run --evaluators tests/fixtures/evaluators/evals.toml --confirm
+                                     # adds a rubric judge and two checks: they score the
+                                     # stored answers, nothing is generated again
 ```
 
 A complete evaluation is also published to Datadog as two Agent Observability experiments
@@ -131,7 +134,9 @@ fake provider and judge and not published, is allowed: nothing leaves the machin
 `resume` on the fake provider likewise). A changed `--max-tokens`, judge, seed or cap needs a
 new `--out-dir`. An evaluation whose pairs ended in errors (a sampler or judge outage) reports
 `complete_with_errors` with an error count and a `next_command` that retries them, and exits
-1 when a target has no verdict at all; a cancelled one reports `partial`.
+1 when a target has no verdict at all; a cancelled one reports `partial`. `evaluator_errors`
+counts each evaluator's errors with the first one; a check that raised is not retried (its
+frozen file raises again), and the hint names it with the fix.
 
 To build a dataset from your own Agent Observability traces (Datadog reads through pup, so
 both work with `PUP_READ_ONLY` set; test a filter with `pup llm-obs spans search` first):
@@ -489,6 +494,11 @@ Source lives under `src/pup_finetune/`.
   `key_source` is where a key would come from without reading it out, or a `KeyUnreadable`
   when the lookup raised anything; `doctor`'s key checks and the default judges both use it.
 - `redaction.py` - masks resolved secrets and `Bearer` tokens in error output and logs.
+- `user_checks.py` - the user's Python checks, shared by `evaluate --evaluators`:
+  `load_checks` runs a file as a module named by its sha256 (`CheckModule`: its public
+  functions in definition order, `function` with an arity check), `call` runs one check on
+  deep copies under one lock and reads `True`, `False`, `None` or `(bool, reason)`; anything
+  else, or an exception, is a `CheckError` (not a `FinetuneError`), redacted.
 - `concurrency.py` - `DaemonPool`, worker threads for parallel remote calls that never hold
   up the process's exit, so Ctrl-C stops at once instead of waiting for a call in flight.
 - `http_common.py` - what the `httpx` clients that send a provider key share: `bearer_key`
@@ -832,7 +842,20 @@ Source lives under `src/pup_finetune/`.
   before its first answer) holds the current `key_inputs` (an evaluation made before stamps
   counts as version 1). Only base answers are shared; `evaluation.json` records
   `"reuse": false` only with `--no-reuse`, so a rerun without the flag is a conflict whose
-  hint adds it first (`no_reuse_hint`, in `benchmark` too).
+  hint adds it first (`no_reuse_hint`, in `benchmark` too). `evaluators.py` is `--evaluators`
+  (evaluate and benchmark): `load_spec` (the TOML spec through `tomllib` and pydantic,
+  `extra="forbid"`), `JudgeEvaluator` (a rubric, `judge.py`'s `RUBRIC_PROMPT`, calibrated on
+  the user's examples by `calibrate_examples`) and `CheckEvaluator`, each with the
+  `identity()` frozen by name in
+  `evaluators.json` (`attach_evaluators` under the lock: the list only grows, a change is a
+  `SettingsConflict` naming a new version beside it or a free `--out-dir`), `resolve_evaluators`
+  (the flag, which no `--confirm` command but the preview's repeats, since a run attaches the
+  whole spec; else the stored record, in a benchmark the longest of its models' (the newest
+  on a tie), which a complete model does not attach; a stored check loads only with cases
+  left) and `scorers`, which `run_replay` runs on every pair
+  missing an entry (`replay.outcome` reads a result for the judge, an evaluator or `all`).
+  Evaluators are scored per directory, never shared through the store; their metrics go only
+  with spans being published, and one added after is a warning.
 - `providers/` - the provider seam. `base.py` has the neutral types (`ModelProfile`,
   `TrainSpec`, `CheckpointRef`, `StepMetrics`, ...) and the `Provider`, `TrainingBackend`,
   `TrainingSession` and `Sampler` protocols; `__init__.py` is the lazy registry

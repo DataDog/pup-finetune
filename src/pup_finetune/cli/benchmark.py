@@ -40,6 +40,7 @@ SETTING_PARAMS: dict[str, tuple[str, ...]] = {
     "calibration": ("skip_calibration",),
     "target_pass_rate": ("target_pass_rate",),
     "reuse": ("no_reuse",),
+    "evaluators": ("evaluators",),
 }
 """Each setting of a benchmark preview, and the parameters that set it."""
 
@@ -67,7 +68,10 @@ DOC = CommandDoc(
         "recorded behavior, not task success. Base answers from another evaluation or "
         "benchmark of the same dataset, made under the same settings, are reused from "
         "DATASET/replay_cache, together with their judgments when the judge is the same, and "
-        "a model with every answer reused opens no session; --no-reuse makes them again.",
+        "a model with every answer reused opens no session; --no-reuse makes them again. "
+        "--evaluators FILE adds your own LLM judges and Python checks to each model's "
+        "directory, as for evaluate, and the spec's headline (judge, an evaluator or all) ranks "
+        "the models and meets --target-pass-rate.",
     ),
     examples=(
         "pup finetune benchmark ds --models qwen3p5-9b,glm-5p3-flash",
@@ -128,7 +132,7 @@ def benchmark_command(
             min=0.0,
             max=1.0,
             metavar="RATE",
-            help="Judge pass rate at which a base model needs no fine-tuning.",
+            help="Headline pass rate at which a base model needs no fine-tuning.",
             rich_help_panel=MODELS,
         ),
     ] = benchmark.DEFAULT_TARGET_PASS_RATE,
@@ -178,6 +182,16 @@ def benchmark_command(
             metavar="MODEL",
             help="An alias (glm-5p3-flash), anthropic/MODEL, openai/MODEL or a Fireworks id. "
             f"{default_note(BY_KEY)}",
+            show_default=False,
+            rich_help_panel=JUDGE,
+        ),
+    ] = None,
+    evaluators: Annotated[
+        Path | None,
+        typer.Option(
+            "--evaluators",
+            metavar="FILE",
+            help="More judges and Python checks, from a TOML file.",
             show_default=False,
             rich_help_panel=JUDGE,
         ),
@@ -242,6 +256,7 @@ def benchmark_command(
         skip_calibration=skip_calibration,
         target_pass_rate=target_pass_rate,
         reuse=not no_reuse,
+        evaluators=evaluators,
     )
     plan = benchmark.plan_benchmark(runtime, dataset_dir, resolved, settings)
     # PUP_READ_ONLY refuses paid and remote runs, not one that never leaves the machine.

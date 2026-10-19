@@ -334,7 +334,7 @@ def billing(
     sent = f", about {input_tokens:,} input tokens in all (approximate)" if input_tokens else ""
     counted = f"{calls:,} calls{sent}, at most {config.max_tokens:,} output tokens each"
     if config.provider == "fake":
-        model = "judge" if what == "judge" else "compare model"
+        model = "compare model" if what == "compare-model" else "judge"
         return f"the fake {model} is offline and bills nothing: {counted}"
     name, _ = _name_and_host(config)
     return (

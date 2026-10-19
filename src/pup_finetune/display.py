@@ -57,6 +57,9 @@ MEASUREMENTS: Final = frozenset(
         # rates and their comparison (a metric's or the judge's ``base``, ``tuned`` and
         # ``compare``)
         "rate",
+        "pass_rate",
+        "headline_pass_rate",
+        "reference_pass_rate",
         "kappa",
         "base",
         "tuned",

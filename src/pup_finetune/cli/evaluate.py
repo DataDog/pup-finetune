@@ -18,7 +18,8 @@ evaluation is published as Agent Observability experiments on the pushed dataset
 SIGTERM stops it gracefully: the generations in flight finish, everything done is kept, and
 running the command again continues where it stopped. ``--compare-model`` adds a third
 target, another model replayed and judged alike; added to a complete evaluation, it reuses
-the base and tuned results.
+the base and tuned results. ``--evaluators`` adds the user's own LLM judges and Python
+checks the same way.
 
 The planning, calibration, replay and publishing live in
 :mod:`pup_finetune.evaluation.runner`, shared with ``train --evaluate``; this module only
@@ -66,6 +67,7 @@ SETTING_PARAMS: dict[str, tuple[str, ...]] = {
     "calibration": ("skip_calibration",),
     "publish": ("no_publish",),
     "reuse": ("no_reuse",),
+    "evaluators": ("evaluators",),
 }
 """Each setting of an evaluation preview, and the parameters that set it."""
 
@@ -131,13 +133,21 @@ DOC = CommandDoc(
         "where it came from (judge_source). Base answers from another evaluation or "
         "benchmark of the same dataset, made under the same settings, are reused from "
         "DATASET/replay_cache, together with their judgments when the judge is the same; "
-        "--no-reuse makes them again.",
+        "--no-reuse makes them again. --evaluators FILE adds your own evaluators from a TOML "
+        "spec: LLM judges, each with a rubric, an optional model and optional graded examples "
+        "that calibrate it, and Python checks, each a function of the case and the answer that "
+        "returns True, False, None (does not apply) or (False, reason); its headline is judge, "
+        "an evaluator's name or all (the judge and every evaluator pass). Added to a complete "
+        "evaluation, they score the stored answers, so only their judges' calls are paid. The "
+        "directory keeps its evaluators: a rerun may add some, never drop or change one (add "
+        "the new version under another name, or use a new --out-dir). Checks run in this "
+        "process with your privileges.",
     ),
     examples=(
         "pup finetune evaluate run",
         "pup finetune evaluate run --judge-model glm-5p3-flash",
-        "pup finetune evaluate run --max-cases 4 --out-dir run/eval-4",
         "pup finetune evaluate run --compare-model anthropic/claude-opus-5-5",
+        "pup finetune evaluate run --evaluators evals.toml",
     ),
     safety=Safety(
         data="sends test rows to the provider and the judge, results to Datadog",
@@ -201,6 +211,16 @@ def evaluate(
             "--compare-model",
             metavar="MODEL",
             help="Also replay this model, named as --judge-model.",
+            show_default=False,
+            rich_help_panel=MODELS,
+        ),
+    ] = None,
+    evaluators: Annotated[
+        Path | None,
+        typer.Option(
+            "--evaluators",
+            metavar="FILE",
+            help="More judges and Python checks, from a TOML file.",
             show_default=False,
             rich_help_panel=MODELS,
         ),
@@ -276,13 +296,14 @@ def evaluate(
         publish=not no_publish,
         compare_model=compare_model,
         reuse=not no_reuse,
+        evaluators=evaluators,
     )
     evaluation = runner.plan_standalone(runtime, run_dir, settings)
     # PUP_READ_ONLY refuses paid and remote runs, not one that never leaves the machine.
     offline = evaluation.plan.offline
     if confirm and not offline:
         require_writable(runtime, f"evaluating on {evaluation.provider.name}", what=PAID_RUN)
-    rerun = [*evaluation.plan.evaluate_command(), "--confirm"]
+    rerun = [*evaluation.plan.evaluate_command(evaluators=True), "--confirm"]
     preview = _with_source(_with_defaults_used(evaluation.preview(), current_context()), source)
     require_confirm(
         confirm, preview, shlex.join(rerun), read_only=runtime.read_only and not offline

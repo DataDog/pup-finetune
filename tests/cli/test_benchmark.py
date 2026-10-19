@@ -10,6 +10,7 @@ machine."""
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import shutil
 from collections.abc import Iterator
@@ -484,3 +485,195 @@ def test_a_benchmark_made_before_reuse_neither_loads_its_renderer_nor_warns(
     assert result.exit_code == 0, result.stderr
     assert not [line for line in output(result)["warnings"] if "not shared" in line]
     assert not (dataset / "replay_cache").exists()
+
+
+def test_evaluators_attach_per_model_and_one_added_later_opens_no_session(
+    dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec_dir = tmp_path / "spec"
+    shutil.copytree(ROWS.parent.parent / "evaluators", spec_dir)
+    spec = spec_dir / "evals.toml"
+    args = ("benchmark", str(dataset), "--models", "fake-model")
+    assert invoke(*args, "--confirm").exit_code == 0
+
+    def no_session(*_: Any, **__: Any) -> Any:
+        raise AssertionError("no session may open")
+
+    monkeypatch.setattr(FakeBackend, "open_session", no_session)
+    preview = output(invoke(*args, "--evaluators", str(spec)))
+    shown = preview["preview"]
+    assert (shown["generation_calls"], shown["judge_calls"]) == (0, 0)
+    assert shown["evaluators"]["headline"] == "all"
+    assert shown["settings"]["headline"] == "all"
+    assert "and score each with polite, no_card_numbers and text_when_expected" in shown["action"]
+    assert f"--evaluators {spec}" in preview["next_command"]
+    result = rerun(preview["next_command"])
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    (entry,) = data["leaderboard"]
+    assert set(entry["evaluators"]) == {"polite", "no_card_numbers", "text_when_expected", "all"}
+    assert entry["headline_pass_rate"] == entry["evaluators"]["all"]
+    assert data["recommendation"]["headline"] == "all"
+    assert (dataset / "benchmark" / "fake-model" / "evaluators.json").is_file()
+    stored = json.loads((dataset / "benchmark" / "calibration.json").read_text())
+    assert stored["evaluators"]["polite"]["ok"] is True
+    assert "ranked by all" in result.stderr
+
+
+def test_an_evaluator_that_fails_calibration_can_be_fixed_under_its_name(
+    dataset: Path, tmp_path: Path
+) -> None:
+    spec_dir = tmp_path / "spec"
+    shutil.copytree(ROWS.parent.parent / "evaluators", spec_dir)
+    examples = spec_dir / "polite-examples.jsonl"
+    swapped = {"true": "false", "false": "true"}
+    examples.write_text(
+        re.sub(r'(?<="pass": )(true|false)', lambda m: swapped[m[0]], examples.read_text())
+    )
+    result = invoke(
+        "benchmark", str(dataset), "--models", "fake-model", "--confirm",
+        "--evaluators", str(spec_dir / "evals.toml"),
+    )  # fmt: skip
+    assert result.exit_code == 1
+    data = output(result)
+    assert (data["status"], data["evaluator"]) == ("calibration_failed", "polite")
+    assert "fix its rubric or examples, or pick another model for it" in data["hint"]
+
+
+def test_evaluator_errors_are_reported_and_retried(dataset: Path, tmp_path: Path) -> None:
+    spec_dir = tmp_path / "spec"
+    spec_dir.mkdir()
+    outage = spec_dir / "outage"
+    outage.touch()
+    (spec_dir / "flaky.py").write_text(
+        "import os\n\n\ndef same_as_reference(case, candidate):\n"
+        f"    if candidate != case['reference'] and os.path.exists({str(outage)!r}):\n"
+        "        raise ValueError('not the reference')\n"
+        "    return True\n"
+    )
+    spec = spec_dir / "evals.toml"
+    spec.write_text(
+        'headline = "same_as_reference"\n[[evaluator]]\nname = "same_as_reference"\n'
+        'type = "check"\nfile = "flaky.py"\n'
+    )
+    result = invoke(
+        "benchmark", str(dataset), "--models", "fake-model", "--evaluators", str(spec), "--confirm"
+    )
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    (entry,) = data["leaderboard"]
+    assert (data["status"], entry["status"]) == ("complete_with_errors", "complete_with_errors")
+    assert (entry["errors"], entry["evaluator_errors"]) == (0, data["cases"])
+    assert f"{data['cases']} evaluator score(s) are missing after an error" in result.stderr
+    assert data["recommendation"]["verdict"] == "no_result"
+    assert "same_as_reference" in data["recommendation"]["reason"]
+    assert data["next_command"] == (
+        f"pup finetune benchmark {dataset} --models fake-model --judge-model fake-judge "
+        f"--evaluators {spec}"
+    )
+    outage.unlink()
+    preview = output(rerun(data["next_command"]))
+    assert preview["preview"]["evaluators"]["items"][0]["reference_pass_rate"] == 1.0
+    assert (preview["preview"]["generation_calls"], preview["preview"]["judge_calls"]) == (0, 0)
+    retried = output(rerun(preview["next_command"]))
+    assert retried["status"] == "complete"
+    assert retried["leaderboard"][0]["headline_pass_rate"] == 1.0
+
+
+def test_a_stored_set_s_command_runs_only_the_evaluators_it_previewed(
+    dataset: Path, tmp_path: Path
+) -> None:
+    spec_dir = tmp_path / "spec"
+    shutil.copytree(ROWS.parent.parent / "evaluators", spec_dir)
+    spec = spec_dir / "checks.toml"
+    spec.write_text('[[evaluator]]\nname = "no_card_numbers"\ntype = "check"\nfile = "checks.py"\n')
+    args = ("benchmark", str(dataset), "--models", "fake-model")
+    assert invoke(*args, "--evaluators", str(spec), "--confirm").exit_code == 0
+    spec.write_text(
+        spec.read_text() + '[[evaluator]]\nname = "text_when_expected"\ntype = "check"\n'
+        'file = "checks.py"\nfunction = "answers_in_text"\n'
+    )
+    preview = output(invoke(*args))
+    assert [item["name"] for item in preview["preview"]["evaluators"]["items"]] == [
+        "no_card_numbers"
+    ]
+    assert "--evaluators" not in preview["next_command"]
+    assert rerun(preview["next_command"]).exit_code == 0
+    stored = json.loads((dataset / "benchmark" / "fake-model" / "evaluators.json").read_text())
+    assert [item["name"] for item in stored["evaluators"]] == ["no_card_numbers"]
+
+
+def test_a_rerun_with_nothing_left_records_the_spec_s_headline_and_files(
+    dataset: Path, tmp_path: Path
+) -> None:
+    spec_dir = tmp_path / "spec"
+    shutil.copytree(ROWS.parent.parent / "evaluators", spec_dir)
+    check = '[[evaluator]]\nname = "no_card_numbers"\ntype = "check"\nfile = "checks.py"\n'
+    (spec_dir / "checks.toml").write_text(check)
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--confirm")
+    assert invoke(*args, "--evaluators", str(spec_dir / "checks.toml")).exit_code == 0
+    moved = tmp_path / "moved"
+    spec_dir.rename(moved)
+    (moved / "checks.toml").write_text(f'headline = "no_card_numbers"\n{check}')
+    assert invoke(*args, "--evaluators", str(moved / "checks.toml")).exit_code == 0
+    stored = json.loads((dataset / "benchmark" / "fake-model" / "evaluators.json").read_text())
+    assert stored["headline"] == "no_card_numbers"
+    assert stored["evaluators"][0]["file"] == str(moved / "checks.py")
+    assert output(invoke(*args))["recommendation"]["headline"] == "no_card_numbers"
+
+
+def test_the_share_command_continues_the_evaluators_without_the_spec(
+    dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec_dir = tmp_path / "spec"
+    shutil.copytree(ROWS.parent.parent / "evaluators", spec_dir)
+    spec = spec_dir / "checks.toml"
+    spec.write_text('[[evaluator]]\nname = "no_card_numbers"\ntype = "check"\nfile = "checks.py"\n')
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--evaluators", str(spec))
+    assert invoke(*args, "--confirm").exit_code == 0
+    shutil.rmtree(dataset / "replay_cache")
+    loadable = FakeProvider.renderer
+    monkeypatch.setattr(FakeProvider, "renderer", unloadable)
+    warning = output(invoke(*args, "--confirm"))["warnings"][-1]
+    shared = re.search(r"run `(.+)` to share them", warning)
+    assert shared is not None and "--evaluators" not in shared[1]
+    spec.write_text(
+        spec.read_text() + '[[evaluator]]\nname = "text_when_expected"\ntype = "check"\n'
+        'file = "checks.py"\nfunction = "answers_in_text"\n'
+    )
+    monkeypatch.setattr(FakeProvider, "renderer", loadable)
+    assert rerun(shared[1]).exit_code == 0
+    stored = json.loads((dataset / "benchmark" / "fake-model" / "evaluators.json").read_text())
+    assert [item["name"] for item in stored["evaluators"]] == ["no_card_numbers"]
+
+
+def test_a_conflict_s_hint_names_a_free_benchmark_directory(dataset: Path, tmp_path: Path) -> None:
+    spec_dir = tmp_path / "spec"
+    shutil.copytree(ROWS.parent.parent / "evaluators", spec_dir)
+    spec = spec_dir / "evals.toml"
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--evaluators", str(spec))
+    assert invoke(*args, "--confirm").exit_code == 0
+    spec.write_text(spec.read_text().replace('name = "polite"', 'name = "polite_v2"'))
+    conflict = invoke(*args)
+    assert conflict.exit_code == 2
+    assert f"pass --out-dir {dataset / 'benchmark-2'}" in conflict.stderr
+
+
+def test_recalibrating_the_judge_keeps_the_evaluators_calibrations(
+    dataset: Path, tmp_path: Path
+) -> None:
+    spec_dir = tmp_path / "spec"
+    shutil.copytree(ROWS.parent.parent / "evaluators", spec_dir)
+    args = ("benchmark", str(dataset), "--models", "fake-model")
+    args += ("--evaluators", str(spec_dir / "evals.toml"))
+    assert invoke(*args, "--confirm").exit_code == 0
+    path = dataset / "benchmark" / "calibration.json"
+    stored = json.loads(path.read_text())
+    path.write_text(json.dumps({**stored, "judge": {**stored["judge"], "model": "another"}}))
+    preview = output(invoke(*args))["preview"]
+    assert preview["calibration_calls"] > 0
+    assert preview["evaluators"]["items"][0]["calibration_calls"] == 0
+    result = invoke(*args, "--confirm")
+    assert result.exit_code == 0, result.stderr
+    assert "calibrating the evaluator polite" not in result.stderr
+    assert json.loads(path.read_text())["evaluators"] == stored["evaluators"]

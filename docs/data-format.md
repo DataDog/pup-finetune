@@ -270,6 +270,41 @@ no tool result right after it), `orphan_tool_result` (a tool result with no call
 before it) and `ends_on_assistant` (on Anthropic, a conversation that ends on an assistant
 turn).
 
+## Evaluator specs and checks
+
+`evaluate --evaluators FILE` (and `benchmark --evaluators FILE`) reads a TOML spec, its paths
+relative to it: an optional `headline` (`judge`, the default, an evaluator's name, or `all`)
+and one `[[evaluator]]` table per evaluator. Every evaluator has a `name` (lowercase letters,
+digits and `_`, starting with a letter, at most 40 characters; not `judge`, `all`,
+`judge_pass`, `trajectory_agreement`, `completed_actions` or a metric's name) and a `type`. A
+`judge` has a `rubric`, an optional `model` (named as `--judge-model`; the evaluation's judge
+by default) and optional `examples`, a JSON Lines file of graded answers
+(`{"conversation", "candidate", "pass"}`, with optional `tools` and `reference`; `candidate`
+a string or an assistant message), at least one with `"pass": true` and one with
+`"pass": false`. A `check` has a `file` and an optional `function` (its name by default):
+`function(case, candidate)` gets copies of the case (`id`, `row_id`, `trace_id`,
+`message_index`, `prefix`, `tools`, `reference`, `future_tool_results`) and of the generated
+assistant message, and returns `True`, `False`, `None` (does not apply) or `(bool, reason)`.
+An unknown key, a repeated or reserved name, or a headline that names no evaluator is a usage
+error.
+
+The evaluation directory then holds `evaluators.json`: `{"evaluators": [...], "headline",
+"spec"}`, each evaluator `{"name", "type": "judge", "rubric_sha256", "rubric", "model"}`
+(`model` as in `compare.json`) or `{"name", "type": "check", "function", "file_sha256",
+"file"}`. Evaluators are added, never changed or dropped: a changed rubric, model or check
+file (its whole sha256) is a `settings_conflict`, while the same ones attached from a spec
+elsewhere take its `file` paths. Each line of `results.jsonl` gains
+`evaluators`, by name: `{"status": "ok" | "not_applicable" | "error", "passed", "reason",
+"raw", "no_verdict", "error"}`. `calibration.json` gains `evaluators`, each judge's report on
+its examples. `summary.json` gains, per target, `evaluators.<name>` and `evaluators.all`
+(`{"pass": {"rate", "passed", "n"}, "not_applicable", "no_verdict", "errors", "pending"}`),
+and at the top `evaluators` (`{"headline", "names", "tuned_minus_base", "tuned_minus_compare"}`,
+each by name: `{"delta", "ci95", "n_cases", "n_trajectories", "wins", "regressions", "ties",
+"both_error", "one_error", "pending", "not_applicable"}`). `all` passes a case when the
+judge passes it and every evaluator passes or does not apply; a case with an evaluator error
+is left out of it. `published.json` keeps, after a span's digest, `+` and the evaluators it
+was sent with.
+
 ## Where a dataset stands
 
 Every dataset command's result (`import`, `pull`, `show`, `sample`, `label`, `triage` and
@@ -314,7 +349,7 @@ is:
 | --- | --- | --- |
 | `train`, `resume` | How the run ended (`status`), the best epoch and its validation loss, each epoch's losses (`best: true` on the best one), the promoted model, the deployable checkpoint's name, the elapsed seconds and what next. | `files.result` (`result.json`: every checkpoint with its URI, and each epoch's checkpoints and tokens) and `files.epochs` (`epochs.json`). |
 | `status` | The phase, epoch and step against their maximums, the last training loss, the validation losses, the best epoch, the elapsed time and ETA, the promoted model, what next; `resume_mode` only for a resumable run, and `worker` (`pid`, `state`: `running`, `starting`, `stale` or `exited`, `heartbeat_age_s`, `log`) only when the run has a worker or is training. | `files.state` (`state.json`), `files.epochs` and `files.result` (`null` until the run has one). |
-| `evaluate` | `judge_model` and `compare_model` (`null` without one), `headline` (the judge pass rate of `base` and `tuned`, and `compare` with a compare target, their `delta` with its `ci95`, the paired `wins`, `regressions` and `ties`, `tuned_minus_compare` with a compare target, with the cases it `skipped`, and the numbers of `cases` and `trajectories`), each metric's rate per target, the errors per target, `reused` (the targets that took answers or verdicts from the store, with how many), the publication and the caveat. | `files.summary` (`summary.json`: per target the judge's passes, every metric's `n`, `passed` and `rate`, the agreement per trajectory, tokens and errors by stage; the paired counts; the bootstrap's resamples and seed) and `files.results` (`results.jsonl`, one line per judged pair). |
+| `evaluate` | `judge_model` and `compare_model` (`null` without one), `headline` (the judge pass rate of `base` and `tuned`, and `compare` with a compare target, their `delta` with its `ci95`, the paired `wins`, `regressions` and `ties`, `tuned_minus_compare` with a compare target, with the cases it `skipped`, with `--evaluators` the headline `evaluator` and each one's rates and deltas under `evaluators`, and the numbers of `cases` and `trajectories`), each metric's rate per target, the errors per target, `reused` (the targets that took answers or verdicts from the store, with how many), the publication and the caveat. | `files.summary` (`summary.json`: per target the judge's passes, every metric's `n`, `passed` and `rate`, the agreement per trajectory, tokens and errors by stage; the paired counts; the bootstrap's resamples and seed) and `files.results` (`results.jsonl`, one line per judged pair). |
 
 Under pup, `--output table` (or `csv`) without a `--jq` filter shows the rows of a list:
 `models list` one row per model, `auth status` per provider, `doctor` per check and

@@ -625,3 +625,31 @@ def test_the_deploy_headline_names_a_different_deployment_id() -> None:
     )
     assert found is not None
     assert found.lines[0] == "deployed m as d (ready)"
+
+
+def test_the_headline_evaluator_s_line_comes_first() -> None:
+    entry = {"base": 0.45, "tuned": 0.65, "delta": 0.2, "ci95": [0.05, 0.33], "n": 40}
+    result = {
+        "status": "complete",
+        "judge_model": "j",
+        "calibration": {"ok": True},
+        "errors": {"base": 0, "tuned": 0},
+        "headline": {
+            "judge_pass_rate": {"base": 0.5, "tuned": 0.75, "delta": 0.25},
+            "paired": {"wins": 1, "regressions": 0, "ties": 3},
+            "evaluator": "all",
+            "evaluators": {"polite": entry, "all": entry},
+            "cases": 40,
+            "trajectories": 20,
+        },
+    }
+    found = summarize("evaluate", result)
+    assert found is not None
+    assert found.lines[1] == (
+        "headline all (the judge and every evaluator): base 45%, tuned 65%, tuned - base "
+        "+20 pts (95% CI +5 to +33)"
+    )
+    plain = summarize(
+        "evaluate", {**result, "headline": {**result["headline"], "evaluator": "judge"}}
+    )
+    assert plain is not None and not plain.lines[1].startswith("headline")

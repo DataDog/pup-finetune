@@ -33,6 +33,7 @@ from pup_finetune.datadog.experiments import (
     ExperimentsPublisher,
     PublishSettings,
     app_url,
+    build_span_groups,
     comparison_url,
 )
 from pup_finetune.errors import ReadOnlyError
@@ -1165,3 +1166,109 @@ def test_an_experiment_holds_only_the_cases_its_target_replayed() -> None:
 
     assert rows("compare") == [sent]
     assert rows("base") == [skipped, sent]
+
+
+# --- the user's evaluators -------------------------------------------------------------------
+
+
+def scored(evaluation: Evaluation, *names: str) -> PublishSettings:
+    """``evaluation`` scored by ``names``: each passes the tuned answers, with a reason."""
+    for (target, _), result in evaluation.results.items():
+        result["evaluators"] = {
+            name: {"status": "ok", "passed": target == "tuned", "reason": f"{name} says so"}
+            for name in names
+        }
+    return dataclasses.replace(evaluation.settings(), evaluators=names, headline="all")
+
+
+def test_each_case_span_carries_a_boolean_per_evaluator_and_no_composite(
+    fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
+) -> None:
+    evaluation = Evaluation(rows=1, cases_per_row=2)
+    settings = scored(evaluation, "polite", "no_card_numbers")
+    key = ("base", evaluation.cases[0].id)
+    evaluation.results[key]["evaluators"]["polite"] = {"status": "not_applicable"}
+    report = publish(fake, evaluation, tmp_path / "eval", clock, settings=settings)
+    for target in TARGETS:
+        experiment = api.experiments[report["experiments"][target]["experiment_id"]]
+        assert experiment.attributes["config"]["evaluators"] == ["polite", "no_card_numbers"]
+        assert experiment.attributes["config"]["headline"] == "all"
+        children = spans_named(experiment.spans, CHILD_SPAN_NAME)
+        for child in children:
+            metrics = metrics_of(experiment.metrics, child["span_id"])
+            assert "all" not in metrics
+            card = metrics["no_card_numbers"]
+            assert (card["metric_type"], card["boolean_value"]) == ("boolean", target == "tuned")
+            assert card["reasoning"] == "no_card_numbers says so"
+        first = metrics_of(experiment.metrics, children[0]["span_id"])
+        assert ("polite" in first) is (target == "tuned")
+
+
+def test_without_evaluators_the_config_and_the_published_digests_are_unchanged(
+    fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
+) -> None:
+    evaluation = Evaluation(rows=1, cases_per_row=1)
+    out = tmp_path / "eval"
+    report = publish(fake, evaluation, out, clock)
+    experiment = api.experiments[report["experiments"]["tuned"]["experiment_id"]]
+    assert "evaluators" not in experiment.attributes["config"]
+    group = build_span_groups(
+        evaluation.settings(), "tuned", experiment.id, evaluation.cases, evaluation.generations,
+        evaluation.results, fallback_ns=0,
+    )[0]  # fmt: skip
+    published = json.loads((out / "published.json").read_text())[experiment.id]
+    assert published == {span["span_id"]: group.digest(span) for span in group.spans}
+    again = publish(fake, evaluation, out, clock)
+    assert again["warnings"] == []
+    assert again["experiments"]["tuned"]["submitted"] == 0
+
+
+def test_an_evaluator_attached_after_publishing_is_a_warning_and_never_sent(
+    fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
+) -> None:
+    evaluation = Evaluation(rows=1, cases_per_row=2)
+    out = tmp_path / "eval"
+    publish(fake, evaluation, out, clock)
+    settings = scored(evaluation, "polite")
+    report = publish(fake, evaluation, out, clock, settings=settings)
+    assert report["experiments"]["tuned"]["submitted"] == 0
+    warnings = [w for w in report["warnings"] if "before polite scored them" in w]
+    assert len(warnings) == 2  # one per experiment
+    assert "2 span(s) of the base experiment" in warnings[0]
+    assert "evaluate into a new --out-dir to publish them" in warnings[0]
+    assert not any("earlier result" in w for w in report["warnings"])
+    experiment = api.experiments[report["experiments"]["tuned"]["experiment_id"]]
+    assert not [metric for metric in experiment.metrics if metric["label"] == "polite"]
+
+
+def test_spans_sent_with_their_evaluators_are_up_to_date(
+    fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
+) -> None:
+    evaluation = Evaluation(rows=1, cases_per_row=1)
+    out = tmp_path / "eval"
+    settings = scored(evaluation, "polite")
+    publish(fake, evaluation, out, clock, settings=settings)
+    published = json.loads((out / "published.json").read_text())
+    assert any(
+        value.endswith("+polite") for spans in published.values() for value in spans.values()
+    )
+    again = publish(fake, evaluation, out, clock, settings=settings)
+    assert again["warnings"] == []
+
+
+def test_a_row_waits_live_until_every_evaluator_scored_it(
+    fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
+) -> None:
+    signed_in(fake)
+    evaluation = Evaluation()
+    settings = scored(evaluation, "polite")
+    waiting = evaluation.cases[0]
+    evaluation.results[("tuned", waiting.id)]["evaluators"]["polite"] = {"status": "error"}
+    live = publisher(fake, evaluation, tmp_path / "eval", clock, settings=settings)
+    live.start()
+    live.publish_ready(
+        cases=evaluation.cases, generations=evaluation.generations, results=evaluation.results
+    )
+    tuned = next(e for e in api.experiments.values() if e.attributes["config"]["target"] == "tuned")
+    assert len(tuned.spans) == 3  # the other row only
+    assert waiting.row_id not in json.dumps(tuned.spans)
