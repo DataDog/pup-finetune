@@ -575,9 +575,9 @@ Safety: Paid with --confirm · sends test rows to each model's provider and to t
 
 ## `pup finetune train`
 
-Fine-tune --model with LoRA SFT on --dataset's train split, keeping the best epoch by validation loss. Without --confirm, previews the run and prints the command that starts it. With --confirm, trains (Ctrl-C cancels gracefully).
+Fine-tune --model with LoRA SFT on --dataset's train split, keeping the best epoch by validation loss. Previews without --confirm; trains with it.
 
---dataset must be in Datadog: every kept row pushed with `dataset push`, or the directory made by `dataset fetch` (the offline fake provider trains on any). The run goes in runs/RUN_ID unless --run-dir names another directory (a runs/ this creates gets a .gitignore, since runs hold trace-derived rows), and --provider is inferred from the --model alias when it is offered by one provider only; the preview says so (provider_source), and its next_command pins both. The preview lists rows and rendered tokens per split, the rejected rows, tokens per epoch and in total, the settings and where the data goes. --detach trains in a background worker; follow it with `status --watch`. Training stops early after --patience epochs without a validation-loss improvement; a Ctrl-C or `cancel` still promotes the best epoch. With --evaluate, the run is also evaluated on the test split in its training session once the best epoch is promoted (see `evaluate`): the judge is calibrated and --eval-out-dir checked before training starts, so a failed calibration trains nothing; --detach is refused with it; and the evaluation stops, partial, at --max-spend-usd. --max-seq-len caps the context (and so the cost): longer rows are left out, as the preview shows (exceeds_context). --remote (Baseten only) runs the training loop in a Baseten CPU job, so training continues while this machine sleeps; --team names the team (default: your only or default team). It needs the baseten CLI and uv on PATH, a source checkout of pup-finetune and a team secret pup_finetune_api_key; it uploads the train and validation rows, the run files and pup-finetune's source to Baseten storage, and is refused with --detach and --evaluate. status copies the job's state into the run directory; cancel cannot stop the job yet.
+--dataset must be in Datadog: every kept row pushed with `dataset push`, or the directory made by `dataset fetch` (the offline fake provider trains on any). The run goes in runs/RUN_ID unless --run-dir names another directory (a runs/ this creates gets a .gitignore, since runs hold trace-derived rows), and --provider is inferred from the --model alias when it is offered by one provider only; the preview says so (provider_source), and its next_command pins both. The preview lists rows and rendered tokens per split, the rejected rows, tokens per epoch and in total, the settings and where the data goes. --detach trains in a background worker; follow it with `status --watch`. Training stops early after --patience epochs without a validation-loss improvement; a Ctrl-C or `cancel` still promotes the best epoch. --learning-rate is constant unless --lr-schedule linear or cosine decays it over the steps of --max-epochs epochs (the preview's max_steps; early stopping or a cap ends the run first), after a linear warmup over --warmup-fraction of them (warmup_steps); it never reaches zero, and the other Adam parameters are fixed (run.json settings.optimizer). With --evaluate, the run is also evaluated on the test split in its training session once the best epoch is promoted (see `evaluate`): the judge is calibrated and --eval-out-dir checked before training starts, so a failed calibration trains nothing; --detach is refused with it; and the evaluation stops, partial, at --max-spend-usd. --max-seq-len caps the context (and so the cost): longer rows are left out, as the preview shows (exceeds_context). --remote (Baseten only) runs the training loop in a Baseten CPU job, so training continues while this machine sleeps; --team names the team (default: your only or default team). It needs the baseten CLI and uv on PATH, a source checkout of pup-finetune and a team secret pup_finetune_api_key; it uploads the train and validation rows, the run files and pup-finetune's source to Baseten storage, and is refused with --detach and --evaluate. status copies the job's state into the run directory; cancel cannot stop the job yet.
 
 ```
 pup finetune train [OPTIONS]
@@ -601,6 +601,8 @@ pup finetune train [OPTIONS]
 | `--patience` | `N` | `1` | Epochs without improvement to stop. |
 | `--min-delta` | `X` | `0.0` | Least improvement that counts. |
 | `--learning-rate` | `X` | `0.0001` | Learning rate. |
+| `--lr-schedule` | `NAME` | `constant` | Constant, linear or cosine. |
+| `--warmup-fraction` | `X` | `0.0` | Share of steps warming up. |
 | `--batch-size` | `N` | `32` | Rows per optimizer step. |
 | `--lora-rank` | `N` | the model's | LoRA rank. |
 | `--lora-alpha` | `N` | the provider's | LoRA alpha. |
@@ -630,7 +632,7 @@ Examples:
 
 ```sh
 pup finetune train --dataset ds --model qwen3p8-27b
-pup finetune train --provider fireworks --model qwen3p8-27b --dataset ds --run-dir run --max-seq-len 8192 --detach
+pup finetune train --dataset ds --model qwen3p8-27b --lr-schedule cosine
 ```
 
 Safety: Paid with --confirm · sends rows to the provider (and the judge) · PUP_READ_ONLY: preview only unless offline.

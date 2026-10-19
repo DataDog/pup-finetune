@@ -92,6 +92,7 @@ class TrainingProgress:
         self._steps_per_epoch: int | None = None
         self._max_steps: int | None = None
         self._max_epochs: int | None = None
+        self._show_rate = False
         self._timer_minutes: float | None = None
         self._last_line_at: float | None = None
         self._last_step_shown: int | None = None
@@ -133,6 +134,8 @@ class TrainingProgress:
         self._steps_per_epoch = _positive(event.get("steps_per_epoch"))
         self._max_steps = _positive(event.get("max_steps"))
         self._max_epochs = _positive(event.get("max_epochs"))
+        schedule = event.get("lr_schedule", "constant")
+        self._show_rate = schedule != "constant" or bool(event.get("warmup_steps"))
         minutes = event.get("checkpoint_every_minutes")
         self._timer_minutes = float(minutes) if isinstance(minutes, int | float) else None
         step = event.get("step")
@@ -148,6 +151,9 @@ class TrainingProgress:
             f"epoch {self._epoch_of(event.get('epoch'))} step {step}{total}: "
             f"loss {_loss(event.get('loss'))}"
         )
+        rate = event.get("learning_rate")
+        if self._show_rate and isinstance(rate, int | float):
+            text += f", lr {rate:.2g}"
         if self._every_step:
             self._last_step_shown = step
             self._line(text)

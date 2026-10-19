@@ -441,6 +441,20 @@ def test_a_remote_run_trains_and_status_copies_it_back(world: World) -> None:
     assert output(deploy)["preview"]["model_source"] == "deployable_checkpoint"
 
 
+def test_the_job_trains_on_the_schedule_the_preview_showed(world: World) -> None:
+    schedule = ("--lr-schedule", "cosine", "--warmup-fraction", "0.1", "--batch-size", "1")
+    previewed = output(train(world, *schedule))
+    assert "--lr-schedule cosine --warmup-fraction 0.1" in previewed["next_command"]
+    assert train(world, *schedule, "--confirm").exit_code == 0
+    uploaded = RunDir(world.job_root / "run").spec()
+    assert (uploaded.lr_schedule, uploaded.warmup_fraction) == ("cosine", 0.1)
+    run_the_job(world)
+    total = previewed["preview"]["max_steps"]
+    sent = [kwargs["adam_params"].learning_rate for kwargs in world.loops.kwargs("optim_step")]
+    assert sent == [uploaded.learning_rate_at(step, total) for step in range(1, total + 1)]
+    assert len(set(sent)) > 2
+
+
 def test_the_watch_ends_after_the_final_report(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:

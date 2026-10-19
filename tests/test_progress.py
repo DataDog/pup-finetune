@@ -177,6 +177,26 @@ def test_every_step_mode_prints_every_step_and_each_checkpoint_with_its_reason()
     ]
 
 
+@pytest.mark.parametrize(
+    ("schedule", "shown"),
+    [
+        ({}, False),
+        ({"lr_schedule": "constant", "warmup_steps": 0}, False),
+        ({"lr_schedule": "constant", "warmup_steps": 1}, True),
+        ({"lr_schedule": "cosine", "warmup_steps": 0}, True),
+    ],
+)
+def test_a_step_line_shows_the_learning_rate_only_when_it_varies(
+    schedule: dict[str, Any], shown: bool
+) -> None:
+    lines: list[str] = []
+    progress = TrainingProgress(write=lines.append, every_step=True, fold=False, clock=Clock())
+    progress(plan(steps_per_epoch=2, **schedule))
+    progress({**step(1, 1), "learning_rate": 9.619e-05})
+    rate = ", lr 9.6e-05" if shown else ""
+    assert lines == [f"epoch 1/2 step 1/4: loss 2.000{rate}"]
+
+
 def test_steps_mode_comes_from_the_environment_or_a_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

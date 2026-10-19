@@ -7,8 +7,10 @@
 """The shared, provider-neutral SFT loop, written once against :class:`TrainingSession`.
 
 Each epoch shuffles the rows (:func:`~pup_finetune.training.batching.epoch_rng`), and each
-optimizer step sends one ``forward_backward`` per microbatch, then one ``optim_step``, with
-up to ``spec.pipeline_depth`` steps in flight. Every submitted result is resolved, in order,
+optimizer step sends one ``forward_backward`` per microbatch, then one ``optim_step`` at the
+step's scheduled learning rate (:meth:`TrainSpec.learning_rate_at` over
+:meth:`TrainSpec.max_steps`, so a resume sends the same rates), with up to
+``spec.pipeline_depth`` steps in flight. Every submitted result is resolved, in order,
 also when a step fails or the process is interrupted; an interrupt (Ctrl-C, SIGTERM) wins
 over an ordinary error, which is kept as a note. ``forward_backward`` is never retried: a
 retry would accumulate the step's gradients twice. After each epoch the validation loss
@@ -40,6 +42,7 @@ training result so it is not lost.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import time
 from collections import deque
@@ -197,11 +200,11 @@ def run_training(
     :attr:`~pup_finetune.providers.base.TrainingBackend.max_checkpoint_name_len`) is checked
     against the names ``checkpoint_namer`` gives before any step is sent. ``clock`` (seconds)
     times the checkpoints; ``sleep`` waits between validation retries. ``on_event`` receives
-    a ``{"type": "step", "epoch", "step", "loss", "tokens", "elapsed_s"}`` dict per optimizer
-    step, and ``"epoch"``, ``"checkpoint"``, ``"retry"`` and ``"stopped"`` events, with any
-    non-finite number as ``None``. ``resume`` continues a run in a session opened from
-    ``resume.point.checkpoint``, with the same rows and spec; ``budget`` then also counts the
-    time spent before (see :class:`Resume`). A failing ``finalize`` raises
+    a ``{"type": "step", "epoch", "step", "loss", "learning_rate", "tokens", "elapsed_s"}``
+    dict per optimizer step, and ``"epoch"``, ``"checkpoint"``, ``"retry"`` and ``"stopped"``
+    events, with any non-finite number as ``None``. ``resume`` continues a run in a session
+    opened from ``resume.point.checkpoint``, with the same rows and spec; ``budget`` then also
+    counts the time spent before (see :class:`Resume`). A failing ``finalize`` raises
     :class:`FinalizeFailed`.
     """
     if not train_rows:
@@ -236,6 +239,7 @@ class _InFlight:
     epoch: int
     step: int
     tokens: int
+    learning_rate: float
     results: list[PendingResult[StepMetrics]] = field(default_factory=list)
     optim: PendingResult[None] | None = None
 
@@ -251,8 +255,11 @@ class _Pipeline:
         session: TrainingSession,
         spec: TrainSpec,
         on_done: Callable[[_InFlight, list[StepMetrics]], None],
+        total_steps: int,
     ) -> None:
         self._session = session
+        self._spec = spec
+        self._total_steps = total_steps
         self._adam = spec.adam_config()
         self._depth = spec.pipeline_depth
         self._on_done = on_done
@@ -274,7 +281,9 @@ class _Pipeline:
         are never applied (there is no ``optim_step`` for them).
         """
         # Queued before anything is sent, so a failure part-way still resolves what was sent.
-        flight = _InFlight(epoch, step, tokens)
+        flight = _InFlight(
+            epoch, step, tokens, self._spec.learning_rate_at(step, self._total_steps)
+        )
         self._queue.append(flight)
         for microbatch in microbatches:
             refused = guard()
@@ -284,7 +293,8 @@ class _Pipeline:
         refused = guard()
         if refused is not None:
             return refused
-        flight.optim = self._session.optim_step(self._adam)
+        adam = dataclasses.replace(self._adam, learning_rate=flight.learning_rate)
+        flight.optim = self._session.optim_step(adam)
         return None
 
     def make_room(self) -> None:
@@ -411,6 +421,7 @@ class _Loop:
             )
             for microbatch in step
         ]
+        self._max_steps = spec.max_steps(len(self._train_rows))
         self._started = clock()
         self._last_checkpoint_at = self._started
         self._step = 0
@@ -465,22 +476,22 @@ class _Loop:
         spec = self._spec
         steps_per_epoch = math.ceil(len(self._train_rows) / spec.batch_size)
         for kind in CHECKPOINT_KINDS:  # fail before paying
-            self._name(kind, spec.max_epochs, spec.max_epochs * steps_per_epoch)
+            self._name(kind, spec.max_epochs, self._max_steps)
         if self._skip_steps > steps_per_epoch:
             raise StateError(
                 f"the run already trained {self._skip_steps} steps of epoch "
                 f"{self._start_epoch}, but an epoch has {steps_per_epoch}",
                 hint="resume with the same training rows and settings as the run",
             )
-        self._state.record_plan(
-            steps_per_epoch=steps_per_epoch, max_steps=spec.max_epochs * steps_per_epoch
-        )
+        self._state.record_plan(steps_per_epoch=steps_per_epoch, max_steps=self._max_steps)
         self._emit(
             {
                 "type": "plan",
                 "steps_per_epoch": steps_per_epoch,
-                "max_steps": spec.max_epochs * steps_per_epoch,
+                "max_steps": self._max_steps,
                 "max_epochs": spec.max_epochs,
+                "lr_schedule": spec.lr_schedule,
+                "warmup_steps": spec.warmup_steps(self._max_steps),
                 "checkpoint_every_minutes": spec.checkpoint_every_minutes,
                 "epoch": self._start_epoch,
                 "step": self._step,
@@ -541,7 +552,7 @@ class _Loop:
         else:
             self._epoch_loss_sum, self._epoch_weight = 0.0, 0.0
             self._epoch_steps, self._epoch_tokens = 0, 0
-        pipeline = _Pipeline(self._session, spec, self._step_done)
+        pipeline = _Pipeline(self._session, spec, self._step_done, self._max_steps)
         stop: StoppedReason | None = None
         try:
             for step in steps:
@@ -620,6 +631,7 @@ class _Loop:
                 "epoch": flight.epoch,
                 "step": flight.step,
                 "loss": loss,
+                "learning_rate": flight.learning_rate,
                 "tokens": flight.tokens,
                 "elapsed_s": self._clock() - self._started,
             }

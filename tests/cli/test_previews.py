@@ -108,8 +108,13 @@ def test_the_train_preview_shows_what_will_be_used(dataset: Path, tmp_path: Path
     }
     assert (settings["max_seq_len"], settings["max_seq_len_source"]) == (4096, "model default")
     assert settings["max_epochs"] == 3
+    assert (settings["lr_schedule"], settings["warmup_fraction"]) == ("constant", 0.0)
     assert "max_epochs" not in preview["defaults_used"]
     assert {"lora.rank", "learning_rate", "batch_size", "seed"} <= set(preview["defaults_used"])
+    assert {"lr_schedule", "warmup_fraction"} <= set(preview["defaults_used"])
+    # The schedule's horizon: every step of every epoch, ceil(rows / batch) per epoch.
+    assert preview["max_steps"] == 3 * -(-preview["rows"]["train"] // 32)
+    assert preview["warmup_steps"] == 0
     # The optimizer's fixed parameters and the full profile stay in run.json.
     assert "optimizer" not in settings and "spec" not in preview
     assert set(preview["profile"]) == {"alias", "base_model", "max_seq_len"}
@@ -124,20 +129,40 @@ def test_values_the_user_typed_read_back_exactly(dataset: Path, tmp_path: Path) 
     # Only measurements are rounded: a flag's value reads as typed, in settings and on the
     # card, and the next command carries it unchanged.
     flags = ("--max-spend-usd", "1234.5", "--hourly-rate-usd", "3.33333")
-    result = invoke(*train_args(dataset, tmp_path / "run", *flags, "--learning-rate", "0.00012345"))
+    schedule = ("--lr-schedule", "cosine", "--warmup-fraction", "0.05")
+    result = invoke(
+        *train_args(dataset, tmp_path / "run", *flags, "--learning-rate", "0.00012345", *schedule)
+    )
     data = output(result)
-    settings = data["preview"]["settings"]
+    preview = data["preview"]
+    settings = preview["settings"]
     assert settings["max_spend_usd"] == 1234.5
     assert settings["hourly_rate_usd"] == 3.33333
     assert settings["learning_rate"] == 0.00012345
+    assert (settings["lr_schedule"], settings["warmup_fraction"]) == ("cosine", 0.05)
+    assert not {"lr_schedule", "warmup_fraction"} & set(preview["defaults_used"])
+    assert preview["warmup_steps"] == -(-preview["max_steps"] // 20)  # 5%, rounded up
     assert "--max-spend-usd 1234.5" in data["next_command"]
-    assert "--learning-rate 0.00012345" in data["next_command"]
-    assert "lr 1.2345e-4" in result.stderr
+    assert (
+        "--learning-rate 0.00012345 --lr-schedule cosine --warmup-fraction 0.05"
+        in (data["next_command"])
+    )
+    assert "lr 1.2345e-4 (cosine, warmup 0.05)" in result.stderr
     status_dir = tmp_path / "run"
     assert follow(data["next_command"]).exit_code == 0
+    manifest = RunDir(status_dir).manifest()
+    assert (manifest["spec"]["lr_schedule"], manifest["spec"]["warmup_fraction"]) == (
+        "cosine",
+        0.05,
+    )
+    assert manifest["settings"]["lr_schedule"] == "cosine"
     status = output(invoke("status", str(status_dir)))
     assert status["settings"]["learning_rate"] == 0.00012345
     assert status["settings"]["max_spend_usd"] == 1234.5
+    assert (status["settings"]["lr_schedule"], status["settings"]["warmup_fraction"]) == (
+        "cosine",
+        0.05,
+    )
 
 
 def test_the_next_command_is_the_preview_plus_confirm_and_trains(
@@ -338,7 +363,7 @@ def crashed(dataset: Path, tmp_path: Path) -> Path:
     run_dir = tmp_path / "run"
     result = invoke(
         *train_args(dataset, run_dir, "--batch-size", "2", "--max-epochs", "2"),
-        *("--provider-option", "fail_at_step=5", "--confirm"),
+        *("--lr-schedule", "linear", "--provider-option", "fail_at_step=5", "--confirm"),
     )
     assert result.exit_code == 1, result.stderr
     return run_dir
@@ -349,6 +374,7 @@ def test_the_resume_preview_has_the_shape_and_pins_the_run(crashed: Path) -> Non
     preview = data["preview"]
     assert all(key in preview for key in SHAPE)
     assert preview["settings"]["batch_size"] == 2
+    assert preview["settings"]["lr_schedule"] == "linear"
     assert "optimizer" not in preview["settings"]
     assert data["next_command"] == f"pup finetune resume {crashed} --confirm"
     resumed = follow(data["next_command"])
@@ -372,6 +398,7 @@ def test_status_shows_only_the_settings_that_differ_from_the_defaults(crashed: P
     status = output(invoke("status", str(crashed)))
     assert status["settings"] == {
         "max_epochs": 2,
+        "lr_schedule": "linear",
         "batch_size": 2,
         "provider_options": {"fail_at_step": 5},
     }

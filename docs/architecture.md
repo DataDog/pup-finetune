@@ -67,7 +67,9 @@ side of a session:
 - converting each `TokenizedExample` to the SDK's own datum type;
 - `forward_backward`, `forward` and `optim_step`, returning `PendingResult`s. A backend whose
   forward-only call returns per-token logprobs instead of a loss computes the loss itself, as
-  the weighted sum of the negative logprobs;
+  the weighted sum of the negative logprobs. `optim_step` takes an `AdamConfig` per call whose
+  learning rate follows the run's schedule (`TrainSpec.learning_rate_at`); pass it through on
+  every call, never cache it;
 - saving training checkpoints (weights and optimizer state, resumable) and sampler checkpoints
   (weights only), within the provider's checkpoint-name limit
   (`max_checkpoint_name_len`);
@@ -578,12 +580,12 @@ Using Baseten as the example:
 2. **Backend.** Implement `TrainingBackend` with the Baseten Loops SDK. `open_session` returns
    a context manager that deactivates the session on exit, whether training finished,
    stopped early or failed. Convert each `TokenizedExample` to the SDK's datum type, map
-   `AdamConfig` onto its optimizer parameters, size the trainer from the `seed` and
-   `max_seq_len` passed to `open_session`, set `max_checkpoint_name_len` to the provider's
-   limit, and declare `supports_resume` and `supports_promotion`. Map SDK failures onto the
-   neutral errors in `providers/base.py`: `ProviderCapacityError` when there is no capacity
-   or quota (end what the failed call started before raising it, and say so in the hint
-   only then), `ProviderAuthError` for a rejected key and
+   `AdamConfig` onto its optimizer parameters on every step, size the trainer from the
+   `seed` and `max_seq_len` passed to `open_session`, set `max_checkpoint_name_len` to the
+   provider's limit, and declare `supports_resume` and `supports_promotion`. Map SDK
+   failures onto the neutral errors in `providers/base.py`: `ProviderCapacityError` when
+   there is no capacity or quota (end what the failed call started before raising it, and
+   say so in the hint only then), `ProviderAuthError` for a rejected key and
    `TransientError` for a retryable server error or dropped connection, with redacted
    messages (`providers/fireworks/client.py` does this in `fireworks_error`).
    `providers/fireworks/backend.py` is a complete backend to follow.

@@ -181,6 +181,15 @@ or recorded as the run's `deployable_checkpoint` on Baseten, which has no promot
 Baseten models are `qwen3p5-9b` and `glm-5p3-flash`:
 `pup finetune train --dataset datasets/my-agent --model qwen3p5-9b --detach`.
 
+Training uses Adam on a LoRA adapter: `--learning-rate` (1e-4), `--batch-size` rows per step,
+up to `--max-epochs` epochs with early stopping after `--patience` epochs without a
+validation-loss gain, and `--lora-rank`. The rate is constant by default; `--lr-schedule
+linear` or `cosine` decays it toward zero over the steps of `--max-epochs` epochs (the
+preview's `max_steps`), after `--warmup-fraction` of them ramping up (`warmup_steps`). Early
+stopping or a cap ends a run before its decay does: set `--max-epochs` to the length you
+intend, and raise `--patience` to let the decay run. The preview's `settings` and `run.json`
+record every value; the other Adam parameters are fixed (`settings.optimizer`).
+
 `--remote` (Baseten only) runs the training loop in a Baseten CPU job, so training continues
 while this machine sleeps; `--team` names the Baseten team (by default your only or default
 team). It needs the `baseten` CLI and `uv` on `PATH`, pup-finetune installed from a source

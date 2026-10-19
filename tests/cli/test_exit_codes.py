@@ -206,6 +206,8 @@ MISTAKES: list[tuple[str, Setup, int, str]] = [
     ("a mistyped option", lambda w: ["train", "--conf"], 2, "usage"),
     ("a mistyped command", lambda w: ["evalute"], 2, "usage"),
     ("a malformed value", lambda w: w.train("--max-epochs", "many"), 2, "usage"),
+    ("an unknown schedule", lambda w: w.train("--lr-schedule", "step"), 2, "usage"),
+    ("a warmup of every step", lambda w: w.train("--warmup-fraction", "1"), 2, "usage"),
     ("a flag without the one it needs", lambda w: w.train("--eval-max-tokens", "9"), 2, "usage"),
     ("--team without --remote", lambda w: w.train("--team", "T"), 2, "usage"),
     ("--remote with --detach", lambda w: w.train("--remote", "--detach"), 2, "usage"),
