@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import shlex
 import time
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -51,6 +52,7 @@ from pup_finetune.data.pull import (
     DEFAULT_TARGET_COUNT,
     Collection,
     PullOptions,
+    SampleMode,
     frozen_window,
     pull,
     read_limits,
@@ -66,6 +68,7 @@ from pup_finetune.data.push import (
     push_path,
     read_push_state,
 )
+from pup_finetune.data.schema import TrainingRow
 from pup_finetune.data.split import (
     DEFAULT_SEED,
     DEFAULT_TEST_FRACTION,
@@ -91,6 +94,10 @@ from pup_finetune.workspace import ParentSetup, ignore_new_parent
 SAMPLE_IDS_PER_SPLIT = 5
 EXPLAINED_CODES = 5
 """How many of the most frequent exclusion codes get an explanation in the output."""
+SPREAD_MIN_ROWS = 20
+"""Below this many accepted rows, one trace giving most of them is not warned about."""
+SPREAD_MAX_SHARE = 0.25
+"""The share of the accepted rows one trace may give before a warning."""
 
 DEFAULT_FROM = "7d"
 DEFAULT_TO = "now"
@@ -125,6 +132,12 @@ DirArgument = Annotated[
 SeedOption = Annotated[
     int,
     typer.Option(metavar="N", help="Seed for the split assignment.", rich_help_panel=SPLITS_PANEL),
+]
+PullSeedOption = Annotated[
+    int,
+    typer.Option(
+        metavar="N", help="Seed for the splits and --sample random.", rich_help_panel=SPLITS_PANEL
+    ),
 ]
 ValidationFractionOption = Annotated[
     float,
@@ -197,7 +210,7 @@ TargetCountOption = Annotated[
     typer.Option(
         min=1,
         metavar="N",
-        help="Stop once this many rows are accepted.",
+        help="Rows to accept (--sample first stops reading there).",
         rich_help_panel=LIMITS_PANEL,
     ),
 ]
@@ -226,6 +239,24 @@ IncludeErrorsOption = Annotated[
         rich_help_panel=ROWS_PANEL,
     ),
 ]
+SampleOption = Annotated[
+    SampleMode,
+    typer.Option(
+        metavar="MODE",
+        help="first rows read, or random: spread over traces (by --seed).",
+        rich_help_panel=ROWS_PANEL,
+    ),
+]
+MaxRowsPerTraceOption = Annotated[
+    int | None,
+    typer.Option(
+        min=1,
+        metavar="N",
+        help="At most this many rows from any one trace.",
+        show_default=False,
+        rich_help_panel=ROWS_PANEL,
+    ),
+]
 
 _PULL_FLAGS = (
     "Spans are LLM spans of --ml-app in the time range, narrowed by --span-name, --query and "
@@ -234,9 +265,14 @@ _PULL_FLAGS = (
     "contains is dropped, so sub-agents stay their own rows. "
     "Errored LLM calls are excluded as span_error unless --include-errors is passed. Reading "
     "stops once --target-count rows are accepted or --max-candidates spans are read, "
-    "unreadable ones included. A relative time is a number and a unit (s, m, h, d or w, or "
-    "spelled out, such as 5min or 2hours), with or without now- in front (7d is now-7d), or "
-    "now; it is resolved once, when the command starts. A bare number is epoch "
+    "unreadable ones included. --max-rows-per-trace N keeps a trace's first N rows and excludes "
+    "the rest as trace_row_cap. --sample random instead reads every span up to "
+    "--max-candidates, then deals rows round-robin over the traces in an order --seed fixes "
+    "(one row of every trace, then a second one, and so on, the rows a pull already stored "
+    "first; with --max-rows-per-trace, N rounds) and keeps the first --target-count, so one "
+    "long trace cannot fill the dataset. A relative time is a number and a unit (s, m, h, d "
+    "or w, or spelled out, such as 5min or 2hours), with or without now- in front (7d is "
+    "now-7d), or now; it is resolved once, when the command starts. A bare number is epoch "
     "milliseconds, not seconds: one below 10^11 (before March 1973) is refused."
 )
 
@@ -339,9 +375,9 @@ PULL_DOC = CommandDoc(
     short="Pull training rows from Datadog into a dataset directory.",
     description=describe(
         "Pull --ml-app's LLM spans from Datadog into DIR as training rows, with splits. "
-        "The filter, the time range, --reasoning, --include-errors and the splits are frozen "
-        "on the first pull, so a rerun needs no flag: `dataset pull DIR` resumes, and a "
-        "higher --target-count reads further.",
+        "The filter, the time range, the Rows options and the splits are frozen on the first "
+        "pull, so a rerun needs no flag: `dataset pull DIR` resumes, and a higher "
+        "--target-count reads further.",
         "Excluded rows are recorded in excluded.jsonl with their reason. On a rerun, a flag "
         "left out takes the frozen value and a flag with another value fails, so use a new "
         "directory for other settings. Raw pages are cached in DIR/raw/, so a rerun resumes "
@@ -565,7 +601,7 @@ def _pull_more_steps(dataset: DatasetDir, directory: Path, state: Pipeline) -> l
     toward the target)."""
     limits = read_limits(dataset)
     if limits is None or limits[2] or not state.dropped or state.kept >= limits[0]:
-        return []  # no pull, or the last one read every matching span
+        return []  # no pull, or the last one read and kept every matching row
     return [
         step(
             command("dataset", "pull", directory),
@@ -887,7 +923,9 @@ def pull_rows(
     max_candidates: MaxCandidatesOption = DEFAULT_MAX_CANDIDATES,
     reasoning: ReasoningOption = "omit",
     include_errors: IncludeErrorsOption = False,
-    seed: SeedOption = DEFAULT_SEED,
+    sample: SampleOption = "first",
+    max_rows_per_trace: MaxRowsPerTraceOption = None,
+    seed: PullSeedOption = DEFAULT_SEED,
     validation_fraction: ValidationFractionOption = DEFAULT_VALIDATION_FRACTION,
     test_fraction: TestFractionOption = DEFAULT_TEST_FRACTION,
 ) -> dict[str, Any]:
@@ -905,6 +943,8 @@ def pull_rows(
             "to": to,
             "reasoning": reasoning,
             "include_errors": include_errors,
+            "sample": sample,
+            "max_rows_per_trace": max_rows_per_trace,
             "seed": seed,
             "validation_fraction": validation_fraction,
             "test_fraction": test_fraction,
@@ -929,6 +969,8 @@ def pull_rows(
         max_candidates=max_candidates,
         reasoning=values["reasoning"],
         include_errors=values["include_errors"],
+        sample=values["sample"],
+        max_rows_per_trace=values["max_rows_per_trace"],
     )
     frozen = frozen_window(options, dataset) is not None
     options = resolve_window(options, dataset, clock)
@@ -975,6 +1017,7 @@ def pull_rows(
             "matched_spans": collection.spans,
             "traces": collection.traces,
             "accepted": len(collection.rows),
+            **_spread(collection.rows),
             "added": added.added,
             "unchanged": added.unchanged,
             "excluded": added.excluded,
@@ -1097,6 +1140,8 @@ def _frozen_pull_values(dataset: DatasetDir) -> dict[str, Any] | None:
         "to": expr("to_expr", "to", DEFAULT_TO),
         "reasoning": source.get("reasoning", "omit"),
         "include_errors": bool(source.get("include_errors", False)),
+        "sample": source.get("sample", "first"),
+        "max_rows_per_trace": source.get("max_rows_per_trace"),
         "seed": split.seed,
         "validation_fraction": split.validation_fraction,
         "test_fraction": split.test_fraction,
@@ -1300,6 +1345,8 @@ def _pull_options(
     max_candidates: int,
     reasoning: ReasoningMode,
     include_errors: bool,
+    sample: SampleMode,
+    max_rows_per_trace: int | None,
 ) -> PullOptions:
     if not ml_app.strip():
         raise UsageError("--ml-app must not be empty")
@@ -1317,6 +1364,8 @@ def _pull_options(
         include_errors=include_errors,
         target_count=target_count,
         max_candidates=max_candidates,
+        max_rows_per_trace=max_rows_per_trace,
+        sample=sample,
     )
 
 
@@ -1398,10 +1447,11 @@ def _collection_warnings(collection: Collection, options: PullOptions) -> list[s
             "an LLM span, such as a trace id), so there was nothing to convert"
         )
         return warnings
+    anew = " in a new directory (this one froze them)"
     if not collection.spans:
         warnings.append(
             "no LLM spans matched; check --ml-app, --span-name, --query, --tag and the time "
-            "range (--from, --to)"
+            f"range (--from, --to){anew}"
         )
     elif collection.counted < options.target_count:
         if collection.stopped == "max_candidates":
@@ -1414,13 +1464,39 @@ def _collection_warnings(collection: Collection, options: PullOptions) -> list[s
             warnings.append(
                 f"only {collection.counted} rows were accepted from every matching span, "
                 f"fewer than --target-count {options.target_count}; widen the filter or the "
-                "time range for more"
+                f"time range{anew} for more"
             )
+    if options.sample == "random" and collection.stopped == "max_candidates":
+        warnings.append(
+            f"--sample random covers only the first --max-candidates {options.max_candidates} "
+            "spans of the time range (oldest first), not all of it; raise --max-candidates to "
+            "sample the whole range"
+        )
+    busiest, accepted = _spread(collection.rows)["busiest_trace_rows"], len(collection.rows)
+    if (
+        options.max_rows_per_trace is None
+        and accepted >= SPREAD_MIN_ROWS
+        and busiest > accepted * SPREAD_MAX_SHARE
+    ):
+        warnings.append(
+            f"one trace gives {busiest} of the {accepted} accepted rows; --sample random "
+            "--max-rows-per-trace N in a new directory (this one froze its row options) "
+            "spreads the rows over more traces"
+        )
     if unreadable:
         warnings.append(
             f"{unreadable} spans could not be read and were skipped (excluded as unreadable_span)"
         )
     return warnings
+
+
+def _spread(rows: Sequence[TrainingRow]) -> dict[str, int]:
+    """How many traces the accepted ``rows`` come from, and the most rows one trace gives."""
+    by_trace = Counter(row.source.trace_id for row in rows)
+    return {
+        "accepted_traces": len(by_trace),
+        "busiest_trace_rows": max(by_trace.values(), default=0),
+    }
 
 
 def register(app: typer.Typer) -> None:

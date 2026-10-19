@@ -107,9 +107,12 @@ The pull reports how many rows it accepted, and why it left the rest out
 (`excluded_by_code`, with `exclusion_explanations`). `--tag` repeats, and every tag must match.
 `--query` takes a search query, and `--include-errors` keeps errored LLM calls. `--from` and
 `--to` take ISO 8601, epoch milliseconds (a bare number is milliseconds), or a relative time:
-`7d`, `24h`, `now-7d`, `now`.
+`7d`, `24h`, `now-7d`, `now`. So that a few long traces do not fill the dataset,
+`--max-rows-per-trace N` keeps at most N rows of any trace, and `--sample random` reads every
+span up to `--max-candidates`, then deals `--target-count` rows round-robin over the traces
+in an order `--seed` fixes, instead of keeping the first rows read.
 
-The first pull freezes the filter and the time window, so `pup finetune dataset pull datasets/my-agent`
+The first pull freezes the filter, these options and the time window, so `pup finetune dataset pull datasets/my-agent`
 with no flags resumes it over the same window and limits. `--target-count` is the number of
 rows to keep: rows a review drops do not count, so pulling again after a review reads on to
 replace them. Every dataset command reports a `pipeline`

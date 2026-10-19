@@ -48,6 +48,9 @@ class ExclusionCode(StrEnum):
     SPLIT_CONFLICT = "split_conflict"
     """A fetched dataset record names a split other than the one another record of the same
     trace names; a trace is never in two splits."""
+    TRACE_ROW_CAP = "trace_row_cap"
+    """The row's trace already gives the dataset ``--max-rows-per-trace`` rows, so one trace
+    cannot dominate it."""
 
 
 ExclusionReason = RowErrorCode | ExclusionCode
@@ -99,6 +102,10 @@ EXPLANATIONS: Mapping[ExclusionReason, str] = {
     ExclusionCode.SPLIT_CONFLICT: (
         "the dataset record names another split than a record of the same trace does, and a "
         "trace is never in two splits"
+    ),
+    ExclusionCode.TRACE_ROW_CAP: (
+        "its trace already gives --max-rows-per-trace rows, so one trace cannot dominate the "
+        "dataset"
     ),
 }
 """A short, human-readable explanation of every exclusion code."""

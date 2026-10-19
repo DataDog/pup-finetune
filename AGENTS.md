@@ -159,9 +159,10 @@ epoch ms when the command starts; a bare number is epoch milliseconds (pup reads
 first pull into a directory freezes that window together with the expressions, and a re-run
 with the same expressions reads the frozen window, so a resumed pull reads the same spans. On
 a re-run, every source flag left out (`--ml-app`, the filter, the time range, `--reasoning`,
-`--include-errors` and the split flags) takes the frozen value, and one given with another
-value is a `settings_conflict` naming the frozen one; `--ml-app` is required only for the
-first pull. The result's `window` holds the bounds read and whether they are the frozen ones.
+`--include-errors`, `--sample`, `--max-rows-per-trace` and the split flags) takes the frozen
+value, and one given with another value is a `settings_conflict` naming the frozen one;
+`--ml-app` is required only for the first pull. The result's `window` holds the bounds read
+and whether they are the frozen ones.
 
 Every dataset command's result holds a `pipeline` block (`curation/pipeline.py`): `rows`
 (`accepted`, `kept`, `dropped`, `unlabeled`), `triage` (`none`, `incomplete`, `complete`; see
@@ -593,7 +594,11 @@ Source lives under `src/pup_finetune/`.
   first; tests run `collect` in memory), a relative time range resolved once (a re-run
   reuses the frozen window, `resolve_window`): export a page at a time, check, convert, drop
   repeated conversations, and stop at `--target-count` rows or `--max-candidates` spans before
-  fetching another page. Unreadable items are excluded as `unreadable_span` and count toward
+  fetching another page. `--max-rows-per-trace` excludes a trace's rows past the cap as
+  `trace_row_cap` (in the dataset too: `trace_capped`); `--sample random` reads every
+  candidate, then deals rows round-robin over traces in a seeded order, stored rows first
+  (`_ordered`); both are frozen only when set, so older `settings.json` files still match.
+  Unreadable items are excluded as `unreadable_span` and count toward
   `--max-candidates` (`SpanQuery.max_spans` caps export items, readable or not); a re-run that reads
   further retires a stored row its trace now shows to be a prefix of a longer conversation
   (`retirements`, `contained_conversation`), and one with lower limits does not add such a row

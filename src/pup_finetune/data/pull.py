@@ -20,6 +20,12 @@
    labels drop do not count (:func:`pull` passes them as ``dropped``): the target is the rows
    to keep, so a pull re-run after a review reads on to replace the rows it dropped.
 
+With ``max_rows_per_trace``, a trace's rows past the cap are excluded as ``trace_row_cap``
+before they count toward the target: its first rows in time order, or the sample's. With
+``sample="random"`` reading never stops at the target: every candidate up to
+``max_candidates`` is read, then rows are dealt round-robin over traces in a seeded order and
+the first ``target_count`` are kept (see :func:`_ordered`), so no trace dominates.
+
 Conversion groups spans by trace, so it runs again over every span read after each page;
 the last run is the result. A trace whose spans straddle the page the export stopped at is
 converted from the spans read so far. Items the export could not read at all are excluded as
@@ -48,19 +54,22 @@ however much later it runs.
 
 from __future__ import annotations
 
+import hashlib
+import heapq
 import time
+from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from pup_finetune.data.checks import CheckOptions, check_span
 from pup_finetune.data.convert import ReasoningMode, check_reasoning
 from pup_finetune.data.dataset_dir import AddResult, DatasetDir, DatasetSettings, SourceKind
 from pup_finetune.data.exclusions import Exclusion, ExclusionCode
 from pup_finetune.data.schema import TrainingRow, row_content_hash, without_reasoning
-from pup_finetune.data.split import SplitParams
+from pup_finetune.data.split import DEFAULT_SEED, SplitParams
 from pup_finetune.data.trajectories import (
     ConversionStats,
     comparable_messages,
@@ -91,6 +100,10 @@ SOURCE_KIND: SourceKind = "datadog"
 StopReason = Literal["target_count", "max_candidates", "exhausted"]
 """Why reading stopped: enough rows, the span cap, or no matching span left."""
 
+SampleMode = Literal["first", "random"]
+"""Which rows count toward the target: the first read, or a seeded sample spread over traces."""
+SAMPLE_MODES: tuple[SampleMode, ...] = get_args(SampleMode)
+
 Progress = Callable[[str], None]
 
 
@@ -107,6 +120,10 @@ class PullOptions:
     """Stop reading once this many rows are accepted."""
     max_candidates: int = DEFAULT_MAX_CANDIDATES
     """Read at most this many export items, readable or not (an unreadable one counts too)."""
+    max_rows_per_trace: int | None = None
+    """Keep at most this many rows of any one trace; the rest are ``trace_row_cap``."""
+    sample: SampleMode = "first"
+    """``first`` stops at ``target_count``; ``random`` samples all candidates (:func:`_ordered`)."""
     window: tuple[TimeBound, TimeBound] | None = None
     """The ``from`` and ``to`` the export sends, a relative time resolved to epoch ms;
     ``None`` until :meth:`resolved` or :meth:`with_window` sets it."""
@@ -117,6 +134,14 @@ class PullOptions:
             raise UsageError(f"--target-count must be at least 1, not {self.target_count}")
         if self.max_candidates < 1:
             raise UsageError(f"--max-candidates must be at least 1, not {self.max_candidates}")
+        if self.max_rows_per_trace is not None and self.max_rows_per_trace < 1:
+            raise UsageError(
+                f"--max-rows-per-trace must be at least 1, not {self.max_rows_per_trace}"
+            )
+        if self.sample not in SAMPLE_MODES:
+            raise UsageError(
+                f"--sample must be one of {', '.join(SAMPLE_MODES)}, not {self.sample!r}"
+            )
 
     def resolved(self, now_ms: int) -> PullOptions:
         """These options with the time range of ``query`` resolved at ``now_ms``."""
@@ -153,6 +178,9 @@ class PullOptions:
             "to_expr": self.query.to,
             "reasoning": self.reasoning,
             "include_errors": self.include_errors,
+            # Only when set, so the settings of a dataset pulled before these options still match.
+            **({"max_rows_per_trace": self.max_rows_per_trace} if self.max_rows_per_trace else {}),
+            **({"sample": self.sample} if self.sample != "first" else {}),
         }
 
     def dataset_settings(self, split: SplitParams) -> DatasetSettings:
@@ -164,10 +192,11 @@ class Collection:
     """What :func:`collect` read and produced."""
 
     rows: list[TrainingRow] = field(default_factory=list)
-    """Accepted rows, at most ``target_count``, in the order conversion produced them."""
+    """Accepted rows, at most ``target_count``, in the order they count toward it
+    (:func:`_ordered`)."""
     exclusions: list[Exclusion] = field(default_factory=list)
-    """Span-level check failures first, then conversion and duplicate exclusions, then
-    ``unreadable_span`` ones."""
+    """Span-level check failures first, then conversion, duplicate and ``trace_row_cap``
+    exclusions, then ``unreadable_span`` ones."""
     export: ExportStats = field(default_factory=ExportStats)
     conversion: ConversionStats = field(default_factory=ConversionStats)
     spans: int = 0
@@ -216,12 +245,15 @@ def collect(
     sleep: Callable[[float], None] = time.sleep,
     progress: Progress | None = None,
     dropped: AbstractSet[str] = frozenset(),
+    seed: int = DEFAULT_SEED,
+    held: AbstractSet[str] = frozenset(),
 ) -> Collection:
     """Export, check and convert the spans ``options`` select; see the module docstring.
 
     ``cache_dir`` is the raw page cache :func:`~pup_finetune.datadog.spans.iter_span_pages`
     resumes from; without one nothing is written. Options without a window are resolved at
     ``clock`` first. Rows whose id is in ``dropped`` do not count toward ``target_count``.
+    ``seed`` and ``held`` (the ids of rows already stored) order a random sample (:func:`_ordered`).
     """
     if options.window is None:
         options = options.resolved(epoch_ms(clock))
@@ -249,14 +281,20 @@ def collect(
                 added = True
             else:
                 result.exclusions.append(exclusion)
+        if options.sample == "random":
+            if progress is not None:
+                progress(f"page {number}: {len(seen)} spans read")
+            continue
         if added:
-            converted = _convert(passing, options.reasoning)
+            converted = _convert(passing, options)
         accepted = sum(1 for row in converted.rows if row.id not in dropped)
         if progress is not None:
             progress(f"page {number}: {len(seen)} spans read, {accepted} rows accepted")
         if accepted >= options.target_count:
             stopped = "target_count"
             break
+    if options.sample == "random":
+        converted = _convert(passing, options, seed, held)
     rows = converted.rows
     result.conversion = converted.stats
     result.duplicates = converted.duplicates
@@ -268,7 +306,11 @@ def collect(
         e.row_id for e in result.exclusions if e.row_id is not None
     }
     result.exclusions.extend(_unreadable(span) for span in pages.stats.unreadable)
-    result.rows = _up_to_target(rows, options.target_count, dropped)
+    target = options.target_count
+    if options.sample == "random":
+        # Stored rows this read stops short of keep their places in the sample.
+        target -= len(held - dropped - result.read_ids)
+    result.rows = _up_to_target(rows, max(0, target), dropped)
     result.over_target = len(rows) - len(result.rows)
     result.counted = sum(1 for row in result.rows if row.id not in dropped)
     if stopped is None:
@@ -285,28 +327,96 @@ class _Converted:
     stats: ConversionStats = field(default_factory=ConversionStats)
 
 
-def _convert(spans: Iterable[LLMObsSpan], reasoning: ReasoningMode) -> _Converted:
-    """The rows and exclusions of ``spans``; a repeated conversation is a duplicate."""
-    conversion = rows_from_spans(spans, reasoning=reasoning)
+def _convert(
+    spans: Iterable[LLMObsSpan],
+    options: PullOptions,
+    seed: int = DEFAULT_SEED,
+    held: AbstractSet[str] = frozenset(),
+) -> _Converted:
+    """The rows and exclusions of ``spans``, in :func:`_ordered`'s order: a row past the
+    per-trace cap is excluded, then one repeating the conversation of a row kept before it."""
+    conversion = rows_from_spans(spans, reasoning=options.reasoning)
     result = _Converted()
-    by_hash: dict[str, str] = {}
+    rows: list[TrainingRow] = []
     for converted in conversion:
-        row = converted.row
-        if row is None:
-            if converted.exclusion is not None:
-                result.exclusions.append(converted.exclusion)
-            continue
-        digest = row_content_hash(row)
-        other = by_hash.setdefault(digest, row.id)
+        if converted.row is not None:
+            rows.append(converted.row)
+        elif converted.exclusion is not None:
+            result.exclusions.append(converted.exclusion)
+    cap = options.max_rows_per_trace
+    taken: Counter[str | None] = Counter()
+    by_hash: dict[str, str] = {}
+
+    def keep(row: TrainingRow) -> bool:
+        trace = row.source.trace_id
+        if cap is not None and taken[trace] >= cap:
+            # Not hashed, so a copy of its conversation in a trace with room is kept.
+            detail = f"past the first --max-rows-per-trace {cap} rows of trace {trace!r}"
+            if options.sample == "random":
+                detail = f"past the --max-rows-per-trace {cap} rows kept of trace {trace!r}"
+            result.exclusions.append(Exclusion.for_row(row, ExclusionCode.TRACE_ROW_CAP, detail))
+            return False
+        other = by_hash.setdefault(row_content_hash(row), row.id)
         if other != row.id:
             detail = f"same conversation as row {other!r}"
             exclusion = Exclusion.for_row(row, ExclusionCode.DUPLICATE_CONVERSATION, detail)
             result.exclusions.append(exclusion)
             result.duplicates.append((row, other))
-            continue
+            return False
+        taken[trace] += 1
         result.rows.append(row)
+        return True
+
+    _ordered(rows, options, seed, held, keep)
     result.stats = conversion.stats
     return result
+
+
+def _ordered(
+    rows: Sequence[TrainingRow],
+    options: PullOptions,
+    seed: int,
+    held: AbstractSet[str],
+    keep: Callable[[TrainingRow], bool],
+) -> None:
+    """Offer ``rows`` to ``keep`` in the order they count toward ``target_count``.
+
+    With ``sample="first"`` the order is conversion's (time order). With ``sample="random"``
+    rows are dealt in turns: each trace ranks its rows (``held`` ones first, then by
+    ``sha256(f"sample:{seed}:{row id}")``), and the next turn goes to the trace with the
+    fewest rows kept, ties broken by ``sha256(f"sample:{seed}:{trace id}")``, held rows
+    leading. On its turn a trace offers rows until ``keep`` takes one, so a duplicate does
+    not cost it its turn. No rank depends on how far a pull read, so a rerun keeps the rows
+    it stored and deals on from them.
+    """
+    if options.sample == "first":
+        for row in rows:
+            keep(row)
+        return
+    by_trace: dict[str | None, list[TrainingRow]] = {}
+    for row in rows:
+        by_trace.setdefault(row.source.trace_id, []).append(row)
+    # Each queue is reversed, so pop() takes a trace's next row.
+    queues: list[list[TrainingRow]] = []
+    turns: list[tuple[bool, int, str, int]] = []
+    for trace, trace_rows in by_trace.items():
+        queue = sorted(
+            trace_rows, key=lambda row: (row.id not in held, _rank(seed, row.id)), reverse=True
+        )
+        turns.append((queue[-1].id not in held, 0, _rank(seed, str(trace)), len(queues)))
+        queues.append(queue)
+    heapq.heapify(turns)
+    while turns:
+        _, kept, rank, index = heapq.heappop(turns)
+        queue = queues[index]
+        kept += keep(queue.pop())
+        if queue:
+            heapq.heappush(turns, (queue[-1].id not in held, kept, rank, index))
+
+
+def _rank(seed: int, key: str) -> str:
+    # Salted, so the sample does not follow the split, which hashes f"{seed}:{trace id}".
+    return hashlib.sha256(f"sample:{seed}:{key}".encode()).hexdigest()
 
 
 def _unreadable(span: UnreadableSpan) -> Exclusion:
@@ -455,6 +565,40 @@ def contained(
             excluded.append(Exclusion.for_row(row, code, detail))
         else:
             kept.append(row)
+    return kept, excluded
+
+
+def trace_capped(
+    rows: Sequence[TrainingRow],
+    stored_rows: Sequence[TrainingRow],
+    cap: int | None,
+    retired: Iterable[Exclusion] = (),
+) -> tuple[list[TrainingRow], list[Exclusion]]:
+    """``rows`` minus the new ones past ``cap`` rows of their trace in the dataset, and an
+    exclusion for each one left out.
+
+    The stored rows that are not being ``retired`` take their trace's places first, since a
+    re-run that reads further can rank a trace's rows otherwise: a stored row collapsed into
+    a longer one past the cap is not retired, for one. Rows already stored are left to the
+    dataset.
+    """
+    if cap is None:
+        return list(rows), []
+    retired_ids = {exclusion.row_id for exclusion in retired}
+    stored_ids = {row.id for row in stored_rows}
+    taken = Counter(row.source.trace_id for row in stored_rows if row.id not in retired_ids)
+    kept: list[TrainingRow] = []
+    excluded: list[Exclusion] = []
+    for row in rows:
+        trace = row.source.trace_id
+        if row.id in stored_ids:
+            kept.append(row)
+        elif taken[trace] < cap:
+            taken[trace] += 1
+            kept.append(row)
+        else:
+            detail = f"trace {trace!r} already has --max-rows-per-trace {cap} rows in the dataset"
+            excluded.append(Exclusion.for_row(row, ExclusionCode.TRACE_ROW_CAP, detail))
     return kept, excluded
 
 
@@ -639,9 +783,9 @@ def pull(
     (:func:`retirements`), as are stored rows it found repeating another stored row
     (:func:`repeat_retirements`), stored rows it read more reasoning for are updated
     (:func:`reasoning_updates`), stored rows those updates make repeat another are retired
-    instead (:func:`reconciled_repeats`), and new rows a stored row contains are excluded instead of
-    added (:func:`contained`); the returned collection is what the export read and
-    converted, before any of these.
+    instead (:func:`reconciled_repeats`), new rows a stored row contains are excluded instead of
+    added (:func:`contained`), and so are new rows past the per-trace cap (:func:`trace_capped`);
+    the returned collection is what the export read and converted, before any of these.
 
     The cache is locked from the export through the add, so a concurrent pull into the same
     dataset fails with :class:`~pup_finetune.errors.LockBusy` instead of changing the stored
@@ -658,13 +802,20 @@ def pull(
     dropped = {row_id for row_id, label in dataset.labels().items() if not label.keep}
     with DirectoryLock(raw):
         write_limits(dataset, options)
+        stored = dataset.rows()
         try:
             collection = collect(
-                pup, options, cache_dir=raw, sleep=sleep, progress=progress, dropped=dropped
+                pup,
+                options,
+                cache_dir=raw,
+                sleep=sleep,
+                progress=progress,
+                dropped=dropped,
+                seed=split.seed,
+                held={row.id for row in stored},
             )
         except ExternalError as exc:
             raise _with_resume_note(exc, raw, rerun_command(dataset.path, options)) from exc
-        stored = dataset.rows()
         stored_exclusions = dataset.excluded()
         retired = [
             *retirements(collection, stored, stored_exclusions),
@@ -674,14 +825,16 @@ def pull(
         rows, updated, repeats = reconciled_repeats(rows, updated, stored, retired)
         retired.extend(repeats)
         rows, exclusions = contained(rows, stored, retired, stored_exclusions)
+        rows, capped = trace_capped(rows, stored, options.max_rows_per_trace, retired)
         added = dataset.add(
             rows,
-            [*collection.exclusions, *exclusions],
+            [*collection.exclusions, *exclusions, *capped],
             settings=settings,
             retired=retired,
             updated=updated,
         )
-        write_limits(dataset, options, exhausted=collection.stopped == "exhausted")
+        exhausted = collection.stopped == "exhausted" and collection.over_target == 0
+        write_limits(dataset, options, exhausted=exhausted)
     return collection, added
 
 
@@ -692,7 +845,7 @@ are what a rerun without them continues toward."""
 
 def read_limits(dataset: DatasetDir) -> tuple[int, int, bool] | None:
     """``(target_count, max_candidates, exhausted)`` of ``dataset``'s last pull (``exhausted``:
-    it read every matching span), or ``None``."""
+    it read every matching span and the target cut no row), or ``None``."""
     try:
         data = read_json(dataset.path / LIMITS_FILE)
     except (FileNotFoundError, ValueError):
@@ -709,9 +862,9 @@ def read_limits(dataset: DatasetDir) -> tuple[int, int, bool] | None:
 
 def write_limits(dataset: DatasetDir, options: PullOptions, *, exhausted: bool = False) -> None:
     """Record ``options``' limits as ``dataset``'s last pull's, and whether it read every
-    matching span. :func:`pull` records them, under the ``raw/`` lock, when it starts, so the
-    rerun that resumes a pull which failed part-way continues toward the limits it was given,
-    and again once it ends."""
+    matching span with no row cut by the target. :func:`pull` records them, under the
+    ``raw/`` lock, when it starts, so the rerun that resumes a pull which failed part-way
+    continues toward the limits it was given, and again once it ends."""
     atomic_write_json(
         dataset.path / LIMITS_FILE,
         {

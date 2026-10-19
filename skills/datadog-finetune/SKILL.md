@@ -137,6 +137,7 @@ rebalancing (step 4) and the recipe kept (step 6). The filter's flags, for `data
 | `--include-errors` | Also errored LLM calls (`span_error` rows). Off by default; ask first. |
 | `--from 7d`, `--to now` | The window: `7d`, `24h`, `now-7d`, `now`, ISO 8601 or epoch ms. |
 | `--target-count`, `--max-candidates` | Rows to keep (rows dropped in review do not count) and spans read. |
+| `--sample random`, `--max-rows-per-trace 3` | Rows spread over traces (by `--seed`), at most 3 per trace, when a few traces give most rows. |
 
 Build a filter only from values you saw, and test it (a `--query` above all) in step 2.
 
@@ -156,16 +157,16 @@ pup finetune dataset show datasets/my-agent
 ```
 
 The search writes nothing: agree with the user that its spans (read a few with `get-content`)
-are the ones to train on, then pull the same filter into `datasets/<ml_app>` (git-ignored).
-The pull freezes the filter, splits and window, so `pup finetune dataset pull datasets/my-agent`
+are the ones to train on, then pull them into `datasets/<ml_app>` (git-ignored), freezing the
+filter, splits, window, `--sample` and `--max-rows-per-trace`: `pup finetune dataset pull datasets/my-agent`
 resumes it with the last limits; after a review drops rows, it reads on to replace them.
 
 Check:
 
 - [ ] The accepted rows and exclusion reasons look right to the user.
 - [ ] Every split is non-empty. Fix a skewed split by pulling more rows, never with the seed.
-- [ ] Trace content stays out of git: keep the dataset, label and review files and any rubric
-      quoting rows under `datasets/` (ignored).
+- [ ] Trace content stays out of git: keep the dataset, label and review files and rubrics
+      under `datasets/` (ignored).
 
 ## Step 3: review the rows
 
