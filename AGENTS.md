@@ -463,8 +463,12 @@ Source lives under `src/pup_finetune/`.
 - `progress.py` - `TrainingProgress` (the loop's `on_event`) and `EvaluationProgress` (the
   replay's `on_progress`): on a terminal, or with `PUP_FINETUNE_PROGRESS=steps`, a line per
   step and per pair; otherwise a step line at most every 30 s or quarter epoch, each epoch's
-  checkpoint folded into its epoch line, and an evaluation line every 10% of the pairs plus
-  one per error. Retries inside the judge and sampler clients print no evaluation line yet
+  checkpoint folded into its epoch line, and an evaluation line every 10% of the pairs
+  (counting failures cut off at `--max-tokens`, unparseable or without a verdict) plus one per
+  error and one for the first failure of each cause. A failed pair's line names its cause
+  (`failure_cause`: the cut-off with the `--max-tokens` hint, or a compare model's own limit,
+  `format_valid` false, the judge's reason on one line, the no-verdict flaw or the error's
+  message). Retries inside the judge and sampler clients print no evaluation line yet
   (training's retries do). Tests pass `write`, `clock` and the modes in.
 - `storage.py` - atomic writes, `0600` files and `0700` directories, directory locks, frozen
   settings, and `identity_changes`, the keys two recorded identities differ in.
@@ -794,12 +798,14 @@ Source lives under `src/pup_finetune/`.
   before it; Anthropic also a prefix that opens or ends on an assistant turn; Anthropic is
   judged on the turns its client sends, `anthropic_messages.py`'s conversion; Fireworks and
   the fake take any), with `compare_skips` over cases; it takes the `compare.json` path and imports nothing from `replay.py`, which imports it.
-  `benchmark.py` is `benchmark`: `plan_benchmark` (the test split's cases, the judge and
+  `benchmark.py` is `benchmark`: `plan_benchmark` (the test split's cases, with `--max-rows`
+  only those of a seeded sample of its conversations, `sample_conversations`; the judge and
   one `Candidate` per base model), `execute` (the judge calibrated once, then each model
   replayed in a session of its own into `OUT/<model>` through `run_replay` with the model as
   its one target, so each resumes; a model whose session fails is an error entry and the
   others still run), `leaderboard` (judge pass rate with a bootstrap CI over trajectories,
-  and each model's paired gap to the best) and `recommend` (`fine_tune`,
+  each model's paired gap to the best and its answers `truncated` at `--max-tokens` or
+  `unparseable`, each a warning) and `recommend` (`fine_tune`,
   `base_meets_target` at `--target-pass-rate`, or `no_result`; models within noise of the
   best are named).
   The package exports its names lazily, so importing the runner (the CLI does, for every

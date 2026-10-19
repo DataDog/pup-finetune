@@ -1191,7 +1191,7 @@ def replay_result(
     a retry of the errors the experiments still show them as errors.
     """
     from pup_finetune.evaluation.compare import skipped_warning
-    from pup_finetune.evaluation.replay import COMPARE
+    from pup_finetune.evaluation.replay import COMPARE, truncation_warning
 
     summary = outcome.summary
     errors = sum(int(count) for count in summary["errors"].values())
@@ -1245,10 +1245,9 @@ def replay_result(
             )
         elif truncated:
             warnings.append(
-                f"{truncated} of the {name} model's generations reached --max-tokens "
-                f"({plan.settings.max_tokens}) and were cut off; they count as failures, so "
-                "evaluate into a new --out-dir with a higher --max-tokens to compare the "
-                "models on their answers rather than their length"
+                truncation_warning(
+                    truncated, f"the {name} model's", plan.settings.max_tokens, "evaluate"
+                )
             )
     no_verdict = sum(int(target["judge_no_verdict"]) for target in summary["targets"].values())
     if no_verdict:

@@ -245,13 +245,13 @@ pup finetune train --dataset datasets/my-agent --model <MODEL> --detach
 pup finetune status ft-20261007183443-a8b181 --watch --timeout 90s
 ```
 
-Set `--target-pass-rate` to what the user would accept from a base model. `train` previews
-tokens, rows left out and recipients (rerun `doctor --provider` if the provider changed); cap
-spend with `--max-train-tokens`, or `--max-spend-usd` with `--hourly-rate-usd`.
-
-Always train with `--detach`; watch only with `--timeout` (as its `next_command` does), then
-evaluate in step 6. The best epoch by validation loss is promoted (Baseten keeps a
-`deployable_checkpoint`). A resume bills again; a cancel promotes the best epoch so far:
+Set `--target-pass-rate` to what the user would accept from a base model. Check
+`leaderboard[].truncated` and `unparseable` first: cut-offs fail on length, not quality, so
+benchmark again into a new `--out-dir` with a higher `--max-tokens`. `train` previews tokens,
+rows left out and recipients (rerun `doctor --provider` if the provider changed); cap spend
+with `--max-train-tokens`, or `--max-spend-usd` with `--hourly-rate-usd`. Always train with
+`--detach`; watch only with `--timeout`. The best epoch by validation loss is promoted. A
+resume bills again; a cancel promotes the best epoch so far:
 
 ```sh
 pup finetune resume ft-20261007183443-a8b181 --detach

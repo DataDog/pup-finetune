@@ -10,9 +10,10 @@ On a terminal every training step and every evaluated pair gets a line, as befor
 terminal (an agent, a pipe, a detached run's ``worker.log``), where every line costs, there
 are fewer: a step line at most once per :data:`STEP_LINE_INTERVAL_S` or per
 :data:`STEP_LINE_FRACTION` of an epoch, an epoch line with its checkpoint folded in, and an
-evaluation line every :data:`EVAL_LINE_FRACTION` of the pairs plus one per error. Every line
-off a terminal starts with the time of day (:func:`pup_finetune.output.info`).
-``PUP_FINETUNE_PROGRESS=steps`` restores a line per step and per pair.
+evaluation line every :data:`EVAL_LINE_FRACTION` of the pairs plus one per error and one for the
+first failure of each cause (:func:`failure_cause`). Every line off a terminal starts with the
+time of day (:func:`pup_finetune.output.info`). ``PUP_FINETUNE_PROGRESS=steps`` restores a
+line per step and per pair.
 
 :class:`TrainingProgress` reads the training loop's events (see
 :func:`pup_finetune.training.loop.run_training`), :class:`EvaluationProgress` the replay's
@@ -23,21 +24,25 @@ from __future__ import annotations
 
 import math
 import time
+from collections import Counter
 from collections.abc import Callable, Mapping
 from typing import Any, Final
 
 from pup_finetune.display import loss_text
 from pup_finetune.output import info, stderr_is_terminal
+from pup_finetune.redaction import redact
 from pup_finetune.runtime import Runtime
 
 __all__ = [
     "EVAL_LINE_FRACTION",
+    "REASON_CHARS",
     "STEP_LINE_FRACTION",
     "STEP_LINE_INTERVAL_S",
     "EvaluationProgress",
     "TrainingProgress",
     "describe_pair",
     "every_line",
+    "failure_cause",
 ]
 
 STEP_LINE_INTERVAL_S: Final = 30.0
@@ -46,6 +51,8 @@ STEP_LINE_FRACTION: Final = 0.25
 """...or once the epoch moved on by this share of its steps since then."""
 EVAL_LINE_FRACTION: Final = 0.10
 """Off a terminal, an evaluation line each time this share of the pairs is done."""
+REASON_CHARS: Final = 160
+"""The most characters of a judge's reason a progress line shows."""
 
 Write = Callable[[str], None]
 
@@ -224,12 +231,50 @@ def describe_pair(event: Mapping[str, Any]) -> str:
     return "judged pass" if event.get("passed") else "judged fail"
 
 
+def _one_line(text: str, limit: int) -> str:
+    words = " ".join(text.split())
+    return words if len(words) <= limit else f"{words[: limit - 3]}..."
+
+
+def failure_cause(event: Mapping[str, Any]) -> tuple[str, str] | None:
+    """Why a pair did not pass, as ``(kind, text)``; ``None`` for a pass, or a fail the judge
+    gave no reason for.
+
+    ``kind`` is ``cut_off`` (the generation stopped at its ``max_tokens``), ``unparseable``
+    (its answer could not be parsed), ``no_verdict`` (``text`` is empty: :func:`describe_pair`
+    names the flaw), ``judge`` (``text`` is the judge's reason, on one line, at most
+    :data:`REASON_CHARS`) or ``error`` (``text`` is the first line of its message).
+    """
+    if event.get("status") == "error":
+        message = str((event.get("error") or {}).get("message") or "").strip()
+        return "error", message.splitlines()[0][:200] if message else ""
+    if event.get("passed") and not event.get("no_verdict"):
+        return None
+    if event.get("stop_reason") == "length":
+        tokens = event.get("max_tokens")
+        if event.get("target") == "compare":  # its limit is not --max-tokens
+            return "cut_off", f"cut off at its limit of {tokens} tokens"
+        return "cut_off", f"cut off at --max-tokens {tokens}; raise --max-tokens"
+    if event.get("format_valid") is False:
+        return "unparseable", "answer could not be parsed (format_valid false)"
+    if event.get("no_verdict"):
+        return "no_verdict", ""
+    reason = _one_line(redact(str(event.get("reason") or "")), REASON_CHARS)
+    return ("judge", reason) if reason else None
+
+
+_COUNTED: Final = {"cut_off": "cut off", "unparseable": "unparseable", "no_verdict": "no verdict"}
+"""The failure causes the periodic evaluation line counts, and how it names them."""
+
+
 class EvaluationProgress:
     """The replay's ``on_progress``: a line per pair (``every_pair``, on a terminal by
-    default), or a line each :data:`EVAL_LINE_FRACTION` of the pairs plus one per error.
+    default), or a line each :data:`EVAL_LINE_FRACTION` of the pairs, counting the failures
+    by cause, plus one per error and one for the first failure of each cause.
 
-    The replay reports finished pairs only: a retry inside a judge or sampler client (its
-    backoff included) prints no line until the pair ends.
+    A pair that did not pass names its cause (:func:`failure_cause`). The replay reports
+    finished pairs only: a retry inside a judge or sampler client (its backoff included)
+    prints no line until the pair ends.
     """
 
     def __init__(self, *, write: Write = info, every_pair: bool | None = None) -> None:
@@ -239,6 +284,7 @@ class EvaluationProgress:
         self._failed = 0
         self._errors = 0
         self._shown = 0
+        self._causes: Counter[str] = Counter()
 
     def __call__(self, event: Mapping[str, Any]) -> None:
         done, total = int(event.get("done") or 0), int(event.get("total") or 0)
@@ -249,19 +295,27 @@ class EvaluationProgress:
         else:
             self._failed += 1
         what = f"{event.get('target')} {event.get('case_id')}"
+        cause = failure_cause(event)
+        said = f": {cause[1]}" if cause is not None and cause[1] else ""
         if self._every_pair:
-            self._write(f"evaluated {done}/{total}: {what} ({describe_pair(event)})")
+            self._write(f"evaluated {done}/{total}: {what} ({describe_pair(event)}){said}")
             return
-        if event.get("status") == "error":
-            message = str((event.get("error") or {}).get("message") or "").strip()
-            first = message.splitlines()[0][:200] if message else ""
-            self._write(f"{what}: {describe_pair(event)}" + (f": {first}" if first else ""))
+        if cause is not None:
+            kind = cause[0]
+            if kind == "error" or not self._causes[kind]:
+                self._write(f"{what}: {describe_pair(event)}{said}")
+            self._causes[kind] += 1
         step = max(1, math.ceil(total * EVAL_LINE_FRACTION)) if total else 1
         if done >= total or done - self._shown >= step:
             self._shown = done
             percent = round(done / total * 100) if total else 100
+            counted = ", ".join(
+                f"{self._causes[kind]} {name}"
+                for kind, name in _COUNTED.items()
+                if self._causes[kind]
+            )
             self._write(
                 f"evaluated {done}/{total} pairs ({percent}%): {self._passed} judged pass, "
-                f"{self._failed} judged fail, {self._errors} "
-                f"{'error' if self._errors == 1 else 'errors'}"
+                f"{self._failed} judged fail{f' ({counted})' if counted else ''}, "
+                f"{self._errors} {'error' if self._errors == 1 else 'errors'}"
             )

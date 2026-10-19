@@ -525,8 +525,8 @@ def evaluate_summary(result: Mapping[str, Any]) -> Summary | None:
 
 
 def benchmark_summary(result: Mapping[str, Any]) -> Summary | None:
-    """``benchmark``: the cases and judge, each model's judge agreement with its CI and gap
-    to the best, the recommendation and the caveat."""
+    """``benchmark``: the cases and judge, each model's judge agreement with its CI, gap to
+    the best and answers cut off or unparseable, the recommendation and the caveat."""
     status = result.get("status")
     if status == "calibration_failed":
         return _evaluation_parts(result, compact=False)
@@ -549,6 +549,16 @@ def benchmark_summary(result: Mapping[str, Any]) -> Summary | None:
             interval += f"  {_points(-float(gap['judge_pass_rate']))} vs best{noise}"
         elif entry.get("status") == "error":
             interval = f"  {_error_text(entry.get('error')) or 'error'}"
+        flaws = [
+            f"{entry[key]} {name}"
+            for key, name in (
+                ("truncated", "cut off at --max-tokens"),
+                ("unparseable", "unparseable"),
+            )
+            if entry.get(key)
+        ]
+        if flaws:
+            interval += f"  {', '.join(flaws)}"
         rows.append(
             f"{entry.get('model')!s:<{width}}{_percent(entry.get('judge_pass_rate'))}{interval}"
         )
@@ -1118,6 +1128,9 @@ def _benchmark_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
         f"{_n(settings.get('max_cases'), 'turn')} per conversation, target pass rate "
         f"{_percent(settings.get('target_pass_rate'))}"
     )
+    tested = preview.get("rows") or {}
+    if tested.get("test_total", 0) > tested.get("test", 0):
+        detail += f", --max-rows {tested['test']} of {tested['test_total']} conversations"
     rows = [
         _row("data", _evaluation_calls(preview)),
         _row("settings", detail),

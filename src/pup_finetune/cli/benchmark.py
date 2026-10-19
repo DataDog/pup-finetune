@@ -33,6 +33,7 @@ from pup_finetune.judge_models import BY_KEY
 SETTING_PARAMS: dict[str, tuple[str, ...]] = {
     "judge_model": ("judge_model",),
     "max_cases": ("max_cases",),
+    "max_rows": ("max_rows",),
     "max_tokens": ("max_tokens",),
     "concurrency": ("concurrency",),
     "seed": ("seed",),
@@ -60,12 +61,13 @@ DOC = CommandDoc(
         "the same command to continue a benchmark that stopped. A model below "
         "--target-pass-rate is worth fine-tuning; one at or above it may need no training. "
         "Models within noise of the best are named, so the cheapest to serve can be chosen. "
-        "Tools are not executed, so the scores measure agreement with the recorded behavior, "
-        "not task success.",
+        "--max-rows replays a seeded sample of the test conversations instead, for a quicker, "
+        "cheaper comparison. Tools are not executed, so the scores measure agreement with the "
+        "recorded behavior, not task success.",
     ),
     examples=(
         "pup finetune benchmark ds --models qwen3p5-9b,glm-5p3-flash",
-        "pup finetune benchmark ds --models qwen3p5-9b,glm-5p3-flash --max-cases 1",
+        "pup finetune benchmark ds --models qwen3p5-9b,glm-5p3-flash --max-cases 1 --max-rows 20",
     ),
     safety=Safety(
         data="sends test rows to each model's provider and to the judge",
@@ -136,6 +138,17 @@ def benchmark_command(
             rich_help_panel=CASES,
         ),
     ] = runner.DEFAULT_MAX_CASES_PER_TRAJECTORY,
+    max_rows: Annotated[
+        int | None,
+        typer.Option(
+            "--max-rows",
+            min=1,
+            metavar="N",
+            help=f"Test conversations to sample and replay. {default_note('all')}",
+            show_default=False,
+            rich_help_panel=CASES,
+        ),
+    ] = None,
     max_tokens: Annotated[
         int,
         typer.Option(
@@ -209,6 +222,7 @@ def benchmark_command(
     settings = benchmark.BenchmarkSettings(
         out_dir=out_dir if out_dir is not None else dataset_dir / benchmark.DEFAULT_OUT_DIR_NAME,
         max_cases_per_trajectory=max_cases,
+        max_rows=max_rows,
         judge_model=judge_model,
         concurrency=concurrency,
         max_tokens=max_tokens,
