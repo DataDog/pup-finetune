@@ -48,6 +48,7 @@ from pup_finetune.providers.base import (
     SamplingUsage,
     SmokeTest,
     TrainingUsage,
+    find_profile,
     sampling_usage_text,
     training_usage_text,
 )
@@ -61,7 +62,14 @@ from pup_finetune.providers.baseten.client import (
     loops_sdk,
 )
 from pup_finetune.providers.options import parse_options
-from pup_finetune.rendering.families import GLM5_3, QWEN3_5, ModelFamily, get_family
+from pup_finetune.rendering.families import (
+    GLM5_3,
+    KIMI_K3,
+    QWEN3_5,
+    QWEN3_8,
+    ModelFamily,
+    get_family,
+)
 from pup_finetune.rendering.hf import ChatTokenizer, HFChatTemplateRenderer
 from pup_finetune.runtime import Runtime
 
@@ -89,6 +97,7 @@ def _profile(
     base_model: str,
     family: ModelFamily,
     *,
+    max_seq_len: int,
     supports_reasoning: bool = False,
     notes: str = "",
 ) -> ModelProfile:
@@ -99,9 +108,10 @@ def _profile(
         tokenizer_model=family.tokenizer_model,
         tokenizer_revision=family.revision,
         renderer=family.key,
-        max_seq_len=131_072,
+        max_seq_len=max_seq_len,
         supports_reasoning=supports_reasoning,
         notes=notes,
+        trust_remote_code=family.trust_remote_code,
     )
 
 
@@ -110,6 +120,7 @@ PROFILES: Final[tuple[ModelProfile, ...]] = (
         "qwen3p5-9b",
         "Qwen/Qwen3.5-9B",
         QWEN3_5,
+        max_seq_len=131_072,
         supports_reasoning=True,
         notes="Qwen3.5 9B; reasoning is kept after the last user turn only.",
     ),
@@ -117,12 +128,31 @@ PROFILES: Final[tuple[ModelProfile, ...]] = (
         "glm-5p3-flash",
         "zai-org/GLM-5.3-Flash",
         GLM5_3,
+        max_seq_len=131_072,
+        supports_reasoning=True,
         notes="GLM-5.3 Flash; it stops by emitting the next role tag.",
     ),
+    _profile(
+        "qwen3p8-27b",
+        "Qwen/Qwen3.8-27B",
+        QWEN3_8,
+        max_seq_len=262_144,
+        supports_reasoning=True,
+        notes="Qwen3.8 27B; reasoning history is preserved in training.",
+    ),
+    _profile(
+        "kimi-k3",
+        "moonshotai/Kimi-K3",
+        KIMI_K3,
+        max_seq_len=131_072,
+        supports_reasoning=True,
+        notes="Kimi K3; its repository's tokenizer code renders the chat.",
+    ),
 )
-"""Every model we train on Baseten Loops; ``base_model`` is its Loops name, and the tokenizer
-and its pinned revision come from the model family, so a profile cannot drift from its
-renderer."""
+"""Every model we train on Baseten Loops; ``base_model`` is its Loops name and ``max_seq_len``
+the context Loops' capabilities report for it, which preflight checks the workspace against.
+The tokenizer and its pinned revision come from the model family, so a profile cannot drift
+from its renderer."""
 
 MAX_SEQ_LEN: Final = max(profile.max_seq_len for profile in PROFILES)
 """The largest training context of any profile: the bound on the ``max_seq_len`` option."""
@@ -246,11 +276,7 @@ class BasetenProvider:
         return list(PROFILES)
 
     def resolve_model(self, alias_or_id: str) -> ModelProfile:
-        for profile in PROFILES:
-            if alias_or_id in (profile.alias, profile.base_model):
-                return profile
-        known = ", ".join(profile.alias for profile in PROFILES)
-        raise UsageError(f"unknown baseten model {alias_or_id!r}", hint=f"known models: {known}")
+        return find_profile(PROFILES, alias_or_id, provider=PROVIDER_NAME)
 
     def preflight(self, profile: ModelProfile) -> None:
         """Confirm, read only, that this workspace can train ``profile`` on Baseten Loops.

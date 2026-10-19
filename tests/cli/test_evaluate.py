@@ -13,10 +13,12 @@ offline fake judge (the default for a fake run), or a fake swapped in for
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import json
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -37,11 +39,13 @@ from pup_finetune.evaluation import runner as runner_module
 from pup_finetune.evaluation import targets as targets_module
 from pup_finetune.evaluation.fake_judge import FAKE_JUDGE_MODEL, FakeJudge
 from pup_finetune.inference import ChatCompleter, ChatCompletion, ContextLimitError, JudgeConfig
+from pup_finetune.providers import fake as fake_module
 from pup_finetune.providers.fake import FakeRenderer
 from pup_finetune.runs import RunDir, RunState, model_id_for_run
 from pup_finetune.runtime import Runtime
 from pup_finetune.storage import append_jsonl
 from pup_finetune.training.budget import Budget
+from tests.fakes.rows import import_with_opening_assistant_test_row, import_with_refused_test_row
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
 
@@ -1185,3 +1189,128 @@ def test_generations_cut_off_at_max_tokens_are_counted_and_warned_about(run_dir:
     truncated = data["headline"]["truncated"]
     assert truncated["base"] > 0 and truncated["tuned"] > 0
     assert any("reached --max-tokens (2)" in warning for warning in data["warnings"])
+
+
+def results_of(eval_dir: Path) -> list[dict[str, Any]]:
+    path = eval_dir / "results.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def test_a_turn_with_no_message_before_it_is_left_out_at_planning(tmp_path: Path) -> None:
+    dataset, opened = import_with_opening_assistant_test_row(tmp_path)
+    run = tmp_path / "run"
+    assert invoke(*train_args(dataset, run, "--confirm")).exit_code == 0
+
+    preview = output(invoke("evaluate", str(run), "--no-publish", "--max-cases", "10"))
+
+    assert preview["preview"]["excluded_by_reason"] == {"empty_prompt": 1}
+    result = rerun(preview["next_command"])
+    assert result.exit_code == 0, result.stderr
+    case_ids = {record["case_id"] for record in results_of(run / "eval")}
+    assert f"{opened}:0" not in case_ids
+    assert any(case_id.startswith(f"{opened}:") for case_id in case_ids)
+
+
+def test_a_case_whose_prompt_the_model_refuses_is_left_out_at_planning(tmp_path: Path) -> None:
+    dataset, refused = import_with_refused_test_row(tmp_path)
+    run = tmp_path / "run"
+    assert invoke(*train_args(dataset, run, "--confirm")).exit_code == 0
+
+    preview = output(invoke("evaluate", str(run), "--no-publish"))
+    excluded = preview["preview"]["excluded_cases"]
+    assert excluded > 0
+    assert preview["preview"]["excluded_by_reason"] == {"unsupported_message": excluded}
+    assert any(
+        " test cases are left out for fake-model, " in w for w in preview["preview"]["warnings"]
+    )
+
+    result = rerun(preview["next_command"])
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["status"] == "complete"
+    assert any(" test cases are left out for fake-model, " in w for w in data["warnings"])
+    rows = {record["row_id"] for record in results_of(run / "eval")}
+    assert rows and refused not in rows
+
+
+def test_a_prompt_refused_while_sampling_is_an_error_no_rerun_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A renderer whose check misses what its sampler then refuses: the backstop.
+    monkeypatch.setattr(FakeRenderer, "prompt_refusal", lambda self, messages, tools: None)
+    dataset, refused = import_with_refused_test_row(tmp_path)
+    run = tmp_path / "run"
+    assert invoke(*train_args(dataset, run, "--confirm")).exit_code == 0
+
+    result = invoke("evaluate", str(run), "--no-publish", "--confirm")
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["status"] == "complete_with_errors"
+    unrenderable = [record for record in results_of(run / "eval") if record["status"] == "error"]
+    assert {record["row_id"] for record in unrenderable} == {refused}
+    assert {record["error"]["type"] for record in unrenderable} == {"RendererError"}
+    summary = json.loads((run / "eval" / "summary.json").read_text())
+    for target in summary["targets"].values():
+        assert target["errors_unrenderable"] == target["errors"] > 0
+    assert "which a retry cannot fix" in data["hint"]
+    assert "evaluate" not in (data["next_command"] or "")
+    assert output(invoke("status", str(run)))["next_command"].split()[2] == "deploy"
+
+    again = invoke("evaluate", str(run), "--no-publish")
+    assert output(again)["preview"]["generation_calls"] == 0
+
+
+def test_a_prompt_refused_while_sampling_is_no_missing_evaluator_score(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(FakeRenderer, "prompt_refusal", lambda self, messages, tools: None)
+    dataset, _ = import_with_refused_test_row(tmp_path)
+    run = tmp_path / "run"
+    assert invoke(*train_args(dataset, run, "--confirm")).exit_code == 0
+    shutil.copy(ROWS.parent.parent / "evaluators" / "checks.py", tmp_path / "checks.py")
+    spec = tmp_path / "checks.toml"
+    spec.write_text('[[evaluator]]\nname = "no_card_numbers"\ntype = "check"\nfile = "checks.py"\n')
+
+    result = invoke("evaluate", str(run), "--evaluators", str(spec), "--no-publish", "--confirm")
+
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["status"] == "complete_with_errors"
+    assert "which a retry cannot fix" in data["hint"]
+    assert not [warning for warning in data["warnings"] if "evaluator score" in warning]
+    assert data["next_command"] == f"pup finetune deploy {run}"
+
+
+def test_errors_no_retry_can_fix_leave_nothing_to_rerun_when_publishing_was_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(FakeRenderer, "prompt_refusal", lambda self, messages, tools: None)
+    dataset, _ = import_with_refused_test_row(tmp_path)
+    run = tmp_path / "run"
+    assert invoke(*train_args(dataset, run, "--confirm")).exit_code == 0
+
+    data = output(invoke("evaluate", str(run), "--confirm"))
+
+    assert data["status"] == "complete_with_errors"
+    assert data["publication"]["status"] == "skipped"
+    assert data["next_command"] is None
+    push, publish, *rest = data["next_steps"]
+    assert push["command"].startswith("pup finetune dataset push")
+    assert publish["command"].endswith("--confirm")
+    assert "makes no new model calls" in publish["why"]
+    assert [step["command"].split()[2] for step in rest][:1] == ["deploy"]
+
+
+def test_previews_say_when_the_tokenizer_runs_repository_code(
+    dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    remote = dataclasses.replace(fake_module.FAKE_PROFILE, trust_remote_code=True)
+    monkeypatch.setattr(fake_module, "FAKE_PROFILE", remote)
+    run = tmp_path / "run"
+    notice = "tokenizer runs Python code from the Hugging Face repository fake/tokenizer"
+
+    train = output(invoke(*train_args(dataset, run)))["preview"]
+    assert any(notice in warning for warning in train["warnings"])
+    assert invoke(*train_args(dataset, run, "--confirm")).exit_code == 0
+    evaluate = output(invoke("evaluate", str(run), "--no-publish"))["preview"]
+    assert any(notice in warning for warning in evaluate["warnings"])

@@ -26,9 +26,12 @@ from pup_finetune.cli._dirs import require_dataset_dir
 from pup_finetune.cli._flags import given
 from pup_finetune.cli._presentation import TRAIN, CommandDoc, Safety, default_note, describe
 from pup_finetune.cli.train import provider_for_model
+from pup_finetune.display import joined
 from pup_finetune.errors import PAID_RUN, UsageError, require_confirm, require_writable
 from pup_finetune.evaluation import benchmark, runner
 from pup_finetune.judge_models import BY_KEY
+from pup_finetune.providers import aliases_for_model, known_providers, providers_for_model
+from pup_finetune.runtime import Runtime
 
 SETTING_PARAMS: dict[str, tuple[str, ...]] = {
     "judge_model": ("judge_model",),
@@ -59,9 +62,16 @@ DOC = CommandDoc(
         "LLM judge evaluate uses. Without --confirm, previews the calls and where the data "
         "goes. The result ranks the models and recommends the one to fine-tune.",
         "The dataset must be in Datadog, as for `train`. "
-        "Each model runs in a session of its own, one after another, into OUT/<model>; rerun "
-        "the same command to continue a benchmark that stopped. A model below "
-        "--target-pass-rate is worth fine-tuning; one at or above it may need no training. "
+        "Each model runs in a session of its own, one after another, into OUT/<model> "
+        "(PROVIDER/MODEL for a model both providers offer); rerun "
+        "the same command to continue a benchmark that stopped; adding a model reuses the "
+        "finished ones. Each model replays the test cases it can and gets its own pass rate on "
+        "them. The finished models (nothing pending, no error a rerun retries, no score the "
+        "headline still needs) are ranked on the cases the headline (the judge, unless "
+        "--evaluators names another) scored for every one of them; a model a rerun can still "
+        "advance is listed unranked and never narrows them. The best one is worth fine-tuning "
+        "below --target-pass-rate; at or above it on its own cases, with the headline scoring at "
+        "least 90% of the test cases with a prompt, it may need no training. "
         "Models within noise of the best are named, so the cheapest to serve can be chosen. "
         "--max-rows replays a seeded sample of the test conversations instead, for a quicker, "
         "cheaper comparison. Tools are not executed, so the scores measure agreement with the "
@@ -74,8 +84,9 @@ DOC = CommandDoc(
         "the models and meets --target-pass-rate.",
     ),
     examples=(
-        "pup finetune benchmark ds --models qwen3p5-9b,glm-5p3-flash",
-        "pup finetune benchmark ds --models qwen3p5-9b,glm-5p3-flash --max-cases 1 --max-rows 20",
+        "pup finetune benchmark ds --models qwen3p5-9b,baseten/glm-5p3-flash",
+        "pup finetune benchmark ds --models qwen3p5-9b,baseten/glm-5p3-flash --max-cases 1 "
+        "--max-rows 20",
     ),
     safety=Safety(
         data="sends test rows to each model's provider and to the judge",
@@ -88,6 +99,28 @@ DOC = CommandDoc(
     ),
     panel=TRAIN,
 )
+
+
+def model_and_provider(entry: str, runtime: Runtime) -> tuple[str, str]:
+    """One ``--models`` entry as ``(model, provider)``: a model that one provider offers
+    (:func:`~pup_finetune.cli.train.provider_for_model`), else ``PROVIDER/MODEL``. A whole
+    entry that names a model wins, so a tokenizer name such as ``org/name`` is never split.
+    A model several providers offer is a usage error naming the entries that pick one."""
+    found = aliases_for_model(entry, runtime)
+    if len(found) > 1:
+        choices = ", ".join(f"{name}/{alias}" for name, alias in found.items())
+        raise UsageError(
+            f"{entry} is offered by {joined(list(found))}", hint=f"name one of {choices}"
+        )
+    head, slash, rest = entry.partition("/")
+    if not found and slash and head in known_providers(runtime):
+        if head not in providers_for_model(rest, runtime):
+            raise UsageError(
+                f"{head} offers no model {rest!r}",
+                hint=f"`pup finetune models list --provider {head}` shows every name it accepts",
+            )
+        return rest, head
+    return entry, provider_for_model(entry, None, runtime)[0]
 
 
 def _with_defaults_used(preview: dict[str, Any], ctx: Any) -> dict[str, Any]:
@@ -120,7 +153,8 @@ def benchmark_command(
         typer.Option(
             "--models",
             metavar="M1,M2",
-            help="Base models to compare, comma-separated (see models list).",
+            help="Base models to compare, comma-separated (see models list); "
+            "PROVIDER/MODEL names the provider of a model several offer.",
             show_default=False,
             rich_help_panel=MODELS,
         ),
@@ -244,7 +278,7 @@ def benchmark_command(
     aliases = [alias.strip() for alias in models.split(",") if alias.strip()]
     if not aliases:
         raise UsageError("--models names no model", hint="pass --models MODEL,MODEL")
-    resolved = [(alias, provider_for_model(alias, None, runtime)[0]) for alias in aliases]
+    resolved = [model_and_provider(alias, runtime) for alias in aliases]
     settings = benchmark.BenchmarkSettings(
         out_dir=out_dir if out_dir is not None else dataset_dir / benchmark.DEFAULT_OUT_DIR_NAME,
         max_cases_per_trajectory=max_cases,

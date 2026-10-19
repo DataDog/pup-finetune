@@ -292,10 +292,11 @@ Training runs in the key's own account (Fireworks refuses a key that sees severa
 records.
 
 Training on Baseten Loops is paid too: `--provider baseten --model qwen3p5-9b` (or
-`glm-5p3-flash`) needs the `baseten` extra and a Baseten API key (`BASETEN_API_KEY`, the OS
-keychain after `pup finetune auth login baseten`, or the default remote's key in
-`~/.trussrc`, read only). Its preview asks Baseten, read only, whether the workspace can train
-the model; `--confirm` starts a billed dedicated trainer, deactivated when the session ends.
+`glm-5p3-flash` or `qwen3p8-27b`, which Fireworks offers too) needs the `baseten` extra and a
+Baseten API key (`BASETEN_API_KEY`, the OS keychain after `pup finetune auth login baseten`,
+or the default remote's key in `~/.trussrc`, read only). Its preview asks Baseten, read only,
+whether the workspace can train the model; `--confirm` starts a billed dedicated trainer,
+deactivated when the session ends.
 Baseten has no promotion, so `result.json` records the best sampler checkpoint as
 `deployable_checkpoint`, and `deploy` serves it as a dedicated Baseten model named after the
 deployment id (the run id made safe, or `--deployment-id`), on an instance type with exactly
@@ -382,8 +383,8 @@ Source lives under `src/pup_finetune/`.
   command and steps a dataset directory's state calls for (unlabeled, or labeled only `by:
   check` with rows left: `dataset sample`; labeled: training steps, since the model is the
   user's to choose; the provider follows from it and the run directory defaults); `train.py`
-  has `train` (`provider_for_model` infers
-  `--provider` from the registry's aliases, failing on an alias several providers offer),
+  has `train` (`provider_for_model` infers `--provider` from any of a model's names in the
+  registry, failing on a name several providers offer; the rerun pins the alias),
   `resume`,
   `status`, `cancel` and the hidden `_worker` a detached run executes (and `train
   --evaluate`), and `run_next`, the next command a run's phase calls for; `models.py` has `models list` (every provider's
@@ -393,7 +394,8 @@ Source lives under `src/pup_finetune/`.
   `workspace.list_runs`;
   `evaluate.py` has `evaluate`, which only parses its flags and emits what
   `evaluation/runner.py` returns; `benchmark.py` has `benchmark`, which does the same for
-  `evaluation/benchmark.py`; `deploy.py` has `deploy` and `undeploy` (over
+  `evaluation/benchmark.py` (a `--models` entry may be `PROVIDER/MODEL`, which the rerun
+  writes for a model several providers offer); `deploy.py` has `deploy` and `undeploy` (over
   `deployment.py`); `triage.py` has `dataset triage` (over `curation/triage.py`; its
   `open_clients` builds one chat client per judge provider); `skill.py` has `skill show` and `skill
   install` (its `find_npx` and `run_npx` are what tests replace); `help.py` has `help
@@ -739,25 +741,51 @@ Source lives under `src/pup_finetune/`.
   `heartbeat_s`, `state.json` is also saved on a timer so its heartbeat stays fresh.
 - `rendering/` - chat rows to model tokens and completions back to messages. `tokens.py` has
   `TokenizedExample`, the provider-neutral, next-token-shifted token and weight arrays;
-  `base.py` has the `Renderer` protocol and `RendererError`. `hf.py` has
+  `base.py` has the `Renderer` protocol and `RendererError` (`prompt_refusal` says, loading
+  no tokenizer, which prompts `generation_prompt_tokens` refuses). `hf.py` has
   `HFChatTemplateRenderer`, the one renderer every provider shares: the model's Hugging Face
   chat template and tokenizer at a pinned revision, one example per trainable assistant turn
-  (the prompt tokenized whole, then the completion through its stop token, re-encoded after
-  the prompt when a token merges across the boundary), and a per-row-checked one-example fast
-  path for families that pin `prefix_stable`. It also has the narrow `ChatTokenizer` seam
-  (tests inject `tests/fakes/tokenizer.py`) and the lazily imported `transformers` adapter
-  (the `hf` extra). `parsers.py` has the `ResponseParser`s (`Qwen3XmlToolParser`,
-  `Qwen3_5XmlToolParser`, `GlmXmlToolParser`, `JsonToolCallParser`) that turn sampled text
-  back into a message; `families.py` is the model-family table (`qwen3_8`, `qwen3_5`,
-  `glm5_3`), each entry a tokenizer, revision, parser and stop tokens.
+  (the prompt tokenized whole, as the template tokenizes it: its text encoded whole, or
+  `ChatTokenizer.render_tokens` when the tokenizer's own code tokenizes the chat (`None`
+  otherwise); then the completion through its stop token, re-encoded after the prompt when a
+  token merges across the boundary, which a tokenizer whose `render_tokens` is not `None`
+  refuses instead; two template renders per turn), and a per-row-checked one-example fast
+  path for families that pin `prefix_stable` (every trainable turn a token prefix of the whole
+  render). It also has the narrow `ChatTokenizer` seam (tests inject
+  `tests/fakes/tokenizer.py`), the lazily imported `transformers` adapter (the `hf` extra;
+  `load_tokenizer` passes `trust_remote_code` only for a family that sets it, always with the
+  pinned revision as `revision` and `code_revision`, refuses a tokenizer class from any other
+  repository or commit, and a remote tokenizer's identity is its pinned `model@revision`),
+  and `ChatEncoder` and `EncodedChatTokenizer`, for a tokenizer that ships no chat template.
+  `encoders.py` has those encoders (`DeepSeekV4Encoder`, DeepSeek-V4's
+  `encoding/encoding_dsv4.py` for the messages we train on, held to it by the `tokenizer`
+  tests). `parsers.py` has the `ResponseParser`s (`Qwen3XmlToolParser`,
+  `Qwen3_5XmlToolParser`, `GlmXmlToolParser`, `JsonToolCallParser`, `DeepSeekDsmlParser`,
+  `KimiXtmlParser`, `MuseAtemParser`) that turn sampled text back into a message (a
+  `ControlTokenParser`, Kimi's, is also given the completion split at its control tokens, so
+  text that spells one stays text: `Renderer.parse_completion`, which the samplers call);
+  `families.py` is the model-family table (`qwen3_8`, `qwen3_5`, `glm5_3`, `kimi_k3`,
+  `deepseek_v4`, `muse_glimmer`), each entry a tokenizer, revision, parser and stop tokens,
+  and when it needs them `trust_remote_code` (Kimi K3 only), a `chat_encoder` (DeepSeek-V4)
+  a `rewrite`, a `MessageRewrite` that turns each message into the messages the template
+  renders faithfully (Muse Glimmer writes text beside tool calls as its own message to the
+  user; its template's date is pinned in `chat_template_kwargs`), and a `check`, a
+  `PromptCheck` that refuses a prompt the template opens no assistant turn after, and a
+  trained turn after it, with `unsupported_message` (DeepSeek-V4 needs a user or tool message
+  before each turn); each by name and version in the renderer identity, which leaves out
+  what a family does not have.
+  The `hf` extra includes `tiktoken`, which Kimi K3's tokenizer code imports.
 - `evaluation/` - replay evaluation, provider-neutral. `cases.py` turns a dataset's kept
   test-split rows into `ReplayCase`s (`cases_from_dataset`, `build_cases`): one per trained
   (`weight` not `0`) assistant message with a visible action, with the recorded prefix and
   tools as input and the recorded message as the reference, capped per trajectory
   (`max_cases_per_trajectory`) with evenly spaced, seeded picks that always keep the final
-  turn. Tools are never executed, so replay measures agreement with the recorded behavior, not
-  task success. `metrics.py` has the deterministic tool-call metrics (`MetricName`,
-  `score_case`, `aggregate`; `None` when a metric does not apply) and `schema_errors`, a
+  turn. `exclusions` names the cases a model cannot replay, each with a stable `code`: a turn
+  with no message before it (`empty_prompt`, for every provider) and a prompt the model's
+  renderer refuses (`prompt_refusal`, the renderer's code). Tools are never executed, so
+  replay measures agreement with the recorded behavior, not task success. `metrics.py` has
+  the deterministic tool-call metrics (`MetricName`, `score_case`, `aggregate`; `None` when a
+  metric does not apply) and `schema_errors`, a
   validator for the common JSON Schema subset tool declarations use. `judge.py` is the LLM
   judge: `judge` asks whether a candidate action is an acceptable substitute for the reference
   (the recorded data JSON-encoded in tagged blocks marked untrusted, reasoning never shown) and
@@ -780,8 +808,10 @@ Source lives under `src/pup_finetune/`.
   `results.jsonl` as it completes, so a rerun skips finished pairs; `evaluation.json` is the
   identity a rerun must match (`evaluation_identity`; a mismatch is a `SettingsConflict`, exit 2,
   asking for a new `--out-dir`); a sampler or judge failure is an error result, counted apart and out of
-  every rate; `cancel` stops new pairs and keeps finished ones (any other error waits for the
-  pairs in flight, then propagates). `summarize` writes
+  every rate, and a generation whose prompt the renderer refused (`RendererError`) is one a
+  rerun never retries (`is_final`, counted as `errors_unrenderable`); `cancel` stops new
+  pairs and keeps finished ones (any other error waits for the pairs in flight, then
+  propagates). `summarize` writes
   `summary.json`: per-target pass rates (judge and metrics), per-trajectory agreement, the
   paired wins, regressions and ties, and `tuned_minus_base` with a seeded paired bootstrap
   95% CI over trajectories (`bootstrap.py`'s `paired_bootstrap_ci`), `tuned_minus_compare`
@@ -789,7 +819,9 @@ Source lives under `src/pup_finetune/`.
   the cases it does not replay as `skipped`), plus the agreement-not-task-success `CAVEAT`. A `Publisher` (default `NoopPublisher`) gets a complete evaluation and returns
   what it reports, the outcome's `publication`. `runner.py` is what `evaluate` and `train
   --evaluate` run: `plan_evaluation` (an `EvalPlan`: cases, judge, settings and `Publishing`,
-  whether the dataset's push receipt allows publishing), calibration (`prepare_eval_dir`
+  whether the dataset's push receipt allows publishing; cases the run's model cannot replay
+  are left out, `excluded`, and the preview counts them as `excluded_cases` and
+  `excluded_by_reason`, through `cases.py`'s `exclusions`), calibration (`prepare_eval_dir`
   stores a passing one), `replay` with the plan's publisher, `replay_result` and
   `evaluation_exit_code`, `plan_standalone` and `StandaloneEvaluation` for `evaluate`, and
   `EvaluateAfterTraining`, the `after_finalize` hook that evaluates in the training session
@@ -828,25 +860,43 @@ Source lives under `src/pup_finetune/`.
   the fake take any), with `compare_skips` over cases; it takes the `compare.json` path and imports nothing from `replay.py`, which imports it.
   `benchmark.py` is `benchmark`: `plan_benchmark` (the test split's cases, with `--max-rows`
   only those of a seeded sample of its conversations, `sample_conversations`; the judge and
-  one `Candidate` per base model), `execute` (the judge calibrated once, then each model
-  replayed in a session of its own into `OUT/<model>` through `run_replay` with the model as
-  its one target, so each resumes; a model whose session fails is an error entry and the
-  others still run; each model first copies what it takes from the dataset's store, so one
-  with every answer reused opens no session, and shares its own answers after, a complete
-  one included; `BenchmarkPlan.inputs` and `keys`, from each model's full renderer identity,
-  are read at plan time only when the store exists, and not for a model whose renderer
-  cannot load), `leaderboard` (judge pass rate with a bootstrap CI
-  over trajectories, each model's paired gap to the best and its answers `truncated` at
-  `--max-tokens` or `unparseable`, each a warning) and `recommend` (`fine_tune`,
-  `base_meets_target` at `--target-pass-rate`, or `no_result`; models within noise of the
-  best are named).
+  one `Candidate` per base model, with its renderer identity and the cases of that sample it
+  cannot replay, `excluded`; a model is named `PROVIDER/ALIAS` when another provider offers
+  its alias, `Candidate.target`; a model whose renderer cannot load is planned as an error,
+  `Candidate.unavailable`, its results not scored (planning reads the judge and evaluators it
+  froze, and which of them have work left); a preview whose models share no case they all
+  replay fails), `execute` (the judge calibrated once, then each model replayed in a
+  session of its own, sized on its own cases, into `OUT/<model>` through `run_replay` with the
+  model as its one target, so each resumes; each model's directory is identified by its own
+  cases and renderer identity, `BenchmarkPlan.identity`, never by the other models, so adding
+  or dropping a model reuses the finished ones; a model whose session fails is an error entry
+  and the others still run; each model first copies what it takes from the dataset's store,
+  so one with every answer reused opens no session, and shares its own answers after, a
+  complete one included; `BenchmarkPlan.inputs` and `keys`, from each model's renderer
+  identity, are read at plan time only when the store exists), `leaderboard` (a
+  `Leaderboard`: each model's headline pass rate, the judge's unless `--evaluators` names
+  another, with a bootstrap CI over trajectories on its own cases, its judge pass rate,
+  `judged_cases`, `headline_cases` (the cases its headline scored, the rate's denominator) and
+  `coverage` (their share of the test cases with a prompt), and its answers `truncated` at
+  `--max-tokens` or `unparseable`, each a warning; the finished models, with no session error,
+  nothing pending, no error a rerun retries and no score the headline still needs, ranked on
+  the cases the headline scored for every one of them, `common_cases`, by their headline rate
+  there, with each one's paired gap to the best; a model a rerun can still advance listed
+  unranked, never narrowing that set; `rerun`, whether a rerun has work left, an evaluator
+  score outside the headline included, but not a check that raised, whose frozen file raises
+  again: the hint names it, as `evaluate`'s does) and `recommend` (`fine_tune`;
+  `base_meets_target` when the best ranked model's own headline rate reaches
+  `--target-pass-rate` and its `headline_cases` cover `TARGET_COVERAGE`, 90% of the test cases
+  with a prompt; or `no_result`; the reason quotes that count and says when results are
+  partial, and models within noise of the best are named).
   The package exports its names lazily, so importing the runner (the CLI does, for every
   command) loads no judge client. `targets.py` makes the two samplers from a session: the live training
   session's best sampler checkpoint, or the best training checkpoint loaded and saved again
   as an `ev...` sampler checkpoint in a new session (`run_samplers`), only for the targets
   with a case left to generate (`targets`). `reuse.py` is the dataset's store of base
   results, `DATASET/replay_cache` (`generations.jsonl` by `generation_key`: provider, base
-  model, context, renderer identity, `max_tokens`, prefix and tools; `verdicts.jsonl` by
+  model, context, renderer identity (a family's `prompt_check` and `message_rewrite`
+  included), `max_tokens`, prefix and tools; `verdicts.jsonl` by
   `verdict_key`: the judge's identity and exact request; append-only, first line of a key
   wins): `ReuseIndex.load` reads it once at plan time (`EvalPlan.reuse`, `None` with
   `--no-reuse`), `plan_target` is what a target takes (the preview's `reuse` block and
@@ -877,9 +927,11 @@ Source lives under `src/pup_finetune/`.
   `TrainingSession` and `Sampler` protocols; `__init__.py` is the lazy registry
   (`register_provider`, `get_provider`, `known_providers`), which imports a provider only on
   first use; each entry names its `--provider-option` keys (`registered_option_keys`, which
-  `train --help` lists; a test holds them to the option models) and its model aliases
-  (`known_models`, `providers_for_model`, which `train` infers `--provider` from without
-  importing a provider; a test holds them to the profiles), and what it needs
+  `train --help` lists; a test holds them to the option models) and its model table, each
+  alias with every name that selects the profile (`ModelProfile.names`: alias, provider
+  model id, tokenizer; `known_models`, `providers_for_model`, which `train` infers
+  `--provider` from without importing a provider; a test holds it to the profiles, and
+  every `resolve_model` goes through `base.find_profile`), and what it needs
   (`ProviderInfo`: its `label`, the `credential` it signs in with, the `packages` each step
   needs, the training flags it `refuses`, whether it `deploys`, whether it is `offline`,
   whether it trains in a job of its own (`remote`, for `train --remote`: `require_remote`);
@@ -893,7 +945,9 @@ Source lives under `src/pup_finetune/`.
   `--provider-option`s with (unknown keys refused, string values decoded as JSON). `fireworks/` is the Fireworks provider: its `__init__.py` only registers the
   `FIREWORKS_API_KEY` `CredentialSpec` (the registry imports it, so `auth` and `doctor` see
   the key without loading anything heavy; the validator lists accounts); `models.py` is the
-  profile table (`qwen3p8-27b`), each entry naming a rendering family that supplies its
+  profile table (`qwen3p8-27b`, `glm-5p3-flash`, `kimi-k3`, `deepseek-v4-flash-0731`,
+  `muse-glimmer-30b`; each `max_seq_len` the `trainingContextLength` Fireworks reports),
+  each entry naming a rendering family that supplies its
   tokenizer and revision; `api.py` is a small read-only REST client over `httpx` (no SDK;
   `model_info`, `list_accounts`, injectable transport, redacted errors, 401/403 as
   `FireworksAuthError`, 404 as a missing model); `provider.py` has `FireworksProvider`
@@ -948,7 +1002,9 @@ Source lives under `src/pup_finetune/`.
   session always deactivates its run and samplers. `baseten/__init__.py` only registers the
   `BASETEN_API_KEY` `CredentialSpec`, as Fireworks' does (falling back, read only, to the key
   of the default remote in `~/.trussrc`; the validator lists models). `baseten/provider.py`
-  has `BasetenProvider`: the `qwen3p5-9b` and `glm-5p3-flash` profiles (tokenizer pins from
+  has `BasetenProvider`: the `qwen3p5-9b`, `glm-5p3-flash`, `qwen3p8-27b` and `kimi-k3`
+  profiles, each
+  with its own context (tokenizer pins from
   their families), a read-only `preflight` (the SDK loads, and Loops' capabilities offer and
   enable the model with a limit of at least the `max_seq_len` option, else the profile's
   context), the family's HF renderer and the `max_seq_len` option (at least 1024; it
@@ -987,7 +1043,13 @@ delayed or capped indexing); it chains to the `api` handler installed before it,
 one `FakePup` with `FakeDatasetsApi`.
 `tests/fakes/tokenizer.py` has `FakeChatTokenizer`, a character-level chat tokenizer with a
 Qwen3.8-like Python template (optionally merging `\n\n` across the prompt boundary) or a
-GLM-5-like one (`glm5_like`).
+GLM-5-like one (`glm5_like`), and extra special tokens (`DEEPSEEK_SPECIALS`) for a fake behind
+an encoder; `FakeXtmlTokenizer` renders Kimi K3's XTML as its tokenizer code does, control
+tokens apart from message text (`render_tokens`).
+`tests/fakes/rows.py` has `import_with_edited_test_row`, the tool-use fixture rows imported
+with one test-split row edited, and two edits: `import_with_refused_test_row` (a prompt the
+fake renderer refuses) and `import_with_opening_assistant_test_row` (a row that opens with
+an assistant turn).
 `tests/fakes/chat_api.py` has `FakeChatApi`, an OpenAI-compatible chat completions endpoint
 (scripted responses or errors first, then an answer function) and `matching_judge`.
 `tests/fakes/fireworks_api.py` has `FakeFireworksApi`, the Fireworks model and account routes
@@ -1024,7 +1086,8 @@ or compare model whose client they fake.
 `tests/providers/contract/` has the `RendererContract`, `BackendContract` and
 `ProviderContract` suites every provider subclasses (`tests/providers/test_fake_contract.py`
 runs them against the fake provider; `tests/providers/fireworks/` against Fireworks on its fakes;
-`tests/providers/baseten/` against Baseten on its fake).
+`tests/providers/baseten/` against Baseten on its fake; `tests/rendering/test_hf_contract.py`
+runs the `RendererContract` on each family's real tokenizer under `-m tokenizer`).
 Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds canonical rows and
 `llmobs/` raw Export API pages.
 

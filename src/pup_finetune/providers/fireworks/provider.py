@@ -48,6 +48,7 @@ from pup_finetune.providers.base import (
     SamplingUsage,
     SmokeTest,
     TrainingUsage,
+    find_profile,
     sampling_usage_text,
     training_usage_text,
 )
@@ -186,11 +187,7 @@ class FireworksProvider:
         return list(PROFILES)
 
     def resolve_model(self, alias_or_id: str) -> ModelProfile:
-        for profile in PROFILES:
-            if alias_or_id in (profile.alias, profile.base_model):
-                return profile
-        known = ", ".join(profile.alias for profile in PROFILES)
-        raise UsageError(f"unknown fireworks model {alias_or_id!r}", hint=f"known models: {known}")
+        return find_profile(PROFILES, alias_or_id, provider=PROVIDER_NAME)
 
     def preflight(self, profile: ModelProfile) -> None:
         """Confirm with Fireworks that ``profile``'s base model can be LoRA-tuned right now.

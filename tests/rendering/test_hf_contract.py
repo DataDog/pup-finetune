@@ -10,7 +10,7 @@ Offline against the fake tokenizer: token prefix-stable with the fast path on, m
 newlines across the prompt boundary (per turn), and both (the fast path refuses every row,
 which then renders per turn); and the ``qwen3_5`` and ``glm5_3`` families on fake templates.
 With ``PUP_FINETUNE_TOKENIZER_TESTS=1`` and the ``hf`` extra, also against the real, pinned
-Qwen3.8, Qwen3.5 and GLM-5.3 tokenizers.
+Qwen3.8, Qwen3.5, GLM-5.3, Kimi K3, DeepSeek-V4 and Muse Glimmer tokenizers.
 """
 
 from __future__ import annotations
@@ -20,7 +20,15 @@ from collections.abc import Callable
 
 import pytest
 
-from pup_finetune.rendering.families import GLM5_3, QWEN3_5, QWEN3_8, ModelFamily
+from pup_finetune.rendering.families import (
+    DEEPSEEK_V4,
+    GLM5_3,
+    KIMI_K3,
+    MUSE_GLIMMER,
+    QWEN3_5,
+    QWEN3_8,
+    ModelFamily,
+)
 from pup_finetune.rendering.hf import HFChatTemplateRenderer, TransformersTokenizer
 from tests.fakes.tokenizer import FakeChatTokenizer, glm5_like
 from tests.providers.contract import RendererContract
@@ -84,3 +92,30 @@ class TestHFChatTemplateRendererOnGlm5_3(RendererContract):
         self, glm5_3_tokenizer: TransformersTokenizer
     ) -> Callable[[], HFChatTemplateRenderer]:
         return lambda: GLM5_3.renderer(tokenizer=glm5_3_tokenizer)
+
+
+@pytest.mark.tokenizer
+class TestHFChatTemplateRendererOnKimiK3(RendererContract):
+    @pytest.fixture
+    def renderer_factory(
+        self, kimi_k3_tokenizer: TransformersTokenizer
+    ) -> Callable[[], HFChatTemplateRenderer]:
+        return lambda: KIMI_K3.renderer(tokenizer=kimi_k3_tokenizer)
+
+
+@pytest.mark.tokenizer
+class TestHFChatTemplateRendererOnDeepSeekV4(RendererContract):
+    @pytest.fixture
+    def renderer_factory(
+        self, deepseek_v4_tokenizer: TransformersTokenizer
+    ) -> Callable[[], HFChatTemplateRenderer]:
+        return lambda: DEEPSEEK_V4.renderer(tokenizer=deepseek_v4_tokenizer)
+
+
+@pytest.mark.tokenizer
+class TestHFChatTemplateRendererOnMuseGlimmer(RendererContract):
+    @pytest.fixture
+    def renderer_factory(
+        self, muse_glimmer_tokenizer: TransformersTokenizer
+    ) -> Callable[[], HFChatTemplateRenderer]:
+        return lambda: MUSE_GLIMMER.renderer(tokenizer=muse_glimmer_tokenizer)

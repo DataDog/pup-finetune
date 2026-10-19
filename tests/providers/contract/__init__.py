@@ -251,6 +251,7 @@ class RendererContract:
     def test_names_itself(self, renderer: Renderer) -> None:
         assert renderer.name
         assert renderer.stop_token_ids
+        renderer.check_tokens()
 
     def test_identity_pins_the_render(self, renderer: Renderer) -> None:
         identity = renderer.identity()
@@ -271,8 +272,8 @@ class RendererContract:
             assert examples == second.per_turn_examples(messages, tools)
             full = _full_render(first, messages, tools)
             assert full == _full_render(second, messages, tools)
-            prompt = first.generation_prompt_tokens(messages, tools)
-            assert prompt == second.generation_prompt_tokens(messages, tools)
+            prompt = first.generation_prompt_tokens(messages[:-1], tools)
+            assert prompt == second.generation_prompt_tokens(messages[:-1], tools)
             assert second.decode(prompt) == first.decode(prompt)
             for example in examples:
                 tokens, _ = _unshifted(example)
@@ -284,7 +285,11 @@ class RendererContract:
         messages, tools = conversation
         for rendered, example, full in self._examples(renderer, messages, tools):
             tokens, _ = _unshifted(example)
-            turns = _assistant_turns(rendered) if full else [len(rendered) - 1]
+            turns = (
+                [turn for turn in _assistant_turns(rendered) if _trainable(rendered[turn])]
+                if full
+                else [len(rendered) - 1]
+            )
             for turn in turns:
                 prompt = renderer.generation_prompt_tokens(rendered[:turn], tools)
                 assert tokens[: len(prompt)] == prompt, f"turn {turn} is not a token prefix"
@@ -318,6 +323,13 @@ class RendererContract:
                 assert parsed.format_valid
                 assert _comparable(parsed.message) == _comparable(rendered[turn])
 
+    def test_no_turn_s_prompt_is_refused(
+        self, renderer: Renderer, conversation: Conversation
+    ) -> None:
+        messages, tools = conversation
+        for turn in _assistant_turns(messages):
+            assert renderer.prompt_refusal(messages[:turn], tools) is None
+
     def test_weight_zero_turns_are_never_trained(self, renderer: Renderer) -> None:
         messages: list[ChatMessage] = [
             {"role": "user", "content": "Hi."},
@@ -340,6 +352,7 @@ class RendererContract:
                 parsed = renderer.parse_response(renderer.decode(completion), tools)
                 assert parsed.format_valid
                 assert _comparable(parsed.message) == _comparable(messages[turn])
+                assert renderer.parse_completion(completion, tools) == parsed
 
     def test_parse_response_keeps_declared_argument_types(self, renderer: Renderer) -> None:
         call = {
@@ -690,10 +703,10 @@ class ProviderContract:
         assert len({profile.alias for profile in profiles}) == len(profiles)
         assert all(len(profile.tokenizer_revision) == 40 for profile in profiles)
 
-    def test_resolve_model_by_alias_or_id(self, provider: Provider) -> None:
+    def test_resolve_model_by_alias_id_or_tokenizer(self, provider: Provider) -> None:
         for profile in provider.models():
-            assert provider.resolve_model(profile.alias) == profile
-            assert provider.resolve_model(profile.base_model) == profile
+            for name in (profile.alias, profile.base_model, profile.tokenizer_model):
+                assert provider.resolve_model(name) == profile
         with pytest.raises(UsageError):
             provider.resolve_model("no-such-model-pft-contract")
 

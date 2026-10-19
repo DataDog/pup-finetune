@@ -189,7 +189,7 @@ Safety: Free · deletes from the OS keychain · PUP_READ_ONLY: allowed.
 
 ## `pup finetune models list`
 
-List the model profiles of every provider, or of --provider: alias, provider, provider model, context length, reasoning support, default LoRA rank and the provider's --provider-option keys; this needs no API key. With --check, also shows each profile's renderer and pinned tokenizer, asks the provider whether each model can be fine-tuned now, and exits 1 when any cannot.
+List the model profiles of every provider, or of --provider: alias, the names --model accepts for it, provider, provider model, context length, reasoning support, default LoRA rank, whether its tokenizer runs code from the model's repository (trust_remote_code), the provider's --provider-option keys and notes on the model; this needs no API key. With --check, also shows each profile's renderer and pinned tokenizer, asks the provider whether each model can be fine-tuned now, and exits 1 when any cannot.
 
 ```
 pup finetune models list [OPTIONS]
@@ -538,7 +538,7 @@ Safety: Free · reads Datadog · PUP_READ_ONLY: allowed.
 
 Replay each held-out test conversation of a dataset with several base models, one recorded assistant turn at a time, and score each with the tool-call metrics and the LLM judge evaluate uses. Without --confirm, previews the calls and where the data goes. The result ranks the models and recommends the one to fine-tune.
 
-The dataset must be in Datadog, as for `train`. Each model runs in a session of its own, one after another, into OUT/&lt;model&gt;; rerun the same command to continue a benchmark that stopped. A model below --target-pass-rate is worth fine-tuning; one at or above it may need no training. Models within noise of the best are named, so the cheapest to serve can be chosen. --max-rows replays a seeded sample of the test conversations instead, for a quicker, cheaper comparison. Tools are not executed, so the scores measure agreement with the recorded behavior, not task success. Base answers from another evaluation or benchmark of the same dataset, made under the same settings, are reused from DATASET/replay_cache, together with their judgments when the judge is the same, and a model with every answer reused opens no session; --no-reuse makes them again. --evaluators FILE adds your own LLM judges and Python checks to each model's directory, as for evaluate, and the spec's headline (judge, an evaluator or all) ranks the models and meets --target-pass-rate.
+The dataset must be in Datadog, as for `train`. Each model runs in a session of its own, one after another, into OUT/&lt;model&gt; (PROVIDER/MODEL for a model both providers offer); rerun the same command to continue a benchmark that stopped; adding a model reuses the finished ones. Each model replays the test cases it can and gets its own pass rate on them. The finished models (nothing pending, no error a rerun retries, no score the headline still needs) are ranked on the cases the headline (the judge, unless --evaluators names another) scored for every one of them; a model a rerun can still advance is listed unranked and never narrows them. The best one is worth fine-tuning below --target-pass-rate; at or above it on its own cases, with the headline scoring at least 90% of the test cases with a prompt, it may need no training. Models within noise of the best are named, so the cheapest to serve can be chosen. --max-rows replays a seeded sample of the test conversations instead, for a quicker, cheaper comparison. Tools are not executed, so the scores measure agreement with the recorded behavior, not task success. Base answers from another evaluation or benchmark of the same dataset, made under the same settings, are reused from DATASET/replay_cache, together with their judgments when the judge is the same, and a model with every answer reused opens no session; --no-reuse makes them again. --evaluators FILE adds your own LLM judges and Python checks to each model's directory, as for evaluate, and the spec's headline (judge, an evaluator or all) ranks the models and meets --target-pass-rate.
 
 ```
 pup finetune benchmark [OPTIONS] DATASET
@@ -551,7 +551,7 @@ pup finetune benchmark [OPTIONS] DATASET
 | Option | Value | Default | Description |
 | --- | --- | --- | --- |
 | **Models** | | | |
-| `--models` | `M1,M2` | required | Base models to compare, comma-separated (see models list). |
+| `--models` | `M1,M2` | required | Base models to compare, comma-separated (see models list); PROVIDER/MODEL names the provider of a model several offer. |
 | `--target-pass-rate` | `RATE (0.0<=x<=1.0)` | `0.9` | Headline pass rate at which a base model needs no fine-tuning. |
 | **Cases** | | | |
 | `--max-cases` | `N (x>=1)` | `2` | Turns replayed per conversation. |
@@ -571,8 +571,8 @@ pup finetune benchmark [OPTIONS] DATASET
 Examples:
 
 ```sh
-pup finetune benchmark ds --models qwen3p5-9b,glm-5p3-flash
-pup finetune benchmark ds --models qwen3p5-9b,glm-5p3-flash --max-cases 1 --max-rows 20
+pup finetune benchmark ds --models qwen3p5-9b,baseten/glm-5p3-flash
+pup finetune benchmark ds --models qwen3p5-9b,baseten/glm-5p3-flash --max-cases 1 --max-rows 20
 ```
 
 Safety: Paid with --confirm · sends test rows to each model's provider and to the judge · PUP_READ_ONLY: preview only unless offline.
@@ -581,7 +581,7 @@ Safety: Paid with --confirm · sends test rows to each model's provider and to t
 
 Fine-tune --model with LoRA SFT on --dataset's train split, keeping the best epoch by validation loss. Previews without --confirm; trains with it.
 
---dataset must be in Datadog: every kept row pushed with `dataset push`, or the directory made by `dataset fetch` (the offline fake provider trains on any). The run goes in runs/RUN_ID unless --run-dir names another directory (a runs/ this creates gets a .gitignore, since runs hold trace-derived rows), and --provider is inferred from the --model alias when it is offered by one provider only; the preview says so (provider_source), and its next_command pins both. The preview lists rows and rendered tokens per split, the rejected rows, tokens per epoch and in total, the settings and where the data goes. --detach trains in a background worker; follow it with `status --watch`. Training stops early after --patience epochs without a validation-loss improvement; a Ctrl-C or `cancel` still promotes the best epoch. --learning-rate is constant unless --lr-schedule linear or cosine decays it over the steps of --max-epochs epochs (the preview's max_steps; early stopping or a cap ends the run first), after a linear warmup over --warmup-fraction of them (warmup_steps); it never reaches zero, and the other Adam parameters are fixed (run.json settings.optimizer). With --evaluate, the run is also evaluated on the test split in its training session once the best epoch is promoted (see `evaluate`): the judge is calibrated and --eval-out-dir checked before training starts, so a failed calibration trains nothing; --detach is refused with it; and the evaluation stops, partial, at --max-spend-usd. --max-seq-len caps the context (and so the cost): longer rows are left out, as the preview shows (exceeds_context). --remote (Baseten only) runs the training loop in a Baseten CPU job, so training continues while this machine sleeps; --team names the team (default: your only or default team). It needs the baseten CLI and uv on PATH, a source checkout of pup-finetune and a team secret pup_finetune_api_key; it uploads the train and validation rows, the run files and pup-finetune's source to Baseten storage, and is refused with --detach and --evaluate. status copies the job's state into the run directory; cancel cannot stop the job yet.
+--dataset must be in Datadog: every kept row pushed with `dataset push`, or the directory made by `dataset fetch` (the offline fake provider trains on any). The run goes in runs/RUN_ID unless --run-dir names another directory (a runs/ this creates gets a .gitignore, since runs hold trace-derived rows). --model takes a model's alias, or in any case the provider's model id or its Hugging Face tokenizer name, and --provider is inferred from it when one provider offers that model; the preview says so (provider_source), and its next_command pins both, with the alias. The preview lists rows and rendered tokens per split, the rejected rows, tokens per epoch and in total, the settings and where the data goes. --detach trains in a background worker; follow it with `status --watch`. Training stops early after --patience epochs without a validation-loss improvement; a Ctrl-C or `cancel` still promotes the best epoch. --learning-rate is constant unless --lr-schedule linear or cosine decays it over the steps of --max-epochs epochs (the preview's max_steps; early stopping or a cap ends the run first), after a linear warmup over --warmup-fraction of them (warmup_steps); it never reaches zero, and the other Adam parameters are fixed (run.json settings.optimizer). With --evaluate, the run is also evaluated on the test split in its training session once the best epoch is promoted (see `evaluate`): the judge is calibrated and --eval-out-dir checked before training starts, so a failed calibration trains nothing; --detach is refused with it; and the evaluation stops, partial, at --max-spend-usd. --max-seq-len caps the context (and so the cost): longer rows are left out, as the preview shows (exceeds_context). --remote (Baseten only) runs the training loop in a Baseten CPU job, so training continues while this machine sleeps; --team names the team (default: your only or default team). It needs the baseten CLI and uv on PATH, a source checkout of pup-finetune and a team secret pup_finetune_api_key; it uploads the train and validation rows, the run files and pup-finetune's source to Baseten storage, and is refused with --detach and --evaluate. status copies the job's state into the run directory; cancel cannot stop the job yet.
 
 ```
 pup finetune train [OPTIONS]
@@ -635,8 +635,8 @@ pup finetune train [OPTIONS]
 Examples:
 
 ```sh
-pup finetune train --dataset ds --model qwen3p8-27b
-pup finetune train --dataset ds --model qwen3p8-27b --lr-schedule cosine
+pup finetune train --dataset ds --model qwen3p5-9b
+pup finetune train --dataset ds --model qwen3p5-9b --lr-schedule cosine
 ```
 
 Safety: Paid with --confirm · sends rows to the provider (and the judge) · PUP_READ_ONLY: preview only unless offline.

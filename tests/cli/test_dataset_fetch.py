@@ -96,7 +96,9 @@ def test_a_pushed_dataset_fetches_back_to_the_same_rows_splits_and_records(
     assert receipt["dataset_id"] == remote.id
     assert receipt["record_ids"] == original["record_ids"]
     assert data["pipeline"]["push"]["status"] == "pushed"
-    assert any("train --dataset" in step["command"] for step in data["next_steps"])
+    assert any(
+        "train --provider <PROVIDER> --dataset" in step["command"] for step in data["next_steps"]
+    )
     dataset = DatasetDir(target)
     require_in_datadog(dataset, dataset.rows_by_split(), "train", directory=target, offline=False)
 

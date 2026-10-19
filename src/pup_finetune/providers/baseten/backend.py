@@ -685,7 +685,7 @@ class BasetenSampler:
             )
         sequence, latency = self._sample(prompt, max_tokens, "sampling on the Baseten sampler")
         tokens = list(sequence.tokens)
-        parsed = self._renderer.parse_response(self._renderer.decode(tokens), tools)
+        parsed = self._renderer.parse_completion(tokens, tools)
         return Generation(
             message=parsed.message,
             # A completion cut off at max_tokens is not a whole turn, whatever it parses as.

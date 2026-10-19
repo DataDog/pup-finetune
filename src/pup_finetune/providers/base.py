@@ -53,7 +53,9 @@ class ModelProfile:
     ``tokenizer_model`` and ``tokenizer_revision`` pin the Hugging Face tokenizer and chat
     template; the revision must be a full 40-character lowercase commit SHA, never a branch
     or tag that can move. ``renderer`` names the renderer; ``max_seq_len`` is the training
-    context limit in tokens.
+    context limit in tokens. Any of :attr:`names` selects the profile (:func:`find_profile`).
+    ``trust_remote_code`` says the tokenizer runs code from the model's repository, at the
+    pinned revision.
     """
 
     provider: str
@@ -66,6 +68,7 @@ class ModelProfile:
     default_lora_rank: int = 8
     supports_reasoning: bool = False
     notes: str = ""
+    trust_remote_code: bool = False
 
     def __post_init__(self) -> None:
         if not COMMIT_SHA.fullmatch(self.tokenizer_revision):
@@ -77,6 +80,41 @@ class ModelProfile:
             raise ValueError(f"max_seq_len must be positive, got {self.max_seq_len}")
         if self.default_lora_rank <= 0:
             raise ValueError(f"default_lora_rank must be positive, got {self.default_lora_rank}")
+
+    def remote_code_warning(self) -> str | None:
+        """What a preview warns when the tokenizer runs code from the model's repository."""
+        if not self.trust_remote_code:
+            return None
+        return (
+            f"the {self.alias} tokenizer runs Python code from the Hugging Face repository "
+            f"{self.tokenizer_model} at commit {self.tokenizer_revision} on this machine "
+            "(trust_remote_code)"
+        )
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        """Every name that selects this profile, alias first: the alias, the provider's
+        model id and the Hugging Face tokenizer, each once."""
+        return tuple(dict.fromkeys((self.alias, self.base_model, self.tokenizer_model)))
+
+
+def selects(names: Sequence[str], name: str) -> bool:
+    """Whether ``name`` selects the profile whose :attr:`~ModelProfile.names` are ``names``:
+    its alias exactly, or its provider model id or Hugging Face tokenizer in any case."""
+    return name == names[0] or name.casefold() in {other.casefold() for other in names[1:]}
+
+
+def find_profile(profiles: Sequence[ModelProfile], name: str, *, provider: str) -> ModelProfile:
+    """The profile of ``provider``'s ``profiles`` that ``name`` selects (:func:`selects`); a
+    :class:`UsageError` listing the aliases for any other."""
+    for profile in profiles:
+        if selects(profile.names, name):
+            return profile
+    known = ", ".join(profile.alias for profile in profiles)
+    raise UsageError(
+        f"unknown {provider} model {name!r}",
+        hint=f"known models: {known}; `pup finetune models list` shows every name each accepts",
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -904,7 +942,8 @@ class Provider(Protocol):
         ...
 
     def resolve_model(self, alias_or_id: str) -> ModelProfile:
-        """The profile for a profile alias or a provider model id."""
+        """The profile any of whose :attr:`~ModelProfile.names` is ``alias_or_id``
+        (:func:`find_profile`)."""
         ...
 
     def preflight(self, profile: ModelProfile) -> None:

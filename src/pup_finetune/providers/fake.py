@@ -70,6 +70,7 @@ from pup_finetune.providers.base import (
     SmokeTest,
     StepMetrics,
     TrainingUsage,
+    find_profile,
     sampling_usage_text,
     training_usage_text,
 )
@@ -232,6 +233,9 @@ class FakeRenderer:
     def stop_token_ids(self) -> list[int]:
         return [_SPECIAL_IDS[_END]]
 
+    def check_tokens(self) -> None:
+        """The fake's stop token is always one token."""
+
     # The tokenizer: words and whitespace runs, each id derived from the word, so every
     # renderer (in any process) gives the same text the same ids.
 
@@ -275,6 +279,20 @@ class FakeRenderer:
     ) -> list[int]:
         segments = [*self._segments(messages, tools, trainable=set()), _Segment(_ASSISTANT_HEADER)]
         return [token for segment in segments for token in self.tokenize(segment.text)]
+
+    def prompt_refusal(
+        self, messages: Sequence[ChatMessage], tools: Sequence[ToolSpec]
+    ) -> RendererError | None:
+        try:
+            self._segments(messages, tools, trainable=set())
+        except RendererError as exc:
+            return exc
+        return None
+
+    def parse_completion(
+        self, tokens: Sequence[int], tools: Sequence[ToolSpec] = ()
+    ) -> ParsedResponse:
+        return self.parse_response(self.decode(tokens), tools)
 
     def render_completion(self, message: ChatMessage) -> str:
         """The completion text of an assistant ``message``, ``<|end|>`` included."""
@@ -1017,7 +1035,7 @@ class FakeSampler:
         stop_reason = "stop"
         if len(completion) > max_tokens:
             completion, stop_reason = completion[:max_tokens], "length"
-        parsed = self.renderer.parse_response(self.renderer.decode(completion), tools)
+        parsed = self.renderer.parse_completion(completion, tools)
         return Generation(
             message=parsed.message,
             format_valid=parsed.format_valid,
@@ -1103,11 +1121,7 @@ class FakeProvider:
         return [FAKE_PROFILE]
 
     def resolve_model(self, alias_or_id: str) -> ModelProfile:
-        for profile in self.models():
-            if alias_or_id in (profile.alias, profile.base_model):
-                return profile
-        known = ", ".join(profile.alias for profile in self.models())
-        raise UsageError(f"unknown fake model {alias_or_id!r}", hint=f"known models: {known}")
+        return find_profile(self.models(), alias_or_id, provider=PROVIDER_NAME)
 
     def preflight(self, profile: ModelProfile) -> None:
         """Nothing to check offline; only refuses another provider's profile."""

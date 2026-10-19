@@ -29,6 +29,7 @@ from pup_finetune.datadog.pup import Pup
 from pup_finetune.doctor import CheckOutcome
 from pup_finetune.errors import UsageError, install_hint
 from pup_finetune.providers.base import Provider
+from pup_finetune.providers.fireworks.models import PROFILES as FIREWORKS_PROFILES
 from pup_finetune.providers.fireworks.provider import FireworksProvider
 from pup_finetune.runtime import Runtime
 from tests.fakes.fireworks_api import API_KEY, FakeFireworksApi
@@ -509,11 +510,12 @@ def test_check_preflights_the_named_provider_s_models(
     assert result.exit_code == 0, result.stderr
     report = report_of(result)
     names = [check["name"] for check in report["checks"]]
-    assert names[2:6] == [
+    aliases = [profile.alias for profile in FIREWORKS_PROFILES]
+    assert names[2 : 5 + len(aliases)] == [
         "fireworks:key",
         "fireworks:sdk",
         "fireworks:renderer",
-        "fireworks:model:qwen3p8-27b",
+        *(f"fireworks:model:{alias}" for alias in aliases),
     ]
     model = checks_of(result)["fireworks:model:qwen3p8-27b"]
     assert model["status"] == "pass"
@@ -521,7 +523,7 @@ def test_check_preflights_the_named_provider_s_models(
     assert model["label"] == "qwen3p8-27b can be fine-tuned on Fireworks"
     assert report["next_command"] is None
     assert [request.url.path for request in fireworks_api.requests] == [
-        "/v1/accounts/fireworks/models/qwen3p8-27b"
+        f"/v1/accounts/fireworks/models/{alias}" for alias in aliases
     ]
     assert API_KEY not in result.stdout + result.stderr
 

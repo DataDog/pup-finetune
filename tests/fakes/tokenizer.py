@@ -12,6 +12,8 @@ Each special token is one id and every other character is its own id (its code p
     tokenizer = FakeChatTokenizer(merge_newlines=True)  # "\\n\\n" encodes as one token
     tokenizer = FakeChatTokenizer(template=role_tag_template)  # any template function
     tokenizer = FakeChatTokenizer(template=glm5_like)  # GLM-5-like, role tags as stops
+    tokenizer = FakeChatTokenizer(specials=DEEPSEEK_SPECIALS)  # more special tokens
+    tokenizer = FakeXtmlTokenizer()  # Kimi-K3-like: its own code renders and tokenizes
 
 :func:`qwen3_8_like` follows the real Qwen3.8 template: ``<|im_start|>role\\n...<|im_end|>\\n``
 turns, ``<think>`` blocks on assistant turns (kept in history unless the template argument
@@ -20,11 +22,14 @@ turns and a generation prompt that opens ``<think>\\n``. With ``merge_newlines``
 reasoning block's newline merges with that prompt's trailing one, as BPE does. Like a real
 template, it raises on an empty conversation and on tool arguments that are not a mapping.
 Every render is recorded in ``calls``. :func:`glm5_like` follows the real GLM-5 template.
+:class:`FakeXtmlTokenizer` renders Kimi K3's XTML channels the way its tokenizer code does,
+control tokens apart from message text, so text that spells a control token stays text.
 """
 
 from __future__ import annotations
 
 import copy
+import datetime
 import json
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
@@ -67,11 +72,20 @@ class FakeChatTokenizer:
         merge_newlines: bool = False,
         template: Template | None = None,
         template_name: str = "fake-qwen3.8-like-v1",
+        specials: Sequence[str] = (),
     ) -> None:
         self.merge_newlines = merge_newlines
         self.template = template or qwen3_8_like
         self.template_name = template_name
         self.calls: list[dict[str, Any]] = []
+        self.specials = (*SPECIAL_TOKENS, *specials)
+        self.ids = {
+            **SPECIAL_IDS,
+            **{token: DOUBLE_NEWLINE_ID + 1 + index for index, token in enumerate(specials)},
+        }
+        self.text_of = {**_TEXT_OF, **{token_id: token for token, token_id in self.ids.items()}}
+
+    render_tokens: Any = None
 
     @property
     def chat_template(self) -> str:
@@ -85,6 +99,16 @@ class FakeChatTokenizer:
         add_generation_prompt: bool,
         template_kwargs: Mapping[str, Any],
     ) -> str:
+        self._record(messages, tools, add_generation_prompt, template_kwargs)
+        return self.template(messages, tools, add_generation_prompt, template_kwargs)
+
+    def _record(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[Mapping[str, Any]] | None,
+        add_generation_prompt: bool,
+        template_kwargs: Mapping[str, Any],
+    ) -> None:
         self.calls.append(
             {
                 "messages": copy.deepcopy([dict(m) for m in messages]),
@@ -95,15 +119,14 @@ class FakeChatTokenizer:
         )
         if not messages:
             raise ValueError("No messages provided.")
-        return self.template(messages, tools, add_generation_prompt, template_kwargs)
 
     def encode(self, text: str) -> list[int]:
         ids: list[int] = []
         position = 0
         while position < len(text):
-            special = next((t for t in SPECIAL_TOKENS if text.startswith(t, position)), None)
+            special = next((t for t in self.specials if text.startswith(t, position)), None)
             if special is not None:
-                ids.append(SPECIAL_IDS[special])
+                ids.append(self.ids[special])
                 position += len(special)
             elif self.merge_newlines and text.startswith("\n\n", position):
                 ids.append(DOUBLE_NEWLINE_ID)
@@ -114,10 +137,10 @@ class FakeChatTokenizer:
         return ids
 
     def decode(self, token_ids: Sequence[int]) -> str:
-        return "".join(_TEXT_OF.get(token) or chr(token) for token in token_ids)
+        return "".join(self.text_of.get(token) or chr(token) for token in token_ids)
 
     def token_id(self, token: str) -> int | None:
-        return SPECIAL_IDS.get(token)
+        return self.ids.get(token)
 
 
 def _arguments(call: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -245,4 +268,176 @@ def glm5_like(
             parts.append(f"<|{role}|>{content}")
     if add_generation_prompt:
         parts.append("<|assistant|><think>")
+    return "".join(parts)
+
+
+DEEPSEEK_SPECIALS: tuple[str, ...] = (
+    "<｜begin▁of▁sentence｜>",  # noqa: RUF001 - DeepSeek spells them with U+FF5C
+    "<｜end▁of▁sentence｜>",  # noqa: RUF001
+    "<｜User｜>",  # noqa: RUF001
+    "<｜Assistant｜>",  # noqa: RUF001
+)
+"""DeepSeek-V4's special tokens, for a fake behind its chat encoder."""
+
+XTML_CONTROLS: tuple[str, ...] = ("<|open|>", "<|close|>", "<|sep|>", "<|end_of_msg|>")
+XTML_PROMPT_END = '<|open|>message role="assistant"<|sep|><|open|>think<|sep|>'
+
+Segment = tuple[str, bool]
+"""``(text, is_control)``: a control token, or text encoded without control tokens."""
+
+
+def _tag(name: str, *attributes: tuple[str, Any]) -> list[Segment]:
+    words = "".join(f' {key}="{value}"' for key, value in attributes)
+    return [("<|open|>", True), (f"{name}{words}", False), ("<|sep|>", True)]
+
+
+def _close(name: str) -> list[Segment]:
+    return [("<|close|>", True), (name, False), ("<|sep|>", True)]
+
+
+def xtml_segments(
+    messages: Sequence[Mapping[str, Any]],
+    tools: Sequence[Mapping[str, Any]] | None,
+    add_generation_prompt: bool,
+) -> list[Segment]:
+    """Kimi K3's XTML: one message per turn, ending ``<|end_of_msg|>``; an assistant turn
+    holds a think channel, a response channel and, with calls, a tools channel of typed
+    arguments (strings raw, other values as JSON); the prompt opens the think channel."""
+    segments: list[Segment] = []
+    if tools:
+        declared = "\n".join(json.dumps(dict(tool), sort_keys=True) for tool in tools)
+        segments += [*_tag("tools_declare"), (declared, False), *_close("tools_declare")]
+    for message in messages:
+        role = message["role"]
+        segments += _tag("message", ("role", role))
+        if role == "assistant":
+            segments += [*_tag("think"), (message.get("reasoning_content") or "", False)]
+            segments += [*_close("think"), *_tag("response"), (message.get("content") or "", False)]
+            segments += _close("response")
+            calls = message.get("tool_calls") or ()
+            if calls:
+                segments += _tag("tools")
+                for index, call in enumerate(calls, start=1):
+                    segments += _tag("call", ("tool", call["function"]["name"]), ("index", index))
+                    for key, value in _arguments(call).items():
+                        kind = _xtml_type(value)
+                        text = value if isinstance(value, str) else json.dumps(value)
+                        segments += [*_tag("argument", ("key", key), ("type", kind)), (text, False)]
+                        segments += _close("argument")
+                    segments += _close("call")
+                segments += _close("tools")
+        else:
+            segments.append((message.get("content") or "", False))
+        segments += [*_close("message"), ("<|end_of_msg|>", True)]
+    if add_generation_prompt:
+        segments += [*_tag("message", ("role", "assistant")), *_tag("think")]
+    return [(text, control) for text, control in segments if text]
+
+
+def _xtml_type(value: Any) -> str:
+    if isinstance(value, bool):
+        return "boolean"
+    if value is None:
+        return "null"
+    if isinstance(value, int | float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    return "object" if isinstance(value, Mapping) else "array"
+
+
+class FakeXtmlTokenizer(FakeChatTokenizer):
+    """A Kimi-K3-like tokenizer whose own code renders the chat (:func:`xtml_segments`) and
+    encodes message text apart from its control tokens."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            template=lambda messages, tools, generation, _: "".join(
+                text for text, _ in xtml_segments(messages, tools, generation)
+            ),
+            template_name="fake-kimi-k3-like-v1",
+            specials=XTML_CONTROLS,
+        )
+
+    def render_tokens(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        tools: Sequence[Mapping[str, Any]] | None,
+        add_generation_prompt: bool,
+        template_kwargs: Mapping[str, Any],
+    ) -> list[int]:
+        self._record(messages, tools, add_generation_prompt, template_kwargs)
+        return self.segment_ids(xtml_segments(messages, tools, add_generation_prompt))
+
+    def segment_ids(self, segments: Sequence[Segment]) -> list[int]:
+        """``segments`` as ids: each control token one id, text one id per character."""
+        ids: list[int] = []
+        for text, control in segments:
+            ids += [self.ids[text]] if control else [ord(char) for char in text]
+        return ids
+
+
+MUSE_SPECIALS: tuple[str, ...] = (
+    "<|begin_of_text|>",
+    "<|start|>",
+    "<|message|>",
+    "<|eom|>",
+    "<|eot|>",
+)
+
+
+def _atem(call: Mapping[str, Any]) -> str:
+    function = call["function"]
+    parameters = "".join(
+        f'<atem:parameter name="{key}">'
+        f"{value if isinstance(value, str) else json.dumps(value)}</atem:parameter>\n"
+        for key, value in _arguments(call).items()
+    )
+    return (
+        f'<atem:function_calls>\n<atem:invoke name="{function["name"]}">\n{parameters}'
+        "</atem:invoke>\n</atem:function_calls>"
+    )
+
+
+def muse_like(
+    messages: Sequence[Mapping[str, Any]],
+    tools: Sequence[Mapping[str, Any]] | None,
+    add_generation_prompt: bool,
+    template_kwargs: Mapping[str, Any],
+) -> str:
+    """The Muse Glimmer template's structure: a default system message carrying a date
+    (``current_date``, else today's) when there is none, reasoning to ``self``, one message
+    per tool call that writes no text beside the calls, text to a ``recipient`` that ends the
+    turn unless ``end_turn`` is false, and a prompt that opens ``<|start|>assistant``."""
+    parts = ["<|begin_of_text|>"]
+    if not any(message["role"] == "system" for message in messages):
+        today = template_kwargs.get("current_date") or datetime.date.today().isoformat()
+        parts.append(f"<|start|>system<|message|>Default.\nCurrent date: {today}.<|eot|>")
+    for index, message in enumerate(messages):
+        role, content = message["role"], message.get("content") or ""
+        last = index == len(messages) - 1
+        end_token = "<|eom|>" if not last and messages[index + 1]["role"] == role else "<|eot|>"
+        if role in ("system", "user"):
+            parts.append(f"<|start|>{role}<|message|>{content}<|eot|>")
+        elif role == "tool":
+            parts.append(f"<|start|>tool<|message|>{content}<|eot|>")
+        elif role == "assistant":
+            if message.get("reasoning_content"):
+                parts.append(
+                    f"<|start|>assistant to=self<|message|>{message['reasoning_content']}<|eom|>"
+                )
+            calls = message.get("tool_calls") or ()
+            for position, call in enumerate(calls):
+                parts.append(f"<|start|>assistant to={call['function']['name']}<|message|>")
+                parts.append(_atem(call) + (end_token if position == len(calls) - 1 else "<|eom|>"))
+            if not calls:
+                recipient = message.get("recipient") or "user"
+                end_turn = message.get("end_turn")
+                if end_turn is None:
+                    end_turn = recipient == "user"
+                parts.append(f"<|start|>assistant to={recipient}<|message|>{content}")
+                parts.append("<|eot|>" if end_turn else "<|eom|>")
+    if add_generation_prompt:
+        parts.append("<|start|>assistant")
     return "".join(parts)

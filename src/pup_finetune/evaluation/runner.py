@@ -101,11 +101,11 @@ from pup_finetune.storage import (
 from pup_finetune.training.records import StoppedReason, TrainResult
 
 if TYPE_CHECKING:
-    from pup_finetune.evaluation.cases import ReplayCase
+    from pup_finetune.evaluation.cases import Exclusion, ReplayCase
     from pup_finetune.evaluation.compare import CompareTarget
     from pup_finetune.evaluation.evaluators import CheckEvaluator, EvaluatorSet, JudgeEvaluator
     from pup_finetune.evaluation.judge import Judgment
-    from pup_finetune.evaluation.replay import EvalDir, Publisher, ReplaySummary
+    from pup_finetune.evaluation.replay import EvalDir, PairKey, Publisher, ReplaySummary
     from pup_finetune.evaluation.reuse import ReuseIndex, TargetReuse
     from pup_finetune.inference import ChatCompleter, ChatCompletion, JudgeConfig
 
@@ -133,10 +133,12 @@ __all__ = [
     "calibration_failed",
     "calibration_line",
     "cancel_on_signals",
+    "check_hint",
     "deploy_command",
     "evaluate_words",
     "evaluation_exit_code",
     "evaluator_calibration_calls",
+    "evaluator_errors",
     "evaluator_fix",
     "evaluators_preview",
     "finished_result",
@@ -473,6 +475,9 @@ class EvalPlan:
     differ from the defaults, and the judge (see :meth:`evaluate_command`)."""
     compare: CompareTarget | None = None
     """The compare model: ``--compare-model``'s, else the one the directory has attached."""
+    excluded: Mapping[str, Exclusion] = field(default_factory=dict)
+    """The test cases left out of :attr:`cases` because the run's model cannot replay them,
+    by case id (:func:`~pup_finetune.evaluation.cases.exclusions`)."""
     base_keys: Mapping[str, str] = field(default_factory=dict)
     """Each case's base answer key in the dataset's store, by case id."""
     reuse: ReuseIndex | None = None
@@ -685,6 +690,13 @@ class EvalPlan:
             found.append("test cases, generated answers and scores -> Datadog (experiments)")
         return found
 
+    def exclusion_warnings(self) -> list[str]:
+        from pup_finetune.evaluation.cases import exclusion_warning
+
+        total = len(self.cases) + len(self.excluded)
+        warning = exclusion_warning(self.excluded, cases=total, model=self.profile.alias)
+        return [] if warning is None else [warning]
+
     def _refuse_another_compare(self, eval_dir: EvalDir) -> None:
         """Raise the conflict --confirm would raise for another compare model than the one
         ``eval_dir`` keeps: fail the preview now, never offer that --confirm."""
@@ -775,11 +787,15 @@ class EvalPlan:
         """The calls the evaluation makes. With ``tuned_checkpoint`` (a standalone run), what
         ``--out-dir`` already holds under the same settings is left out of the counts."""
         from pup_finetune.datadog.experiments import experiment_name
+        from pup_finetune.evaluation.cases import excluded_by_reason
         from pup_finetune.evaluation.compare import require_sent, skipped_warning
         from pup_finetune.evaluation.replay import CAVEAT, COMPARE, TARGETS, EvalDir
 
         settings = self.settings
-        warnings: list[str] = [] if self.reuse is None else list(self.reuse.warnings)
+        warnings = self.exclusion_warnings()
+        if (remote := self.profile.remote_code_warning()) is not None:
+            warnings.append(remote)
+        warnings += [] if self.reuse is None else self.reuse.warnings
         targets = self.targets
         replays = self.replays
         skips = Counter(self.compare_skips.values())
@@ -920,6 +936,8 @@ class EvalPlan:
             "out_dir": display_path(self.out_dir),
             "rows": {"test": trajectories},
             "cases": len(self.cases),
+            "excluded_cases": len(self.excluded),
+            "excluded_by_reason": excluded_by_reason(self.excluded),
             "trajectories": trajectories,
             "targets": target_names,
             **(
@@ -1301,7 +1319,7 @@ def plan_evaluation(
     being trained or the run's tuned model: the model id the run promotes to
     (:func:`~pup_finetune.runs.model_id_for_run`) or, once known, the ``promoted`` model.
     """
-    from pup_finetune.evaluation.cases import cases_from_dataset
+    from pup_finetune.evaluation.cases import cases_from_dataset, exclusions
     from pup_finetune.evaluation.compare import resolve_compare, stored_compare
     from pup_finetune.evaluation.evaluators import resolve_evaluators, stored_evaluators
     from pup_finetune.evaluation.judge import check_judge_differs
@@ -1338,19 +1356,29 @@ def plan_evaluation(
             "no assistant turn to replay",
             hint="import more rows so the test split holds some conversations",
         )
+    excluded = exclusions(cases, get_provider(provider, runtime).renderer(profile))
+    if len(excluded) == len(cases):
+        first = next(iter(excluded.values()))
+        raise UsageError(
+            f"nothing to evaluate: {profile.alias} cannot replay any of the {len(cases)} test "
+            f"cases ({first.code}: {first.detail})",
+            hint="import rows whose test conversations the model can replay",
+        )
+    replayed = [case for case in cases if case.id not in excluded]
     inputs = key_inputs(provider, profile, rendering, settings.max_tokens)
-    keys = {case.id: generation_key(inputs, case) for case in cases}
+    keys = {case.id: generation_key(inputs, case) for case in replayed}
     reuse = None
     if settings.reuse:
         own = EvalDir(settings.out_dir).read_generations()
-        reuse = ReuseIndex.load(dataset.path, judge_config, [Wanted("base", cases, keys, own)])
+        reuse = ReuseIndex.load(dataset.path, judge_config, [Wanted("base", replayed, keys, own)])
     plan = EvalPlan(
         run_id=run_id,
         run_dir=run_dir,
         provider=provider,
         profile=profile,
         rendering=dict(rendering),
-        cases=cases,
+        cases=replayed,
+        excluded=excluded,
         judge=judge_config,
         judge_source=judge_source,
         settings=settings,
@@ -1791,14 +1819,23 @@ def replay_result(
     status = "partial"
     if outcome.complete:
         status = "complete_with_errors" if errors or scoring else "complete"
-    warnings: list[str] = [] if shared is None else [shared]
+    warnings = plan.exclusion_warnings()
+    if shared is not None:
+        warnings.append(shared)
     hint = None
     publication = _publication(plan, outcome)
-    failed = {} if plan.evaluators is None else _evaluator_errors(plan)
+    unrenderable = sum(int(target["errors_unrenderable"]) for target in summary["targets"].values())
+    failed = (
+        {}
+        if plan.evaluators is None
+        else evaluator_errors(
+            EvalDir(plan.out_dir).read_results(), plan.replays, plan.evaluator_names
+        )
+    )
     checks = {check.name for check in plan.evaluators.checks} if plan.evaluators else set()
-    rescored = bool(errors) or any(failed[name]["errors"] for name in set(failed) - checks)
-    if scoring:
-        warnings.append(scoring_warning(scoring, retried=rescored))
+    rescored = errors > unrenderable or any(failed[name]["errors"] for name in set(failed) - checks)
+    if missing := scoring - unrenderable * len(plan.evaluator_names):
+        warnings.append(scoring_warning(missing, retried=rescored))
     if plan.evaluators is not None:
         reports = _reports(EvalDir(plan.out_dir))
         calibrate = not plan.settings.skip_calibration
@@ -1806,8 +1843,10 @@ def replay_result(
     if errors:
         hint = (
             f"{errors} case(s) ended in an error, left out of every rate (see the file "
-            "files.results names); run next_command to retry them"
+            "files.results names)"
         )
+        if errors > unrenderable:
+            hint += "; run next_command to retry them"
         too_long = {
             name: target.get("errors_too_long_by_stage") or {}
             for name, target in summary["targets"].items()
@@ -1826,13 +1865,18 @@ def replay_result(
                 "which a retry cannot fix: compare with another --compare-model in a new "
                 "--out-dir"
             )
+        if unrenderable:
+            hint += (
+                f". {unrenderable} of them have a prompt the model's chat format cannot "
+                "continue, which a retry cannot fix, so next_command never retries them"
+            )
         if publication["status"] in _SENT:
             hint += (
                 ". Spans already published keep the results they were sent with, these errors "
                 "included: a retry updates the local results only, so evaluate into a new "
                 "--out-dir to publish experiments with every result"
             )
-    if broken := _check_hint(failed, checks, plan.out_dir):
+    if broken := check_hint(failed, checks, plan.out_dir):
         hint = broken if hint is None else f"{hint}. {broken}"
     if plan.compare is not None:
         skips = Counter(plan.compare_skips.values())
@@ -1901,7 +1945,12 @@ def replay_result(
             "tuned_checkpoint": None
             if tuned_sampler is None
             else dataclasses.asdict(tuned_sampler),
-            **_replay_next(plan, status=status, publication=publication, retry=retry),
+            **_replay_next(
+                plan,
+                finished=_finished(status, summary),
+                publication=publication,
+                retry=retry,
+            ),
         }
     )
 
@@ -1916,16 +1965,15 @@ def scoring_warning(count: int, *, retried: bool = True) -> str:
     )
 
 
-def _evaluator_errors(plan: EvalPlan) -> dict[str, dict[str, Any]]:
-    """Each evaluator's entries that ended in an error over the plan's pairs, with the first
-    error (``{"stage", "type", "message"}``)."""
-    from pup_finetune.evaluation.replay import EvalDir
-
-    results = EvalDir(plan.out_dir).read_results()
-    found: dict[str, dict[str, Any]] = {
-        name: {"errors": 0, "first_error": None} for name in plan.evaluator_names
-    }
-    for target, cases in plan.replays.items():
+def evaluator_errors(
+    results: Mapping[PairKey, Mapping[str, Any]],
+    replays: Mapping[str, Sequence[ReplayCase]],
+    names: Sequence[str],
+) -> dict[str, dict[str, Any]]:
+    """Each of the evaluators ``names``' entries in ``results`` that ended in an error over
+    the pairs of ``replays``, with the first error (``{"stage", "type", "message"}``)."""
+    found: dict[str, dict[str, Any]] = {name: {"errors": 0, "first_error": None} for name in names}
+    for target, cases in replays.items():
         for case in cases:
             entries = (results.get((target, case.id)) or {}).get("evaluators")
             for name, counted in found.items():
@@ -1936,7 +1984,7 @@ def _evaluator_errors(plan: EvalPlan) -> dict[str, dict[str, Any]]:
     return found
 
 
-def _check_hint(found: Mapping[str, Mapping[str, Any]], checks: set[str], out_dir: Path) -> str:
+def check_hint(found: Mapping[str, Mapping[str, Any]], checks: set[str], out_dir: Path) -> str:
     """The hint for the ``checks`` that raised in ``found``, which a retry cannot fix since
     each runs its frozen file again; empty when none raised."""
     raised = [
@@ -1954,7 +2002,7 @@ def _check_hint(found: Mapping[str, Mapping[str, Any]], checks: set[str], out_di
 
 
 def _replay_next(
-    plan: EvalPlan, *, status: str, publication: Mapping[str, Any], retry: bool
+    plan: EvalPlan, *, finished: bool, publication: Mapping[str, Any], retry: bool
 ) -> dict[str, Any]:
     """``next_command`` and ``next_steps`` after an evaluation.
 
@@ -1967,12 +2015,12 @@ def _replay_next(
     """
     rerun = plan.evaluate_command()
     pushing = (
-        _push_first(plan.publishing, shlex.join(rerun), plan.run_dir, complete=status == "complete")
+        _push_first(plan.publishing, shlex.join(rerun), plan.run_dir, complete=finished)
         if publication.get("status") == "skipped"
         else []
     )
     steps = list(pushing)
-    if status == "complete" and plan.compare is None:
+    if finished and plan.compare is None:
         compared = evaluate_words(
             plan.run_dir,
             plan.settings,
@@ -1989,7 +2037,7 @@ def _replay_next(
                 "previews first)",
             )
         )
-    if status == "complete" and plan.evaluators is None:
+    if finished and plan.evaluators is None:
         steps.append(
             step(
                 template(*rerun[len(PROGRAM) :], "--evaluators", "<EVALUATORS_FILE>"),
@@ -2177,10 +2225,32 @@ def _settings_record(plan: EvalPlan) -> dict[str, Any]:
     }
 
 
-def _is_complete(status: str, publication: str | None) -> bool:
-    """Whether an evaluation is done: every pair judged without error, and its publishing
-    neither failed nor was cancelled (either is what a rerun continues)."""
-    return status == "complete" and publication not in {"failed", "cancelled", "pending"}
+def _is_complete(status: str, publication: str | None, summary: object) -> bool:
+    """Whether an evaluation is done: :func:`_finished`, and its publishing neither failed nor
+    was cancelled (either is what a rerun continues)."""
+    return _finished(status, summary) and publication not in {"failed", "cancelled", "pending"}
+
+
+def _finished(status: str, summary: object) -> bool:
+    """Whether every pair is judged, without an error a retry could fix: a rerun makes no
+    model call."""
+    return status == "complete" or (status == "complete_with_errors" and _errors_final(summary))
+
+
+def _errors_final(summary: object) -> bool:
+    """Whether every error in ``summary`` is a prompt the renderer refused, which a rerun
+    never retries: no other pair error, and no evaluator error on an answer (an evaluator
+    counts each pair error as its own too)."""
+    if not isinstance(summary, Mapping):
+        return False
+    return all(
+        target["errors"] == target["errors_unrenderable"]
+        and all(
+            entry["errors"] == target["errors"]
+            for entry in (target.get("evaluators") or {}).values()
+        )
+        for target in summary["targets"].values()
+    )
 
 
 def record_evaluation(plan: EvalPlan, outcome: Mapping[str, Any]) -> None:
@@ -2202,7 +2272,7 @@ def record_evaluation(plan: EvalPlan, outcome: Mapping[str, Any]) -> None:
     entry = {
         "settings": settings,
         "status": status,
-        "complete": _is_complete(status, published),
+        "complete": _is_complete(status, published, summary),
         "publication": published,
         "headline": headline(summary) if isinstance(summary, Mapping) else None,
         "recorded_at": utcnow().isoformat(timespec="seconds").replace("+00:00", "Z"),

@@ -40,7 +40,9 @@ def dataset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def train(dataset: Path) -> Result:
-    return invoke("train", "--dataset", str(dataset), "--model", "qwen3p8-27b")
+    return invoke(
+        "train", "--provider", "fireworks", "--dataset", str(dataset), "--model", "qwen3p8-27b"
+    )
 
 
 def test_train_refuses_a_dataset_never_pushed_and_names_the_push(dataset: Path) -> None:
@@ -105,7 +107,7 @@ def test_train_refuses_kept_rows_changed_after_the_push_and_names_them(dataset: 
 def test_the_refusal_names_a_few_of_many_changed_rows(dataset: Path) -> None:
     mark_pushed(dataset)
     edited = edit_rows(dataset, 7)
-    result = invoke("benchmark", str(dataset), "--models", "qwen3p8-27b")
+    result = invoke("benchmark", str(dataset), "--models", "fireworks/qwen3p8-27b")
     assert result.exit_code == 2
     shown = ", ".join(edited[:5])
     assert (
@@ -200,7 +202,7 @@ def test_dropped_rows_need_no_push(dataset: Path, tmp_path: Path) -> None:
 
 
 def test_benchmark_on_a_real_model_refuses_a_dataset_never_pushed(dataset: Path) -> None:
-    result = invoke("benchmark", str(dataset), "--models", "qwen3p8-27b")
+    result = invoke("benchmark", str(dataset), "--models", "fireworks/qwen3p8-27b")
     assert result.exit_code == 2
     assert result.stderr.startswith(
         "Error [usage]: benchmark reads a dataset that is in Datadog, and ds was never pushed\n"

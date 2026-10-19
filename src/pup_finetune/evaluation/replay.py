@@ -36,15 +36,16 @@ holds, all ``0600``:
 
 A rerun skips the pairs whose result is ``ok`` and scored by every attached evaluator,
 reuses a stored generation for a pair that still needs a judgment, runs only the
-evaluators a pair misses, and retries the pairs that failed. A generation that fails after the
-sampler's own retries, or a judge call that fails after the client's (an outage, not a
-verdict), is recorded as an error result and the run goes on; errors are counted apart and
-never count in a pass rate. Setting ``cancel`` (the CLI sets it on Ctrl-C or SIGTERM) stops
-new pairs from starting; the ones in flight finish and are kept. A second Ctrl-C stops at
-once: the pairs in flight are abandoned, and nothing they finish later is written, since
-the directory's lock is released and the samplers are closed once :func:`run_replay`
-returns. The workers are daemon threads, so the process can exit without waiting for a call
-still blocked in a provider.
+evaluators a pair misses, and retries the pairs that failed, except a generation the
+model's renderer refused (:func:`is_final`): rendering is deterministic, so a retry would
+fail the same way. A generation that fails after the sampler's own retries, or a judge call
+that fails after the client's (an outage, not a verdict), is recorded as an error result and
+the run goes on; errors are counted apart and never count in a pass rate. Setting ``cancel``
+(the CLI sets it on Ctrl-C or SIGTERM) stops new pairs from starting; the ones in flight
+finish and are kept. A second Ctrl-C stops at once: the pairs in flight are abandoned, and
+nothing they finish later is written, since the directory's lock is released and the
+samplers are closed once :func:`run_replay` returns. The workers are daemon threads, so the
+process can exit without waiting for a call still blocked in a provider.
 
 Like the metrics and the judge, every score measures agreement with the recorded behavior
 on held-out conversations, not task success: tools were never executed (:data:`CAVEAT`).
@@ -88,6 +89,7 @@ from pup_finetune.evaluation.metrics import aggregate, score_case
 from pup_finetune.inference import JudgeConfig
 from pup_finetune.providers.base import CheckpointRef, Generation, Sampler
 from pup_finetune.redaction import redact
+from pup_finetune.rendering.base import RendererError
 from pup_finetune.storage import (
     DirectoryLock,
     append_jsonl,
@@ -348,6 +350,19 @@ class EvalDir:
         atomic_write_json(self.summary_path, finite_json(dict(summary)))
 
 
+def is_final(result: Mapping[str, Any]) -> bool:
+    """Whether ``result`` is one a rerun keeps: ``ok``, or an error a retry cannot fix, a
+    generation whose prompt the model's renderer refused."""
+    if result.get("status") == "ok":
+        return True
+    error = result.get("error")
+    return (
+        isinstance(error, Mapping)
+        and error.get("stage") == "generation"
+        and error.get("type") == RendererError.__name__
+    )
+
+
 def remaining_work(
     eval_dir: EvalDir, replays: Mapping[str, Sequence[ReplayCase]], evaluators: Sequence[str] = ()
 ) -> dict[str, Any]:
@@ -355,9 +370,9 @@ def remaining_work(
     each target replays): its ``{"done", "generate", "judge"}`` pairs, and with
     ``evaluators`` the pairs each still scores (``"evaluators": {name: n}``).
 
-    ``done`` pairs have an ``ok`` result scored by every evaluator; every other pair without
-    an ``ok`` result is judged, and generated too unless a generation is stored. Reads only,
-    without the lock: for previews.
+    ``done`` pairs have an ``ok`` result scored by every evaluator, or an error a rerun
+    keeps (:func:`is_final`); every other pair without an ``ok`` result is judged, and
+    generated too unless a generation is stored. Reads only, without the lock: for previews.
     """
     generations, results = eval_dir.read_generations(), eval_dir.read_results()
     found: dict[str, Any] = {}
@@ -367,6 +382,9 @@ def remaining_work(
         for case in cases:
             key = (target, case.id)
             result = results.get(key, {})
+            if result.get("status") != "ok" and is_final(result):
+                done += 1
+                continue
             missing = unscored(result.get("evaluators"), evaluators)
             left.update(missing)
             if result.get("status") == "ok":
@@ -593,10 +611,10 @@ class _Replay:
         ]
 
     def done(self, result: Mapping[str, Any] | None) -> bool:
-        return (
-            result is not None
-            and result.get("status") == "ok"
-            and not unscored(result.get("evaluators"), list(self.scorers))
+        if result is None or not is_final(result):
+            return False
+        return result.get("status") != "ok" or not unscored(
+            result.get("evaluators"), list(self.scorers)
         )
 
     def pair(self, target: str, case: ReplayCase) -> dict[str, Any] | None:
@@ -979,6 +997,7 @@ def _target_summary(
     ok: list[Mapping[str, Any]] = []
     errors: Counter[str] = Counter()
     too_long: Counter[str] = Counter()
+    unrenderable = 0
     pending = 0
     for case in cases:
         result = results.get((target, case.id))
@@ -992,6 +1011,7 @@ def _target_summary(
             errors[str(stage or "unknown")] += 1
             if isinstance(error, Mapping) and error.get("type") == "ContextLimitError":
                 too_long[str(stage or "unknown")] += 1
+            unrenderable += is_final(result)
     unanswered: Counter[str] = Counter()
     for result in ok:
         judgment = result.get("judgment")
@@ -1020,6 +1040,7 @@ def _target_summary(
         "errors_by_stage": dict(sorted(errors.items())),
         "errors_too_long": sum(too_long.values()),
         "errors_too_long_by_stage": dict(sorted(too_long.items())),
+        "errors_unrenderable": unrenderable,
         "pending": pending,
         "skipped": skipped,
         "judge_pass": _rate(sum(_passed(result) for result in ok), len(ok)),

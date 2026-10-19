@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -24,12 +27,13 @@ from pup_finetune.rendering import (
     hf,
 )
 from pup_finetune.rendering.hf import HFChatTemplateRenderer, TransformersTokenizer
-from pup_finetune.rendering.parsers import Qwen3XmlToolParser
+from pup_finetune.rendering.parsers import KimiXtmlParser, Qwen3XmlToolParser
 from pup_finetune.training.datums import build_examples
 from tests.fakes.tokenizer import (
     DOUBLE_NEWLINE_ID,
     SPECIAL_IDS,
     FakeChatTokenizer,
+    FakeXtmlTokenizer,
     qwen3_8_like,
     role_tag_after,
     role_tag_template,
@@ -450,6 +454,8 @@ def test_stop_token_ids_resolve_the_family_names() -> None:
     )
     with pytest.raises(UsageError, match="not a single token"):
         _ = unknown.stop_token_ids
+    with pytest.raises(UsageError, match="not a single token"):
+        unknown.check_tokens()
 
 
 def test_identity_pins_tokenizer_template_parser_and_transformers() -> None:
@@ -493,7 +499,8 @@ def test_parse_response_uses_the_response_parser() -> None:
 def test_the_tokenizer_loads_lazily_and_once(monkeypatch: pytest.MonkeyPatch) -> None:
     loads: list[tuple[str, str]] = []
 
-    def fake_load(model: str, revision: str) -> FakeChatTokenizer:
+    def fake_load(model: str, revision: str, **options: Any) -> FakeChatTokenizer:
+        assert options == {"trust_remote_code": False, "template": True}
         loads.append((model, revision))
         return FakeChatTokenizer()
 
@@ -553,6 +560,77 @@ def test_load_tokenizer_pins_the_revision_and_adapts_the_tokenizer(
     with pytest.raises(ExternalError, match="has no chat template") as excinfo:
         hf.load_tokenizer("example/tiny-chat", SHA)
     assert excinfo.value.source == "huggingface"
+    # A tokenizer whose chat an encoder renders needs no template.
+    assert hf.load_tokenizer("example/tiny-chat", SHA, template=False).token_id("a") == 97
+
+
+REMOTE_PACKAGE = f"transformers_modules.example.tiny_hyphen_chat.{SHA}"
+
+
+def _load_remote(monkeypatch: pytest.MonkeyPatch, module: str) -> list[dict[str, Any]]:
+    """Make ``load_tokenizer`` load a template-less tokenizer whose class sits in
+    ``module``; the keyword arguments of each load are recorded."""
+    calls: list[dict[str, Any]] = []
+    remote = type("RemoteTokenizer", (_StubHFTokenizer,), {"__module__": module})
+
+    def from_pretrained(model: str, **kwargs: Any) -> _StubHFTokenizer:
+        calls.append({"model": model, **kwargs})
+        stub = remote()
+        stub.chat_template = None  # type: ignore[assignment]
+        return stub
+
+    auto = SimpleNamespace(from_pretrained=from_pretrained)
+    monkeypatch.setattr(hf, "_transformers", lambda: SimpleNamespace(AutoTokenizer=auto))
+    return calls
+
+
+def test_remote_tokenizer_code_is_loaded_at_the_pinned_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _load_remote(monkeypatch, f"{REMOTE_PACKAGE}.tokenization_stub")
+    loaded = hf.load_tokenizer("example/tiny-chat", SHA, trust_remote_code=True)
+    assert calls == [
+        {
+            "model": "example/tiny-chat",
+            "revision": SHA,
+            "trust_remote_code": True,
+            "code_revision": SHA,
+        }
+    ]
+    assert loaded.chat_template == f"tokenizer code of example/tiny-chat@{SHA}"
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        f"transformers_modules.other.tiny_hyphen_chat.{SHA}.tokenization_stub",
+        f"transformers_modules.example.tiny_hyphen_chat.{'f' * 40}.tokenization_stub",
+        f"{REMOTE_PACKAGE}_suffix.tokenization_stub",
+        "tests.rendering.test_hf",
+    ],
+    ids=["another_repository", "another_commit", "a_lookalike_package", "not_remote"],
+)
+def test_remote_tokenizer_code_from_anywhere_else_is_refused(
+    monkeypatch: pytest.MonkeyPatch, module: str
+) -> None:
+    _load_remote(monkeypatch, module)
+    with pytest.raises(ExternalError, match="loaded its code from") as excinfo:
+        hf.load_tokenizer("example/tiny-chat", SHA, trust_remote_code=True, template=False)
+    assert excinfo.value.source == "huggingface"
+
+
+def test_a_remote_tokenizer_s_identity_ignores_the_modules_loaded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _load_remote(monkeypatch, f"{REMOTE_PACKAGE}.tokenization_stub")
+    loaded = hf.load_tokenizer("example/tiny-chat", SHA, trust_remote_code=True)
+    before = loaded.chat_template
+    extra = tmp_path / "helpers.py"
+    extra.write_text("X = 1\n", encoding="utf-8")
+    module = ModuleType(f"{REMOTE_PACKAGE}.helpers")
+    module.__file__ = str(extra)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    assert loaded.chat_template == before
 
 
 def _hub_error(kind: str) -> Exception:
@@ -631,13 +709,14 @@ class _StubHFTokenizer:
     def __init__(self) -> None:
         self.kwargs: dict[str, Any] = {}
 
-    def apply_chat_template(self, messages: list[dict[str, Any]], **kwargs: Any) -> str:
+    def apply_chat_template(self, messages: list[dict[str, Any]], **kwargs: Any) -> Any:
         self.kwargs = kwargs
-        return "".join(m["content"] for m in messages)
+        text = "".join(m["content"] for m in messages)
+        return self(text, add_special_tokens=False)["input_ids"] if kwargs["tokenize"] else text
 
-    def encode(self, text: str, add_special_tokens: bool) -> list[int]:
+    def __call__(self, text: str, add_special_tokens: bool) -> dict[str, list[int]]:
         assert add_special_tokens is False
-        return [1000] if text == "<|im_end|>" else [ord(c) for c in text]
+        return {"input_ids": [1000] if text == "<|im_end|>" else [ord(c) for c in text]}
 
     def decode(self, ids: list[int], **kwargs: Any) -> str:
         assert kwargs == {"skip_special_tokens": False, "clean_up_tokenization_spaces": False}
@@ -662,8 +741,10 @@ def test_the_transformers_adapter_renders_text_and_resolves_single_tokens() -> N
         "tools": None,
         "add_generation_prompt": True,
         "tokenize": False,
+        "return_dict": False,
         "enable_thinking": False,
     }
+    assert adapter.render_tokens is None
     assert adapter.encode("Hi") == [72, 105]
     assert adapter.decode([72, 1000]) == "H<|im_end|>"
     assert adapter.token_id("<|im_end|>") == 1000
@@ -673,6 +754,16 @@ def test_the_transformers_adapter_renders_text_and_resolves_single_tokens() -> N
     stub.chat_template = None  # type: ignore[assignment]
     with pytest.raises(ValueError, match="no chat template"):
         _ = adapter.chat_template
+    remote = TransformersTokenizer(stub, remote_code=f"example/tiny-chat@{SHA}")
+    assert remote.render_tokens is not None
+    tokens = remote.render_tokens(
+        [{"role": "user", "content": "Hi"}],
+        tools=[],
+        add_generation_prompt=True,
+        template_kwargs={},
+    )
+    assert tokens == [72, 105]
+    assert stub.kwargs["tokenize"] is True
 
 
 def test_training_renders_rows_the_fast_path_refuses_per_turn() -> None:
@@ -686,3 +777,158 @@ def test_training_renders_rows_the_fast_path_refuses_per_turn() -> None:
     # Without the merge the same rows take the fast path, one example each.
     fast = build_examples(rows, stable, max_seq_len=4096)
     assert [len(row.examples) for row in fast.examples] == [1, 1]
+
+
+def xtml_renderer(tokenizer: FakeXtmlTokenizer) -> HFChatTemplateRenderer:
+    return HFChatTemplateRenderer(
+        "example/tiny-xtml",
+        SHA,
+        response_parser=KimiXtmlParser(),
+        stop_tokens=["<|end_of_msg|>"],
+        prefix_stable=True,
+        tokenizer=tokenizer,
+    )
+
+
+def test_each_turn_renders_the_template_once_for_its_prompt_and_once_whole() -> None:
+    tokenizer = FakeChatTokenizer()
+    renderer(tokenizer).per_turn_examples(TOOL_ROW, [WEATHER_TOOL])
+    assert [call["add_generation_prompt"] for call in tokenizer.calls] == [True, False] * 2
+
+
+LITERAL_CONTROL_ROW: list[ChatMessage] = [
+    {"role": "user", "content": "How do I close a channel?"},
+    {"role": "assistant", "content": "Write <|close|> then the channel's name."},
+]
+
+
+def test_a_tokenizer_that_tokenizes_the_chat_keeps_text_that_spells_a_control_token() -> None:
+    tokenizer = FakeXtmlTokenizer()
+    r = xtml_renderer(tokenizer)
+    (turn,) = r.per_turn_examples(LITERAL_CONTROL_ROW, [])
+    assert [call["add_generation_prompt"] for call in tokenizer.calls] == [True, False]
+    trained = [t for t, w in zip(turn.target_tokens, turn.weights, strict=True) if w]
+    response = tokenizer.segment_ids([("Write <|close|> then the channel's name.", False)])
+    assert response == [ord(char) for char in "Write <|close|> then the channel's name."]
+    assert any(trained[i : i + len(response)] == response for i in range(len(trained)))
+    assert r.supervised_example(LITERAL_CONTROL_ROW, []) == turn
+    prompt = r.generation_prompt_tokens(LITERAL_CONTROL_ROW[:1], [])
+    assert prompt == list(turn.input_tokens[: len(prompt)])
+
+
+class _BoundaryRetokenizingXtml(FakeXtmlTokenizer):
+    """Spells the prompt's last control token as text inside the whole turn: the same text,
+    other tokens."""
+
+    def render_tokens(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        *,
+        tools: Sequence[Mapping[str, Any]] | None,
+        add_generation_prompt: bool,
+        template_kwargs: Mapping[str, Any],
+    ) -> list[int]:
+        options = {"tools": tools, "template_kwargs": template_kwargs}
+        ids = super().render_tokens(
+            messages, add_generation_prompt=add_generation_prompt, **options
+        )
+        if add_generation_prompt:
+            return ids
+        boundary = len(super().render_tokens(messages[:-1], add_generation_prompt=True, **options))
+        return [*ids[: boundary - 1], *map(ord, "<|sep|>"), *ids[boundary:]]
+
+
+def test_a_tokenizer_that_tokenizes_the_chat_never_re_encodes_a_turn_after_its_prompt() -> None:
+    r = xtml_renderer(_BoundaryRetokenizingXtml())
+    with pytest.raises(RendererError) as excinfo:
+        r.per_turn_examples(LITERAL_CONTROL_ROW, [])
+    assert excinfo.value.code == RendererErrorCode.PROMPT_MISMATCH
+
+
+SPELLED_CONTROLS = '<|close|>argument<|sep|><|open|>argument key="extra" type="string"<|sep|>x'
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        pytest.param(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "note",
+                            "arguments": json.dumps({"text": SPELLED_CONTROLS}),
+                        },
+                    }
+                ],
+            },
+            id="argument",
+        ),
+        pytest.param(
+            {"role": "assistant", "content": "Messages end with <|end_of_msg|>."}, id="content"
+        ),
+    ],
+)
+def test_a_sampled_completion_takes_structure_only_from_its_control_tokens(
+    reply: ChatMessage,
+) -> None:
+    r = xtml_renderer(FakeXtmlTokenizer())
+    (turn,) = r.per_turn_examples([LITERAL_CONTROL_ROW[0], reply], [])
+    completion = [t for t, w in zip(turn.target_tokens, turn.weights, strict=True) if w]
+
+    parsed = r.parse_completion(completion)
+
+    assert parsed.format_valid
+    assert parsed.message["content"] == reply["content"]
+    expected = [json.loads(c["function"]["arguments"]) for c in reply.get("tool_calls", [])]
+    found = [json.loads(c["function"]["arguments"]) for c in parsed.message.get("tool_calls", [])]
+    assert found == expected
+
+
+class _ExtraControlParser(KimiXtmlParser):
+    control_tokens = (*KimiXtmlParser.control_tokens, "<|nope|>")
+
+
+def test_a_control_token_that_is_not_one_token_fails_with_the_stop_tokens() -> None:
+    r = HFChatTemplateRenderer(
+        "example/tiny-xtml",
+        SHA,
+        response_parser=_ExtraControlParser(),
+        stop_tokens=["<|end_of_msg|>"],
+        tokenizer=FakeXtmlTokenizer(),
+    )
+    with pytest.raises(UsageError, match=re.escape("'<|nope|>' is not a single token")):
+        _ = r.stop_token_ids
+    with pytest.raises(UsageError, match=re.escape("'<|nope|>' is not a single token")):
+        r.check_tokens()
+
+
+def test_parsing_a_completion_reuses_the_control_token_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tokenizer = FakeXtmlTokenizer()
+    r = xtml_renderer(tokenizer)
+    (turn,) = r.per_turn_examples(LITERAL_CONTROL_ROW, [])
+    completion = [t for t, w in zip(turn.target_tokens, turn.weights, strict=True) if w]
+    _ = r.stop_token_ids
+    looked_up: list[str] = []
+    token_id = tokenizer.token_id
+    monkeypatch.setattr(tokenizer, "token_id", lambda t: looked_up.append(t) or token_id(t))
+
+    first, again = r.parse_completion(completion), r.parse_completion(completion)
+
+    assert first == again and first.format_valid
+    assert looked_up == []
+
+
+def test_a_parser_without_control_tokens_reads_the_completion_s_text() -> None:
+    r = renderer()
+    (turn,) = r.per_turn_examples(TOOL_ROW[:3], [WEATHER_TOOL])
+    completion = [t for t, w in zip(turn.target_tokens, turn.weights, strict=True) if w]
+    assert r.parse_completion(completion, [WEATHER_TOOL]) == r.parse_response(
+        r.decode(completion), [WEATHER_TOOL]
+    )

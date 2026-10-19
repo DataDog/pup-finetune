@@ -94,11 +94,18 @@ an assistant message. `transformers` comes from the optional `hf` extra and load
   inference side: the prompt a sampler continues, where it stops, and how a completion becomes
   an OpenAI assistant message plus a `format_valid` flag. `parse_response` takes the prompt's
   tools, since a format can write argument values untyped (Qwen3.8 writes strings unquoted).
+  Samplers call `parse_completion` with the sampled token ids: it parses their text, except
+  that Kimi K3's parser, whose control tokens a reply can spell as text, takes structure only
+  from the control tokens sampled.
+- `prompt_refusal` is the error `generation_prompt_tokens` would raise for what the messages
+  hold, found without a tokenizer, so planning can leave out a case no sampler could
+  continue.
 - `identity()` pins the tokenizer, its revision, the template hash and the renderer and parser
   versions. A run records it, and a mismatch on resume means "prepare a new run".
 
 **Providers** (`Provider`) own everything outside the loop: the model profiles they support
-(`models`, `resolve_model`), a live `preflight` (which `doctor --provider NAME --check` and
+(`models`, and `resolve_model`, which takes any of a profile's names through
+`find_profile`), a live `preflight` (which `doctor --provider NAME --check` and
 `models list --check` run), their
 credentials, validation of provider-specific `provider_options`, `training_profile` (the
 profile as those options train it, e.g. with a shorter context: rows are rendered against
@@ -110,10 +117,17 @@ provider bills for, with the usage the preview counts, never a price it cannot k
 ## Training matches inference
 
 A chat endpoint renders the conversation with the chat template, tokenizes the whole prompt
-text as **one** string, and the model generates the completion after it. Training must see the
-same tokens, so by default `HFChatTemplateRenderer` renders **one example per trainable
-assistant turn**: the generation prompt for `messages[:i]`, tokenized whole, followed by the
-turn's completion tokens. The loss covers the completion through its stop token and nothing
+as the template does, and the model generates the completion after it. For a Jinja template
+that is the rendered text encoded as **one** string; Kimi K3's tokenizer renders the chat in
+its repository's Python code (`trust_remote_code`) and encodes message text apart from its
+control tokens, so text that spells a control token stays text (`ChatTokenizer.render_tokens`,
+`None` for any other tokenizer).
+DeepSeek-V4 ships its chat format as Python and no template, so its family renders through
+`rendering/encoders.py`'s `DeepSeekV4Encoder`, which the `tokenizer` tests hold to DeepSeek's
+own encoder and test vectors at the pinned commit. Training must see the same tokens, so by
+default `HFChatTemplateRenderer` renders **one example per trainable assistant turn**: the
+generation prompt for `messages[:i]`, tokenized whole, followed by the turn's completion
+tokens. The loss covers the completion through its stop token and nothing
 after it (for role-tag families, the appended next role tag is the stop target, after any
 whitespace the template renders past the reply is dropped). A turn whose render does not
 continue its own prompt is rejected with `prompt_mismatch`.
@@ -122,24 +136,52 @@ Chat templates are often prefix-stable as text and still not as tokens: a tokeni
 characters across the point where generation starts. Qwen3.8's prompt ends `<think>\n` and an
 empty reasoning block continues `\n`, which the whole conversation encodes as one `\n\n`
 token. In that case the completion is the rest of the rendered turn encoded on its own after
-the prompt's tokens, as the model would generate it.
+the prompt's tokens, as the model would generate it. A tokenizer that tokenizes the chat
+itself never merges there; a turn whose tokens still do not extend its prompt's is refused,
+since re-encoding would turn message text that spells a control token into that token.
 
 One example per row with every assistant turn trainable costs O(turns) tokens rather than
 O(turns²), but it is only correct when the renderer is **prefix-stable** for that row: for
 every trainable turn *i*, the turn's per-turn example must be an exact token prefix of the
-whole conversation tokenized once. A family may pin `prefix_stable` to try this fast path;
+whole conversation tokenized once. Every trained token then has exactly its per-turn
+context; an untrained turn carries no loss, so a template that shows it differently in later
+history (DeepSeek-V4 without tools) still trains what the turns would. A family may pin
+`prefix_stable` to try this fast path;
 the renderer then checks it on every row in `supervised_example` (rows with
 `reasoning_content` always render per turn) and raises `RendererError` with code
 `not_prefix_stable` when it does not hold, and the loop renders that row with
 `per_turn_examples`. A renderer that is not prefix-stable declares `prefix_stable = False` and
 the loop renders every row per turn. Qwen3.8 is not token prefix-stable, so `qwen3_8` renders
 per turn, as does `qwen3_5` (Qwen3.5 also drops reasoning before the last user turn); every
-turn boundary of GLM-5.3 is a special token, so `glm5_3` takes the fast path. Only
+turn boundary of GLM-5.3 is a special token, so `glm5_3` takes the fast path, as do
+`kimi_k3` and `muse_glimmer` (both keep reasoning in history) and `deepseek_v4` (whose rows
+without tools render per turn: it drops reasoning before the last user turn when no tool is
+declared). A family's `rewrite` turns each message into the messages its template renders
+faithfully. Muse Glimmer's template drops the text of a message that has tool calls, so the
+text renders first as its own message to the user that does not end the turn (`end_turn`
+false), as the template writes such a message. Its template also writes today's date into
+the default system message of a conversation that has none, so the family pins
+`current_date` in `chat_template_kwargs`. A family's `check` refuses, with
+`unsupported_message`, a prompt after which its template opens no assistant turn, and any
+trained turn after such a prompt: DeepSeek's own encoder writes a turn after a system or
+assistant message, or at the start, with no `<｜Assistant｜>` before it, so `deepseek_v4`
+needs a user or tool message before each turn it trains or samples. The renderer's
+`prompt_refusal` runs that check without a tokenizer, so `evaluate` and `benchmark` leave
+such test cases out at planning (`excluded_cases`), as they do a turn with no message before
+it (`empty_prompt`) for every model. Each benchmarked model replays the cases it can and gets
+its own headline pass rate; the leaderboard ranks the finished models on the cases the
+headline scored for every one of them, so a model a rerun can still advance never narrows
+them. A refusal that
+still reaches a sampler is an error result a rerun never retries. Only
 `supervised_example` raises `not_prefix_stable`; a per-turn failure carries its own code, so
 the loop never retries it per turn.
 
 A tokenizer that cannot be loaded fails every row alike, so the renderer reports it as an
 `ExternalError` (a `UsageError` when the `hf` extra is missing) rather than rejecting rows.
+A benchmark plans a model whose renderer cannot load as an error entry and runs the others;
+without the renderer its identity cannot be checked, so its results are not scored. Planning
+still reads the judge and evaluators its directory froze, and which of them have work left, as
+for every model.
 
 The Qwen3.8 response parser knows its generation prompt opens `<think>`: sampled text that
 never reaches `</think>` (cut off at the token limit) is all reasoning and `format_valid` is
@@ -388,8 +430,8 @@ provider, and talks to models only through the `Sampler` protocol.
   across the evaluations of one dataset through a content-addressed store in the dataset
   directory, `replay_cache/`, since runs and their evaluation directories can live anywhere
   and a case id does not prove a case's content. An answer's key hashes what the base model
-  is sent and how (provider, base model, context, renderer identity, `max_tokens`, prefix,
-  tools); a verdict's hashes the judge's settings and its exact request. Base sampling is
+  is sent and how (provider, base model, context, renderer identity with a family's
+  `prompt_check` and `message_rewrite`, `max_tokens`, prefix, tools); a verdict's hashes the judge's settings and its exact request. Base sampling is
   greedy on pinned weights, so the seed only picks cases and is left out. The plan reads the
   store once, so the preview and the run agree; after calibration passes, the run copies the
   matching answers and verdicts into its directory, and the ordinary resume skips them. The
@@ -667,12 +709,14 @@ Using Baseten as the example:
    gate them behind `--confirm` and `PUP_READ_ONLY`.
 7. **Registration and install.** Call `register_provider("baseten",
    "pup_finetune.providers.baseten.provider:BasetenProvider", options=("max_seq_len",),
-   models=("qwen3p5-9b", "glm-5p3-flash"))` in the registry (the implementation lives in
-   `provider.py`, so the package `__init__.py` stays light; `options` names the
-   `--provider-option` keys, which `train --help` lists, and a provider that takes
-   `max_seq_len` gets `train --max-seq-len` too; `models` names the profiles' aliases, which
-   `train` infers `--provider` from, and an alias another provider offers too makes
-   `--provider` required for it; `label`, `credential`, `packages`, `refuses` and `deploys`
+   models={"qwen3p5-9b": ("qwen3p5-9b", "Qwen/Qwen3.5-9B"), ...})` in the registry (the
+   implementation lives in `provider.py`, so the package `__init__.py` stays light; `options`
+   names the `--provider-option` keys, which `train --help` lists, and a provider that takes
+   `max_seq_len` gets `train --max-seq-len` too; `models` holds each profile's alias with
+   every name that selects it, alias first (`ModelProfile.names`: the alias, the provider's
+   model id and the tokenizer), which `train` infers `--provider` from, and a name another
+   provider offers too makes `--provider` required for it; a test holds the table to the
+   profiles; `label`, `credential`, `packages`, `refuses` and `deploys`
    say what it needs, which `doctor` and the previews check), and add a `baseten`
    extra to `pyproject.toml` for the SDK (with its rows in `LICENSE-3rdparty.csv`).
 8. **Tests.** Subclass the contract suites in `tests/providers/contract/`

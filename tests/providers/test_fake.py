@@ -588,7 +588,7 @@ def test_the_profile() -> None:
             build(other)
     with pytest.raises(UsageError) as excinfo:
         provider.resolve_model("other")
-    assert excinfo.value.hint == "known models: fake-model"
+    assert excinfo.value.hint.startswith("known models: fake-model;")
 
 
 def test_options_from_the_command_line_are_decoded() -> None:

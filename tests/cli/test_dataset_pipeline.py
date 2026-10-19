@@ -103,7 +103,7 @@ def test_labels_move_the_pipeline_on_to_a_first_push_then_training(tmp_path: Pat
     assert [step["command"] for step in shown["next_steps"]] == [
         "pup finetune models list",
         "pup finetune benchmark ds --models <MODELS>",
-        "pup finetune train --dataset ds --model <MODEL>",
+        "pup finetune train --provider <PROVIDER> --dataset ds --model <MODEL>",
     ]
 
 

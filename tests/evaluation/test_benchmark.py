@@ -23,12 +23,13 @@ from pup_finetune.evaluation.benchmark import (
     BenchmarkPlan,
     BenchmarkSettings,
     Candidate,
+    Leaderboard,
     leaderboard,
     plan_benchmark,
     recommend,
     sample_conversations,
 )
-from pup_finetune.evaluation.cases import ReplayCase, cases_from_dataset
+from pup_finetune.evaluation.cases import Exclusion, ReplayCase, cases_from_dataset
 from pup_finetune.evaluation.evaluators import (
     CheckEvaluator,
     EvaluatorSet,
@@ -37,7 +38,7 @@ from pup_finetune.evaluation.evaluators import (
 )
 from pup_finetune.evaluation.fake_judge import fake_judge_config
 from pup_finetune.evaluation.replay import EvalDir
-from pup_finetune.providers.fake import FAKE_PROFILE, FakeProvider
+from pup_finetune.providers.fake import FAKE_PROFILE, FakeProvider, FakeRenderer
 from pup_finetune.runtime import Runtime
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
@@ -53,11 +54,17 @@ def plan(tmp_path: Path) -> BenchmarkPlan:
     assert imported.exit_code == 0, imported.stderr
     cases = cases_from_dataset(dataset, split="test")
     assert len({case.row_id for case in cases}) >= 2
+    rendering = FakeRenderer().identity()
     return BenchmarkPlan(
         dataset_dir=dataset.path,
         candidates=(
-            Candidate(provider="fake", profile=FAKE_PROFILE),
-            Candidate(provider="fake", profile=dataclasses.replace(FAKE_PROFILE, alias="fake-b")),
+            Candidate(provider="fake", profile=FAKE_PROFILE, rendering=rendering, excluded={}),
+            Candidate(
+                provider="fake",
+                profile=dataclasses.replace(FAKE_PROFILE, alias="fake-b"),
+                rendering=rendering,
+                excluded={},
+            ),
         ),
         cases=cases,
         judge=fake_judge_config(),
@@ -86,6 +93,36 @@ def result(target: str, case: ReplayCase, passed: bool) -> dict[str, Any]:
     }
 
 
+def write_error(plan: BenchmarkPlan, candidate: Candidate, case: ReplayCase, kind: str) -> None:
+    EvalDir(plan.model_dir(candidate)).append_result(
+        {
+            "target": candidate.target,
+            "case_id": case.id,
+            "row_id": case.row_id,
+            "status": "error",
+            "error": {"stage": "generation", "type": kind, "message": "failed"},
+        }
+    )
+
+
+def replaying(plan: BenchmarkPlan, model: str, case_ids: set[str]) -> BenchmarkPlan:
+    refused = Exclusion("unsupported_message", "refused")
+    candidates = tuple(
+        candidate
+        if candidate.target != model
+        else dataclasses.replace(
+            candidate,
+            excluded={case.id: refused for case in plan.cases if case.id not in case_ids},
+        )
+        for candidate in plan.candidates
+    )
+    return dataclasses.replace(plan, candidates=candidates)
+
+
+def by_model(board: Leaderboard) -> dict[str, dict[str, Any]]:
+    return {entry["model"]: entry for entry in board.entries}
+
+
 def test_the_best_model_comes_first_with_the_gap_of_the_others(plan: BenchmarkPlan) -> None:
     worse, better = plan.candidates
     write_results(plan, worse, {case.id: False for case in plan.cases})
@@ -93,12 +130,13 @@ def test_the_best_model_comes_first_with_the_gap_of_the_others(plan: BenchmarkPl
 
     board = leaderboard(plan)
 
-    assert [entry["model"] for entry in board] == ["fake-b", "fake-model"]
-    assert board[0]["judge_pass_rate"] == 1.0
-    assert board[0]["status"] == "complete"
-    assert board[1]["gap_to_best"]["judge_pass_rate"] == 1.0
-    assert board[1]["gap_to_best"]["n_cases"] == len(plan.cases)
-    assert board[1]["within_noise_of_best"] is False
+    assert [entry["model"] for entry in board.entries] == ["fake-b", "fake-model"]
+    assert [entry["rank"] for entry in board.entries] == [1, 2]
+    assert board.entries[0]["judge_pass_rate"] == 1.0
+    assert board.entries[0]["status"] == "complete"
+    assert board.entries[1]["gap_to_best"]["judge_pass_rate"] == 1.0
+    assert board.entries[1]["within_noise_of_best"] is False
+    assert board.common_cases == len(plan.cases)
 
 
 def test_a_model_with_the_same_verdicts_is_within_noise(plan: BenchmarkPlan) -> None:
@@ -108,21 +146,157 @@ def test_a_model_with_the_same_verdicts_is_within_noise(plan: BenchmarkPlan) -> 
 
     board = leaderboard(plan)
 
-    assert board[1]["gap_to_best"]["judge_pass_rate"] == 0.0
-    assert board[1]["within_noise_of_best"] is True
+    assert board.entries[1]["gap_to_best"]["judge_pass_rate"] == 0.0
+    assert board.entries[1]["within_noise_of_best"] is True
 
 
-def test_a_model_without_results_is_last_and_pending(plan: BenchmarkPlan) -> None:
+def test_unfinished_models_are_unranked_in_the_order_given(plan: BenchmarkPlan) -> None:
     first, second = plan.candidates
     write_results(plan, second, {plan.cases[0].id: True})
 
     board = leaderboard(plan, {first.target: {"type": "ExternalError", "message": "down"}})
 
-    assert [entry["model"] for entry in board] == ["fake-b", "fake-model"]
-    assert board[0]["status"] == "partial"
-    assert board[1]["status"] == "error"
-    assert board[1]["judge_pass_rate"] is None
-    assert board[1]["gap_to_best"] is None
+    assert [entry["model"] for entry in board.entries] == ["fake-model", "fake-b"]
+    assert [entry["status"] for entry in board.entries] == ["error", "partial"]
+    assert [entry["rank"] for entry in board.entries] == [None, None]
+    assert board.entries[0]["judge_pass_rate"] is None
+    assert board.entries[1]["judge_pass_rate"] == 1.0
+
+
+def test_a_model_that_replays_few_cases_never_lifts_another_s_rate(plan: BenchmarkPlan) -> None:
+    first = plan.cases[0].id
+    plan = replaying(plan, "fake-b", {first})
+    full, narrow = plan.candidates
+    write_results(plan, full, {case.id: case.id == first for case in plan.cases})
+    write_results(plan, narrow, {first: True})
+
+    board = leaderboard(plan)
+
+    entries = by_model(board)
+    assert entries["fake-model"]["judge_pass_rate"] == 1 / len(plan.cases)
+    assert entries["fake-model"]["judged_cases"] == len(plan.cases)
+    assert entries["fake-b"]["judge_pass_rate"] == 1.0
+    assert entries["fake-b"]["judged_cases"] == 1
+    assert board.common_cases == 1
+    assert recommend(board.entries, target_pass_rate=0.9)["verdict"] == "fine_tune"
+
+
+def test_an_unfinished_model_never_narrows_the_comparison(plan: BenchmarkPlan) -> None:
+    first = plan.cases[0].id
+    finished, unfinished = plan.candidates
+    write_results(plan, finished, {case.id: case.id == first for case in plan.cases})
+    write_results(plan, unfinished, {first: True})
+
+    board = leaderboard(plan)
+
+    assert board.common_cases == len(plan.cases)
+    best = board.entries[0]
+    assert (best["model"], best["rank"]) == ("fake-model", 1)
+    assert best["judge_pass_rate"] == best["common_pass_rate"] == 1 / len(plan.cases)
+    found = recommend(board.entries, target_pass_rate=0.9)
+    assert (found["verdict"], found["model"]) == ("fine_tune", "fake-model")
+
+
+def test_a_partial_model_is_listed_unranked_beside_a_finished_one(plan: BenchmarkPlan) -> None:
+    finished, partial = plan.candidates
+    write_results(plan, finished, {case.id: True for case in plan.cases})
+    write_results(plan, partial, {plan.cases[0].id: False, plan.cases[1].id: True})
+
+    board = leaderboard(plan)
+
+    ranked, unranked = board.entries
+    assert (ranked["model"], ranked["finished"], ranked["rank"]) == ("fake-model", True, 1)
+    assert unranked["model"] == "fake-b"
+    assert unranked["finished"] is False
+    assert unranked["rank"] is None
+    assert unranked["judge_pass_rate"] == 0.5
+    assert unranked["judged_cases"] == 2
+    assert unranked["gap_to_best"] is None
+    assert unranked["within_noise_of_best"] is None
+    found = recommend(board.entries, target_pass_rate=0.9)
+    assert (found["verdict"], found["model"]) == ("base_meets_target", "fake-model")
+    assert "results are partial: fake-b can still advance" in found["reason"]
+
+
+@pytest.mark.parametrize(("kind", "finished"), [("ExternalError", False), ("RendererError", True)])
+def test_a_model_is_finished_once_a_rerun_cannot_change_it(
+    plan: BenchmarkPlan, kind: str, finished: bool
+) -> None:
+    one, other = plan.candidates
+    *answered, last = plan.cases
+    write_results(plan, one, {case.id: True for case in plan.cases})
+    write_results(plan, other, {case.id: True for case in answered})
+    write_error(plan, other, last, kind)
+
+    entry = by_model(leaderboard(plan))["fake-b"]
+
+    assert entry["finished"] is finished
+    assert (entry["rank"] is not None) is finished
+
+
+def test_the_target_is_decided_on_the_model_s_own_rate(plan: BenchmarkPlan) -> None:
+    failed = plan.cases[0].id
+    plan = replaying(plan, "fake-b", {case.id for case in plan.cases if case.id != failed})
+    best, worse = plan.candidates
+    write_results(plan, best, {case.id: case.id != failed for case in plan.cases})
+    write_results(plan, worse, {case.id: False for case in plan.cases if case.id != failed})
+
+    board = leaderboard(plan)
+
+    first = board.entries[0]
+    assert (first["model"], first["common_pass_rate"], first["judge_pass_rate"]) == (
+        "fake-model",
+        1.0,
+        0.8,
+    )
+    assert recommend(board.entries, target_pass_rate=0.9)["verdict"] == "fine_tune"
+    assert recommend(board.entries, target_pass_rate=0.8)["verdict"] == "base_meets_target"
+
+
+def test_a_model_judged_on_too_few_cases_is_never_held_to_the_target(
+    plan: BenchmarkPlan,
+) -> None:
+    plan = replaying(plan, "fake-b", {plan.cases[0].id})
+    narrow = plan.candidates[1]
+    plan = dataclasses.replace(plan, candidates=(narrow,))
+    write_results(plan, narrow, {plan.cases[0].id: True})
+
+    found = recommend(leaderboard(plan).entries, target_pass_rate=0.9)
+
+    assert found["verdict"] == "fine_tune"
+    assert found["judge_pass_rate"] == 1.0
+    assert found["coverage"] == 1 / len(plan.cases)
+
+
+def test_finished_models_with_no_case_in_common_are_not_ranked(plan: BenchmarkPlan) -> None:
+    first = plan.cases[0].id
+    plan = replaying(plan, "fake-model", {first})
+    plan = replaying(plan, "fake-b", {case.id for case in plan.cases if case.id != first})
+    one, other = plan.candidates
+    write_results(plan, one, {first: True})
+    write_results(plan, other, {case.id: True for case in plan.cases if case.id != first})
+
+    board = leaderboard(plan)
+
+    assert board.common_cases == 0
+    assert [entry["rank"] for entry in board.entries] == [None, None]
+    found = recommend(board.entries, target_pass_rate=0.9)
+    assert found["verdict"] == "no_result"
+    assert "share no judged case" in found["reason"]
+
+
+def test_no_finished_model_is_no_result_without_claiming_nothing_was_judged(
+    plan: BenchmarkPlan,
+) -> None:
+    down, partial = plan.candidates
+    write_results(plan, partial, {plan.cases[0].id: True})
+
+    board = leaderboard(plan, {down.target: {"type": "ExternalError", "message": "down"}})
+    found = recommend(board.entries, target_pass_rate=0.9)
+
+    assert found["verdict"] == "no_result"
+    assert "no model has a judged case" not in found["reason"]
+    assert "no finished model has a judged case" in found["reason"]
 
 
 def test_the_board_counts_answers_cut_off_or_unparseable(plan: BenchmarkPlan) -> None:
@@ -142,7 +316,7 @@ def test_the_board_counts_answers_cut_off_or_unparseable(plan: BenchmarkPlan) ->
         )
 
     board = leaderboard(plan)
-    [found] = [entry for entry in board if entry["model"] == candidate.target]
+    [found] = [entry for entry in board.entries if entry["model"] == candidate.target]
     result = benchmark_module._result(plan, board, calibration=None, cancelled=False)
 
     assert (found["truncated"], found["unparseable"]) == (1, 1)
@@ -192,29 +366,42 @@ def test_a_small_sample_asks_for_a_larger_max_rows(plan: BenchmarkPlan) -> None:
 def test_cut_off_answers_ask_for_a_higher_max_tokens(
     plan: BenchmarkPlan, truncated: int, trains: bool
 ) -> None:
-    done = {"status": "complete", "cases": 4, "unparseable": 0, "out_dir": "bench/fake-model"}
-    board = [{**entry("fake-model", 0.5), **done, "truncated": truncated}]
+    done = {"status": "complete", "judged_cases": 4, "headline_cases": 4, "errors_unrenderable": 0}
+    done |= {"unparseable": 0, "out_dir": "bench/fake-model"}
+    board = Leaderboard([{**entry("fake-model", 0.5), **done, "truncated": truncated}], 1)
 
     found = benchmark_module._result(plan, board, calibration=None, cancelled=False)
 
-    train = f"pup finetune train --dataset {plan.dataset_dir} --model fake-model"
+    train = f"pup finetune train --provider fake --dataset {plan.dataset_dir} --model fake-model"
     assert found["next_command"] == (train if trains else None)
     assert found["next_steps"][0]["command"].endswith("--max-tokens 8192 --out-dir <NEW_DIR>")
     assert "not their length" in found["next_steps"][0]["why"]
 
 
-def entry(model: str, rate: float | None, *, close: bool | None = None) -> dict[str, Any]:
+def entry(
+    model: str,
+    rate: float | None,
+    *,
+    rank: int | None = 1,
+    close: bool | None = None,
+    judged: int = 10,
+) -> dict[str, Any]:
     return {
         "model": model,
         "provider": "fake",
+        "finished": True,
+        "rank": rank if rate is not None else None,
         "judge_pass_rate": rate,
         "headline_pass_rate": rate,
+        "judged_cases": judged if rate is not None else 0,
+        "headline_cases": judged if rate is not None else 0,
+        "coverage": 1.0 if rate is not None else 0.0,
         "within_noise_of_best": close,
     }
 
 
 def test_recommend_fine_tunes_the_best_model_below_the_target() -> None:
-    found = recommend([entry("a", 0.6), entry("b", 0.4, close=False)], target_pass_rate=0.9)
+    found = recommend([entry("a", 0.6), entry("b", 0.4, rank=2, close=False)], target_pass_rate=0.9)
 
     assert found["verdict"] == "fine_tune"
     assert found["model"] == "a"
@@ -222,7 +409,7 @@ def test_recommend_fine_tunes_the_best_model_below_the_target() -> None:
 
 
 def test_recommend_names_the_models_within_noise() -> None:
-    found = recommend([entry("a", 0.6), entry("b", 0.55, close=True)], target_pass_rate=0.9)
+    found = recommend([entry("a", 0.6), entry("b", 0.55, rank=2, close=True)], target_pass_rate=0.9)
 
     assert found["within_noise"] == ["b"]
     assert "b is within noise" in found["reason"]
@@ -238,9 +425,9 @@ def test_recommend_says_a_base_model_at_the_target_may_need_no_training() -> Non
 @pytest.mark.parametrize(
     ("rate", "reason"),
     [
-        (0.95, "a already passes the judge and every evaluator on 95% of the cases"),
-        (0.5, "a passes the judge and every evaluator best (50% of the cases)"),
-        (None, "no model has a case the judge and every evaluator scored yet"),
+        (0.95, "a ranks first and passes the judge and every evaluator on 95% of the 10 cases"),
+        (0.5, "every evaluator on 50% of the 10 cases they scored, below the 90% target"),
+        (None, "no model has a case the judge and every evaluator scored, so"),
     ],
 )
 def test_recommend_by_all_names_the_judge_and_every_evaluator(
@@ -257,8 +444,17 @@ def test_recommend_without_any_judged_case() -> None:
     assert found == {
         "verdict": "no_result",
         "model": None,
-        "reason": "no model has a judged case yet, so there is nothing to compare",
+        "reason": "no model has a judged case, so there is nothing to compare",
     }
+
+
+def test_recommend_without_any_judged_case_yet() -> None:
+    found = recommend([{**entry("a", None), "finished": False}], target_pass_rate=0.9)
+
+    assert found["reason"] == (
+        "no model has a judged case yet, so there is nothing to compare; results are partial: "
+        "a can still advance, and a rerun may change this"
+    )
 
 
 def test_the_session_context_fits_the_longest_case(
@@ -300,16 +496,92 @@ def test_the_headline_evaluator_ranks_the_models_and_drives_the_recommendation(
 
     board = leaderboard(plan)
 
-    assert [entry["model"] for entry in board] == ["fake-model", "fake-b"]
-    assert (board[0]["headline_pass_rate"], board[0]["judge_pass_rate"]) == (1.0, 0.0)
-    assert board[0]["evaluators"] == {"short": 1.0, "all": 0.0}
-    gap = board[1]["gap_to_best"]
+    first, second = board.entries
+    assert [first["model"], second["model"]] == ["fake-model", "fake-b"]
+    assert (first["headline_pass_rate"], first["judge_pass_rate"]) == (1.0, 0.0)
+    assert first["evaluators"] == {"short": 1.0, "all": 0.0}
+    assert first["common_pass_rate"] == 1.0
+    gap = second["gap_to_best"]
     assert (gap["pass_rate"], "judge_pass_rate" in gap) == (1.0, False)
     found = benchmark_module._result(plan, board, calibration=None, cancelled=False)
     recommendation = found["recommendation"]
     assert (recommendation["model"], recommendation["headline"]) == ("fake-model", "short")
     assert (recommendation["pass_rate"], recommendation["verdict"]) == (1.0, "base_meets_target")
     assert "passes the evaluator short" in recommendation["reason"]
+
+
+def checks(*names: str, headline: str) -> EvaluatorSet:
+    found = tuple(
+        CheckEvaluator(name=name, file=Path("checks.py"), function=name, file_sha256="0")
+        for name in names
+    )
+    return EvaluatorSet(evaluators=found, headline=headline, spec=None, source="flag")
+
+
+def write_scored(
+    plan: BenchmarkPlan, candidate: Candidate, scores: dict[str, dict[str, bool]]
+) -> None:
+    """An ``ok`` result the judge passed per case of ``scores``, with each evaluator's entry,
+    passed or failed."""
+    eval_dir = EvalDir(plan.model_dir(candidate))
+    eval_dir.create()
+    for case in plan.cases:
+        if case.id in scores:
+            line = result(candidate.target, case, True)
+            line["evaluators"] = {
+                name: {"status": "ok", "passed": passed} for name, passed in scores[case.id].items()
+            }
+            eval_dir.append_result(line)
+
+
+def test_the_headline_ranks_the_finished_models_on_the_cases_it_scored_for_all(
+    plan: BenchmarkPlan,
+) -> None:
+    first = plan.cases[0].id
+    plan = dataclasses.replace(plan, evaluators=checks("short", headline="short"))
+    plan = replaying(plan, "fake-b", {first})
+    full, narrow = plan.candidates
+    write_scored(plan, full, {case.id: {"short": case.id != first} for case in plan.cases})
+    write_scored(plan, narrow, {first: {"short": True}})
+
+    board = leaderboard(plan)
+
+    assert board.common_cases == 1
+    best, other = board.entries
+    assert (best["model"], best["rank"], best["common_pass_rate"]) == ("fake-b", 1, 1.0)
+    assert (other["model"], other["rank"], other["common_pass_rate"]) == ("fake-model", 2, 0.0)
+    assert other["headline_pass_rate"] == (len(plan.cases) - 1) / len(plan.cases)
+    assert other["judge_pass_rate"] == 1.0
+    assert other["gap_to_best"] == {"pass_rate": 1.0, "ci95": None, "n_cases": 1}
+    found = recommend(board.entries, target_pass_rate=0.9, headline="short")
+    assert (found["model"], found["pass_rate"], found["verdict"]) == ("fake-b", 1.0, "fine_tune")
+    assert found["coverage"] == 1 / len(plan.cases)
+
+
+@pytest.mark.parametrize(("headline", "ranked"), [("short", True), ("late", False)])
+def test_only_a_score_the_headline_needs_keeps_a_model_unranked(
+    plan: BenchmarkPlan, headline: str, ranked: bool
+) -> None:
+    plan = dataclasses.replace(plan, evaluators=checks("short", "late", headline=headline))
+    plan = dataclasses.replace(plan, candidates=plan.candidates[:1])
+    [candidate] = plan.candidates
+    unscored = plan.cases[0].id
+    write_scored(
+        plan,
+        candidate,
+        {
+            case.id: {"short": True, **({} if case.id == unscored else {"late": True})}
+            for case in plan.cases
+        },
+    )
+
+    board = leaderboard(plan)
+    found = benchmark_module._result(plan, board, calibration=None, cancelled=False)
+
+    [entry] = board.entries
+    assert (entry["finished"], entry["rank"] is not None) == (ranked, ranked)
+    assert board.rerun is True
+    assert found["next_command"].startswith("pup finetune benchmark ")
 
 
 @pytest.mark.parametrize("order", [1, -1])

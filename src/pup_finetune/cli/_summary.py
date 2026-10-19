@@ -552,8 +552,9 @@ def evaluate_summary(result: Mapping[str, Any]) -> Summary | None:
 
 
 def benchmark_summary(result: Mapping[str, Any]) -> Summary | None:
-    """``benchmark``: the cases and judge, each model's judge agreement with its CI, gap to
-    the best and answers cut off or unparseable, the recommendation and the caveat."""
+    """``benchmark``: the cases and judge, each model's agreement on its own cases with its
+    CI, the gap of each ranked one to the best and its answers cut off or unparseable, the
+    recommendation and the caveat."""
     status = result.get("status")
     if status == "calibration_failed":
         return _evaluation_parts(result, compact=False)
@@ -561,24 +562,31 @@ def benchmark_summary(result: Mapping[str, Any]) -> Summary | None:
     if status is None or not board:
         return None
     what = {"complete": "complete", "partial": "partial"}.get(str(status), "complete with errors")
+    common = result.get("common_cases")
+    ranked = f"ranked on the {common} scored for every finished model" if common else "none ranked"
     headline = (
         f"benchmark {what}: {_n(len(board), 'model')} on {_n(result.get('cases'), 'case')} from "
-        f"{_n(result.get('trajectories'), 'test conversation')}; judge {result.get('judge_model')}"
+        f"{_n(result.get('trajectories'), 'test conversation')}, {ranked}; judge "
+        f"{result.get('judge_model')}"
     )
-    ranked = (result.get("recommendation") or {}).get("headline")
-    if isinstance(ranked, str) and ranked != "judge":
-        headline += f", ranked by {ranked}"
+    by = (result.get("recommendation") or {}).get("headline")
+    if isinstance(by, str) and by != "judge":
+        headline += f", ranked by {by}"
     width = max(len(str(entry.get("model"))) for entry in board) + 2
     rows = []
     for entry in board:
         ci = entry.get("ci95")
-        interval = f" [{_percent(ci[0])}, {_percent(ci[1])}]" if isinstance(ci, list) else ""
+        text = f" [{_percent(ci[0])}, {_percent(ci[1])}]" if isinstance(ci, list) else ""
+        if entry.get("headline_cases"):
+            text += f" on {_n(entry.get('headline_cases'), 'case')}"
         gap = entry.get("gap_to_best")
         if isinstance(gap, Mapping) and isinstance(gap.get("pass_rate"), int | float):
             noise = ", within noise" if entry.get("within_noise_of_best") else ""
-            interval += f"  {_points(-float(gap['pass_rate']))} vs best{noise}"
+            text += f"  {_points(-float(gap['pass_rate']))} vs best{noise}"
         elif entry.get("status") == "error":
-            interval = f"  {_error_text(entry.get('error')) or 'error'}"
+            text = f"  {_error_text(entry.get('error')) or 'error'}"
+        elif not entry.get("finished"):
+            text += "  unfinished, not ranked"
         flaws = [
             f"{entry[key]} {name}"
             for key, name in (
@@ -588,15 +596,18 @@ def benchmark_summary(result: Mapping[str, Any]) -> Summary | None:
             if entry.get(key)
         ]
         if flaws:
-            interval += f"  {', '.join(flaws)}"
+            text += f"  {', '.join(flaws)}"
         rate = entry.get("headline_pass_rate", entry.get("judge_pass_rate"))
-        rows.append(f"{entry.get('model')!s:<{width}}{_percent(rate)}{interval}")
+        rows.append(f"{entry.get('model')!s:<{width}}{_percent(rate)}{text}")
     recommendation = result.get("recommendation") or {}
     verdict = {
         "fine_tune": f"recommended: fine-tune {recommendation.get('model')}",
         "base_meets_target": f"recommended: {recommendation.get('model')} already meets the "
         f"{_percent(recommendation.get('target_pass_rate'))} target; fine-tuning may add little",
-    }.get(str(recommendation.get("verdict")), "no recommendation yet")
+    }.get(
+        str(recommendation.get("verdict")),
+        "no recommendation" + ("" if all(entry.get("finished") for entry in board) else " yet"),
+    )
     return _summary(
         headline,
         [*rows, verdict, CAVEAT],

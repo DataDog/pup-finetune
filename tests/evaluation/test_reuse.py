@@ -34,7 +34,9 @@ from pup_finetune.evaluation.reuse import (
 )
 from pup_finetune.inference import JudgeConfig
 from pup_finetune.providers.fake import FAKE_PROFILE
+from pup_finetune.rendering.families import DEEPSEEK_V4, MUSE_GLIMMER, ModelFamily
 from pup_finetune.storage import DirectoryLock, append_jsonl
+from tests.fakes.tokenizer import MUSE_SPECIALS, FakeChatTokenizer, muse_like
 
 JUDGE = JudgeConfig(model="judge/model")
 RENDERING = {"renderer": "fake", "renderer_version": "1"}
@@ -142,6 +144,26 @@ def load(dataset: Path, own: Mapping[Any, Any] | None = None) -> ReuseIndex:
 )
 def test_the_generation_key_covers_what_the_model_is_sent(changes: dict[str, Any]) -> None:
     assert key(CASES[0], **changes) != key(CASES[0])
+
+
+@pytest.mark.parametrize(
+    ("family", "rule", "tokenizer"),
+    [
+        (DEEPSEEK_V4, "prompt_check", FakeChatTokenizer()),
+        (
+            MUSE_GLIMMER,
+            "message_rewrite",
+            FakeChatTokenizer(template=muse_like, specials=MUSE_SPECIALS),
+        ),
+    ],
+)
+def test_the_generation_key_covers_a_family_s_prompt_check_or_message_rewrite(
+    family: ModelFamily, rule: str, tokenizer: FakeChatTokenizer
+) -> None:
+    ruled = family.renderer(tokenizer=tokenizer).identity()
+    plain = dataclasses.replace(family, check=None, rewrite=None).renderer(tokenizer=tokenizer)
+    assert ruled.keys() - plain.identity().keys() == {rule}
+    assert key(CASES[0], rendering=ruled) != key(CASES[0], rendering=plain.identity())
 
 
 @pytest.mark.parametrize(

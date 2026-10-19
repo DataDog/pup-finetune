@@ -240,8 +240,8 @@ To choose the model, first compare candidates on the test split (paid; it previe
 `recommendation` names the one to fine-tune, or says a base model already meets the target:
 
 ```sh
-pup finetune benchmark datasets/my-agent --models qwen3p5-9b,glm-5p3-flash
-pup finetune train --dataset datasets/my-agent --model <MODEL> --detach
+pup finetune benchmark datasets/my-agent --models qwen3p5-9b,baseten/glm-5p3-flash
+pup finetune train --provider <PROVIDER> --dataset datasets/my-agent --model <MODEL> --detach
 pup finetune status ft-20261007183443-a8b181 --watch --timeout 90s
 ```
 
@@ -315,6 +315,7 @@ Check:
 
 - [ ] The user authorized this deployment after seeing the billing line.
 - [ ] The smoke test passed, and the user knows the undeploy command.
+- [ ] The user knows `muse-glimmer-30b` may write today's date where training pinned one.
 
 ## Provider notes
 
@@ -323,26 +324,24 @@ Check:
 | `--model` | Base model | Notes |
 | --- | --- | --- |
 | `qwen3p5-9b` | `Qwen/Qwen3.5-9B` | Supports reasoning |
-| `glm-5p3-flash` | `zai-org/GLM-5.3-Flash` | No reasoning |
+| `glm-5p3-flash` | `zai-org/GLM-5.3-Flash` | Supports reasoning |
+| `qwen3p8-27b` | `Qwen/Qwen3.8-27B` | Supports reasoning |
+| `kimi-k3` | `moonshotai/Kimi-K3` | Supports reasoning; its tokenizer runs code from its repository |
 
 - **Setup.** The `baseten` and `hf` extras and a key: `pup finetune auth login baseten`, or
-  read only, the default remote's key in `~/.trussrc`. These `--model`s select Baseten:
-  `pup finetune train --dataset datasets/my-agent --model qwen3p5-9b --detach`.
-  `--max-seq-len <n>` (at least 1024) caps the context; never pass `--lora-alpha`.
+  read only, the default remote's key in `~/.trussrc`. A model Fireworks offers too (all but `qwen3p5-9b`) needs `--provider baseten`:
+  `pup finetune train --provider baseten --dataset datasets/my-agent --model glm-5p3-flash --detach`. `--max-seq-len <n>` (at least 1024) caps the context; never pass `--lora-alpha`.
 - **Billing.** `train`, `resume` and `evaluate` provision a dedicated Loops trainer (and
   samplers) that bills until the run is deactivated; every exit deactivates it. Never `kill -9`
   a pup-finetune process. On `could not deactivate Baseten run <id> (...); it may still bill`,
-  tell the user at once. A standalone `evaluate` starts a new trainer; `train --evaluate`
-  reuses one.
+  tell the user at once. A standalone `evaluate` starts a new trainer; `train --evaluate` reuses one.
 - **Remote.** `--remote` (instead of `--detach`) runs the loop in a Baseten CPU job, which also
   bills, so training survives a sleeping laptop. It needs the `baseten` CLI, `uv` and a team secret
   `pup_finetune_api_key`. `cancel` cannot stop it: the user stops the job in the Baseten UI.
 - **Checkpoints.** No promotion: the best epoch's sampler checkpoint is the run's
-  `deployable_checkpoint` (`bt://loops:<run>/sampler_weights/<name>`). An expired checkpoint
-  needs a new run.
+  `deployable_checkpoint` (`bt://loops:<run>/sampler_weights/<name>`). An expired checkpoint needs a new run.
 - **Deploy.** A dedicated model on exactly the GPUs of `--shape TYPE:COUNT` (default `H100:1`),
-  0 to 1 replicas. The workspace needs BDN volumes and an `hf_access_token` secret. `undeploy`
-  deletes the model and keeps the checkpoint.
+  0 to 1 replicas. The workspace needs BDN volumes and an `hf_access_token` secret. `undeploy` deletes the model and keeps the checkpoint.
 - **Environment.** pup-finetune refuses `LOOPS_REQUEST_LOG`, `LOOPS_REUSE_FROM_RUN_ID`,
   `LOOPS_REUSE_FROM_SESSION_ID`, `INTERNAL_LOOPS_BACKEND_VERSION`, `LOOPS_TEAM`, and
   `LOOPS_BASE_URL` (`LOOPS_BASE_URL must be unset or https://api.baseten.co`). Ask the user to

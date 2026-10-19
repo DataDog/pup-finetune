@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
@@ -31,6 +32,9 @@ from pup_finetune.cli._views import (
     worker_state,
     worker_view,
 )
+from pup_finetune.cli.models import profile_entry
+from pup_finetune.providers import get_provider, known_providers
+from pup_finetune.runtime import Runtime
 from pup_finetune.training.worker import WorkerStatus
 from tests.fakes.pup import FakePup
 
@@ -225,12 +229,27 @@ def test_under_pup_a_table_gets_the_command_s_view_and_a_filter_of_the_user_s_no
     assert not any(arg.startswith("--jq=") for arg in formats[-1])
 
 
-def test_the_models_table_shows_the_columns_that_matter() -> None:
+def test_the_models_table_fits_80_columns_for_every_profile() -> None:
     view = TABLE_VIEWS["models list"]
-    for column in ("alias", "provider", "base_model", "max_seq_len", "default_lora_rank"):
-        assert column in view
-    for hidden in ("tokenizer", "renderer"):
-        assert hidden not in view
+    fields = re.fullmatch(r"\.models \| map\(\{(.*)\}\)", view)
+    assert fields is not None
+    columns = [
+        (header, source.strip().removeprefix(".") if source else header)
+        for header, _, source in (item.strip().partition(":") for item in fields[1].split(","))
+    ]
+    assert [header for header, _ in columns][:2] == ["alias", "provider"]
+    runtime = Runtime(dev_mode=True)
+    entries = [
+        profile_entry(profile, ())
+        for name in known_providers(runtime)
+        for profile in get_provider(name, runtime).models()
+    ]
+    widths = [
+        max(len(header), *(len(json.dumps(entry[source]).strip('"')) for entry in entries))
+        for header, source in columns
+    ]
+    # pup's table: a border, then a space either side of each cell and a bar after it.
+    assert 1 + sum(width + 3 for width in widths) <= 80
 
 
 @pytest.mark.parametrize(

@@ -10,21 +10,27 @@
 :class:`BenchmarkPlan`: the same replay cases ``evaluate`` uses (with ``--max-rows``, those of
 a seeded sample of the test conversations), the judge and the output directory.
 :func:`execute` calibrates the judge once, then replays the cases with each base
-model in turn (:func:`~pup_finetune.evaluation.replay.run_replay`, with the model alias as
-its one target), in a session of its own that ends before the next model starts, into
-``OUT/<model>``; a rerun resumes every model where it stopped. A model whose session cannot
-start is recorded as an error and the others still run. Base answers and verdicts are shared
-with the dataset's other evaluations and benchmarks (:mod:`~pup_finetune.evaluation.reuse`):
-a model with every answer reused opens no session.
+model in turn (:func:`~pup_finetune.evaluation.replay.run_replay`, with the model as its one
+target), in a session of its own that ends before the next model starts, into
+``OUT/<model>``; a rerun resumes every model where it stopped. A model is named by its alias,
+or ``PROVIDER/ALIAS`` when another provider offers that alias too (:attr:`Candidate.target`),
+so one model can be benchmarked on both providers. A model whose session cannot start, or
+whose renderer cannot load, is recorded as an error and the others still run. Base answers
+and verdicts are shared with the dataset's other evaluations and benchmarks
+(:mod:`~pup_finetune.evaluation.reuse`): a model with every answer reused opens no session.
 
-With ``--evaluators``, each model's directory scores the user's own judges and checks too
+Each model replays the cases it can (:func:`~pup_finetune.evaluation.cases.exclusions`) and
+its directory is identified by those cases and its renderer, never by the other models, so
+adding or dropping a model reuses every finished one. With ``--evaluators``, each model's
+directory scores the user's own judges and checks too
 (:mod:`~pup_finetune.evaluation.evaluators`), and their headline ranks the models.
 
-:func:`leaderboard` ranks the models by the headline pass rate (the judge's by default), with
-a 95% bootstrap CI over trajectories and each one's paired gap to the best;
-:func:`recommend` names the model to fine-tune, or says the best base model already reaches
-``--target-pass-rate``. Like
-``evaluate``, the scores measure agreement with the recorded answers, not task success.
+:func:`leaderboard` gives each model its own headline pass rate (the judge's by default), with
+a 95% bootstrap CI over trajectories, and ranks the finished ones on the cases the headline
+scored for every one of them, with each one's paired gap to the best; a model still running is
+listed unranked. :func:`recommend` names the model to fine-tune, or says the best base model
+already reaches ``--target-pass-rate`` on its own cases. Like ``evaluate``, the scores measure
+agreement with the recorded answers, not task success.
 """
 
 from __future__ import annotations
@@ -35,14 +41,14 @@ import statistics
 import threading
 from collections import defaultdict
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.display import display_path, joined
-from pup_finetune.errors import ExternalError, FinetuneError, SettingsConflict, UsageError
+from pup_finetune.errors import ExternalError, SettingsConflict, UsageError
 from pup_finetune.evaluation.runner import (
     CALIBRATION_CASES,
     DEFAULT_CONCURRENCY,
@@ -54,7 +60,9 @@ from pup_finetune.evaluation.runner import (
     calibrate_evaluators,
     calibration_line,
     cancel_on_signals,
+    check_hint,
     evaluator_calibration_calls,
+    evaluator_errors,
     evaluator_fix,
     evaluators_preview,
     no_reuse_hint,
@@ -67,7 +75,13 @@ from pup_finetune.evaluation.runner import (
 from pup_finetune.next_steps import PROGRAM, command, step, template
 from pup_finetune.output import info
 from pup_finetune.progress import EvaluationProgress
-from pup_finetune.providers import get_provider, provider_info, require_packages
+from pup_finetune.providers import (
+    get_provider,
+    provider_info,
+    providers_for_model,
+    require_packages,
+)
+from pup_finetune.providers import require_key as require_provider_key
 from pup_finetune.providers.base import (
     Generation,
     LoraConfig,
@@ -76,6 +90,7 @@ from pup_finetune.providers.base import (
     SamplingUsage,
 )
 from pup_finetune.redaction import redact
+from pup_finetune.rendering.base import Renderer, RendererError
 from pup_finetune.runs import error_json
 from pup_finetune.runtime import Runtime
 from pup_finetune.storage import (
@@ -87,10 +102,10 @@ from pup_finetune.storage import (
 )
 
 if TYPE_CHECKING:
-    from pup_finetune.evaluation.cases import ReplayCase
+    from pup_finetune.evaluation.cases import Exclusion, ReplayCase
     from pup_finetune.evaluation.evaluators import EvaluatorSet
     from pup_finetune.evaluation.judge import Judgment
-    from pup_finetune.evaluation.replay import EvalDir
+    from pup_finetune.evaluation.replay import EvalDir, PairKey
     from pup_finetune.evaluation.reuse import ReuseIndex, TargetReuse
     from pup_finetune.inference import ChatCompleter, JudgeConfig
 
@@ -98,9 +113,11 @@ __all__ = [
     "DEFAULT_OUT_DIR_NAME",
     "DEFAULT_TARGET_PASS_RATE",
     "LOW_PASS_RATE",
+    "TARGET_COVERAGE",
     "BenchmarkPlan",
     "BenchmarkSettings",
     "Candidate",
+    "Leaderboard",
     "execute",
     "exit_code",
     "leaderboard",
@@ -116,6 +133,11 @@ LOW_PASS_RATE: Final = 0.25
 MIN_TRAJECTORIES: Final = 30
 """Fewer test conversations than this is a warning: the intervals are too wide to choose."""
 RESULT_FILE: Final = "benchmark.json"
+TARGET_COVERAGE: Final = 0.9
+"""The share of the test cases with a prompt that the cases a model's headline scored must
+cover before its own headline pass rate can show it meets ``--target-pass-rate``: a rate on
+fewer says too little about the rest of the agent's conversations to call fine-tuning
+unneeded."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -137,15 +159,29 @@ class BenchmarkSettings:
 
 @dataclass(frozen=True, slots=True)
 class Candidate:
-    """One base model to benchmark: its provider and profile."""
+    """One base model to benchmark: its provider, profile and renderer identity, and the
+    test cases it cannot replay."""
 
     provider: str
     profile: ModelProfile
+    rendering: Mapping[str, str]
+    """Its renderer's :meth:`~pup_finetune.rendering.base.Renderer.identity`."""
+    excluded: Mapping[str, Exclusion]
+    """The test cases it cannot replay, by case id."""
+    shared: bool = False
+    """Whether another provider offers the profile's alias too."""
+    unavailable: ExternalError | None = None
+    """Why its renderer could not load, which its run records as its error. Its identity
+    needs the renderer, so its directory is not checked against it and its results are not
+    scored; planning still reads the judge and evaluators it froze, and which of them have
+    work left, as for every model. Its :attr:`excluded` are only the cases with no prompt."""
 
     @property
     def target(self) -> str:
-        """The replay target name, and the name of its directory under ``--out-dir``."""
-        return self.profile.alias
+        """How the benchmark names the model: its alias, or ``PROVIDER/ALIAS`` when another
+        provider offers that alias too. It is the ``--models`` entry, the replay target, the
+        model's directory under ``--out-dir`` and its name in the result."""
+        return f"{self.provider}/{self.profile.alias}" if self.shared else self.profile.alias
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -200,8 +236,29 @@ class BenchmarkPlan:
         return [] if self.evaluators is None else self.evaluators.names
 
     @property
+    def headline_evaluators(self) -> list[str]:
+        """The evaluators the headline needs: none for the judge, every one for ``all``."""
+        from pup_finetune.evaluation.evaluators import ALL, JUDGE
+
+        if self.headline == JUDGE:
+            return []
+        return self.evaluator_names if self.headline == ALL else [self.headline]
+
+    @property
     def trajectories(self) -> int:
         return len({case.row_id for case in self.cases})
+
+    def cases_for(self, candidate: Candidate) -> list[ReplayCase]:
+        """The cases ``candidate`` replays: every test case it can."""
+        return [case for case in self.cases if case.id not in candidate.excluded]
+
+    def replayed_by_every_model(self) -> list[ReplayCase]:
+        """The cases every model replays: the most the finished models can be compared on."""
+        return [
+            case
+            for case in self.cases
+            if not any(case.id in candidate.excluded for candidate in self.candidates)
+        ]
 
     def model_dir(self, candidate: Candidate) -> Path:
         return self.out_dir / candidate.target
@@ -211,19 +268,15 @@ class BenchmarkPlan:
         or a score of that model."""
         from pup_finetune.evaluation.replay import METRICS_VERSION, cases_sha256
 
-        profile = candidate.profile
+        cases = self.cases_for(candidate)
         return {
             "benchmark": True,
             "provider": candidate.provider,
-            "base_model": profile.base_model,
-            "rendering": {
-                "renderer": profile.renderer,
-                "tokenizer_model": profile.tokenizer_model,
-                "tokenizer_revision": profile.tokenizer_revision,
-            },
+            "base_model": candidate.profile.base_model,
+            "rendering": dict(candidate.rendering),
             "judge": self.judge.identity(),
-            "cases_sha256": cases_sha256(self.cases),
-            "n_cases": len(self.cases),
+            "cases_sha256": cases_sha256(cases),
+            "n_cases": len(cases),
             "max_tokens": self.settings.max_tokens,
             "metrics_version": METRICS_VERSION,
             "seed": self.settings.seed,
@@ -235,7 +288,8 @@ class BenchmarkPlan:
 
     def _matching_dir(self, candidate: Candidate) -> EvalDir | None:
         """``candidate``'s directory when what it holds counts for this plan; ``None`` when
-        ``--confirm`` would start it again (another identity, no work).
+        ``--confirm`` would start it again (another identity, no work), or when its renderer
+        cannot load, so its identity cannot be checked.
 
         Raises :class:`SettingsConflict` when it holds work done under other settings, or
         evaluators these drop or change, which ``--confirm`` would refuse.
@@ -243,6 +297,8 @@ class BenchmarkPlan:
         from pup_finetune.evaluation.evaluators import evaluators_conflict, stored_evaluators
         from pup_finetune.evaluation.replay import EvalDir
 
+        if candidate.unavailable is not None:
+            return None
         eval_dir = EvalDir(self.model_dir(candidate))
         stored = eval_dir.stored_identity()
         wanted = finite_json(self.identity(candidate))
@@ -278,7 +334,7 @@ class BenchmarkPlan:
         return plan_target(
             self.reuse,
             candidate.target,
-            self.cases,
+            self.cases_for(candidate),
             self.keys.get(candidate.target, {}),
             self.judge,
             {} if eval_dir is None else eval_dir.read_generations(),
@@ -297,15 +353,16 @@ class BenchmarkPlan:
 
         eval_dir = self._matching_dir(candidate)
         names = self.evaluator_names
+        cases = self.cases_for(candidate)
         if eval_dir is None:
             found: dict[str, Any] = {
                 "done": 0,
-                "generate": len(self.cases),
-                "judge": len(self.cases),
-                **({"evaluators": dict.fromkeys(names, len(self.cases))} if names else {}),
+                "generate": len(cases),
+                "judge": len(cases),
+                **({"evaluators": dict.fromkeys(names, len(cases))} if names else {}),
             }
         else:
-            work = remaining_work(eval_dir, {candidate.target: self.cases}, names)
+            work = remaining_work(eval_dir, {candidate.target: cases}, names)
             found = work[candidate.target]
         taken = self.reused(candidate)
         if taken is not None:
@@ -314,19 +371,29 @@ class BenchmarkPlan:
         return found
 
     def split_warnings(self) -> list[str]:
-        """A warning when the test split is too small for the intervals to separate models."""
+        """A warning per model that leaves cases out, and one when the test split (or the
+        ``--max-rows`` sample of it) is too small for the intervals to separate models."""
+        from pup_finetune.evaluation.cases import exclusion_warning
+
+        found = (
+            exclusion_warning(candidate.excluded, cases=len(self.cases), model=candidate.target)
+            for candidate in self.candidates
+        )
+        warnings = [warning for warning in found if warning is not None]
         if self.trajectories >= MIN_TRAJECTORIES:
-            return []
+            return warnings
         if self.sampled_from is not None:
-            return [
+            warnings.append(
                 f"--max-rows {self.settings.max_rows} replays only {self.trajectories} of the "
                 f"{self.sampled_from} test conversations, so the confidence intervals are wide: "
                 "raise --max-rows for a firmer choice"
-            ]
-        return [
-            f"the test split holds only {self.trajectories} conversations, so the confidence "
-            "intervals are wide: pull more rows for a firmer choice"
-        ]
+            )
+        else:
+            warnings.append(
+                f"the test split holds only {self.trajectories} conversations, so the "
+                "confidence intervals are wide: pull more rows for a firmer choice"
+            )
+        return warnings
 
     def judge_calls(self) -> int:
         """The judge calls a run would still make: calibration's and every candidate's.
@@ -351,7 +418,15 @@ class BenchmarkPlan:
     def calibration_calls(self) -> int:
         if self.settings.skip_calibration or self._calibrated():
             return 0
-        return 3 * min(CALIBRATION_CASES, len(self.cases))
+        return 3 * min(CALIBRATION_CASES, len(self.calibration_cases()))
+
+    def calibration_cases(self) -> list[ReplayCase]:
+        """The cases some model replays, which the judge is calibrated on."""
+        return [
+            case
+            for case in self.cases
+            if any(case.id not in candidate.excluded for candidate in self.candidates)
+        ]
 
     def _calibrated(self) -> bool:
         from pup_finetune.evaluation.replay import EvalDir
@@ -408,6 +483,7 @@ class BenchmarkPlan:
 
     def preview(self) -> dict[str, Any]:
         """The calls the benchmark makes; work ``--out-dir`` already holds is left out."""
+        from pup_finetune.evaluation.cases import excluded_by_reason
         from pup_finetune.evaluation.evaluators import stored_evaluators
         from pup_finetune.evaluation.replay import CAVEAT, EvalDir
         from pup_finetune.judges import billing as judge_billing
@@ -434,6 +510,9 @@ class BenchmarkPlan:
                     "model": candidate.target,
                     "provider": candidate.provider,
                     "base_model": candidate.profile.base_model,
+                    "cases": len(self.cases_for(candidate)),
+                    "excluded_cases": len(candidate.excluded),
+                    "excluded_by_reason": excluded_by_reason(candidate.excluded),
                     "already_done": remaining["done"],
                     "generation_calls": remaining["generate"],
                     "reused": {"generations": 0, "verdicts": 0}
@@ -445,10 +524,26 @@ class BenchmarkPlan:
             names.append(f"{candidate.target}{idle}")
         calibration = self.calibration_calls()
         warnings = [*self.split_warnings(), *(() if self.reuse is None else self.reuse.warnings)]
+        for candidate in self.candidates:
+            if (remote := candidate.profile.remote_code_warning()) is not None:
+                warnings.append(remote)
+            if candidate.unavailable is not None:
+                warnings.append(
+                    f"the renderer of {candidate.target} cannot load "
+                    f"({redact(candidate.unavailable.message)}), so --confirm records it as an "
+                    "error unless it loads by then; the other models still run"
+                )
+        # --confirm would fail on a key nothing provides: fail now, never offer it. A
+        # read-only preview offers none, so it only warns.
+        soft = warnings if self.runtime.read_only else None
+        for model in models:
+            if model["generation_calls"]:
+                needed_by = f"generating with {model['model']}"
+                require_provider_key(
+                    model["provider"], self.runtime, needed_by=needed_by, warnings=soft
+                )
         if judge_calls + calibration:
-            # --confirm would fail on a key nothing provides: fail now, never offer it. A
-            # read-only preview offers none, so it only warns.
-            require_key(self.judge, warnings=warnings if self.runtime.read_only else None)
+            require_key(self.judge, warnings=soft)
         billing = [
             get_provider(name, self.runtime).sampling_billing(
                 SamplingUsage(calls=calls, max_tokens_per_call=settings.max_tokens)
@@ -462,11 +557,7 @@ class BenchmarkPlan:
             work = self.work()
             scoring = [name for name in evaluators.names if work.evaluator_calls(name)]
             for judge in busy_judges(evaluators, work):
-                require_key(
-                    judge.config,
-                    what=f"evaluator {judge.name}",
-                    warnings=warnings if self.runtime.read_only else None,
-                )
+                require_key(judge.config, what=f"evaluator {judge.name}", warnings=soft)
             attached = {
                 str(item.get("name"))
                 for candidate in self.candidates
@@ -498,8 +589,8 @@ class BenchmarkPlan:
             "action": f"benchmark {_models(len(self.candidates))} ({', '.join(names)}) on "
             f"{len(self.cases)} cases from {self.trajectories} test conversations{sampled}: "
             + (
-                "generate each with every model, one model at a time in a session of its own, "
-                f"and judge each answer with {judge_name}"
+                "generate each with every model that can replay it, one model at a time in a "
+                f"session of its own, and judge each answer with {judge_name}"
                 if generate
                 else "every answer is already generated, so no session opens; judge any answer "
                 f"left with {judge_name}"
@@ -513,6 +604,7 @@ class BenchmarkPlan:
                 "test_total": self.sampled_from or self.trajectories,
             },
             "cases": len(self.cases),
+            "replayed_by_every_model": len(self.replayed_by_every_model()),
             "trajectories": self.trajectories,
             "models": models,
             "judge_model": self.judge.spec,
@@ -551,7 +643,7 @@ class BenchmarkPlan:
             ],
             "caveat": CAVEAT,
             **({"notes": evaluated.notes} if evaluated is not None and evaluated.notes else {}),
-            "warnings": warnings,
+            "warnings": list(dict.fromkeys(warnings)),
         }
 
     def _reuse_block(self, taken: Sequence[tuple[TargetReuse, int]]) -> dict[str, Any]:
@@ -604,14 +696,16 @@ def plan_benchmark(
     dataset in ``dataset_dir``.
 
     Raises :class:`UsageError` for fewer than one model, a model given twice, a missing
-    package, a judge that is one of the models, or a test split with no case. With
-    ``max_rows``, the cases are those of :func:`sample_conversations`. Unless
-    ``settings.reuse`` is off, the dataset's store of base results is read here, once: each
-    model's renderer is loaded for the keys only when the store exists, and a model whose
-    renderer cannot load reuses nothing (its run records the error).
+    package, a judge that is one of the models, a test split with no case or none with a
+    prompt, a model that can replay none of its cases, or models that share none. With
+    ``max_rows``, the cases are those of :func:`sample_conversations`, and each model replays
+    those of them it can. Each model's renderer is loaded here for its identity and the cases
+    it refuses; a model whose renderer cannot load is planned as an error
+    (:attr:`Candidate.unavailable`). Unless ``settings.reuse`` is off, the dataset's store of
+    base results is read here, once.
     """
     from pup_finetune.curation.pipeline import require_in_datadog
-    from pup_finetune.evaluation.cases import build_cases
+    from pup_finetune.evaluation.cases import EMPTY_PROMPT, build_cases
     from pup_finetune.evaluation.evaluators import resolve_evaluators, stored_evaluators
     from pup_finetune.evaluation.judge import check_judge_differs
     from pup_finetune.evaluation.replay import EvalDir, remaining_work
@@ -626,24 +720,6 @@ def plan_benchmark(
         directory=dataset_dir,
         offline=all(provider_info(provider, runtime).offline for _, provider in models),
     )
-    candidates: list[Candidate] = []
-    for alias, provider_name in models:
-        require_packages(provider_name, runtime, "evaluate")
-        profile = get_provider(provider_name, runtime).resolve_model(alias)
-        if any(candidate.target == profile.alias for candidate in candidates):
-            raise UsageError(f"--models names {profile.alias} twice")
-        candidates.append(Candidate(provider=provider_name, profile=profile))
-    if not candidates:
-        raise UsageError("--models names no model", hint="pass --models MODEL,MODEL")
-    offline = all(candidate.provider == "fake" for candidate in candidates)
-    judge, judge_source = resolve_judge(
-        settings.judge_model,
-        provider="fake" if offline else candidates[0].provider,
-        runtime=runtime,
-        stored=_stored_judge(settings.out_dir, candidates),
-    )
-    for candidate in candidates:
-        check_judge_differs(judge, candidate.profile.base_model)
     cases = build_cases(
         by_split["test"],
         max_cases_per_trajectory=settings.max_cases_per_trajectory,
@@ -662,7 +738,61 @@ def plan_benchmark(
     if settings.max_rows is not None and settings.max_rows < conversations:
         cases = sample_conversations(cases, settings.max_rows, seed=settings.seed)
         sampled_from = conversations
-    model_dirs = [EvalDir(settings.out_dir / candidate.target) for candidate in candidates]
+    candidates: list[Candidate] = []
+    for alias, provider_name in models:
+        require_packages(provider_name, runtime, "evaluate")
+        candidate = _candidate(runtime, provider_name, alias, cases)
+        if any(other.target == candidate.target for other in candidates):
+            raise UsageError(f"--models names {candidate.target} twice")
+        if len(candidate.excluded) == len(cases):
+            refused = [
+                exclusion
+                for exclusion in candidate.excluded.values()
+                if exclusion.code != EMPTY_PROMPT
+            ]
+            if not refused:
+                raise UsageError(
+                    f"nothing to benchmark: the test split of {display_path(dataset.path)} has "
+                    f"{len(cases)} test cases, and none has a message before its recorded turn "
+                    f"({EMPTY_PROMPT})",
+                    hint="import rows whose test conversations have a message before each "
+                    "assistant turn",
+                )
+            first = refused[0]
+            raise UsageError(
+                f"nothing to benchmark with {candidate.target}: it cannot replay any of the "
+                f"{len(cases)} test cases ({first.code}: {first.detail})",
+                hint="benchmark without that model",
+            )
+        candidates.append(candidate)
+    if not candidates:
+        raise UsageError("--models names no model", hint="pass --models MODEL,MODEL")
+    offline = all(candidate.provider == "fake" for candidate in candidates)
+    judge, judge_source = resolve_judge(
+        settings.judge_model,
+        provider="fake" if offline else candidates[0].provider,
+        runtime=runtime,
+        stored=_stored_judge(settings.out_dir, candidates),
+    )
+    for candidate in candidates:
+        check_judge_differs(judge, candidate.profile.base_model)
+    plan = BenchmarkPlan(
+        dataset_dir=dataset_dir,
+        candidates=tuple(candidates),
+        cases=cases,
+        judge=judge,
+        judge_source=judge_source,
+        settings=settings,
+        runtime=runtime,
+        sampled_from=sampled_from,
+    )
+    if not plan.replayed_by_every_model():
+        raise UsageError(
+            "the models share no test case they can all replay, so they cannot be ranked on "
+            "the same cases",
+            hint="benchmark the models that leave cases out on their own",
+        )
+    model_dirs = [EvalDir(plan.model_dir(candidate)) for candidate in candidates]
     records = {
         d.evaluators_path: r
         for d in model_dirs
@@ -676,7 +806,7 @@ def plan_benchmark(
 
     def pending(name: str) -> bool:
         return any(
-            remaining_work(d, {c.target: cases}, [name])[c.target]["evaluators"][name]
+            remaining_work(d, {c.target: plan.cases_for(c)}, [name])[c.target]["evaluators"][name]
             for d, c in zip(model_dirs, candidates, strict=True)
         )
 
@@ -693,48 +823,70 @@ def plan_benchmark(
                     hint="name another model for it in the spec: a model should not grade its "
                     "own outputs",
                 ) from None
-    plan = BenchmarkPlan(
-        dataset_dir=dataset_dir,
-        candidates=tuple(candidates),
-        cases=cases,
-        judge=judge,
-        judge_source=judge_source,
-        settings=settings,
-        runtime=runtime,
-        sampled_from=sampled_from,
-        evaluators=evaluators,
-    )
+    plan = replace(plan, evaluators=evaluators)
     if not settings.reuse:
         return plan
     if not store_path(dataset_dir).exists():
         return replace(plan, reuse=ReuseIndex(store_path(dataset_dir)))
-    inputs: dict[str, Mapping[str, Any]] = {}
-    for candidate in candidates:
-        with suppress(ExternalError):
-            inputs[candidate.target] = _inputs(plan, candidate)
+    available = [candidate for candidate in candidates if candidate.unavailable is None]
+    inputs = {candidate.target: _inputs(plan, candidate) for candidate in available}
     keys = {
-        target: {case.id: generation_key(found, case) for case in cases}
-        for target, found in inputs.items()
+        c.target: {case.id: generation_key(inputs[c.target], case) for case in plan.cases_for(c)}
+        for c in available
     }
     wanted = [
-        Wanted(c.target, cases, keys[c.target], EvalDir(plan.model_dir(c)).read_generations())
-        for c in candidates
-        if c.target in keys
+        Wanted(
+            c.target,
+            plan.cases_for(c),
+            keys[c.target],
+            EvalDir(plan.model_dir(c)).read_generations(),
+        )
+        for c in available
     ]
     return replace(
         plan, inputs=inputs, keys=keys, reuse=ReuseIndex.load(dataset_dir, judge, wanted)
     )
 
 
+def _candidate(
+    runtime: Runtime, provider_name: str, alias: str, cases: Sequence[ReplayCase]
+) -> Candidate:
+    """``alias`` on ``provider_name``, with its renderer's identity and the ``cases`` it
+    refuses; :attr:`Candidate.unavailable` when its renderer cannot load."""
+    from pup_finetune.evaluation.cases import exclusions
+
+    provider = get_provider(provider_name, runtime)
+    profile = provider.resolve_model(alias)
+    shared = any(name != provider_name for name in providers_for_model(profile.alias, runtime))
+    try:
+        renderer = provider.renderer(profile)
+        renderer.check_tokens()
+        rendering = renderer.identity()
+    except ExternalError as exc:
+        return Candidate(
+            provider=provider_name,
+            profile=profile,
+            rendering={},
+            excluded=exclusions(cases, None),
+            shared=shared,
+            unavailable=exc,
+        )
+    return Candidate(
+        provider=provider_name,
+        profile=profile,
+        rendering=rendering,
+        excluded=exclusions(cases, renderer),
+        shared=shared,
+    )
+
+
 def _inputs(plan: BenchmarkPlan, candidate: Candidate) -> dict[str, Any]:
-    """What ``candidate``'s answers are sampled under, from its full renderer identity, which
-    loads its renderer."""
+    """What ``candidate``'s answers are sampled under, from its renderer identity."""
     from pup_finetune.evaluation.reuse import key_inputs
 
-    provider = get_provider(candidate.provider, plan.runtime)
-    provider.validate_options({})
-    rendering = provider.renderer(candidate.profile).identity()
-    return key_inputs(candidate.provider, candidate.profile, rendering, plan.settings.max_tokens)
+    return key_inputs(
+        candidate.provider, candidate.profile, candidate.rendering, plan.settings.max_tokens
+    )
 
 
 def _stored_judge(out_dir: Path, candidates: Sequence[Candidate]) -> str | None:
@@ -764,14 +916,7 @@ def _base_sampler(plan: BenchmarkPlan, candidate: Candidate) -> Iterator[Sampler
     provider.validate_options({})
     profile = candidate.profile
     renderer = provider.renderer(profile)
-    longest = max(
-        len(
-            renderer.generation_prompt_tokens(
-                [dict(m) for m in case.prefix], [dict(t) for t in case.tools]
-            )
-        )
-        for case in plan.cases
-    )
+    longest = max(_prompt_length(renderer, case) for case in plan.cases_for(candidate))
     with provider.backend().open_session(
         profile,
         LoraConfig(rank=profile.default_lora_rank),
@@ -788,6 +933,18 @@ def _base_sampler(plan: BenchmarkPlan, candidate: Candidate) -> Iterator[Sampler
                 info(f"closing the {candidate.target} sampler failed: {redact(str(exc))}")
 
 
+def _prompt_length(renderer: Renderer, case: ReplayCase) -> int:
+    """The tokens of ``case``'s prompt; ``0`` for one the renderer refuses, whose pair then
+    records the refusal instead of stopping the benchmark."""
+    try:
+        prompt = renderer.generation_prompt_tokens(
+            [dict(m) for m in case.prefix], [dict(t) for t in case.tools]
+        )
+    except RendererError:
+        return 0
+    return len(prompt)
+
+
 def _calibration(plan: BenchmarkPlan, client: ChatCompleter) -> dict[str, Any] | None:
     """The judge's calibration report, reused from ``--out-dir`` when one passed there for
     this judge; ``None`` with ``--skip-calibration``."""
@@ -801,7 +958,7 @@ def _calibration(plan: BenchmarkPlan, client: ChatCompleter) -> dict[str, Any] |
         return store.read_calibration()
     info(f"calibrating the judge {plan.judge.spec} on {plan.calibration_calls() // 3} cases")
     report = {
-        **calibrate(plan.cases, client, plan.judge, n=CALIBRATION_CASES).to_json(),
+        **calibrate(plan.calibration_cases(), client, plan.judge, n=CALIBRATION_CASES).to_json(),
         "judge": plan.judge.identity(),
     }
     info(calibration_line(report))
@@ -824,7 +981,7 @@ def _prepare(plan: BenchmarkPlan, candidate: Candidate, inputs: Mapping[str, Any
         taken = plan.reused(candidate)
         if plan.reuse is None or taken is None or not any(taken.counts().values()):
             return
-        copied = import_target(eval_dir, taken, plan.cases)
+        copied = import_target(eval_dir, taken, plan.cases_for(candidate))
     info(
         f"reusing {copied['generations']} answers of {candidate.target} "
         f"({copied['verdicts']} judged) from {display_path(plan.reuse.store)}"
@@ -851,31 +1008,25 @@ def _share(
     inputs: Mapping[str, Any] | None,
     warnings: list[str],
 ) -> None:
-    """Add ``candidate``'s own answers and verdicts, sampled under ``inputs`` (loaded now
-    when ``None``), to the dataset's store; a warning when they could not be. A directory
-    made before stamps shares nothing, so its renderer is not loaded."""
+    """Add ``candidate``'s own answers and verdicts, sampled under ``inputs`` (made now when
+    ``None``), to the dataset's store; a warning when they could not be. A directory made
+    before stamps shares nothing."""
     from pup_finetune.evaluation.replay import EvalDir
-    from pup_finetune.evaluation.reuse import export_target, not_shared, stamped
+    from pup_finetune.evaluation.reuse import export_target, stamped
 
     eval_dir = EvalDir(plan.model_dir(candidate))
     if not eval_dir.has_work() or not stamped(eval_dir):
         return
-    rerun = f"{shlex.join(plan.command(evaluators=False))} --confirm"
-    try:
-        inputs = inputs if inputs is not None else _inputs(plan, candidate)
-    except (FinetuneError, OSError) as exc:
-        warning: str | None = not_shared(exc, rerun)
-    else:
-        warning = export_target(
-            plan.dataset_dir,
-            eval_dir,
-            candidate.target,
-            plan.cases,
-            inputs,
-            plan.judge,
-            {"command": "benchmark", "run_id": None},
-            rerun,
-        )
+    warning = export_target(
+        plan.dataset_dir,
+        eval_dir,
+        candidate.target,
+        plan.cases_for(candidate),
+        inputs if inputs is not None else _inputs(plan, candidate),
+        plan.judge,
+        {"command": "benchmark", "run_id": None},
+        f"{shlex.join(plan.command(evaluators=False))} --confirm",
+    )
     if warning is not None and warning not in warnings:
         warnings.append(warning)
 
@@ -888,12 +1039,17 @@ def _replay_model(
     warnings: list[str],
     scoring: Mapping[str, ChatCompleter],
 ) -> dict[str, Any] | None:
-    """Replay every case with ``candidate`` (after copying what it takes from the dataset's
-    store), then share its answers; the error that kept its session from starting, or
-    ``None``."""
+    """Replay every case ``candidate`` can (after copying what it takes from the dataset's
+    store), then share its answers; the error that kept its renderer from loading or its
+    session from starting, or ``None``."""
     from pup_finetune.evaluation.judge import judge
     from pup_finetune.evaluation.replay import run_replay
 
+    if candidate.unavailable is not None:
+        info(
+            f"{candidate.target} could not be benchmarked: {redact(candidate.unavailable.message)}"
+        )
+        return error_json(candidate.unavailable)
     inputs = plan.inputs.get(candidate.target)
     if inputs is not None:
         _prepare(plan, candidate, inputs)
@@ -904,6 +1060,7 @@ def _replay_model(
         _share(plan, candidate, inputs, warnings)
         return None
     config = plan.judge
+    cases = plan.cases_for(candidate)
 
     def judge_fn(case: ReplayCase, generation: Generation) -> Judgment:
         return judge(
@@ -917,7 +1074,7 @@ def _replay_model(
 
     def replay(samplers: Mapping[str, Sampler]) -> None:
         run_replay(
-            plan.cases,
+            cases,
             samplers,
             judge_fn,
             out_dir=plan.model_dir(candidate),
@@ -925,7 +1082,7 @@ def _replay_model(
             concurrency=plan.settings.concurrency,
             cancel=cancel,
             on_progress=EvaluationProgress(),
-            replays={candidate.target: plan.cases},
+            replays={candidate.target: cases},
             evaluators=plan.evaluators,
             scorers=None if plan.evaluators is None else plan.evaluators.scorers(scoring),
         )
@@ -1010,14 +1167,32 @@ def _calibration_failed(plan: BenchmarkPlan, report: Mapping[str, Any]) -> dict[
 # --- ranking ------------------------------------------------------------------------------
 
 
-def _headline_passes(plan: BenchmarkPlan, candidate: Candidate) -> dict[str, bool]:
-    """Whether each case the headline scored passed it, by case id: the judge's verdict on
-    an ``ok`` result, or the evaluator's (or ``all``'s) where it applies."""
-    from pup_finetune.evaluation.replay import EvalDir, outcome
+@dataclass(frozen=True, slots=True)
+class Leaderboard:
+    """Every model's entry, ranked ones first, best first, then the unranked ones in the order
+    given; :attr:`common_cases`, the size of the set the ranked ones are compared on; and
+    :attr:`rerun`, whether a rerun has work left for some model."""
 
-    results = EvalDir(plan.model_dir(candidate)).read_results()
+    entries: list[dict[str, Any]]
+    common_cases: int
+    """How many cases the headline scored for every finished model it scored a case for."""
+    rerun: bool = False
+    """Whether a model is unfinished, or has an evaluator score left that a rerun retries."""
+    raised: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Each check's answers it raised on over every model, with the first error, as
+    :func:`~pup_finetune.evaluation.runner.evaluator_errors` counts them."""
+
+
+def _headline_passes(
+    plan: BenchmarkPlan, candidate: Candidate, results: Mapping[PairKey, Mapping[str, Any]]
+) -> dict[str, bool]:
+    """Whether each of ``candidate``'s cases the headline scored in ``results`` passed it, by
+    case id: the judge's verdict on an ``ok`` result, or the evaluator's (or ``all``'s) where
+    it applies."""
+    from pup_finetune.evaluation.replay import outcome
+
     found: dict[str, bool] = {}
-    for case in plan.cases:
+    for case in plan.cases_for(candidate):
         result = results.get((candidate.target, case.id))
         verdict = outcome(result, plan.headline, plan.evaluator_names)
         if verdict in ("pass", "fail"):
@@ -1035,23 +1210,35 @@ def _by_trajectory(cases: Sequence[ReplayCase], values: Mapping[str, float]) -> 
 
 def _entry(
     plan: BenchmarkPlan, candidate: Candidate, error: Mapping[str, Any] | None
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, bool], bool, dict[str, dict[str, Any]]]:
+    """``candidate``'s entry, whether each case its headline scored passed, whether a rerun
+    has work left for it, and each check's answers it raised on. A check that raised is not
+    work left: a rerun runs the same frozen file. A model whose renderer cannot load is an
+    error, its results not read."""
     from pup_finetune.evaluation.bootstrap import paired_bootstrap_ci
-    from pup_finetune.evaluation.replay import EvalDir, summarize
+    from pup_finetune.evaluation.cases import EMPTY_PROMPT, excluded_by_reason
+    from pup_finetune.evaluation.replay import EvalDir, remaining_work, summarize
 
     eval_dir = EvalDir(plan.model_dir(candidate))
-    results, generations = eval_dir.read_results(), eval_dir.read_generations()
+    cases = plan.cases_for(candidate)
+    names = plan.evaluator_names
+    results: dict[PairKey, dict[str, Any]] = {}
+    generations: dict[PairKey, dict[str, Any]] = {}
+    if candidate.unavailable is not None:
+        error = error or error_json(candidate.unavailable)
+    else:
+        results, generations = eval_dir.read_results(), eval_dir.read_generations()
     target = summarize(
-        plan.cases,
+        cases,
         results,
         generations,
         seed=plan.settings.seed,
-        replays={candidate.target: plan.cases},
+        replays={candidate.target: cases},
         evaluators=plan.evaluators,
     )["targets"][candidate.target]
-    passes = _headline_passes(plan, candidate)
+    passes = _headline_passes(plan, candidate, results)
     interval = paired_bootstrap_ci(
-        _by_trajectory(plan.cases, {key: float(value) for key, value in passes.items()}),
+        _by_trajectory(cases, {key: float(value) for key, value in passes.items()}),
         seed=plan.settings.seed,
     )
     latencies = [
@@ -1060,22 +1247,37 @@ def _entry(
         if name == candidate.target and isinstance(record.get("latency_s"), int | float)
     ]
     unparseable = 0
-    for case in plan.cases:
+    for case in cases:
         record = generations.get((candidate.target, case.id))
         if record is not None and record.get("stop_reason") != "length":
             unparseable += record.get("format_valid") is False
-    scoring = sum(int(target["evaluators"][name]["errors"]) for name in plan.evaluator_names)
+    scoring = sum(int(target["evaluators"][name]["errors"]) for name in names)
+    checks = [] if plan.evaluators is None else [check.name for check in plan.evaluators.checks]
+    raised = evaluator_errors(results, {candidate.target: cases}, checks)
+    finished = settled = False
+    if error is None:
+        left = remaining_work(eval_dir, {candidate.target: cases}, names)[candidate.target]
+        scores = {
+            name: count - (raised[name]["errors"] if name in raised else 0)
+            for name, count in left.get("evaluators", {}).items()
+        }
+        finished = not left["judge"] and not any(scores[name] for name in plan.headline_evaluators)
+        settled = finished and not any(scores.values())
     if error is not None:
         status = "error"
     elif target["pending"]:
         status = "partial"
     else:
         status = "complete_with_errors" if target["errors"] or scoring else "complete"
-    return {
+    excluded = excluded_by_reason(candidate.excluded)
+    prompted = len(plan.cases) - excluded.get(EMPTY_PROMPT, 0)
+    entry = {
         "model": candidate.target,
         "provider": candidate.provider,
         "base_model": candidate.profile.base_model,
         "status": status,
+        "finished": finished,
+        "rank": None,
         "judge_pass_rate": target["judge_pass"]["rate"],
         "headline_pass_rate": sum(passes.values()) / len(passes) if passes else None,
         **(
@@ -1083,71 +1285,93 @@ def _entry(
             if plan.evaluators is None
             else {
                 "evaluators": {
-                    name: entry["pass"]["rate"] for name, entry in target["evaluators"].items()
+                    name: counts["pass"]["rate"] for name, counts in target["evaluators"].items()
                 },
                 "evaluator_errors": scoring,
             }
         ),
         "ci95": None if interval is None else list(interval),
-        "cases": target["completed"],
+        "judged_cases": target["completed"],
+        "headline_cases": len(passes),
+        "coverage": len(passes) / prompted,
+        "common_pass_rate": None,
+        "gap_to_best": None,
+        "within_noise_of_best": None,
+        "cases": len(cases),
+        "excluded_cases": len(candidate.excluded),
+        "excluded_by_reason": excluded,
         "errors": target["errors"],
+        "errors_unrenderable": target["errors_unrenderable"],
         "pending": target["pending"],
         "truncated": target["truncated"],
         "unparseable": unparseable,
         "reused": target["reused"],
         "latency_p50_s": statistics.median(latencies) if latencies else None,
-        "gap_to_best": None,
-        "within_noise_of_best": None,
         "error": None if error is None else dict(error),
         "out_dir": display_path(eval_dir.path),
     }
+    return entry, passes, not settled, raised
 
 
 def leaderboard(
     plan: BenchmarkPlan, errors: Mapping[str, Mapping[str, Any]] | None = None
-) -> list[dict[str, Any]]:
-    """Every model, best headline pass rate first (models without one last, in the order
-    given), each with its gap to the best: the mean paired difference over the cases the
-    headline scored for both, with a 95% bootstrap CI over trajectories. A model is within
-    noise of the best when that CI reaches 0 or there are too few cases for one."""
+) -> Leaderboard:
+    """Every model, with its headline pass rate (the judge's by default) and 95% bootstrap CI
+    over trajectories on its own cases, ranked when it is finished (no session error, nothing
+    pending, no error a rerun retries, no score the headline still needs) and the headline
+    scored one of its cases.
+
+    The ranked models are compared on the cases the headline scored for every one of them, so
+    a model still running never narrows the comparison: each one's headline pass rate there
+    (``common_pass_rate``) orders them, and each one's gap to the best (the mean paired
+    difference, with its CI) is over those cases. A model is within noise of the best when that
+    CI reaches 0 or there are too few cases for one."""
     from pup_finetune.evaluation.bootstrap import paired_bootstrap_ci
 
     errors = errors or {}
-    entries = [
+    scored = [
         _entry(plan, candidate, errors.get(candidate.target)) for candidate in plan.candidates
     ]
-    order = sorted(
-        range(len(entries)),
-        key=lambda i: (
-            entries[i]["headline_pass_rate"] is None,
-            -(entries[i]["headline_pass_rate"] or 0),
-        ),
+    compared = [(entry, passes) for entry, passes, _, _ in scored if entry["finished"] and passes]
+    common = set.intersection(*(set(passes) for _, passes in compared)) if compared else set()
+    ranked: list[tuple[dict[str, Any], dict[str, bool]]] = []
+    if common:
+        for entry, passes in compared:
+            entry["common_pass_rate"] = sum(passes[case_id] for case_id in common) / len(common)
+        ranked = sorted(compared, key=lambda item: -item[0]["common_pass_rate"])
+        best = ranked[0][1]
+        for rank, (entry, passes) in enumerate(ranked, start=1):
+            entry["rank"] = rank
+            if rank == 1:
+                continue
+            differences = {
+                case_id: float(best[case_id]) - float(passes[case_id]) for case_id in common
+            }
+            interval = paired_bootstrap_ci(
+                _by_trajectory(plan.cases, differences), seed=plan.settings.seed
+            )
+            gap = sum(differences.values()) / len(differences)
+            entry["gap_to_best"] = {
+                "pass_rate": gap,
+                **({"judge_pass_rate": gap} if plan.headline == "judge" else {}),
+                "ci95": None if interval is None else list(interval),
+                "n_cases": len(differences),
+            }
+            entry["within_noise_of_best"] = interval is None or interval[0] <= 0
+    entries = [entry for entry, _ in ranked]
+    entries += [entry for entry, _, _, _ in scored if entry["rank"] is None]
+    raised: dict[str, dict[str, Any]] = {}
+    for _, _, _, found in scored:
+        for name, counted in found.items():
+            total = raised.setdefault(name, {"errors": 0, "first_error": None})
+            total["errors"] += counted["errors"]
+            total["first_error"] = total["first_error"] or counted["first_error"]
+    return Leaderboard(
+        entries,
+        common_cases=len(common),
+        rerun=any(rerun for _, _, rerun, _ in scored),
+        raised=raised,
     )
-    board = [entries[i] for i in order]
-    if not board or board[0]["headline_pass_rate"] is None:
-        return board
-    by_target = {candidate.target: candidate for candidate in plan.candidates}
-    best = _headline_passes(plan, by_target[board[0]["model"]])
-    for entry in board[1:]:
-        if entry["headline_pass_rate"] is None:
-            continue
-        other = _headline_passes(plan, by_target[entry["model"]])
-        differences = {
-            case_id: float(best[case_id]) - float(other[case_id])
-            for case_id in best.keys() & other.keys()
-        }
-        interval = paired_bootstrap_ci(
-            _by_trajectory(plan.cases, differences), seed=plan.settings.seed
-        )
-        gap = sum(differences.values()) / len(differences) if differences else None
-        entry["gap_to_best"] = {
-            "pass_rate": gap,
-            **({"judge_pass_rate": gap} if plan.headline == "judge" else {}),
-            "ci95": None if interval is None else list(interval),
-            "n_cases": len(differences),
-        }
-        entry["within_noise_of_best"] = interval is None or interval[0] <= 0
-    return board
 
 
 def _pct(rate: float) -> str:
@@ -1157,39 +1381,66 @@ def _pct(rate: float) -> str:
 def recommend(
     board: Sequence[Mapping[str, Any]], *, target_pass_rate: float, headline: str = "judge"
 ) -> dict[str, Any]:
-    """The model to fine-tune, from a :func:`leaderboard` ranked by ``headline``.
+    """The model to fine-tune, from a :attr:`Leaderboard.entries` ranked by ``headline``: the
+    best ranked one.
 
-    ``verdict`` is ``fine_tune`` (the best model is below ``target_pass_rate``: fine-tune
-    it), ``base_meets_target`` (the best base model already reaches it, so fine-tuning may
-    add little) or ``no_result`` (no model has a case the headline scored). Models within
-    noise of the best are named too: any of them is as good a start, so the cheapest to
+    ``verdict`` is ``base_meets_target`` when that model's own headline pass rate reaches
+    ``target_pass_rate`` and the cases its headline scored cover at least
+    :data:`TARGET_COVERAGE` of the test cases with a prompt (fine-tuning may add little),
+    ``fine_tune`` otherwise, or ``no_result`` when no model is ranked. The reason quotes the
+    cases the rate is over. Only finished models are ranked, so a model still running changes
+    neither the choice nor the verdict; the reason says the results are partial then. Models
+    within noise of the best are named too: any of them is as good a start, so the cheapest to
     serve wins.
     """
-    scored = [entry for entry in board if entry.get("headline_pass_rate") is not None]
+    ranked = [entry for entry in board if entry.get("rank") is not None]
+    unfinished = [str(entry["model"]) for entry in board if not entry.get("finished")]
+    partial = (
+        f"; results are partial: {joined(unfinished)} can still advance, and a rerun may "
+        "change this"
+        if unfinished
+        else ""
+    )
     which = "the judge and every evaluator" if headline == "all" else f"the evaluator {headline}"
-    if not scored:
-        what = "a judged case" if headline == "judge" else f"a case {which} scored"
-        return {
-            "verdict": "no_result",
-            "model": None,
-            "reason": f"no model has {what} yet, so there is nothing to compare",
-        }
-    best = scored[0]
-    rate = float(best["headline_pass_rate"])
-    matches = "matches the recorded answers" if headline == "judge" else f"passes {which}"
-    close = [str(entry["model"]) for entry in scored[1:] if entry.get("within_noise_of_best")]
-    if rate >= target_pass_rate:
-        verdict = "base_meets_target"
-        reason = (
-            f"{best['model']} already {matches} on {_pct(rate)} of the cases, at or above the "
-            f"{_pct(target_pass_rate)} target, so fine-tuning may add little: check whether "
-            "the remaining misses matter before training"
-        )
-    else:
+    case = "judged case" if headline == "judge" else f"case {which} scored"
+    if not ranked:
+        if any(e.get("finished") and e.get("headline_pass_rate") is not None for e in board):
+            reason = f"the finished models share no {case}, so none can be ranked"
+        elif any(entry.get("headline_pass_rate") is not None for entry in board):
+            reason = f"no finished model has a {case}, so none is ranked yet"
+        else:
+            pending = " yet" if unfinished else ""
+            reason = f"no model has a {case}{pending}, so there is nothing to compare"
+        return {"verdict": "no_result", "model": None, "reason": reason + partial}
+    best = ranked[0]
+    rate, coverage = float(best["headline_pass_rate"]), float(best["coverage"])
+    close = [str(entry["model"]) for entry in ranked[1:] if entry.get("within_noise_of_best")]
+    scored = best["headline_cases"]
+    judged = (
+        f"its {scored} judged cases"
+        if headline == "judge"
+        else f"the {scored} cases {'they' if headline == 'all' else 'it'} scored"
+    )
+    own = (
+        f"{best['model']} ranks first and matches {_pct(rate)} of the recorded answers on {judged}"
+        if headline == "judge"
+        else f"{best['model']} ranks first and passes {which} on {_pct(rate)} of {judged}"
+    )
+    if rate < target_pass_rate:
+        verdict = "fine_tune"
+        reason = f"{own}, below the {_pct(target_pass_rate)} target: fine-tune it"
+    elif coverage < TARGET_COVERAGE:
         verdict = "fine_tune"
         reason = (
-            f"{best['model']} {matches} best ({_pct(rate)} of the cases), below the "
+            f"{own}, but they cover only {_pct(coverage)} of the test cases with a prompt, "
+            f"under the {_pct(TARGET_COVERAGE)} needed to say it meets the "
             f"{_pct(target_pass_rate)} target: fine-tune it"
+        )
+    else:
+        verdict = "base_meets_target"
+        reason = (
+            f"{own}, at or above the {_pct(target_pass_rate)} target, so fine-tuning may add "
+            "little: check whether the remaining misses matter before training"
         )
     if close:
         reason += (
@@ -1203,15 +1454,16 @@ def recommend(
         "headline": headline,
         "pass_rate": rate,
         "judge_pass_rate": best["judge_pass_rate"],
+        "coverage": coverage,
         "target_pass_rate": target_pass_rate,
         "within_noise": close,
-        "reason": reason,
+        "reason": reason + partial,
     }
 
 
 def _result(
     plan: BenchmarkPlan,
-    board: list[dict[str, Any]],
+    board: Leaderboard,
     *,
     calibration: Mapping[str, Any] | None,
     cancelled: bool,
@@ -1219,10 +1471,11 @@ def _result(
 ) -> dict[str, Any]:
     from pup_finetune.evaluation.replay import CAVEAT, truncation_warning
 
+    entries = board.entries
     recommendation = recommend(
-        board, target_pass_rate=plan.settings.target_pass_rate, headline=plan.headline
+        entries, target_pass_rate=plan.settings.target_pass_rate, headline=plan.headline
     )
-    statuses = {entry["status"] for entry in board}
+    statuses = {entry["status"] for entry in entries}
     if cancelled or "partial" in statuses:
         status = "partial"
     elif statuses == {"complete"}:
@@ -1231,16 +1484,25 @@ def _result(
         status = "complete_with_errors"
     warnings: list[str] = []
     hint = None
-    failed = [entry["model"] for entry in board if entry["status"] != "complete"]
-    if status != "complete":
+    unrenderable = sum(int(entry["errors_unrenderable"]) for entry in entries)
+    failed = [entry["model"] for entry in entries if not entry["finished"]]
+    if failed:
         keys = "errors, evaluator_errors" if plan.evaluators is not None else "errors"
         hint = (
             f"{', '.join(failed)} {'has' if len(failed) == 1 else 'have'} no result for every "
             f"case (see each entry's {keys}, error and pending); run next_command to continue, "
             "which reuses every finished result"
         )
-    if scoring := sum(int(entry.get("evaluator_errors") or 0) for entry in board):
-        warnings.append(scoring_warning(scoring))
+    if unrenderable:
+        hint = (f"{hint}. " if hint else "") + (
+            f"{unrenderable} case(s) have a prompt a model's chat format cannot continue, "
+            "which a retry cannot fix, so next_command never retries them"
+        )
+    if broken := check_hint(board.raised, set(board.raised), plan.out_dir):
+        hint = broken if hint is None else f"{hint}. {broken}"
+    scoring = sum(int(entry.get("evaluator_errors") or 0) for entry in entries)
+    if missing := scoring - unrenderable * len(plan.evaluator_names):
+        warnings.append(scoring_warning(missing, retried=board.rerun))
     rate = recommendation.get("judge_pass_rate")
     if isinstance(rate, float) and rate < LOW_PASS_RATE:
         warnings.append(
@@ -1248,7 +1510,7 @@ def _result(
             "fine-tuning may not close a gap this wide, so add rows or try a larger base "
             "model too"
         )
-    for entry in board:
+    for entry in entries:
         if entry["truncated"]:
             warnings.append(
                 truncation_warning(
@@ -1270,11 +1532,12 @@ def _result(
         {
             "status": status,
             "recommendation": recommendation,
-            "leaderboard": board,
+            "leaderboard": entries,
             "dataset": display_path(plan.dataset_dir),
             "out_dir": display_path(plan.out_dir),
             "judge_model": plan.judge.spec,
             "cases": len(plan.cases),
+            "common_cases": board.common_cases,
             "trajectories": plan.trajectories,
             "cancelled": cancelled,
             "calibration": None
@@ -1285,29 +1548,40 @@ def _result(
             "hint": hint,
             "files": {
                 "result": display_path(plan.out_dir / RESULT_FILE),
-                "models": {entry["model"]: entry["out_dir"] for entry in board},
+                "models": {entry["model"]: entry["out_dir"] for entry in entries},
             },
-            **_next(plan, status, recommendation, board),
+            **_next(plan, recommendation, entries, retry=board.rerun),
         }
     )
 
 
 def _next(
     plan: BenchmarkPlan,
-    status: str,
     recommendation: Mapping[str, Any],
     board: Sequence[Mapping[str, Any]],
+    *,
+    retry: bool,
 ) -> dict[str, Any]:
-    """An unfinished benchmark is continued (a free preview first). A finished one leads to
-    the training preview of the recommended model, which is a step instead when the base
-    model already meets the target or most of its failures were cut off at ``--max-tokens``.
-    Answers cut off add a step that benchmarks again with twice the ``--max-tokens``."""
+    """An unfinished benchmark that a rerun can advance is continued (a free preview first).
+    A finished one leads to the training preview of the recommended model, which is a step
+    instead when the base model already meets the target or most of its failures were cut
+    off at ``--max-tokens``. Answers cut off add a step that benchmarks again with twice the
+    ``--max-tokens``."""
     rerun = shlex.join(plan.command())
     model = recommendation.get("model")
+    chosen = next((c for c in plan.candidates if c.target == model), None)
     train = (
-        command("train", "--dataset", plan.dataset_dir, "--model", model)
-        if isinstance(model, str)
-        else None
+        None
+        if chosen is None
+        else command(
+            "train",
+            "--provider",
+            chosen.provider,
+            "--dataset",
+            plan.dataset_dir,
+            "--model",
+            chosen.profile.alias,
+        )
     )
     steps = []
     if any(entry["truncated"] for entry in board):
@@ -1324,12 +1598,12 @@ def _next(
                 "benchmarking is paid)",
             )
         )
-    if status != "complete":
+    if retry:
         return {"next_command": rerun, "next_steps": steps}
     if train is None:
         return {"next_command": None, "next_steps": steps}
     best = board[0]
-    failed = best["cases"] - round((best["judge_pass_rate"] or 0) * best["cases"])
+    failed = best["judged_cases"] - round((best["judge_pass_rate"] or 0) * best["judged_cases"])
     if recommendation.get("verdict") == "fine_tune" and 2 * best["truncated"] <= failed:
         return {"next_command": train, "next_steps": steps}
     steps.append(
@@ -1345,4 +1619,5 @@ def exit_code(result: Mapping[str, Any]) -> int:
         return 1
     if result.get("status") != "complete_with_errors":
         return 0
-    return 1 if any(entry.get("cases") == 0 for entry in result.get("leaderboard") or []) else 0
+    entries = result.get("leaderboard") or []
+    return 1 if any(entry.get("judged_cases") == 0 for entry in entries) else 0

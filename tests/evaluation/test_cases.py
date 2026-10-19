@@ -21,9 +21,13 @@ from pup_finetune.evaluation.cases import (
     build_cases,
     case_indices,
     cases_from_dataset,
+    exclusion_warning,
+    exclusions,
     row_cases,
     select_spread,
 )
+from pup_finetune.providers.fake import FakeRenderer
+from pup_finetune.rendering.families import DEEPSEEK_V4
 from pup_finetune.storage import DirectoryLock, canonical_json
 
 TOOLS: list[dict[str, Any]] = [
@@ -317,3 +321,42 @@ def test_cases_from_dataset_use_kept_test_rows_only(tmp_path: Path) -> None:
         row.id for row in dataset.rows_for_split("validation")
     }
     assert all(case.split == "validation" for case in validation)
+
+
+def replay_case(case_id: str, *prefix: dict[str, Any]) -> ReplayCase:
+    return ReplayCase(
+        id=case_id,
+        row_id=case_id,
+        trace_id=None,
+        message_index=len(prefix),
+        prefix=prefix,
+        tools=(),
+        reference={"role": "assistant", "content": "Hi."},
+    )
+
+
+def test_a_case_a_model_cannot_replay_is_left_out_for_it_with_a_stable_reason() -> None:
+    user = {"role": "user", "content": "Hi."}
+    cases = [
+        replay_case("fine", user),
+        replay_case("after-system", {"role": "system", "content": "Be brief."}),
+        replay_case("marker", {"role": "user", "content": "Hi <|end|>"}),
+        replay_case("opening"),
+    ]
+
+    # DeepSeek's check loads no tokenizer; the fake renderer refuses its own markers.
+    by_deepseek = exclusions(cases, DEEPSEEK_V4.renderer())
+    by_fake = exclusions(cases, FakeRenderer())
+
+    assert {case_id: e.code for case_id, e in by_deepseek.items()} == {
+        "after-system": "unsupported_message",
+        "opening": "empty_prompt",
+    }
+    assert {case_id: e.code for case_id, e in by_fake.items()} == {
+        "marker": "unsupported_message",
+        "opening": "empty_prompt",
+    }
+    warning = exclusion_warning(by_fake, cases=4, model="fake-model")
+    assert warning is not None
+    assert warning.startswith("2 of 4 test cases are left out for fake-model, which cannot ")
+    assert exclusion_warning({}, cases=4, model="fake-model") is None

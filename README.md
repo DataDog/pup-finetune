@@ -38,7 +38,7 @@ pup finetune dataset pull datasets/my-agent --ml-app my-agent --from 7d
 pup finetune dataset sample datasets/my-agent --count 20
 pup finetune dataset label datasets/my-agent --file labels.jsonl
 pup finetune dataset push datasets/my-agent --name my-agent-sft
-pup finetune train --dataset datasets/my-agent --model qwen3p8-27b --detach
+pup finetune train --provider fireworks --dataset datasets/my-agent --model qwen3p8-27b --detach
 pup finetune status --watch
 pup finetune evaluate ft-20261007183443-a8b181
 pup finetune deploy ft-20261007183443-a8b181
@@ -176,17 +176,21 @@ pup finetune dataset fetch datasets/my-agent-v2 --project pup-finetune --name my
 ## Train
 
 ```sh
-pup finetune train --dataset datasets/my-agent --model qwen3p8-27b --detach
+pup finetune train --provider fireworks --dataset datasets/my-agent --model qwen3p8-27b --detach
 pup finetune status --watch
 ```
 
 The preview shows the rendered tokens per split, the rows left out (such as `exceeds_context`)
-and where the rows go. The provider follows from the model, and the run goes in
-`runs/<run id>`. `--detach` trains in a background worker (its log is `worker.log`). Cap the
-spend with `--max-train-tokens`, or `--max-spend-usd` with `--hourly-rate-usd`. The epoch with
+and where the rows go. `--model` takes a model's alias, or in any case the provider's model id
+or its Hugging Face tokenizer name (`models list` shows them). The provider follows from the model
+when one provider offers it; `qwen3p8-27b`, `glm-5p3-flash` and `kimi-k3` are on both, so
+name `--provider` for them. The run goes in `runs/<run id>`. `--detach` trains in a background
+worker (its log is `worker.log`). Cap the spend with `--max-train-tokens`, or `--max-spend-usd`
+with `--hourly-rate-usd`. The epoch with
 the best validation loss is kept, also when a cap stops the run: promoted to a Fireworks model,
-or recorded as the run's `deployable_checkpoint` on Baseten, which has no promotion. The
-Baseten models are `qwen3p5-9b` and `glm-5p3-flash`:
+or recorded as the run's `deployable_checkpoint` on Baseten, which has no promotion. Fireworks
+also trains `deepseek-v4-flash-0731` and `muse-glimmer-30b`. The Baseten models are
+`qwen3p5-9b`, `glm-5p3-flash`, `qwen3p8-27b` and `kimi-k3`:
 `pup finetune train --dataset datasets/my-agent --model qwen3p5-9b --detach`.
 
 Training uses Adam on a LoRA adapter: `--learning-rate` (1e-4), `--batch-size` rows per step,
@@ -218,12 +222,15 @@ Before training, compare candidate base models on the test split. Each one repla
 the judge `evaluate` uses (paid; it previews first):
 
 ```sh
-pup finetune benchmark datasets/my-agent --models qwen3p5-9b,glm-5p3-flash
+pup finetune benchmark datasets/my-agent --models qwen3p5-9b,baseten/glm-5p3-flash
 ```
 
-The result ranks the models by judge pass rate with a confidence interval and recommends one
-to fine-tune. A base model at or above `--target-pass-rate` (90% by default) may need no
-training, and models within noise of the best are named, so the cheapest to serve can win.
+`PROVIDER/MODEL` names the provider of a model both offer. Each model gets its own judge
+pass rate with a confidence interval, and the result ranks the finished models on the test
+cases scored for every one of them and recommends one to fine-tune. A base model at or above
+`--target-pass-rate` (90% by default) on its own cases, with its headline (the judge, unless
+`--evaluators` names another) scoring at least 90% of the test cases with a prompt, may need
+no training, and models within noise of the best are named, so the cheapest to serve can win.
 Results go in `datasets/my-agent/benchmark`; rerun the command to continue one that stopped.
 `--max-rows 20` replays a seeded sample of 20 test conversations, for a quicker, cheaper
 first comparison. Base answers already made on the dataset (see [Evaluate](#evaluate)) are
@@ -241,7 +248,7 @@ pipeline, not quality. Set `--max-train-tokens` above the preview's `tokens_per_
 it no epoch finishes, so nothing is promoted or evaluated (the preview warns):
 
 ```sh
-pup finetune train --dataset datasets/my-agent --model qwen3p8-27b \
+pup finetune train --provider fireworks --dataset datasets/my-agent --model qwen3p8-27b \
   --max-epochs 1 --max-train-tokens 200000 --evaluate --eval-max-cases 1
 ```
 
@@ -444,6 +451,12 @@ validation rows, their split assignments, the run files and pup-finetune's sourc
 storage for its job; the test split and dropped rows stay on this machine. The checks of
 `--evaluators` and `dataset triage --checks` run on this machine and send nothing; the
 evaluators' judges are recipients like the built-in judge.
+
+Rows are rendered with each model's own tokenizer and chat template, downloaded from Hugging
+Face at a pinned commit. Kimi K3's tokenizer is Python code from the model's repository
+(`trust_remote_code`, which `models list` shows): rendering for `kimi-k3` downloads that code
+at its pinned commit and runs it on this machine, and the `train`, `evaluate` and `benchmark`
+previews warn of it.
 [docs/data-format.md](docs/data-format.md)
 describes the rows, the exclusion codes and the files in a dataset directory.
 

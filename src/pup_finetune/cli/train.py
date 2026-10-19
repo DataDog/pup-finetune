@@ -225,7 +225,7 @@ def model_example() -> str:
     """An example of what ``--model`` takes, for its help: the first model alias of the first
     provider, e.g. ``qwen3p8-27b`` (``models list`` names them all); development-only
     providers left out. Imports no provider module."""
-    return next((info.models[0] for info in provider_infos(Runtime()) if info.models), "")
+    return next((alias for info in provider_infos(Runtime()) for alias in info.models), "")
 
 
 def provider_option_keys() -> str:
@@ -453,6 +453,8 @@ def _preview(
         )
     if no_epoch_can_finish(spec, inputs):
         warnings.append(no_epoch_warning(spec, inputs))
+    if (remote := profile.remote_code_warning()) is not None:
+        warnings.append(remote)
     rows = _rows(inputs)
     usage = _usage(spec, inputs, epochs=spec.max_epochs)
     max_steps = spec.max_steps(len(inputs.train_rows))
@@ -647,9 +649,9 @@ def _remote_sync(run: RunDir) -> RemoteSync | None:
 
 def provider_for_model(model: str, given: str | None, runtime: Runtime) -> tuple[str, str]:
     """The provider ``train`` uses for ``--model`` and where it came from: ``given``
-    (``--provider``), else the one provider whose profiles name the alias ``model``
+    (``--provider``), else the one provider with a profile that ``model`` names
     (:func:`~pup_finetune.providers.providers_for_model`; development-only providers only in
-    development mode). An alias several providers offer, or none, is a usage error: the
+    development mode). A name several providers offer, or none, is a usage error: the
     provider is never picked silently. Imports no provider module."""
     if given is not None:
         return given, "--provider"
@@ -662,14 +664,11 @@ def provider_for_model(model: str, given: str | None, runtime: Runtime) -> tuple
             hint=f"for example --provider {found[0]}",
         )
     known = "; ".join(
-        f"{', '.join(aliases)} ({name})"
-        for name, aliases in known_models(runtime).items()
-        if aliases
+        f"{', '.join(models)} ({name})" for name, models in known_models(runtime).items() if models
     )
     raise UsageError(
         f"unknown model {model!r}",
-        hint=f"known models: {known}; see `pup finetune models list`, or pass "
-        "--provider with a provider's own model id",
+        hint=f"known models: {known}; `pup finetune models list` shows every name each accepts",
     )
 
 
@@ -1067,10 +1066,10 @@ def train(
         # The consent fields name every recipient, the evaluation's judge included.
         preview["data_destination"] += f"; {preview['evaluation']['data_destination']}"
         preview["data_recipients"] += preview["evaluation"]["data_recipients"]
-    # The rerun pins the provider, run id and directory (even when inferred or defaulted),
-    # so it trains exactly what was previewed.
+    # The rerun pins the provider, the model's alias, the run id and directory (even when
+    # inferred or defaulted), so it trains exactly what was previewed.
     rerun = [*PROGRAM, "train", "--provider", provider.name]
-    rerun += ["--dataset", str(dataset_dir), "--model", model]
+    rerun += ["--dataset", str(dataset_dir), "--model", profile.alias]
     rerun += ["--run-dir", str(run_dir), "--run-id", run_id]
     for field, value in flags.items():
         if value is not None and given(ctx, field):
@@ -1311,8 +1310,8 @@ def resume(
         flag = exc.message.partition(" ")[0]
         exc.hint = (
             f"the run was recorded with {flag}, and a resume trains with its recorded "
-            f"settings: start a new run without {flag} (`pup finetune train --dataset "
-            "<DIR> --model <MODEL>`)"
+            f"settings: start a new run without {flag} (`pup finetune train --provider "
+            "<PROVIDER> --dataset <DIR> --model <MODEL>`)"
         )
         raise
     provider, inputs = load_run_inputs(run, runtime, finalize_only=mode == "finalize")
@@ -1410,7 +1409,10 @@ def run_next(
         next_command = None
         steps.append(
             step(
-                template("train", "--dataset", "<DIR>", "--model", "<MODEL>"), NOTHING_TRAINED_STEP
+                template(
+                    "train", "--provider", "<PROVIDER>", "--dataset", "<DIR>", "--model", "<MODEL>"
+                ),
+                NOTHING_TRAINED_STEP,
             )
         )
     elif phase == "completed":
@@ -1640,7 +1642,7 @@ def _newest_run() -> Path:
         raise NotARunDir(
             f"no run under {RUNS_DIR}/ to show",
             hint="pass a run directory or run id, or start a run with `pup finetune train "
-            "--dataset <DIR> --model <MODEL>`",
+            "--provider <PROVIDER> --dataset <DIR> --model <MODEL>`",
         )
     info(f"the newest run under {RUNS_DIR}/: {display_path(found)}")
     return found
@@ -1818,9 +1820,11 @@ TRAIN_DOC = CommandDoc(
         "--dataset must be in Datadog: every kept row pushed with `dataset push`, or the "
         "directory made by `dataset fetch` (the offline fake provider trains on any). "
         "The run goes in runs/RUN_ID unless --run-dir names another directory (a runs/ this "
-        "creates gets a .gitignore, since runs hold trace-derived rows), and --provider is "
-        "inferred from the --model alias when it is offered by one provider only; the "
-        "preview says so (provider_source), and its next_command pins both. "
+        "creates gets a .gitignore, since runs hold trace-derived rows). --model takes a "
+        "model's alias, or in any case the provider's model id or its Hugging Face tokenizer "
+        "name, and "
+        "--provider is inferred from it when one provider offers that model; the preview says "
+        "so (provider_source), and its next_command pins both, with the alias. "
         "The preview lists rows and rendered tokens per split, the rejected rows, tokens per "
         "epoch and in total, the settings and where the data goes. --detach trains in a "
         "background worker; follow it with `status --watch`. Training stops early after --patience epochs without a "
@@ -1845,8 +1849,8 @@ TRAIN_DOC = CommandDoc(
         "directory; cancel cannot stop the job yet.",
     ),
     examples=(
-        "pup finetune train --dataset ds --model qwen3p8-27b",
-        "pup finetune train --dataset ds --model qwen3p8-27b --lr-schedule cosine",
+        "pup finetune train --dataset ds --model qwen3p5-9b",
+        "pup finetune train --dataset ds --model qwen3p5-9b --lr-schedule cosine",
     ),
     safety=Safety(
         data="sends rows to the provider (and the judge)",

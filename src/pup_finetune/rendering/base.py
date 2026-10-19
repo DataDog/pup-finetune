@@ -16,10 +16,11 @@ Messages and tools are in OpenAI chat format, as
 :func:`~pup_finetune.data.jsonl.to_provider_dict` produces them: an assistant message may
 carry ``weight`` ``0``, meaning "do not train on this turn".
 
-**Prefix stability.** A renderer is prefix-stable when, for every assistant turn ``i``, the
-tokens of :meth:`Renderer.generation_prompt_tokens` for ``messages[:i]`` are a prefix of the
-tokens of the full conversation. Only then does training on one full render (every assistant
-turn trainable at once) match what the model sees at inference. A chat endpoint tokenizes the
+**Prefix stability.** A renderer is prefix-stable when, for every trained assistant turn
+``i``, the tokens of :meth:`Renderer.generation_prompt_tokens` for ``messages[:i]`` are a
+prefix of the tokens of the full conversation. Only then does training on one full render
+(every trained turn at once) match what the model sees at inference; an untrained turn carries
+no loss, so how the whole render shows it does not matter. A chat endpoint tokenizes the
 whole prompt text as one string and the model generates the completion after it, so a
 template that is prefix-stable as text can still fail as tokens: the tokenizer can merge
 characters across the boundary where generation starts. A renderer that cannot guarantee it
@@ -113,6 +114,12 @@ class Renderer(Protocol):
         """Token ids that end an assistant turn; samplers stop on any of them."""
         ...
 
+    def check_tokens(self) -> None:
+        """Raise :class:`~pup_finetune.errors.UsageError` when a stop token, or a control
+        token of the response parser, is not one token of the tokenizer, as the first sampler
+        would."""
+        ...
+
     def supervised_example(
         self, messages: list[ChatMessage], tools: list[ToolSpec]
     ) -> TokenizedExample:
@@ -140,6 +147,15 @@ class Renderer(Protocol):
         """The prompt a sampler continues to generate the next assistant turn."""
         ...
 
+    def prompt_refusal(
+        self, messages: Sequence[ChatMessage], tools: Sequence[ToolSpec]
+    ) -> RendererError | None:
+        """The :class:`RendererError` :meth:`generation_prompt_tokens` raises for ``messages``
+        because of what they hold, or ``None``; it loads no tokenizer, so planning can leave
+        out a case no sampler could continue. Training refuses a trained turn after such a
+        prompt with the same error."""
+        ...
+
     def decode(self, tokens: Sequence[int]) -> str:
         """Token ids back to text, special tokens included."""
         ...
@@ -151,6 +167,14 @@ class Renderer(Protocol):
         argument values untyped (Qwen3.8's XML tool calls write strings unquoted) reads each
         one with the type its tool declares. Never raises.
         """
+        ...
+
+    def parse_completion(
+        self, tokens: Sequence[int], tools: Sequence[ToolSpec] = ()
+    ) -> ParsedResponse:
+        """A sampled completion's token ids as a message, as :meth:`parse_response` reads
+        their text, except that a format whose control tokens a reply can spell as text
+        (Kimi K3) takes structure only from the control tokens sampled. Never raises."""
         ...
 
     def identity(self) -> dict[str, str]:

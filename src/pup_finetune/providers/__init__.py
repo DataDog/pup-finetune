@@ -13,9 +13,10 @@ imports no provider implementation, so ``--help`` and commands that never train 
 :class:`~pup_finetune.providers.base.Provider`. Development-only providers are visible only
 when ``PUP_FINETUNE_DEV=1``. Each entry also names the provider's ``--provider-option``
 keys (:func:`registered_option_keys`), so help can list them without importing a provider; a
-test holds them to the providers' option models. It names the model aliases each provider
-serves too (:func:`providers_for_model`), so ``train`` can infer ``--provider`` from
-``--model`` without importing a provider; a test holds them to the providers' profiles.
+test holds them to the providers' option models. It names every model profile each provider
+serves too, by alias, with each name that selects it (:func:`known_models`,
+:func:`providers_for_model`), so ``train`` can infer ``--provider`` from ``--model`` without
+importing a provider; a test holds them to the providers' profiles.
 Finally, it says what a provider needs before anything is paid for (:class:`ProviderInfo`):
 its display label, the API key it signs in with, the optional packages each step needs
 (:class:`Package`, found with :func:`importlib.util.find_spec`, never imported:
@@ -32,12 +33,13 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import sys
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Final, Literal
 
-from pup_finetune.errors import FinetuneError, UsageError, install_hint
-from pup_finetune.providers.base import Provider, RemoteJobs, SupportsRemote
+from pup_finetune.errors import ExternalError, FinetuneError, UsageError, install_hint
+from pup_finetune.providers.base import Provider, RemoteJobs, SupportsRemote, selects
 from pup_finetune.redaction import redact
 from pup_finetune.runtime import Runtime
 
@@ -48,6 +50,7 @@ __all__ = [
     "ProviderInfo",
     "RefusedFlag",
     "Step",
+    "aliases_for_model",
     "get_provider",
     "installed",
     "known_models",
@@ -62,6 +65,7 @@ __all__ = [
     "registered_providers",
     "remote_jobs",
     "require_deploys",
+    "require_key",
     "require_packages",
     "require_remote",
     "require_supported_flags",
@@ -119,7 +123,9 @@ class RefusedFlag:
 class ProviderInfo:
     """What the registry knows about a provider without importing it.
 
-    ``label`` is its display name (``Fireworks``); ``credential`` the
+    ``label`` is its display name (``Fireworks``); ``models`` its model profiles, each
+    alias with every name that selects the profile, alias first (see
+    :attr:`~pup_finetune.providers.base.ModelProfile.names`); ``credential`` the
     :class:`~pup_finetune.credentials.CredentialSpec` its key is registered under (``None``
     for one without a key); ``packages`` what it needs installed, by step; ``refuses`` the
     flags it cannot honor; ``deploys`` whether it deploys a promoted model; ``offline``
@@ -132,7 +138,7 @@ class ProviderInfo:
     dev_only: bool = False
     label: str = ""
     options: tuple[str, ...] = ()
-    models: tuple[str, ...] = ()
+    models: Mapping[str, tuple[str, ...]] = field(default_factory=lambda: MappingProxyType({}))
     credential: str | None = None
     packages: tuple[Package, ...] = ()
     refuses: tuple[RefusedFlag, ...] = ()
@@ -154,7 +160,7 @@ def register_provider(
     *,
     dev_only: bool = False,
     options: tuple[str, ...] = (),
-    models: tuple[str, ...] = (),
+    models: Mapping[str, Sequence[str]] | None = None,
     label: str = "",
     credential: str | None = None,
     packages: tuple[Package, ...] = (),
@@ -164,25 +170,35 @@ def register_provider(
     remote: bool = False,
 ) -> None:
     """Register ``name`` as the provider ``target`` (``"package.module:attr"``) builds, with
-    the ``--provider-option`` keys it takes (``options``), the aliases of the model
-    profiles it serves (``models``) and what it needs (see :class:`ProviderInfo`; ``label``
-    defaults to ``name`` capitalized).
+    the ``--provider-option`` keys it takes (``options``), the model profiles it serves
+    (``models``: each alias with the names that select it, alias first) and what it needs
+    (see :class:`ProviderInfo`; ``label`` defaults to ``name`` capitalized).
 
     Nothing is imported. Registering the same entry again is a no-op; a different entry under
-    a taken name raises ``ValueError``.
+    a taken name, a model whose names do not start with its alias, or a name two of its
+    models share raises ``ValueError``.
     """
     if not name:
         raise ValueError("a provider needs a name")
     module, sep, attr = target.partition(":")
     if not (module and sep and attr):
         raise ValueError(f"provider target must look like 'module:attr', got {target!r}")
+    table = {alias: tuple(names) for alias, names in (models or {}).items()}
+    seen: set[str] = set()
+    for alias, names in table.items():
+        if not names or names[0] != alias:
+            raise ValueError(f"provider {name!r}: the names of {alias!r} must start with it")
+        for model_name in names:
+            if model_name.casefold() in seen:
+                raise ValueError(f"provider {name!r}: {model_name!r} names two of its models")
+            seen.add(model_name.casefold())
     entry = ProviderInfo(
         name=name,
         target=target,
         dev_only=dev_only,
         label=label or name.capitalize(),
         options=tuple(options),
-        models=tuple(models),
+        models=MappingProxyType(table),
         credential=credential,
         packages=tuple(packages),
         refuses=tuple(refuses),
@@ -295,6 +311,30 @@ def require_packages(name: str, runtime: Runtime, step: Step) -> None:
         )
 
 
+def require_key(
+    name: str, runtime: Runtime, *, needed_by: str, warnings: list[str] | None = None
+) -> None:
+    """Raise the :class:`UsageError` (exit 2) a ``train`` preview's preflight raises when no
+    source has the API key provider ``name`` signs in with, naming ``needed_by``; with
+    ``warnings`` (a read-only preview, which offers no ``--confirm`` to fail), append it there
+    instead. A provider that signs in with no key (the fake) needs none. Never returns the
+    key, and makes no call."""
+    from pup_finetune import credentials
+
+    credential = provider_info(name, runtime).credential
+    if credential is None:
+        return
+    found = credentials.key_source(credential)
+    if isinstance(found, credentials.KeyUnreadable):
+        raise ExternalError(found.detail, hint=found.fix, source="the OS keychain")
+    if found is not None:
+        return
+    error = credentials.missing_key_error(credential, needed_by=needed_by)
+    if warnings is None:
+        raise error
+    warnings.append(f"{error.message}: {error.hint}")
+
+
 def require_supported_flags(name: str, runtime: Runtime, values: Mapping[str, Any]) -> None:
     """Raise :class:`UsageError` when ``values`` (``TrainSpec`` fields) set a flag provider
     ``name`` refuses, e.g. ``--lora-alpha is not supported on baseten: Baseten sets the LoRA
@@ -349,16 +389,30 @@ def registered_option_keys(*, include_dev: bool = False) -> dict[str, tuple[str,
     }
 
 
-def known_models(runtime: Runtime) -> dict[str, tuple[str, ...]]:
-    """The model aliases of each provider ``runtime`` may use, by provider name, sorted by
-    name. Imports no provider module."""
+def known_models(runtime: Runtime) -> dict[str, Mapping[str, tuple[str, ...]]]:
+    """The model profiles of each provider ``runtime`` may use, by provider name, sorted by
+    name: each alias with every name that selects it, alias first. Imports no provider
+    module."""
     return {name: _REGISTRY[name].models for name in known_providers(runtime)}
 
 
-def providers_for_model(alias: str, runtime: Runtime) -> list[str]:
-    """The providers ``runtime`` may use that serve the model ``alias``, sorted: what
-    ``train`` infers ``--provider`` from. Imports no provider module."""
-    return [name for name, models in known_models(runtime).items() if alias in models]
+def aliases_for_model(model: str, runtime: Runtime) -> dict[str, str]:
+    """The alias of the profile that ``model`` names (its alias, or in any case the
+    provider's model id or its tokenizer: :func:`~pup_finetune.providers.base.selects`), by
+    each provider ``runtime`` may use that has one, sorted by provider. Imports no provider
+    module."""
+    return {
+        name: alias
+        for name, models in known_models(runtime).items()
+        for alias, names in models.items()
+        if selects(names, model)
+    }
+
+
+def providers_for_model(model: str, runtime: Runtime) -> list[str]:
+    """The providers of :func:`aliases_for_model`: what ``train`` infers ``--provider``
+    from."""
+    return list(aliases_for_model(model, runtime))
 
 
 def get_provider(name: str, runtime: Runtime) -> Provider:
@@ -457,14 +511,36 @@ register_provider(
         "max_seq_len",
         "hold_file",
     ),
-    models=("fake-model",),
+    models={"fake-model": ("fake-model", "fake/fake-model", "fake/tokenizer")},
     offline=True,
 )
 register_provider(
     "fireworks",
     "pup_finetune.providers.fireworks.provider:FireworksProvider",
     options=("max_seq_len",),
-    models=("qwen3p8-27b",),
+    models={
+        "qwen3p8-27b": (
+            "qwen3p8-27b",
+            "accounts/fireworks/models/qwen3p8-27b",
+            "Qwen/Qwen3.8-27B",
+        ),
+        "glm-5p3-flash": (
+            "glm-5p3-flash",
+            "accounts/fireworks/models/glm-5p3-flash",
+            "zai-org/GLM-5.3-Flash",
+        ),
+        "kimi-k3": ("kimi-k3", "accounts/fireworks/models/kimi-k3", "moonshotai/Kimi-K3"),
+        "deepseek-v4-flash-0731": (
+            "deepseek-v4-flash-0731",
+            "accounts/fireworks/models/deepseek-v4-flash-0731",
+            "deepseek-ai/DeepSeek-V4-Flash-0731",
+        ),
+        "muse-glimmer-30b": (
+            "muse-glimmer-30b",
+            "accounts/fireworks/models/muse-glimmer-30b",
+            "meta-models/Muse-Glimmer-30B",
+        ),
+    },
     label="Fireworks",
     credential="fireworks",
     packages=(
@@ -491,7 +567,12 @@ register_provider(
     "baseten",
     "pup_finetune.providers.baseten.provider:BasetenProvider",
     options=("max_seq_len",),
-    models=("qwen3p5-9b", "glm-5p3-flash"),
+    models={
+        "qwen3p5-9b": ("qwen3p5-9b", "Qwen/Qwen3.5-9B"),
+        "glm-5p3-flash": ("glm-5p3-flash", "zai-org/GLM-5.3-Flash"),
+        "qwen3p8-27b": ("qwen3p8-27b", "Qwen/Qwen3.8-27B"),
+        "kimi-k3": ("kimi-k3", "moonshotai/Kimi-K3"),
+    },
     label="Baseten",
     credential="baseten",
     packages=(

@@ -45,7 +45,7 @@ from pup_finetune.evaluation.replay import (
 )
 from pup_finetune.inference import ChatCompletion, JudgeConfig
 from pup_finetune.providers.base import CheckpointRef, Generation, Sampler
-from pup_finetune.rendering.base import ChatMessage, ToolSpec
+from pup_finetune.rendering.base import ChatMessage, RendererError, RendererErrorCode, ToolSpec
 from pup_finetune.storage import canonical_json
 from pup_finetune.user_checks import load_checks
 
@@ -964,6 +964,37 @@ def test_a_target_replays_only_cases_the_evaluation_holds(tmp_path: Path) -> Non
         )  # fmt: skip
 
 
+class RefusingSampler(ScriptedSampler):
+    """Refuses to render the prompt of the questions in ``refuse``, as a renderer does."""
+
+    def __init__(self, refuse: Iterable[str]) -> None:
+        super().__init__()
+        self.refuse = set(refuse)
+
+    def generate(
+        self, messages: list[ChatMessage], tools: list[ToolSpec], *, max_tokens: int
+    ) -> Generation:
+        if str(messages[-1]["content"]) in self.refuse:
+            with self._lock:
+                self.calls.append(str(messages[-1]["content"]))
+            raise RendererError(RendererErrorCode.UNSUPPORTED_MESSAGE, "no turn opens here")
+        return super().generate(messages, tools, max_tokens=max_tokens)
+
+
+def test_a_prompt_the_renderer_refuses_is_an_error_a_rerun_never_retries(tmp_path: Path) -> None:
+    out = tmp_path / "eval"
+    tuned = RefusingSampler({q(CASES[0])})
+    outcome = replay(out, {"base": ScriptedSampler(), "tuned": tuned}, Judge())
+    tuned_summary = outcome.summary["targets"]["tuned"]
+    assert (tuned_summary["errors"], tuned_summary["errors_unrenderable"]) == (1, 1)
+    assert outcome.summary["targets"]["base"]["errors_unrenderable"] == 0
+    assert remaining_work(EvalDir(out), {"tuned": CASES})["tuned"]["generate"] == 0
+
+    again = RefusingSampler({q(CASES[0])})
+    replay(out, {"base": ScriptedSampler(), "tuned": again}, Judge())
+    assert again.calls == []
+
+
 def test_reuse_is_in_the_identity_only_when_off() -> None:
     on = identity()
     assert "reuse" not in on  # so a directory made before reuse existed still resumes
@@ -1202,6 +1233,23 @@ def test_compare_skips_skip_its_evaluators_and_tuned_minus_compare_pairs_the_res
     assert (versus["n_cases"], versus["delta"]) == (4, 0.0)
 
 
+def test_a_prompt_the_renderer_refuses_is_never_scored_or_retried_by_evaluators(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "eval"
+    evaluators = evaluator_set(tmp_path, "no_three")
+    samplers = {"base": ScriptedSampler(), "tuned": RefusingSampler({q(CASES[0])})}
+    scored_replay(out, evaluators, RubricJudge(), samplers, Judge())
+    left = remaining_work(EvalDir(out), {"tuned": CASES}, evaluators.names)["tuned"]
+    assert left == {"done": len(CASES), "generate": 0, "judge": 0, "evaluators": {"no_three": 0}}
+
+    again = RefusingSampler({q(CASES[0])})
+    scored_replay(
+        out, evaluators, RubricJudge(), {"base": ScriptedSampler(), "tuned": again}, Judge()
+    )
+    assert again.calls == []
+
+
 def test_without_evaluators_the_summary_is_unchanged(tmp_path: Path) -> None:
     out = tmp_path / "eval"
     summary = replay(out, knowing(), Judge()).summary
@@ -1211,4 +1259,4 @@ def test_without_evaluators_the_summary_is_unchanged(tmp_path: Path) -> None:
     assert not (out / "evaluators.json").exists()
 
 
-GOLDEN_SUMMARY_SHA256 = "32ac1d8dfb6b49b4ac9f98be3f43e978c03a086f141b59a9fb6bea807203c402"
+GOLDEN_SUMMARY_SHA256 = "5bb54fb09ca09b8d21380479f63f285801066350db83743943aa3ff18af11fec"

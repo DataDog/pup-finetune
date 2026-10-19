@@ -8,7 +8,7 @@
 
 It answers the routes the read-only client uses::
 
-    api = FakeFireworksApi()  # qwen3p8-27b READY and tunable; one account
+    api = FakeFireworksApi()  # every profile's model READY and tunable; one account
     api.models["qwen3p8-27b"]["state"] = "DEPLOYING"
     api.account_models["accounts/synthetic-team/models/ft-run"] = {...}  # a tuned model
     api.status["/v1/accounts"] = 503  # answer that route with an HTTP error
@@ -21,25 +21,30 @@ Requests are recorded in :attr:`FakeFireworksApi.requests`. A request without th
 
 from __future__ import annotations
 
-import copy
 import json
 from typing import Any
 
 import httpx
 
+from pup_finetune.providers.base import ModelProfile
+from pup_finetune.providers.fireworks.models import PROFILES
+
 API_KEY = "fw-synthetic-0000-test-key-9f3c"
 
-QWEN3P8_27B: dict[str, Any] = {
-    "name": "accounts/fireworks/models/qwen3p8-27b",
-    "displayName": "Qwen3.8 27B",
-    "state": "READY",
-    "huggingFaceUrl": "https://huggingface.co/Qwen/Qwen3.8-27B",
-    "trainingContextLength": 131072,
-    "supervisedLoraTunable": True,
-    "kind": "HF_BASE_MODEL",
-}
-
 _MODELS_PREFIX = "/v1/accounts/fireworks/models/"
+
+
+def model_entry(profile: ModelProfile) -> dict[str, Any]:
+    """What Fireworks answers for ``profile``'s base model when it can be LoRA-tuned."""
+    return {
+        "name": profile.base_model,
+        "displayName": profile.alias,
+        "state": "READY",
+        "huggingFaceUrl": f"https://huggingface.co/{profile.tokenizer_model}",
+        "trainingContextLength": profile.max_seq_len,
+        "supervisedLoraTunable": True,
+        "kind": "HF_BASE_MODEL",
+    }
 
 
 class FakeFireworksApi:
@@ -47,7 +52,10 @@ class FakeFireworksApi:
 
     def __init__(self, *, api_key: str = API_KEY) -> None:
         self.api_key = api_key
-        self.models: dict[str, dict[str, Any]] = {"qwen3p8-27b": copy.deepcopy(QWEN3P8_27B)}
+        self.models: dict[str, dict[str, Any]] = {
+            profile.base_model.removeprefix("accounts/fireworks/models/"): model_entry(profile)
+            for profile in PROFILES
+        }
         self.account_models: dict[str, dict[str, Any]] = {}
         """Models of other accounts than ``fireworks``, by resource name."""
         self.accounts: list[dict[str, Any]] = [

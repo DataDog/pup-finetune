@@ -233,18 +233,43 @@ def test_a_target_that_does_not_build_a_provider_is_an_error(
         get_provider("stub", USER)
 
 
-def test_a_model_alias_names_the_providers_that_offer_it() -> None:
-    register_provider("one", "pkg.one:Provider", models=("shared", "only-one"))
-    register_provider("two", "pkg.two:Provider", models=("shared",))
-    register_provider("dev", "pkg.dev:Provider", dev_only=True, models=("shared", "dev-model"))
-    assert providers.providers_for_model("only-one", USER) == ["one"]
-    assert providers.providers_for_model("shared", USER) == ["one", "two"]
-    assert providers.providers_for_model("shared", DEV) == ["dev", "one", "two"]
+def test_any_name_of_a_model_names_the_providers_that_offer_it() -> None:
+    register_provider(
+        "one", "pkg.one:Provider", models={"shared": ("shared", "org/Shared"), "only": ("only",)}
+    )
+    register_provider("two", "pkg.two:Provider", models={"two-s": ("two-s", "org/Shared")})
+    register_provider("dev", "pkg.dev:Provider", dev_only=True, models={"dev-m": ("dev-m",)})
+    assert providers.providers_for_model("only", USER) == ["one"]
+    assert providers.providers_for_model("shared", USER) == ["one"]
+    assert providers.providers_for_model("org/Shared", USER) == ["one", "two"]
+    # A provider id or tokenizer name matches in any case; an alias only exactly.
+    assert providers.providers_for_model("ORG/shared", USER) == ["one", "two"]
+    assert providers.providers_for_model("Only", USER) == []
     # A development-only provider's models are unknown outside development mode.
-    assert providers.providers_for_model("dev-model", USER) == []
-    assert providers.providers_for_model("dev-model", DEV) == ["dev"]
+    assert providers.providers_for_model("dev-m", USER) == []
+    assert providers.providers_for_model("dev-m", DEV) == ["dev"]
     assert providers.providers_for_model("nope", DEV) == []
-    assert providers.known_models(USER) == {"one": ("shared", "only-one"), "two": ("shared",)}
+    assert providers.known_models(USER) == {
+        "one": {"shared": ("shared", "org/Shared"), "only": ("only",)},
+        "two": {"two-s": ("two-s", "org/Shared")},
+    }
+
+
+@pytest.mark.parametrize(
+    ("models", "match"),
+    [
+        ({"a": ("b", "a")}, "must start with it"),
+        ({"a": ()}, "must start with it"),
+        ({"a": ("a", "org/A"), "b": ("b", "org/A")}, "'org/A' names two of its models"),
+        ({"a": ("a", "org/A"), "b": ("b", "org/a")}, "'org/a' names two of its models"),
+        ({"a": ("a", "org/A"), "org/a": ("org/a",)}, "'org/a' names two of its models"),
+    ],
+)
+def test_a_model_table_must_name_each_model_once_alias_first(
+    models: dict[str, tuple[str, ...]], match: str
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        register_provider("bad", "pkg.bad:Provider", models=models)
 
 
 def test_registering_the_same_entry_twice_is_a_no_op() -> None:
@@ -313,7 +338,7 @@ def test_importing_the_cli_and_inferring_a_provider_import_no_provider_module() 
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
     )
     report = json.loads(completed.stdout)
-    assert report["inferred"] == ["fireworks"]
+    assert report["inferred"] == ["baseten", "fireworks"]
     # Only the protocols module and the light packages that register provider API keys,
     # never a provider implementation.
     assert set(report["provider_modules"]) <= {

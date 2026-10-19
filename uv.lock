@@ -2414,18 +2414,21 @@ baseten = [
     { name = "baseten-loops" },
     { name = "huggingface-hub" },
     { name = "jinja2" },
+    { name = "tiktoken" },
     { name = "transformers" },
 ]
 fireworks = [
     { name = "fireworks-ai", extra = ["training-sdk"] },
     { name = "huggingface-hub" },
     { name = "jinja2" },
+    { name = "tiktoken" },
     { name = "tinker" },
     { name = "transformers" },
 ]
 hf = [
     { name = "huggingface-hub" },
     { name = "jinja2" },
+    { name = "tiktoken" },
     { name = "transformers" },
 ]
 
@@ -2453,6 +2456,9 @@ requires-dist = [
     { name = "keyring", specifier = ">=25.6" },
     { name = "pydantic", specifier = ">=2.11" },
     { name = "rich", specifier = ">=14" },
+    { name = "tiktoken", marker = "extra == 'baseten'", specifier = ">=0.14" },
+    { name = "tiktoken", marker = "extra == 'fireworks'", specifier = ">=0.14" },
+    { name = "tiktoken", marker = "extra == 'hf'", specifier = ">=0.14" },
     { name = "tinker", marker = "extra == 'fireworks'", specifier = ">=0.23,<0.24" },
     { name = "transformers", marker = "extra == 'baseten'", specifier = ">=5.10.4" },
     { name = "transformers", marker = "extra == 'fireworks'", specifier = ">=5.10.4" },
