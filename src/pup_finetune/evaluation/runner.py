@@ -1834,8 +1834,8 @@ def replay_result(
     )
     checks = {check.name for check in plan.evaluators.checks} if plan.evaluators else set()
     rescored = errors > unrenderable or any(failed[name]["errors"] for name in set(failed) - checks)
-    if scoring:
-        warnings.append(scoring_warning(scoring, retried=rescored))
+    if missing := scoring - unrenderable * len(plan.evaluator_names):
+        warnings.append(scoring_warning(missing, retried=rescored))
     if plan.evaluators is not None:
         reports = _reports(EvalDir(plan.out_dir))
         calibrate = not plan.settings.skip_calibration

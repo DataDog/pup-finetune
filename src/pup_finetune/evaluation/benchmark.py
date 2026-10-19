@@ -1498,8 +1498,9 @@ def _result(
         )
     if broken := check_hint(board.raised, set(board.raised), plan.out_dir):
         hint = broken if hint is None else f"{hint}. {broken}"
-    if scoring := sum(int(entry.get("evaluator_errors") or 0) for entry in entries):
-        warnings.append(scoring_warning(scoring, retried=board.rerun))
+    scoring = sum(int(entry.get("evaluator_errors") or 0) for entry in entries)
+    if missing := scoring - unrenderable * len(plan.evaluator_names):
+        warnings.append(scoring_warning(missing, retried=board.rerun))
     rate = recommendation.get("judge_pass_rate")
     if isinstance(rate, float) and rate < LOW_PASS_RATE:
         warnings.append(

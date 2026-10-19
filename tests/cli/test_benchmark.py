@@ -431,6 +431,26 @@ def test_a_prompt_refused_while_sampling_never_stops_the_benchmark(
     assert "benchmark" not in (data["next_command"] or "")
 
 
+def test_a_prompt_refused_while_sampling_is_no_missing_evaluator_score(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(FakeRenderer, "prompt_refusal", lambda self, messages, tools: None)
+    dataset, _ = import_with_refused_test_row(tmp_path)
+    shutil.copy(ROWS.parent.parent / "evaluators" / "checks.py", tmp_path / "checks.py")
+    spec = tmp_path / "checks.toml"
+    spec.write_text('[[evaluator]]\nname = "no_card_numbers"\ntype = "check"\nfile = "checks.py"\n')
+
+    result = invoke(
+        "benchmark", str(dataset), "--models", "fake-model", "--evaluators", str(spec), "--confirm"
+    )
+
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["status"] == "complete_with_errors"
+    assert "which a retry cannot fix" in data["hint"]
+    assert not [warning for warning in data["warnings"] if "evaluator score" in warning]
+
+
 def test_the_preview_says_when_a_tokenizer_runs_repository_code(
     dataset: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

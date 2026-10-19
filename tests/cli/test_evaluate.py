@@ -18,6 +18,7 @@ import importlib
 import json
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -1257,6 +1258,27 @@ def test_a_prompt_refused_while_sampling_is_an_error_no_rerun_retries(
 
     again = invoke("evaluate", str(run), "--no-publish")
     assert output(again)["preview"]["generation_calls"] == 0
+
+
+def test_a_prompt_refused_while_sampling_is_no_missing_evaluator_score(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(FakeRenderer, "prompt_refusal", lambda self, messages, tools: None)
+    dataset, _ = import_with_refused_test_row(tmp_path)
+    run = tmp_path / "run"
+    assert invoke(*train_args(dataset, run, "--confirm")).exit_code == 0
+    shutil.copy(ROWS.parent.parent / "evaluators" / "checks.py", tmp_path / "checks.py")
+    spec = tmp_path / "checks.toml"
+    spec.write_text('[[evaluator]]\nname = "no_card_numbers"\ntype = "check"\nfile = "checks.py"\n')
+
+    result = invoke("evaluate", str(run), "--evaluators", str(spec), "--no-publish", "--confirm")
+
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["status"] == "complete_with_errors"
+    assert "which a retry cannot fix" in data["hint"]
+    assert not [warning for warning in data["warnings"] if "evaluator score" in warning]
+    assert data["next_command"] == f"pup finetune deploy {run}"
 
 
 def test_errors_no_retry_can_fix_leave_nothing_to_rerun_when_publishing_was_skipped(
