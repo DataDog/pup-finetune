@@ -112,7 +112,9 @@ two minutes (one budget for both experiments) are a warning. Tests serve it with
 
 `evaluate` on a fake run uses the offline fake judge (`--judge-model fake-judge`, dev mode
 only), and the fake's tuned checkpoint calls the tools its training data called, so the
-result shows a positive `headline.judge_pass_rate.delta` (`tuned_minus_base` in `summary.json`). `train ... --evaluate --confirm` evaluates in the
+result shows a positive `headline.judge_pass_rate.delta` (`tuned_minus_base` in `summary.json`).
+Evaluating a second run of the same dataset reuses the first one's base answers and verdicts
+from `/tmp/ds/replay_cache` (the preview's `reuse`; `--no-reuse` makes them again). `train ... --evaluate --confirm` evaluates in the
 training session right after promotion instead (foreground only; `--eval-out-dir`, which must
 be new or empty and is checked before training, `--eval-max-cases`,
 `--eval-judge-model`, `--eval-concurrency`, `--eval-max-tokens`, `--eval-seed` and
@@ -803,15 +805,34 @@ Source lives under `src/pup_finetune/`.
   one `Candidate` per base model), `execute` (the judge calibrated once, then each model
   replayed in a session of its own into `OUT/<model>` through `run_replay` with the model as
   its one target, so each resumes; a model whose session fails is an error entry and the
-  others still run), `leaderboard` (judge pass rate with a bootstrap CI over trajectories,
-  each model's paired gap to the best and its answers `truncated` at `--max-tokens` or
-  `unparseable`, each a warning) and `recommend` (`fine_tune`,
+  others still run; each model first copies what it takes from the dataset's store, so one
+  with every answer reused opens no session, and shares its own answers after, a complete
+  one included; `BenchmarkPlan.inputs` and `keys`, from each model's full renderer identity,
+  are read at plan time only when the store exists, and not for a model whose renderer
+  cannot load), `leaderboard` (judge pass rate with a bootstrap CI
+  over trajectories, each model's paired gap to the best and its answers `truncated` at
+  `--max-tokens` or `unparseable`, each a warning) and `recommend` (`fine_tune`,
   `base_meets_target` at `--target-pass-rate`, or `no_result`; models within noise of the
   best are named).
   The package exports its names lazily, so importing the runner (the CLI does, for every
   command) loads no judge client. `targets.py` makes the two samplers from a session: the live training
   session's best sampler checkpoint, or the best training checkpoint loaded and saved again
-  as an `ev...` sampler checkpoint in a new session (`run_samplers`).
+  as an `ev...` sampler checkpoint in a new session (`run_samplers`), only for the targets
+  with a case left to generate (`targets`). `reuse.py` is the dataset's store of base
+  results, `DATASET/replay_cache` (`generations.jsonl` by `generation_key`: provider, base
+  model, context, renderer identity, `max_tokens`, prefix and tools; `verdicts.jsonl` by
+  `verdict_key`: the judge's identity and exact request; append-only, first line of a key
+  wins): `ReuseIndex.load` reads it once at plan time (`EvalPlan.reuse`, `None` with
+  `--no-reuse`), `plan_target` is what a target takes (the preview's `reuse` block and
+  `EvalWork.reused`), `import_target` copies it in after calibration passed
+  (`prepare_eval_dir`; answers get `reused_from`, results `reused`), and `export_target`
+  adds the run's own base answers and verdicts with a judge answer after the replay
+  (`share_base`), under the store's lock tried once (a busy one is a warning naming the
+  command that shares them), only from a directory whose `reuse.json` (`stamp`, written
+  before its first answer) holds the current `key_inputs` (an evaluation made before stamps
+  counts as version 1). Only base answers are shared; `evaluation.json` records
+  `"reuse": false` only with `--no-reuse`, so a rerun without the flag is a conflict whose
+  hint adds it first (`no_reuse_hint`, in `benchmark` too).
 - `providers/` - the provider seam. `base.py` has the neutral types (`ModelProfile`,
   `TrainSpec`, `CheckpointRef`, `StepMetrics`, ...) and the `Provider`, `TrainingBackend`,
   `TrainingSession` and `Sampler` protocols; `__init__.py` is the lazy registry

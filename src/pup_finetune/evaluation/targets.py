@@ -13,19 +13,21 @@ run's best epoch. :func:`session_samplers` takes them from a session that is alr
 checkpoint is used as is when this session saved it. Otherwise, as in a standalone
 ``evaluate`` (:func:`run_samplers`, which opens a session for the run), the best *training*
 checkpoint's weights are loaded and saved as a new sampler checkpoint named
-:func:`tuned_checkpoint_name`. Every sampler is closed, and the session ended, on exit; a
-sampler that fails to close is noted on stderr.
+:func:`tuned_checkpoint_name`. Only the targets asked for are made, so a base model whose
+answers are all reused costs no sampler. Every sampler is closed, and the session ended, on
+exit; a sampler that fails to close is noted on stderr.
 """
 
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Final
 
 from pup_finetune.errors import WrongPhase
+from pup_finetune.evaluation.replay import TARGETS
 from pup_finetune.output import info
 from pup_finetune.providers.base import CheckpointRef, Provider, Sampler, TrainingSession
 from pup_finetune.redaction import redact
@@ -47,10 +49,11 @@ _MAX_DIGEST: Final = 12
 
 @dataclass(frozen=True, slots=True)
 class EvalTargets:
-    """The samplers by target (``base``, ``tuned``) and the sampler checkpoint ``tuned`` uses."""
+    """The samplers by target (``base``, ``tuned``) and the sampler checkpoint ``tuned`` uses,
+    ``None`` when it was not asked for."""
 
     samplers: dict[str, Sampler]
-    tuned_checkpoint: CheckpointRef
+    tuned_checkpoint: CheckpointRef | None
 
 
 def best_training_checkpoint(result: TrainResult) -> CheckpointRef:
@@ -83,18 +86,25 @@ def session_samplers(
     *,
     run_id: str,
     max_checkpoint_name_len: int,
+    targets: Collection[str] = TARGETS,
 ) -> Iterator[EvalTargets]:
-    """The base and tuned samplers of ``session`` for ``result``'s best epoch; closed on exit."""
+    """The samplers of ``targets`` (base, tuned) of ``session`` for ``result``'s best epoch;
+    closed on exit."""
     training = best_training_checkpoint(result)
     samplers: dict[str, Sampler] = {}
+    best: CheckpointRef | None = None
     try:
-        samplers["base"] = session.sampler(None)
-        best = result.best_sampler_ckpt
-        if best is None or best.created_in_session != session.session_id:
-            name = tuned_checkpoint_name(run_id, training, limit=max_checkpoint_name_len)
-            session.load_weights(training)
-            best = session.save_sampler_checkpoint(name, epoch=training.epoch, step=training.step)
-        samplers["tuned"] = session.sampler(best)
+        if "base" in targets:
+            samplers["base"] = session.sampler(None)
+        if "tuned" in targets:
+            best = result.best_sampler_ckpt
+            if best is None or best.created_in_session != session.session_id:
+                name = tuned_checkpoint_name(run_id, training, limit=max_checkpoint_name_len)
+                session.load_weights(training)
+                best = session.save_sampler_checkpoint(
+                    name, epoch=training.epoch, step=training.step
+                )
+            samplers["tuned"] = session.sampler(best)
         yield EvalTargets(samplers=dict(samplers), tuned_checkpoint=best)
     finally:
         for target, sampler in samplers.items():
@@ -109,7 +119,9 @@ def session_samplers(
 
 
 @contextmanager
-def run_samplers(provider: Provider, run_dir: RunDir, result: TrainResult) -> Iterator[EvalTargets]:
+def run_samplers(
+    provider: Provider, run_dir: RunDir, result: TrainResult, targets: Collection[str] = TARGETS
+) -> Iterator[EvalTargets]:
     """Open a session for the run in ``run_dir`` and yield :func:`session_samplers` of it.
 
     The session uses the run's model profile, LoRA settings, seed and provider options, and
@@ -131,6 +143,7 @@ def run_samplers(provider: Provider, run_dir: RunDir, result: TrainResult) -> It
             result,
             run_id=run_dir.run_id,
             max_checkpoint_name_len=backend.max_checkpoint_name_len,
-        ) as targets,
+            targets=targets,
+        ) as made,
     ):
-        yield targets
+        yield made

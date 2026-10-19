@@ -126,6 +126,34 @@ def test_a_new_session_recreates_the_tuned_sampler_from_the_training_checkpoint(
             assert message["tool_calls"][0]["function"]["name"] == "lookup_order"
 
 
+def test_only_the_targets_asked_for_get_a_sampler() -> None:
+    backend = FakeBackend()
+    with backend.open_session(FAKE_PROFILE, LORA, **SESSION) as session:
+        training, sampler = train(session)
+    with backend.open_session(FAKE_PROFILE, LORA, **SESSION) as later:
+        saved = len(backend.saved)
+        with session_samplers(
+            later,
+            result(training, sampler),
+            run_id="ft-x",
+            max_checkpoint_name_len=17,
+            targets=["tuned"],
+        ) as targets:
+            assert list(targets.samplers) == ["tuned"]
+        assert None not in backend.sampled
+        assert len(backend.saved) == saved + 1
+        with session_samplers(
+            later,
+            result(training, sampler),
+            run_id="ft-x",
+            max_checkpoint_name_len=17,
+            targets=["base"],
+        ) as targets:
+            assert list(targets.samplers) == ["base"]
+            assert targets.tuned_checkpoint is None
+        assert len(backend.saved) == saved + 1  # no ev... checkpoint for base alone
+
+
 def test_tuned_checkpoint_names_are_short_and_deterministic() -> None:
     ref = CheckpointRef(
         kind="training", name="t", uri="fake://x", epoch=1, step=1, created_in_session="s"

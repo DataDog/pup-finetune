@@ -537,7 +537,7 @@ Safety: Free · reads Datadog · PUP_READ_ONLY: allowed.
 
 Replay each held-out test conversation of a dataset with several base models, one recorded assistant turn at a time, and score each with the tool-call metrics and the LLM judge evaluate uses. Without --confirm, previews the calls and where the data goes. The result ranks the models and recommends the one to fine-tune.
 
-The dataset must be in Datadog, as for `train`. Each model runs in a session of its own, one after another, into OUT/&lt;model&gt;; rerun the same command to continue a benchmark that stopped. A model below --target-pass-rate is worth fine-tuning; one at or above it may need no training. Models within noise of the best are named, so the cheapest to serve can be chosen. --max-rows replays a seeded sample of the test conversations instead, for a quicker, cheaper comparison. Tools are not executed, so the scores measure agreement with the recorded behavior, not task success.
+The dataset must be in Datadog, as for `train`. Each model runs in a session of its own, one after another, into OUT/&lt;model&gt;; rerun the same command to continue a benchmark that stopped. A model below --target-pass-rate is worth fine-tuning; one at or above it may need no training. Models within noise of the best are named, so the cheapest to serve can be chosen. --max-rows replays a seeded sample of the test conversations instead, for a quicker, cheaper comparison. Tools are not executed, so the scores measure agreement with the recorded behavior, not task success. Base answers from another evaluation or benchmark of the same dataset, made under the same settings, are reused from DATASET/replay_cache, together with their judgments when the judge is the same, and a model with every answer reused opens no session; --no-reuse makes them again.
 
 ```
 pup finetune benchmark [OPTIONS] DATASET
@@ -563,6 +563,7 @@ pup finetune benchmark [OPTIONS] DATASET
 | **Run** | | | |
 | `--out-dir` | `DIR` | DATASET/benchmark | Output directory. |
 | `--concurrency` | `N (1<=x<=64)` | `4` | Cases at once (1-64). |
+| `--no-reuse` |  |  | Do not reuse results of earlier runs. |
 | `--confirm` |  |  | Run it (paid); without it, only preview. |
 
 Examples:
@@ -743,7 +744,7 @@ Safety: Free · signals the local training process · PUP_READ_ONLY: allowed.
 
 Replay each held-out test conversation of a run, one recorded assistant turn at a time, with the base model and the run's best checkpoint, and score both with tool-call metrics and an LLM judge. Without --confirm, previews the calls and where the data goes. A complete evaluation is published to Datadog as two experiments, three with --compare-model, when the dataset was pushed (--no-publish skips it).
 
-The result compares the two: pass rates, wins and regressions, and the tuned-minus-base delta with a bootstrap confidence interval. --compare-model, named as --judge-model is, replays a third model on the same cases, judged alike, with its own token limit (16000, thinking included) and the provider's lowest reasoning effort, and adds tuned-minus-compare; added to a complete evaluation, it reuses the base and tuned results and opens no training session. The directory keeps its compare model: a rerun without the flag continues it, and another one needs a new --out-dir. Tools are not executed, so the scores measure agreement with the recorded behavior, not task success. With --confirm, the judge is calibrated first, then every case is replayed; rerun the same command to continue an evaluation that stopped. A changed --max-tokens, judge, seed or --max-cases needs a new --out-dir. Without --judge-model, the judge is the one the --out-dir holds an evaluation by, else anthropic/claude-haiku-5-5 when an Anthropic credential resolves (ANTHROPIC_API_KEY, the OS keychain or the Anthropic SDK's login), else openai/gpt-5.4-mini when an OpenAI one does, else Fireworks' deepseek-v4p1-flash; the preview names it and where it came from (judge_source).
+The result compares the two: pass rates, wins and regressions, and the tuned-minus-base delta with a bootstrap confidence interval. --compare-model, named as --judge-model is, replays a third model on the same cases, judged alike, with its own token limit (16000, thinking included) and the provider's lowest reasoning effort, and adds tuned-minus-compare; added to a complete evaluation, it reuses the base and tuned results and opens no training session. The directory keeps its compare model: a rerun without the flag continues it, and another one needs a new --out-dir. Tools are not executed, so the scores measure agreement with the recorded behavior, not task success. With --confirm, the judge is calibrated first, then every case is replayed; rerun the same command to continue an evaluation that stopped. A changed --max-tokens, judge, seed or --max-cases needs a new --out-dir. Without --judge-model, the judge is the one the --out-dir holds an evaluation by, else anthropic/claude-haiku-5-5 when an Anthropic credential resolves (ANTHROPIC_API_KEY, the OS keychain or the Anthropic SDK's login), else openai/gpt-5.4-mini when an OpenAI one does, else Fireworks' deepseek-v4p1-flash; the preview names it and where it came from (judge_source). Base answers from another evaluation or benchmark of the same dataset, made under the same settings, are reused from DATASET/replay_cache, together with their judgments when the judge is the same; --no-reuse makes them again.
 
 ```
 pup finetune evaluate [OPTIONS] RUN_DIR
@@ -767,6 +768,7 @@ pup finetune evaluate [OPTIONS] RUN_DIR
 | `--out-dir` | `DIR` | RUN_DIR/eval | Output directory. |
 | `--concurrency` | `N (1<=x<=64)` | `4` | Cases at once (1-64). |
 | `--no-publish` |  |  | Do not publish the evaluation to Datadog. |
+| `--no-reuse` |  |  | Do not reuse base results of other runs. |
 | `--confirm` |  |  | Run it (paid); without it, only preview. |
 
 Examples:

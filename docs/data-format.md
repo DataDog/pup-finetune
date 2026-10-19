@@ -182,6 +182,7 @@ content. Keep it out of version control.
 | `pull_limits.json` | For a Datadog pull, the last pull's `--target-count` and `--max-candidates`, which a rerun without them continues toward. Not frozen. |
 | `judgments.jsonl`, `triage.json` | For `dataset triage`, every judge vote (`{"row_id", "row_sha256", "judge", "criteria_sha256", "keep", "reason", "at"}`, plus `"too_long": true` when the judge refused the row as longer than its context window, which drops it) and the frozen rubric hash, judges and the settings they are called with. |
 | `push.json` | The receipt `dataset push` writes (see below). |
+| `replay_cache/` | Base model answers and judge verdicts shared by the evaluations and benchmarks of the dataset: `generations.jsonl` (`{"key", "message", "format_valid", "prompt_tokens", "completion_tokens", "latency_s", "stop_reason", "sampled_at", "source"}`, `source` the `{"command", "run_id"}` that made it) and `verdicts.jsonl` (`{"key", "judgment", "judged_at"}`). The keys are hashes of what the model or the judge is sent and how; append-only, the first line of a key wins. Safe to delete: it only costs new answers. A run that reuses a line copies it into its own directory with `reused_from` (an answer, keeping its `sampled_at`) or `"reused": true` (a result, its metrics computed again). |
 
 ## The pushed record
 
@@ -236,7 +237,13 @@ so `evaluate` publishes onto that dataset and `dataset push` has nothing to send
 An evaluation directory (`RUN_DIR/eval` by default) holds `evaluation.json` (the identity a
 rerun must match), `generations.jsonl` and `results.jsonl` (one line per target and case,
 appended; the last line of a pair wins), `calibration.json` and `summary.json`, and, once
-published, `experiments.json` and `published.json`.
+published, `experiments.json` and `published.json`. `reuse.json`, written before the first
+answer, records what its base answers are sampled under (every input of their
+`replay_cache` key but the case); they are shared to the dataset's `replay_cache` only while
+it matches, so a directory resumed after an upgrade that changes them shares none. An
+evaluation directory made before `reuse.json` shares as one made under the first release
+that writes it (its `evaluation.json` pins every other input); a benchmark model directory
+made before it shares nothing.
 
 With `evaluate --compare-model`, `compare.json` records the compare target, written once it
 has answered one short probe and never changed: `{"spec", "model": {"provider", "model",
@@ -249,7 +256,8 @@ has answered one short probe and never changed: `{"spec", "model": {"provider", 
 stage, `errors_too_long` (requests longer than a context window, no retry fixes them) and
 `errors_too_long_by_stage` (the same requests by the stage that sent them: `generation` for
 the target's own model, `judge` for the judge),
-`truncated` (generations cut off at their limit) and `refused` (answers the provider refused).
+`truncated` (generations cut off at their limit), `refused` (answers the provider refused)
+and `reused` (`{"generations", "verdicts"}` copied from the dataset's `replay_cache`).
 With base and tuned, `paired` and `tuned_minus_base`; with a compare target,
 `tuned_minus_compare` (`judge_pass_rate`, `ci95`, `n_cases`, `n_trajectories`, `resamples`,
 `seed`, and its own `paired` counts), over the cases the compare model was sent. Each target
@@ -306,7 +314,7 @@ is:
 | --- | --- | --- |
 | `train`, `resume` | How the run ended (`status`), the best epoch and its validation loss, each epoch's losses (`best: true` on the best one), the promoted model, the deployable checkpoint's name, the elapsed seconds and what next. | `files.result` (`result.json`: every checkpoint with its URI, and each epoch's checkpoints and tokens) and `files.epochs` (`epochs.json`). |
 | `status` | The phase, epoch and step against their maximums, the last training loss, the validation losses, the best epoch, the elapsed time and ETA, the promoted model, what next; `resume_mode` only for a resumable run, and `worker` (`pid`, `state`: `running`, `starting`, `stale` or `exited`, `heartbeat_age_s`, `log`) only when the run has a worker or is training. | `files.state` (`state.json`), `files.epochs` and `files.result` (`null` until the run has one). |
-| `evaluate` | `judge_model` and `compare_model` (`null` without one), `headline` (the judge pass rate of `base` and `tuned`, and `compare` with a compare target, their `delta` with its `ci95`, the paired `wins`, `regressions` and `ties`, `tuned_minus_compare` with a compare target, with the cases it `skipped`, and the numbers of `cases` and `trajectories`), each metric's rate per target, the errors per target, the publication and the caveat. | `files.summary` (`summary.json`: per target the judge's passes, every metric's `n`, `passed` and `rate`, the agreement per trajectory, tokens and errors by stage; the paired counts; the bootstrap's resamples and seed) and `files.results` (`results.jsonl`, one line per judged pair). |
+| `evaluate` | `judge_model` and `compare_model` (`null` without one), `headline` (the judge pass rate of `base` and `tuned`, and `compare` with a compare target, their `delta` with its `ci95`, the paired `wins`, `regressions` and `ties`, `tuned_minus_compare` with a compare target, with the cases it `skipped`, and the numbers of `cases` and `trajectories`), each metric's rate per target, the errors per target, `reused` (the targets that took answers or verdicts from the store, with how many), the publication and the caveat. | `files.summary` (`summary.json`: per target the judge's passes, every metric's `n`, `passed` and `rate`, the agreement per trajectory, tokens and errors by stage; the paired counts; the bootstrap's resamples and seed) and `files.results` (`results.jsonl`, one line per judged pair). |
 
 Under pup, `--output table` (or `csv`) without a `--jq` filter shows the rows of a list:
 `models list` one row per model, `auth status` per provider, `doctor` per check and

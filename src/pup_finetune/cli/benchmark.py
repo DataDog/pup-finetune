@@ -39,6 +39,7 @@ SETTING_PARAMS: dict[str, tuple[str, ...]] = {
     "seed": ("seed",),
     "calibration": ("skip_calibration",),
     "target_pass_rate": ("target_pass_rate",),
+    "reuse": ("no_reuse",),
 }
 """Each setting of a benchmark preview, and the parameters that set it."""
 
@@ -63,7 +64,10 @@ DOC = CommandDoc(
         "Models within noise of the best are named, so the cheapest to serve can be chosen. "
         "--max-rows replays a seeded sample of the test conversations instead, for a quicker, "
         "cheaper comparison. Tools are not executed, so the scores measure agreement with the "
-        "recorded behavior, not task success.",
+        "recorded behavior, not task success. Base answers from another evaluation or "
+        "benchmark of the same dataset, made under the same settings, are reused from "
+        "DATASET/replay_cache, together with their judgments when the judge is the same, and "
+        "a model with every answer reused opens no session; --no-reuse makes them again.",
     ),
     examples=(
         "pup finetune benchmark ds --models qwen3p5-9b,glm-5p3-flash",
@@ -206,6 +210,14 @@ def benchmark_command(
             rich_help_panel=RUN,
         ),
     ] = runner.DEFAULT_CONCURRENCY,
+    no_reuse: Annotated[
+        bool,
+        typer.Option(
+            "--no-reuse",
+            help="Do not reuse results of earlier runs.",
+            rich_help_panel=RUN,
+        ),
+    ] = False,
     confirm: Annotated[
         bool,
         typer.Option(
@@ -229,6 +241,7 @@ def benchmark_command(
         seed=seed,
         skip_calibration=skip_calibration,
         target_pass_rate=target_pass_rate,
+        reuse=not no_reuse,
     )
     plan = benchmark.plan_benchmark(runtime, dataset_dir, resolved, settings)
     # PUP_READ_ONLY refuses paid and remote runs, not one that never leaves the machine.

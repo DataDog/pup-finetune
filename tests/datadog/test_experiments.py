@@ -591,6 +591,29 @@ def test_roots_and_children_are_linked_to_the_records(
     assert not {span["span_id"] for span in base.spans} & {span["span_id"] for span in roots}
 
 
+def test_a_reused_answer_keeps_its_timing_and_says_where_it_came_from(
+    fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
+) -> None:
+    evaluation = Evaluation(rows=1, cases_per_row=2)
+    first = evaluation.cases[0]
+    source = {"command": "benchmark", "run_id": None}
+    evaluation.generations[("base", first.id)]["reused_from"] = source
+    report = publish(fake, evaluation, tmp_path / "eval", clock)
+    base = api.experiments[report["experiments"]["base"]["experiment_id"]]
+    children = {
+        child["meta"]["metadata"]["case_id"]: child
+        for child in spans_named(base.spans, CHILD_SPAN_NAME)
+    }
+    assert len(base.spans) == 3  # unchanged: one root and two children
+    reused = children[first.id]
+    assert reused["meta"]["metadata"]["reused_from"] == source
+    assert reused["duration"] == 1_500_000_000
+    end = int(datetime.fromisoformat(SAMPLED_AT).timestamp()) * 10**9
+    assert reused["start_ns"] == end - reused["duration"]
+    assert "reused_from" not in children[evaluation.cases[1].id]["meta"]["metadata"]
+    assert str(tmp_path) not in json.dumps(base.spans)
+
+
 def test_a_lone_surrogate_in_a_generated_tool_call_is_published(
     fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
 ) -> None:

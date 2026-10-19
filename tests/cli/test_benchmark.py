@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -22,12 +23,15 @@ from typer.testing import CliRunner, Result
 from pup_finetune.cli import app
 from pup_finetune.errors import ExternalError
 from pup_finetune.evaluation import benchmark as benchmark_module
+from pup_finetune.evaluation.fake_judge import FakeJudge
 from pup_finetune.inference import ChatCompletion
 from pup_finetune.providers.base import Sampler
+from pup_finetune.providers.fake import FakeBackend, FakeProvider, FakeRenderer
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
 
 runner = CliRunner()
+OPEN_JUDGE_CLIENT = benchmark_module.open_judge_client
 
 
 @pytest.fixture(autouse=True)
@@ -289,3 +293,194 @@ def test_a_run_directory_is_not_a_dataset(dataset: Path, tmp_path: Path) -> None
 
     assert result.exit_code == 2
     assert "not a dataset" in result.stderr
+
+
+# --- reuse --------------------------------------------------------------------------------
+
+
+def lines(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def no_session(*args: Any, **kwargs: Any) -> Any:
+    raise AssertionError("no session may open")
+
+
+def test_a_model_with_every_answer_reused_opens_no_session(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = invoke("benchmark", str(dataset), "--models", "fake-model", "--confirm")
+    assert first.exit_code == 0, first.stderr
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--out-dir", str(dataset / "b2"))
+    preview = output(invoke(*args))["preview"]
+    cases = preview["cases"]
+    [model] = preview["models"]
+    assert model["generation_calls"] == preview["generation_calls"] == 0
+    assert model["reused"] == {"generations": cases, "verdicts": cases}
+    assert "(fake-model (no session for it))" in preview["action"]
+    assert "every answer is already generated, so no session opens" in preview["action"]
+    assert preview["data_recipients"] == [
+        "test split -> the offline fake judge (judge; nothing is sent)"
+    ]
+    stored = lines(dataset / "benchmark" / "fake-model" / "generations.jsonl")
+    assert preview["reuse"] == {
+        "status": "on",
+        "store": str(dataset / "replay_cache"),
+        "oldest_sampled_at": min(line["sampled_at"] for line in stored),
+        "saved": {
+            "generation_calls": cases,
+            "judge_calls": cases,
+            "max_generated_tokens": cases * 4096,
+            "sessions": 1,
+        },
+    }
+    assert preview["settings"]["reuse"] is True
+    monkeypatch.setattr(FakeBackend, "open_session", no_session)
+    result = invoke(*args, "--confirm")
+    assert result.exit_code == 0, result.stderr
+    [entry] = output(result)["leaderboard"]
+    assert entry["reused"] == {"generations": cases, "verdicts": cases}
+    assert entry["judge_pass_rate"] == output(first)["leaderboard"][0]["judge_pass_rate"]
+    assert f"reusing {cases} answers of fake-model ({cases} judged)" in result.stderr
+
+
+@pytest.mark.usefixtures("judge_keys")
+def test_a_benchmark_with_every_verdict_reused_needs_no_judge_key(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    @contextmanager
+    def fake_judge(config: Any, **options: Any) -> Iterator[FakeJudge]:
+        yield FakeJudge()
+
+    monkeypatch.setattr(benchmark_module, "open_judge_client", fake_judge)
+    judged = ("benchmark", str(dataset), "--models", "fake-model")
+    judged += ("--judge-model", "fireworks/some-judge", "--skip-calibration")
+    assert invoke(*judged, "--confirm").exit_code == 0
+    monkeypatch.delenv("FIREWORKS_API_KEY")
+    monkeypatch.setattr(benchmark_module, "open_judge_client", OPEN_JUDGE_CLIENT)
+    again = (*judged, "--out-dir", str(dataset / "b2"))
+    preview = invoke(*again)
+    assert preview.exit_code == 2, preview.stderr
+    assert output(preview)["preview"]["judge_calls"] == 0
+    result = invoke(*again, "--confirm")
+    assert result.exit_code == 0, result.stderr
+    assert output(result)["status"] == "complete"
+
+
+def test_no_reuse_is_frozen_in_the_out_dir(dataset: Path) -> None:
+    args = ("benchmark", str(dataset), "--models", "fake-model")
+    assert invoke(*args, "--confirm").exit_code == 0
+    changed = invoke(*args, "--no-reuse")
+    assert changed.exit_code == 2
+    assert "settings_conflict" in changed.stderr
+    assert "(changed: reuse)" in changed.stderr
+    assert "to continue it" not in changed.stderr
+    fresh = output(invoke(*args, "--no-reuse", "--out-dir", str(dataset / "fresh")))
+    assert fresh["preview"]["reuse"] == {"status": "off"}
+    assert fresh["preview"]["generation_calls"] == fresh["preview"]["cases"]
+    assert "reuse" not in fresh["preview"]["defaults_used"]
+    assert fresh["next_command"].endswith("--no-reuse --confirm")
+    assert rerun(fresh["next_command"]).exit_code == 0
+    again = invoke(*args, "--out-dir", str(dataset / "fresh"))
+    assert again.exit_code == 2
+    assert "Hint: it was made with --no-reuse: add --no-reuse to continue it, or" in again.stderr
+    assert "a new --out-dir" in again.stderr
+
+
+def test_a_rerun_of_a_complete_benchmark_shares_its_answers(dataset: Path) -> None:
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--confirm")
+    first = invoke(*args)
+    assert first.exit_code == 0, first.stderr
+    store = dataset / "replay_cache"
+    shutil.rmtree(store)
+    assert invoke(*args).exit_code == 0
+    shared = lines(store / "generations.jsonl")
+    assert len(shared) == output(first)["cases"]
+    assert {json.dumps(line["source"]) for line in shared} == {
+        json.dumps({"command": "benchmark", "run_id": None})
+    }
+    assert len(lines(store / "verdicts.jsonl")) == len(shared)
+
+
+def test_a_max_rows_sample_reuses_the_answers_it_matches(dataset: Path) -> None:
+    assert invoke("benchmark", str(dataset), "--models", "fake-model", "--confirm").exit_code == 0
+    sample = invoke(
+        "benchmark", str(dataset), "--models", "fake-model", "--max-rows", "1",
+        "--out-dir", str(dataset / "sample"),
+    )  # fmt: skip
+    preview = output(sample)["preview"]
+    assert preview["models"][0]["reused"] == {
+        "generations": preview["cases"],
+        "verdicts": preview["cases"],
+    }
+    assert preview["generation_calls"] == 0
+
+
+def test_a_rerun_after_a_renderer_change_shares_nothing(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--confirm")
+    assert invoke(*args).exit_code == 0
+    store = dataset / "replay_cache" / "generations.jsonl"
+    before = store.read_text()
+    original = FakeRenderer.identity
+    monkeypatch.setattr(
+        FakeRenderer, "identity", lambda self: {**original(self), "renderer_version": "2"}
+    )
+    again = invoke(*args)
+    assert again.exit_code == 0, again.stderr
+    assert store.read_text() == before
+
+
+def unloadable(self: FakeProvider, profile: Any) -> Any:
+    raise ExternalError("the tokenizer of fake-model cannot be loaded", source="huggingface")
+
+
+def test_a_model_whose_renderer_cannot_load_is_an_error_entry(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert invoke("benchmark", str(dataset), "--models", "fake-model", "--confirm").exit_code == 0
+    monkeypatch.setattr(FakeProvider, "renderer", unloadable)
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--out-dir", str(dataset / "b2"))
+    preview = invoke(*args)
+    assert preview.exit_code == 2, preview.stderr
+    assert output(preview)["preview"]["models"][0]["reused"] == {"generations": 0, "verdicts": 0}
+    result = invoke(*args, "--confirm")
+    assert result.exit_code == 1, result.stderr
+    [entry] = output(result)["leaderboard"]
+    assert entry["error"]["message"].endswith("the tokenizer of fake-model cannot be loaded")
+    assert (dataset / "b2" / "benchmark.json").exists()
+
+
+def test_a_complete_rerun_whose_renderer_cannot_load_only_warns(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--confirm")
+    assert invoke(*args).exit_code == 0
+    shutil.rmtree(dataset / "replay_cache")
+    loadable = FakeProvider.renderer
+    monkeypatch.setattr(FakeProvider, "renderer", unloadable)
+    result = invoke(*args)
+    assert result.exit_code == 0, result.stderr
+    words = ["pup", "finetune", *args[:4], "--judge-model", "fake-judge", "--confirm"]
+    assert output(result)["warnings"][-1] == (
+        "base results were not shared: the tokenizer of fake-model cannot be loaded; run "
+        f"`{shlex.join(words)}` to share them"
+    )
+    monkeypatch.setattr(FakeProvider, "renderer", loadable)
+    assert rerun(shlex.join(words)).exit_code == 0
+    assert (dataset / "replay_cache" / "generations.jsonl").exists()
+
+
+def test_a_benchmark_made_before_reuse_neither_loads_its_renderer_nor_warns(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--confirm")
+    assert invoke(*args).exit_code == 0
+    (dataset / "benchmark" / "fake-model" / "reuse.json").unlink()
+    shutil.rmtree(dataset / "replay_cache")
+    monkeypatch.setattr(FakeProvider, "renderer", unloadable)
+    result = invoke(*args)
+    assert result.exit_code == 0, result.stderr
+    assert not [line for line in output(result)["warnings"] if "not shared" in line]
+    assert not (dataset / "replay_cache").exists()

@@ -951,3 +951,38 @@ def test_a_target_replays_only_cases_the_evaluation_holds(tmp_path: Path) -> Non
             CASES[:2], {}, Judge(), out_dir=tmp_path, identity=identity(CASES[:2]),
             replays={"base": CASES[:2], "tuned": CASES},
         )  # fmt: skip
+
+
+def test_reuse_is_in_the_identity_only_when_off() -> None:
+    on = identity()
+    assert "reuse" not in on  # so a directory made before reuse existed still resumes
+    off = evaluation_identity(
+        run_id="ft-test",
+        tuned_checkpoint=CKPT,
+        base_model="base/model",
+        judge=JudgeConfig(model="judge/model"),
+        cases=CASES,
+        max_tokens=64,
+        rendering={"renderer": "fake"},
+        seed=0,
+        max_cases_per_trajectory=2,
+        reuse=False,
+    )
+    assert off == {**on, "reuse": False}
+
+
+def test_the_summary_counts_the_answers_and_verdicts_each_target_reused() -> None:
+    a, b = CASES[0], CASES[1]
+    generations: dict[PairKey, dict[str, Any]] = {
+        ("base", a.id): {"message": {}, "format_valid": True, "reused_from": {"command": "x"}},
+        ("base", b.id): {"message": {}, "format_valid": True},
+        ("tuned", a.id): {"message": {}, "format_valid": True},
+    }
+    results: dict[PairKey, dict[str, Any]] = {
+        ("base", a.id): {"status": "ok", "row_id": a.row_id, "reused": True, "judgment": {}},
+        ("base", b.id): {"status": "ok", "row_id": b.row_id, "judgment": {}},
+        ("tuned", a.id): {"status": "ok", "row_id": a.row_id, "judgment": {}},
+    }
+    targets = summarize(CASES, results, generations, seed=0)["targets"]
+    assert targets["base"]["reused"] == {"generations": 1, "verdicts": 1}
+    assert targets["tuned"]["reused"] == {"generations": 0, "verdicts": 0}

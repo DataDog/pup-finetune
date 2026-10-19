@@ -509,6 +509,11 @@ def _child(
             "message_index": case.message_index,
             "source_trace_id": case.trace_id,
             "source_span_id": source.get("span_id"),
+            **(
+                {"reused_from": generation["reused_from"]}
+                if generation is not None and generation.get("reused_from")
+                else {}
+            ),
         },
     }
     error = result.get("error")

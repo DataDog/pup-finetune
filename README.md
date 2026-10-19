@@ -218,10 +218,13 @@ to fine-tune. A base model at or above `--target-pass-rate` (90% by default) may
 training, and models within noise of the best are named, so the cheapest to serve can win.
 Results go in `datasets/my-agent/benchmark`; rerun the command to continue one that stopped.
 `--max-rows 20` replays a seeded sample of 20 test conversations, for a quicker, cheaper
-first comparison. On a terminal, each failed case says why on stderr (cut off at
-`--max-tokens`, an answer that could not be parsed, or the judge's reason). Off a terminal,
-only the first failure of each cause gets a line and the progress line counts the rest; set
-`PUP_FINETUNE_PROGRESS=steps` to see every one.
+first comparison. Base answers already made on the dataset (see [Evaluate](#evaluate)) are
+reused, and a model with every answer reused opens no session; a benchmark also shares its
+answers, so evaluating the model it recommends reuses the base side. On a terminal, each
+failed case says why on stderr (cut off at `--max-tokens`, an answer that could not be
+parsed, or the judge's reason). Off a terminal, only the first failure of each cause gets a
+line and the progress line counts the rest; set `PUP_FINETUNE_PROGRESS=steps` to see every
+one.
 
 ### A cheap first run
 
@@ -259,6 +262,15 @@ experiments it published. They are created when the evaluation starts, which pri
 compare them (`publication.comparison_url`), and fill in as cases finish. Replay measures
 agreement with the recorded behavior, not task success. Rerun the command to continue an
 evaluation; other settings need a new `--out-dir`.
+
+Base answers are shared within a dataset: `evaluate`, `train --evaluate` and `benchmark` keep
+the base model's answers and their judgments in `DATASET/replay_cache`, and a later
+evaluation of the same dataset reuses those made with the same base model, renderer,
+`--max-tokens` and context (judgments only with the same judge). Only the tuned model's
+answers are then paid for, and no base sampler starts. The preview shows what is reused, from
+which runs and since when (`reuse`); the result counts it per model (`reused`). Every run on
+the dataset then shares one base sample, so their deltas compare directly but share its
+noise. `--no-reuse` makes the answers again; deleting the directory only costs new answers.
 
 A generation cut off at `--max-tokens` fails, so the result counts them per model
 (`headline.truncated`) and warns. A reasoning base model can spend the whole budget thinking
@@ -348,6 +360,8 @@ A rerun with nothing left to judge needs no judge key.
 ## Data handling
 
 Dataset and run directories hold trace content: conversations, tool calls and tool results.
+A dataset's `replay_cache` also holds base model answers to its test conversations and the
+judge's reasons, like an evaluation directory.
 `pup-finetune` creates them with `0700` permissions and their files with `0600`. When it
 creates `runs/` or `datasets/` in the working directory, it adds a `.gitignore` there so they
 stay out of version control. `dataset sample --markdown FILE` writes the sampled conversations
