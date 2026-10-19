@@ -427,7 +427,7 @@ def test_recommend_says_a_base_model_at_the_target_may_need_no_training() -> Non
     [
         (0.95, "a ranks first and passes the judge and every evaluator on 95% of the 10 cases"),
         (0.5, "every evaluator on 50% of the 10 cases they scored, below the 90% target"),
-        (None, "no model has a case the judge and every evaluator scored yet"),
+        (None, "no model has a case the judge and every evaluator scored, so"),
     ],
 )
 def test_recommend_by_all_names_the_judge_and_every_evaluator(
@@ -444,8 +444,17 @@ def test_recommend_without_any_judged_case() -> None:
     assert found == {
         "verdict": "no_result",
         "model": None,
-        "reason": "no model has a judged case yet, so there is nothing to compare",
+        "reason": "no model has a judged case, so there is nothing to compare",
     }
+
+
+def test_recommend_without_any_judged_case_yet() -> None:
+    found = recommend([{**entry("a", None), "finished": False}], target_pass_rate=0.9)
+
+    assert found["reason"] == (
+        "no model has a judged case yet, so there is nothing to compare; results are partial: "
+        "a can still advance, and a rerun may change this"
+    )
 
 
 def test_the_session_context_fits_the_longest_case(

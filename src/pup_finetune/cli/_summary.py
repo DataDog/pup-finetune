@@ -604,7 +604,10 @@ def benchmark_summary(result: Mapping[str, Any]) -> Summary | None:
         "fine_tune": f"recommended: fine-tune {recommendation.get('model')}",
         "base_meets_target": f"recommended: {recommendation.get('model')} already meets the "
         f"{_percent(recommendation.get('target_pass_rate'))} target; fine-tuning may add little",
-    }.get(str(recommendation.get("verdict")), "no recommendation yet")
+    }.get(
+        str(recommendation.get("verdict")),
+        "no recommendation" + ("" if all(entry.get("finished") for entry in board) else " yet"),
+    )
     return _summary(
         headline,
         [*rows, verdict, CAVEAT],

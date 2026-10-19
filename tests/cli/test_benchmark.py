@@ -993,8 +993,10 @@ def test_a_check_that_raises_is_named_and_not_retried(dataset: Path, tmp_path: P
     assert f"{data['cases']} evaluator score(s) are missing after an error" in result.stderr
     assert "the hint says how to fix them" in result.stderr
     assert data["recommendation"]["verdict"] == "no_result"
-    assert "strict" in data["recommendation"]["reason"]
-    assert "partial" not in data["recommendation"]["reason"]
+    assert data["recommendation"]["reason"] == (
+        "no model has a case the evaluator strict scored, so there is nothing to compare"
+    )
+    assert result.stderr.endswith("; no recommendation\n")
     assert data["hint"] == (
         f"the check strict raised on {data['cases']} answer(s): ValueError: not the reference; "
         "a retry runs the same frozen file, so fix the check in a new file under a new "

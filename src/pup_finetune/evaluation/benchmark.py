@@ -1409,7 +1409,8 @@ def recommend(
         elif any(entry.get("headline_pass_rate") is not None for entry in board):
             reason = f"no finished model has a {case}, so none is ranked yet"
         else:
-            reason = f"no model has a {case} yet, so there is nothing to compare"
+            pending = " yet" if unfinished else ""
+            reason = f"no model has a {case}{pending}, so there is nothing to compare"
         return {"verdict": "no_result", "model": None, "reason": reason + partial}
     best = ranked[0]
     rate, coverage = float(best["headline_pass_rate"]), float(best["coverage"])
