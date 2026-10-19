@@ -863,7 +863,8 @@ Source lives under `src/pup_finetune/`.
   one `Candidate` per base model, with its renderer identity and the cases of that sample it
   cannot replay, `excluded`; a model is named `PROVIDER/ALIAS` when another provider offers
   its alias, `Candidate.target`; a model whose renderer cannot load is planned as an error,
-  `Candidate.unavailable`, its directory unread; a preview whose models share no case they
+  `Candidate.unavailable`, its results not scored (planning reads only the judge and
+  evaluators it froze); a preview whose models share no case they
   all replay fails), `execute` (the judge calibrated once, then each model replayed in a
   session of its own, sized on its own cases, into `OUT/<model>` through `run_replay` with the
   model as its one target, so each resumes; each model's directory is identified by its own

@@ -563,7 +563,7 @@ def benchmark_summary(result: Mapping[str, Any]) -> Summary | None:
         return None
     what = {"complete": "complete", "partial": "partial"}.get(str(status), "complete with errors")
     common = result.get("common_cases")
-    ranked = f"ranked on the {common} every finished model answered" if common else "none ranked"
+    ranked = f"ranked on the {common} scored for every finished model" if common else "none ranked"
     headline = (
         f"benchmark {what}: {_n(len(board), 'model')} on {_n(result.get('cases'), 'case')} from "
         f"{_n(result.get('trajectories'), 'test conversation')}, {ranked}; judge "

@@ -172,8 +172,9 @@ class Candidate:
     """Whether another provider offers the profile's alias too."""
     unavailable: ExternalError | None = None
     """Why its renderer could not load, which its run records as its error. Its identity
-    needs the renderer, so its directory is neither checked nor read, and its
-    :attr:`excluded` are only the cases with no prompt."""
+    needs the renderer, so its directory is not checked against it and its results are not
+    scored; planning still reads the judge and evaluators it froze, and which of them have
+    work left, as for every model. Its :attr:`excluded` are only the cases with no prompt."""
 
     @property
     def target(self) -> str:
@@ -1213,7 +1214,7 @@ def _entry(
     """``candidate``'s entry, whether each case its headline scored passed, whether a rerun
     has work left for it, and each check's answers it raised on. A check that raised is not
     work left: a rerun runs the same frozen file. A model whose renderer cannot load is an
-    error, its directory unread."""
+    error, its results not read."""
     from pup_finetune.evaluation.bootstrap import paired_bootstrap_ci
     from pup_finetune.evaluation.cases import EMPTY_PROMPT, excluded_by_reason
     from pup_finetune.evaluation.replay import EvalDir, remaining_work, summarize
