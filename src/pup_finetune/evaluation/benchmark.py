@@ -134,9 +134,10 @@ MIN_TRAJECTORIES: Final = 30
 """Fewer test conversations than this is a warning: the intervals are too wide to choose."""
 RESULT_FILE: Final = "benchmark.json"
 TARGET_COVERAGE: Final = 0.9
-"""The share of the test cases with a prompt that a model's judged cases must cover before its
-own headline pass rate can show it meets ``--target-pass-rate``: a rate on fewer says too
-little about the rest of the agent's conversations to call fine-tuning unneeded."""
+"""The share of the test cases with a prompt that the cases a model's headline scored must
+cover before its own headline pass rate can show it meets ``--target-pass-rate``: a rate on
+fewer says too little about the rest of the agent's conversations to call fine-tuning
+unneeded."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1290,7 +1291,8 @@ def _entry(
         ),
         "ci95": None if interval is None else list(interval),
         "judged_cases": target["completed"],
-        "coverage": target["completed"] / prompted,
+        "headline_cases": len(passes),
+        "coverage": len(passes) / prompted,
         "common_pass_rate": None,
         "gap_to_best": None,
         "within_noise_of_best": None,
@@ -1382,11 +1384,11 @@ def recommend(
     best ranked one.
 
     ``verdict`` is ``base_meets_target`` when that model's own headline pass rate reaches
-    ``target_pass_rate`` and its judged cases cover at least :data:`TARGET_COVERAGE` of the
-    test cases with a prompt (fine-tuning may add little), ``fine_tune`` otherwise, or
-    ``no_result`` when no model is ranked. Only finished models are ranked, so a model still
-    running changes neither the choice nor the verdict; the reason says the results are
-    partial then. Models within noise of the best are named too: any of them is as good a
+    ``target_pass_rate`` and the cases its headline scored cover at least
+    :data:`TARGET_COVERAGE` of the test cases with a prompt (fine-tuning may add little),
+    ``fine_tune`` otherwise, or ``no_result`` when no model is ranked. The reason quotes the
+    cases the rate is over. Only finished models are ranked, so a model still running changes
+    neither the choice nor the verdict; the reason says the results are partial then. Models within noise of the best are named too: any of them is as good a
     start, so the cheapest to serve wins.
     """
     ranked = [entry for entry in board if entry.get("rank") is not None]
@@ -1410,7 +1412,12 @@ def recommend(
     best = ranked[0]
     rate, coverage = float(best["headline_pass_rate"]), float(best["coverage"])
     close = [str(entry["model"]) for entry in ranked[1:] if entry.get("within_noise_of_best")]
-    judged = f"its {best['judged_cases']} judged cases"
+    scored = best["headline_cases"]
+    judged = (
+        f"its {scored} judged cases"
+        if headline == "judge"
+        else f"the {scored} cases {'they' if headline == 'all' else 'it'} scored"
+    )
     own = (
         f"{best['model']} ranks first and matches {_pct(rate)} of the recorded answers on {judged}"
         if headline == "judge"

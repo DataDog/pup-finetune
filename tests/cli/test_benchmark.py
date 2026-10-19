@@ -1036,7 +1036,42 @@ def test_a_headline_check_that_raises_ranks_the_model_on_the_cases_it_scored(
     assert data["recommendation"]["model"] == "fake-model"
     assert "partial" not in data["recommendation"]["reason"]
     assert "the check strict raised on" in data["hint"]
-    assert not str(data["next_command"]).startswith("pup finetune benchmark")
+    assert data["next_command"] == (
+        f"pup finetune train --provider fake --dataset {dataset} --model fake-model"
+    )
+
+
+def test_target_coverage_counts_the_cases_the_headline_scored(
+    dataset: Path, tmp_path: Path
+) -> None:
+    spec_dir = tmp_path / "spec"
+    shutil.copytree(ROWS.parent.parent / "evaluators", spec_dir)
+    spec = spec_dir / "text.toml"
+    spec.write_text(
+        'headline = "text_when_expected"\n[[evaluator]]\nname = "text_when_expected"\n'
+        'type = "check"\nfile = "checks.py"\nfunction = "answers_in_text"\n'
+    )
+    result = invoke(
+        "benchmark", str(dataset), "--models", "fake-model", "--evaluators", str(spec), "--confirm"
+    )
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    (entry,) = data["leaderboard"]
+    scored = entry["headline_cases"]
+    assert 0 < scored < entry["judged_cases"] == data["cases"]
+    assert data["common_cases"] == scored
+    assert entry["coverage"] == scored / data["cases"]
+    assert entry["headline_pass_rate"] == 1.0
+    recommendation = data["recommendation"]
+    assert (recommendation["verdict"], recommendation["coverage"]) == (
+        "fine_tune",
+        entry["coverage"],
+    )
+    assert (
+        f"passes the evaluator text_when_expected on 100% of the {scored} cases it scored, but "
+        f"they cover only {round(100 * entry['coverage'])}% of the test cases"
+    ) in recommendation["reason"]
+    assert f" on {scored} case" in result.stderr
 
 
 def test_an_evaluator_judge_outage_is_retried(

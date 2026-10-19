@@ -875,7 +875,8 @@ Source lives under `src/pup_finetune/`.
   identity, are read at plan time only when the store exists), `leaderboard` (a
   `Leaderboard`: each model's headline pass rate, the judge's unless `--evaluators` names
   another, with a bootstrap CI over trajectories on its own cases, its judge pass rate,
-  `judged_cases` and `coverage`, and its answers `truncated` at `--max-tokens` or
+  `judged_cases`, `headline_cases` (the cases its headline scored, the rate's denominator) and
+  `coverage` (their share of the test cases with a prompt), and its answers `truncated` at `--max-tokens` or
   `unparseable`, each a warning; the finished models, with no session error, nothing pending,
   no error a rerun retries and no score the headline still needs, ranked on the cases the
   headline scored for every one of them, `common_cases`, by their headline rate there, with
@@ -883,9 +884,10 @@ Source lives under `src/pup_finetune/`.
   narrowing that set; `rerun`, whether a rerun has work left, an evaluator score outside the
   headline included, but not a check that raised, whose frozen file raises again: the hint
   names it, as `evaluate`'s does) and `recommend` (`fine_tune`; `base_meets_target` when the
-  best ranked model's own headline rate reaches `--target-pass-rate` and its judged cases
-  cover `TARGET_COVERAGE`, 90% of the test cases with a prompt; or `no_result`; the reason
-  says when results are partial, and models within noise of the best are named).
+  best ranked model's own headline rate reaches `--target-pass-rate` and its
+  `headline_cases` cover `TARGET_COVERAGE`, 90% of the test cases with a prompt; or
+  `no_result`; the reason quotes that count and says when results are partial, and models
+  within noise of the best are named).
   The package exports its names lazily, so importing the runner (the CLI does, for every
   command) loads no judge client. `targets.py` makes the two samplers from a session: the live training
   session's best sampler checkpoint, or the best training checkpoint loaded and saved again

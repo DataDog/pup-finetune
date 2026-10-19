@@ -366,7 +366,7 @@ def test_a_small_sample_asks_for_a_larger_max_rows(plan: BenchmarkPlan) -> None:
 def test_cut_off_answers_ask_for_a_higher_max_tokens(
     plan: BenchmarkPlan, truncated: int, trains: bool
 ) -> None:
-    done = {"status": "complete", "judged_cases": 4, "errors_unrenderable": 0}
+    done = {"status": "complete", "judged_cases": 4, "headline_cases": 4, "errors_unrenderable": 0}
     done |= {"unparseable": 0, "out_dir": "bench/fake-model"}
     board = Leaderboard([{**entry("fake-model", 0.5), **done, "truncated": truncated}], 1)
 
@@ -394,6 +394,7 @@ def entry(
         "judge_pass_rate": rate,
         "headline_pass_rate": rate,
         "judged_cases": judged if rate is not None else 0,
+        "headline_cases": judged if rate is not None else 0,
         "coverage": 1.0 if rate is not None else 0.0,
         "within_noise_of_best": close,
     }
@@ -424,8 +425,8 @@ def test_recommend_says_a_base_model_at_the_target_may_need_no_training() -> Non
 @pytest.mark.parametrize(
     ("rate", "reason"),
     [
-        (0.95, "a ranks first and passes the judge and every evaluator on 95% of its 10 judged"),
-        (0.5, "every evaluator on 50% of its 10 judged cases, below the 90% target"),
+        (0.95, "a ranks first and passes the judge and every evaluator on 95% of the 10 cases"),
+        (0.5, "every evaluator on 50% of the 10 cases they scored, below the 90% target"),
         (None, "no model has a case the judge and every evaluator scored yet"),
     ],
 )

@@ -577,8 +577,8 @@ def benchmark_summary(result: Mapping[str, Any]) -> Summary | None:
     for entry in board:
         ci = entry.get("ci95")
         text = f" [{_percent(ci[0])}, {_percent(ci[1])}]" if isinstance(ci, list) else ""
-        if entry.get("judged_cases"):
-            text += f" on {_n(entry.get('judged_cases'), 'case')}"
+        if entry.get("headline_cases"):
+            text += f" on {_n(entry.get('headline_cases'), 'case')}"
         gap = entry.get("gap_to_best")
         if isinstance(gap, Mapping) and isinstance(gap.get("pass_rate"), int | float):
             noise = ", within noise" if entry.get("within_noise_of_best") else ""
