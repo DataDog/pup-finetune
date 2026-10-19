@@ -1005,6 +1005,7 @@ def test_a_check_that_raises_is_named_and_not_retried(dataset: Path, tmp_path: P
     assert data["next_command"] is None
     outage.unlink()
     preview = output(invoke(*args))
+    assert preview["preview"]["evaluators"]["items"][0]["reference_pass_rate"] == 1.0
     assert (preview["preview"]["generation_calls"], preview["preview"]["judge_calls"]) == (0, 0)
     retried = output(rerun(preview["next_command"]))
     assert retried["status"] == "complete"
@@ -1123,6 +1124,21 @@ def test_an_evaluator_judge_outage_is_retried(
     assert data["next_command"] == (
         f"pup finetune benchmark {dataset} --models fake-model --judge-model fake-judge "
         f"--evaluators {spec}"
+    )
+    spec.write_text(f'headline = "tone"\n{spec.read_text()}')
+    result = invoke(
+        "benchmark", str(dataset), "--models", "fake-model", "--evaluators", str(spec), "--confirm",
+        "--out-dir", str(tmp_path / "headline"),
+    )  # fmt: skip
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    (entry,) = data["leaderboard"]
+    assert (entry["finished"], entry["rank"]) == (False, None)
+    assert data["recommendation"]["verdict"] == "no_result"
+    assert "a rerun may change this" in data["recommendation"]["reason"]
+    assert data["next_command"] == (
+        f"pup finetune benchmark {dataset} --models fake-model --out-dir {tmp_path / 'headline'} "
+        f"--judge-model fake-judge --evaluators {spec}"
     )
 
 
