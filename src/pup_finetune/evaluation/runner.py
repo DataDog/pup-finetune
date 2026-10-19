@@ -105,7 +105,7 @@ if TYPE_CHECKING:
     from pup_finetune.evaluation.compare import CompareTarget
     from pup_finetune.evaluation.evaluators import CheckEvaluator, EvaluatorSet, JudgeEvaluator
     from pup_finetune.evaluation.judge import Judgment
-    from pup_finetune.evaluation.replay import EvalDir, Publisher, ReplaySummary
+    from pup_finetune.evaluation.replay import EvalDir, PairKey, Publisher, ReplaySummary
     from pup_finetune.evaluation.reuse import ReuseIndex, TargetReuse
     from pup_finetune.inference import ChatCompleter, ChatCompletion, JudgeConfig
 
@@ -133,10 +133,12 @@ __all__ = [
     "calibration_failed",
     "calibration_line",
     "cancel_on_signals",
+    "check_hint",
     "deploy_command",
     "evaluate_words",
     "evaluation_exit_code",
     "evaluator_calibration_calls",
+    "evaluator_errors",
     "evaluator_fix",
     "evaluators_preview",
     "finished_result",
@@ -1823,7 +1825,13 @@ def replay_result(
     hint = None
     publication = _publication(plan, outcome)
     unrenderable = sum(int(target["errors_unrenderable"]) for target in summary["targets"].values())
-    failed = {} if plan.evaluators is None else _evaluator_errors(plan)
+    failed = (
+        {}
+        if plan.evaluators is None
+        else evaluator_errors(
+            EvalDir(plan.out_dir).read_results(), plan.replays, plan.evaluator_names
+        )
+    )
     checks = {check.name for check in plan.evaluators.checks} if plan.evaluators else set()
     rescored = errors > unrenderable or any(failed[name]["errors"] for name in set(failed) - checks)
     if scoring:
@@ -1868,7 +1876,7 @@ def replay_result(
                 "included: a retry updates the local results only, so evaluate into a new "
                 "--out-dir to publish experiments with every result"
             )
-    if broken := _check_hint(failed, checks, plan.out_dir):
+    if broken := check_hint(failed, checks, plan.out_dir):
         hint = broken if hint is None else f"{hint}. {broken}"
     if plan.compare is not None:
         skips = Counter(plan.compare_skips.values())
@@ -1957,16 +1965,15 @@ def scoring_warning(count: int, *, retried: bool = True) -> str:
     )
 
 
-def _evaluator_errors(plan: EvalPlan) -> dict[str, dict[str, Any]]:
-    """Each evaluator's entries that ended in an error over the plan's pairs, with the first
-    error (``{"stage", "type", "message"}``)."""
-    from pup_finetune.evaluation.replay import EvalDir
-
-    results = EvalDir(plan.out_dir).read_results()
-    found: dict[str, dict[str, Any]] = {
-        name: {"errors": 0, "first_error": None} for name in plan.evaluator_names
-    }
-    for target, cases in plan.replays.items():
+def evaluator_errors(
+    results: Mapping[PairKey, Mapping[str, Any]],
+    replays: Mapping[str, Sequence[ReplayCase]],
+    names: Sequence[str],
+) -> dict[str, dict[str, Any]]:
+    """Each of the evaluators ``names``' entries in ``results`` that ended in an error over
+    the pairs of ``replays``, with the first error (``{"stage", "type", "message"}``)."""
+    found: dict[str, dict[str, Any]] = {name: {"errors": 0, "first_error": None} for name in names}
+    for target, cases in replays.items():
         for case in cases:
             entries = (results.get((target, case.id)) or {}).get("evaluators")
             for name, counted in found.items():
@@ -1977,7 +1984,7 @@ def _evaluator_errors(plan: EvalPlan) -> dict[str, dict[str, Any]]:
     return found
 
 
-def _check_hint(found: Mapping[str, Mapping[str, Any]], checks: set[str], out_dir: Path) -> str:
+def check_hint(found: Mapping[str, Mapping[str, Any]], checks: set[str], out_dir: Path) -> str:
     """The hint for the ``checks`` that raised in ``found``, which a retry cannot fix since
     each runs its frozen file again; empty when none raised."""
     raised = [

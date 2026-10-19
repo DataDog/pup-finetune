@@ -509,20 +509,17 @@ def checks(*names: str, headline: str) -> EvaluatorSet:
 
 
 def write_scored(
-    plan: BenchmarkPlan, candidate: Candidate, scores: dict[str, dict[str, bool | None]]
+    plan: BenchmarkPlan, candidate: Candidate, scores: dict[str, dict[str, bool]]
 ) -> None:
-    """An ``ok`` result the judge passed per case of ``scores``, with each evaluator's entry:
-    passed or failed, or an error for ``None``."""
+    """An ``ok`` result the judge passed per case of ``scores``, with each evaluator's entry,
+    passed or failed."""
     eval_dir = EvalDir(plan.model_dir(candidate))
     eval_dir.create()
     for case in plan.cases:
         if case.id in scores:
             line = result(candidate.target, case, True)
             line["evaluators"] = {
-                name: {"status": "ok", "passed": passed}
-                if passed is not None
-                else {"status": "error", "passed": None}
-                for name, passed in scores[case.id].items()
+                name: {"status": "ok", "passed": passed} for name, passed in scores[case.id].items()
             }
             eval_dir.append_result(line)
 
@@ -551,19 +548,19 @@ def test_the_headline_ranks_the_finished_models_on_the_cases_it_scored_for_all(
     assert found["coverage"] == 1 / len(plan.cases)
 
 
-@pytest.mark.parametrize(("headline", "ranked"), [("short", True), ("broken", False)])
+@pytest.mark.parametrize(("headline", "ranked"), [("short", True), ("late", False)])
 def test_only_a_score_the_headline_needs_keeps_a_model_unranked(
     plan: BenchmarkPlan, headline: str, ranked: bool
 ) -> None:
-    plan = dataclasses.replace(plan, evaluators=checks("short", "broken", headline=headline))
+    plan = dataclasses.replace(plan, evaluators=checks("short", "late", headline=headline))
     plan = dataclasses.replace(plan, candidates=plan.candidates[:1])
     [candidate] = plan.candidates
-    failing = plan.cases[0].id
+    unscored = plan.cases[0].id
     write_scored(
         plan,
         candidate,
         {
-            case.id: {"short": True, "broken": None if case.id == failing else True}
+            case.id: {"short": True, **({} if case.id == unscored else {"late": True})}
             for case in plan.cases
         },
     )

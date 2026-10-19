@@ -60,7 +60,9 @@ from pup_finetune.evaluation.runner import (
     calibrate_evaluators,
     calibration_line,
     cancel_on_signals,
+    check_hint,
     evaluator_calibration_calls,
+    evaluator_errors,
     evaluator_fix,
     evaluators_preview,
     no_reuse_hint,
@@ -1174,6 +1176,9 @@ class Leaderboard:
     """How many cases the headline scored for every finished model it scored a case for."""
     rerun: bool = False
     """Whether a model is unfinished, or has an evaluator score left that a rerun retries."""
+    raised: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Each check's answers it raised on over every model, with the first error, as
+    :func:`~pup_finetune.evaluation.runner.evaluator_errors` counts them."""
 
 
 def _headline_passes(
@@ -1203,10 +1208,11 @@ def _by_trajectory(cases: Sequence[ReplayCase], values: Mapping[str, float]) -> 
 
 def _entry(
     plan: BenchmarkPlan, candidate: Candidate, error: Mapping[str, Any] | None
-) -> tuple[dict[str, Any], dict[str, bool], bool]:
-    """``candidate``'s entry, whether each case its headline scored passed, and whether a rerun
-    has work left for it. A model whose renderer cannot load is an error, its directory
-    unread."""
+) -> tuple[dict[str, Any], dict[str, bool], bool, dict[str, dict[str, Any]]]:
+    """``candidate``'s entry, whether each case its headline scored passed, whether a rerun
+    has work left for it, and each check's answers it raised on. A check that raised is not
+    work left: a rerun runs the same frozen file. A model whose renderer cannot load is an
+    error, its directory unread."""
     from pup_finetune.evaluation.bootstrap import paired_bootstrap_ci
     from pup_finetune.evaluation.cases import EMPTY_PROMPT, excluded_by_reason
     from pup_finetune.evaluation.replay import EvalDir, remaining_work, summarize
@@ -1244,10 +1250,15 @@ def _entry(
         if record is not None and record.get("stop_reason") != "length":
             unparseable += record.get("format_valid") is False
     scoring = sum(int(target["evaluators"][name]["errors"]) for name in names)
+    checks = [] if plan.evaluators is None else [check.name for check in plan.evaluators.checks]
+    raised = evaluator_errors(results, {candidate.target: cases}, checks)
     finished = settled = False
     if error is None:
         left = remaining_work(eval_dir, {candidate.target: cases}, names)[candidate.target]
-        scores = left.get("evaluators", {})
+        scores = {
+            name: count - (raised[name]["errors"] if name in raised else 0)
+            for name, count in left.get("evaluators", {}).items()
+        }
         finished = not left["judge"] and not any(scores[name] for name in plan.headline_evaluators)
         settled = finished and not any(scores.values())
     if error is not None:
@@ -1296,7 +1307,7 @@ def _entry(
         "error": None if error is None else dict(error),
         "out_dir": display_path(eval_dir.path),
     }
-    return entry, passes, not settled
+    return entry, passes, not settled, raised
 
 
 def leaderboard(
@@ -1318,7 +1329,7 @@ def leaderboard(
     scored = [
         _entry(plan, candidate, errors.get(candidate.target)) for candidate in plan.candidates
     ]
-    compared = [(entry, passes) for entry, passes, _ in scored if entry["finished"] and passes]
+    compared = [(entry, passes) for entry, passes, _, _ in scored if entry["finished"] and passes]
     common = set.intersection(*(set(passes) for _, passes in compared)) if compared else set()
     ranked: list[tuple[dict[str, Any], dict[str, bool]]] = []
     if common:
@@ -1345,9 +1356,18 @@ def leaderboard(
             }
             entry["within_noise_of_best"] = interval is None or interval[0] <= 0
     entries = [entry for entry, _ in ranked]
-    entries += [entry for entry, _, _ in scored if entry["rank"] is None]
+    entries += [entry for entry, _, _, _ in scored if entry["rank"] is None]
+    raised: dict[str, dict[str, Any]] = {}
+    for _, _, _, found in scored:
+        for name, counted in found.items():
+            total = raised.setdefault(name, {"errors": 0, "first_error": None})
+            total["errors"] += counted["errors"]
+            total["first_error"] = total["first_error"] or counted["first_error"]
     return Leaderboard(
-        entries, common_cases=len(common), rerun=any(rerun for _, _, rerun in scored)
+        entries,
+        common_cases=len(common),
+        rerun=any(rerun for _, _, rerun, _ in scored),
+        raised=raised,
     )
 
 
@@ -1468,6 +1488,8 @@ def _result(
             f"{unrenderable} case(s) have a prompt a model's chat format cannot continue, "
             "which a retry cannot fix, so next_command never retries them"
         )
+    if broken := check_hint(board.raised, set(board.raised), plan.out_dir):
+        hint = broken if hint is None else f"{hint}. {broken}"
     if scoring := sum(int(entry.get("evaluator_errors") or 0) for entry in entries):
         warnings.append(scoring_warning(scoring, retried=board.rerun))
     rate = recommendation.get("judge_pass_rate")

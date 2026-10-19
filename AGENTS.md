@@ -881,10 +881,11 @@ Source lives under `src/pup_finetune/`.
   headline scored for every one of them, `common_cases`, by their headline rate there, with
   each one's paired gap to the best; a model a rerun can still advance listed unranked, never
   narrowing that set; `rerun`, whether a rerun has work left, an evaluator score outside the
-  headline included) and `recommend` (`fine_tune`; `base_meets_target` when the best ranked
-  model's own headline rate reaches `--target-pass-rate` and its judged cases cover
-  `TARGET_COVERAGE`, 90% of the test cases with a prompt; or `no_result`; the reason says
-  when results are partial, and models within noise of the best are named).
+  headline included, but not a check that raised, whose frozen file raises again: the hint
+  names it, as `evaluate`'s does) and `recommend` (`fine_tune`; `base_meets_target` when the
+  best ranked model's own headline rate reaches `--target-pass-rate` and its judged cases
+  cover `TARGET_COVERAGE`, 90% of the test cases with a prompt; or `no_result`; the reason
+  says when results are partial, and models within noise of the best are named).
   The package exports its names lazily, so importing the runner (the CLI does, for every
   command) loads no judge client. `targets.py` makes the two samplers from a session: the live training
   session's best sampler checkpoint, or the best training checkpoint loaded and saved again

@@ -939,21 +939,89 @@ def test_an_evaluator_that_fails_calibration_can_be_fixed_under_its_name(
     assert "fix its rubric or examples, or pick another model for it" in data["hint"]
 
 
-def test_evaluator_errors_are_reported_and_retried(dataset: Path, tmp_path: Path) -> None:
+def check_spec(tmp_path: Path, body: str, *, headline: str) -> Path:
+    """A spec with one check, ``strict``, whose function is ``body``."""
     spec_dir = tmp_path / "spec"
-    spec_dir.mkdir()
-    outage = spec_dir / "outage"
-    outage.touch()
-    (spec_dir / "flaky.py").write_text(
-        "import os\n\n\ndef same_as_reference(case, candidate):\n"
-        f"    if candidate != case['reference'] and os.path.exists({str(outage)!r}):\n"
-        "        raise ValueError('not the reference')\n"
-        "    return True\n"
-    )
+    spec_dir.mkdir(exist_ok=True)
+    (spec_dir / "strict.py").write_text(body)
     spec = spec_dir / "evals.toml"
     spec.write_text(
-        'headline = "same_as_reference"\n[[evaluator]]\nname = "same_as_reference"\n'
-        'type = "check"\nfile = "flaky.py"\n'
+        f'headline = "{headline}"\n[[evaluator]]\nname = "strict"\ntype = "check"\n'
+        'file = "strict.py"\n'
+    )
+    return spec
+
+
+def test_a_check_that_raises_is_named_and_not_retried(dataset: Path, tmp_path: Path) -> None:
+    outage = tmp_path / "outage"
+    outage.touch()
+    spec = check_spec(
+        tmp_path,
+        "import os\n\n\ndef strict(case, candidate):\n"
+        f"    if candidate != case['reference'] and os.path.exists({str(outage)!r}):\n"
+        "        raise ValueError('not the reference')\n"
+        "    return True\n",
+        headline="strict",
+    )
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--evaluators", str(spec))
+    result = invoke(*args, "--confirm")
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    (entry,) = data["leaderboard"]
+    assert (data["status"], entry["status"]) == ("complete_with_errors", "complete_with_errors")
+    assert (entry["errors"], entry["evaluator_errors"]) == (0, data["cases"])
+    assert f"{data['cases']} evaluator score(s) are missing after an error" in result.stderr
+    assert "the hint says how to fix them" in result.stderr
+    assert data["recommendation"]["verdict"] == "no_result"
+    assert "strict" in data["recommendation"]["reason"]
+    assert "partial" not in data["recommendation"]["reason"]
+    assert data["hint"] == (
+        f"the check strict raised on {data['cases']} answer(s): ValueError: not the reference; "
+        "a retry runs the same frozen file, so fix the check in a new file under a new "
+        f"evaluator name, or pass --out-dir {dataset / 'benchmark-2'}"
+    )
+    assert data["next_command"] is None
+    outage.unlink()
+    preview = output(invoke(*args))
+    assert (preview["preview"]["generation_calls"], preview["preview"]["judge_calls"]) == (0, 0)
+    retried = output(rerun(preview["next_command"]))
+    assert retried["status"] == "complete"
+    assert retried["leaderboard"][0]["headline_pass_rate"] == 1.0
+
+
+def test_a_check_that_raises_outside_the_headline_leads_to_training(
+    dataset: Path, tmp_path: Path
+) -> None:
+    spec = check_spec(
+        tmp_path,
+        "def strict(case, candidate):\n    if candidate != case['reference']:\n"
+        "        raise ValueError('boom')\n    return True\n",
+        headline="judge",
+    )
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--evaluators", str(spec))
+    result = invoke(*args, "--confirm")
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    (entry,) = data["leaderboard"]
+    assert (entry["finished"], entry["rank"]) == (True, 1)
+    assert data["recommendation"]["verdict"] == "fine_tune"
+    assert "partial" not in data["recommendation"]["reason"]
+    train = f"pup finetune train --provider fake --dataset {dataset} --model fake-model"
+    assert data["next_command"] == train
+    assert f"the check strict raised on {data['cases']} answer(s): ValueError: boom" in data["hint"]
+    assert output(invoke(*args, "--confirm"))["next_command"] == train
+
+
+def test_a_headline_check_that_raises_ranks_the_model_on_the_cases_it_scored(
+    dataset: Path, tmp_path: Path
+) -> None:
+    spec = check_spec(
+        tmp_path,
+        "def strict(case, candidate):\n"
+        "    if case['reference'].get('tool_calls') and candidate != case['reference']:\n"
+        "        raise ValueError('boom')\n"
+        "    return True\n",
+        headline="strict",
     )
     result = invoke(
         "benchmark", str(dataset), "--models", "fake-model", "--evaluators", str(spec), "--confirm"
@@ -961,22 +1029,44 @@ def test_evaluator_errors_are_reported_and_retried(dataset: Path, tmp_path: Path
     assert result.exit_code == 0, result.stderr
     data = output(result)
     (entry,) = data["leaderboard"]
-    assert (data["status"], entry["status"]) == ("complete_with_errors", "complete_with_errors")
-    assert (entry["errors"], entry["evaluator_errors"]) == (0, data["cases"])
-    assert f"{data['cases']} evaluator score(s) are missing after an error" in result.stderr
-    assert data["recommendation"]["verdict"] == "no_result"
-    assert "same_as_reference" in data["recommendation"]["reason"]
+    scored = data["cases"] - entry["evaluator_errors"]
+    assert 0 < scored < data["cases"]
+    assert (entry["finished"], entry["rank"], entry["headline_pass_rate"]) == (True, 1, 1.0)
+    assert data["common_cases"] == scored
+    assert data["recommendation"]["model"] == "fake-model"
+    assert "partial" not in data["recommendation"]["reason"]
+    assert "the check strict raised on" in data["hint"]
+    assert not str(data["next_command"]).startswith("pup finetune benchmark")
+
+
+def test_an_evaluator_judge_outage_is_retried(
+    dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Outage:
+        def complete(self, messages: Any, **kwargs: Any) -> Any:
+            raise ExternalError("the judge is down", source="judge")
+
+        def close(self) -> None:
+            pass
+
+    @contextmanager
+    def down(judges: Any) -> Iterator[dict[str, Any]]:
+        yield {"fake": Outage()}
+
+    monkeypatch.setattr(benchmark_module, "open_evaluator_clients", down)
+    spec = tmp_path / "evals.toml"
+    spec.write_text('[[evaluator]]\nname = "tone"\ntype = "judge"\nrubric = "Pass when polite."\n')
+    result = invoke(
+        "benchmark", str(dataset), "--models", "fake-model", "--evaluators", str(spec), "--confirm"
+    )
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["leaderboard"][0]["evaluator_errors"] == data["cases"]
+    assert data["hint"] is None
     assert data["next_command"] == (
         f"pup finetune benchmark {dataset} --models fake-model --judge-model fake-judge "
         f"--evaluators {spec}"
     )
-    outage.unlink()
-    preview = output(rerun(data["next_command"]))
-    assert preview["preview"]["evaluators"]["items"][0]["reference_pass_rate"] == 1.0
-    assert (preview["preview"]["generation_calls"], preview["preview"]["judge_calls"]) == (0, 0)
-    retried = output(rerun(preview["next_command"]))
-    assert retried["status"] == "complete"
-    assert retried["leaderboard"][0]["headline_pass_rate"] == 1.0
 
 
 def test_a_stored_set_s_command_runs_only_the_evaluators_it_previewed(
