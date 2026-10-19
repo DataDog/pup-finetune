@@ -1389,8 +1389,9 @@ def recommend(
     :data:`TARGET_COVERAGE` of the test cases with a prompt (fine-tuning may add little),
     ``fine_tune`` otherwise, or ``no_result`` when no model is ranked. The reason quotes the
     cases the rate is over. Only finished models are ranked, so a model still running changes
-    neither the choice nor the verdict; the reason says the results are partial then. Models within noise of the best are named too: any of them is as good a
-    start, so the cheapest to serve wins.
+    neither the choice nor the verdict; the reason says the results are partial then. Models
+    within noise of the best are named too: any of them is as good a start, so the cheapest to
+    serve wins.
     """
     ranked = [entry for entry in board if entry.get("rank") is not None]
     unfinished = [str(entry["model"]) for entry in board if not entry.get("finished")]
