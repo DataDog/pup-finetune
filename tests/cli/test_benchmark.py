@@ -1092,7 +1092,7 @@ def test_target_coverage_counts_the_cases_the_headline_scored(
     )
     assert (
         f"passes the evaluator text_when_expected on 100% of the {scored} cases it scored, but "
-        f"they cover only {round(100 * entry['coverage'])}% of the test cases"
+        f"they cover only {round(100 * entry['coverage'])}% of the test cases with a prompt, under"
     ) in recommendation["reason"]
     assert f" on {scored} case" in result.stderr
 

@@ -1432,9 +1432,9 @@ def recommend(
     elif coverage < TARGET_COVERAGE:
         verdict = "fine_tune"
         reason = (
-            f"{own}, but they cover only {_pct(coverage)} of the test cases, under the "
-            f"{_pct(TARGET_COVERAGE)} needed to say it meets the {_pct(target_pass_rate)} "
-            "target: fine-tune it"
+            f"{own}, but they cover only {_pct(coverage)} of the test cases with a prompt, "
+            f"under the {_pct(TARGET_COVERAGE)} needed to say it meets the "
+            f"{_pct(target_pass_rate)} target: fine-tune it"
         )
     else:
         verdict = "base_meets_target"
