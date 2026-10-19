@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -202,6 +203,10 @@ def test_limits_must_be_positive() -> None:
         PullOptions(SpanQuery(), max_candidates=0)
     with pytest.raises(UsageError, match="reasoning"):
         PullOptions(SpanQuery(), reasoning="keep")  # type: ignore[arg-type]
+    with pytest.raises(UsageError, match="--max-rows-per-trace"):
+        PullOptions(SpanQuery(), max_rows_per_trace=0)
+    with pytest.raises(UsageError, match="--sample"):
+        PullOptions(SpanQuery(), sample="all")  # type: ignore[arg-type]
 
 
 def test_settings_hold_what_selects_and_shapes_rows_but_not_the_limits() -> None:
@@ -220,6 +225,14 @@ def test_settings_hold_what_selects_and_shapes_rows_but_not_the_limits() -> None
     assert "max_candidates" not in str(settings)
     wider = PullOptions(options.query, reasoning="preserve", include_errors=True)
     assert wider.settings() == settings
+
+
+def test_the_sample_and_the_cap_are_frozen_only_when_set() -> None:
+    # A dataset pulled before these options froze neither, and still matches a default pull.
+    query = SpanQuery(ml_app="synthetic")
+    assert not {"sample", "max_rows_per_trace"} & PullOptions(query).settings().keys()
+    settings = PullOptions(query, sample="random", max_rows_per_trace=3).settings()
+    assert (settings["sample"], settings["max_rows_per_trace"]) == ("random", 3)
 
 
 def test_max_candidates_equal_to_every_span_reads_to_the_end() -> None:
@@ -997,3 +1010,212 @@ def test_a_rerun_after_a_review_reads_on_to_replace_the_dropped_rows(tmp_path: P
     _, added = pull_three()
     assert added.added == 1
     assert len(dataset.kept_rows()) == 3
+
+
+# --- spreading rows over traces -------------------------------------------------------------
+
+
+def busy_trace_first() -> list[dict[str, Any]]:
+    """Trace ``busy``'s six rows over two pages, then one row of each of ``quiet-1`` to ``-4``."""
+
+    def row(trace: str, n: int) -> dict[str, Any]:
+        question = {"role": "user", "content": f"Question {trace} {n}?"}
+        answer = {"role": "assistant", "content": f"Answer {trace} {n}."}
+        return item(f"span-{trace}-{n}", [SYSTEM, question, answer], trace_id=trace)
+
+    busy = [row("busy", n) for n in range(6)]
+    quiet = [row(f"quiet-{n}", 0) for n in range(1, 5)]
+    return [page(busy[:4], after="cursor-2"), page([*busy[4:], *quiet])]
+
+
+def traces(rows: Iterable[Any]) -> list[str]:
+    return [row.source.trace_id for row in rows]
+
+
+def sampled(seed: int = 42, dropped: frozenset[str] = frozenset(), **options: Any) -> Collection:
+    api = FakeExportApi(busy_trace_first())
+    pup = api.install(FakePup()).client()
+    query = SpanQuery(ml_app="synthetic")
+    return collect(pup, PullOptions(query, sample="random", **options), seed=seed, dropped=dropped)
+
+
+def test_max_rows_per_trace_excludes_a_trace_s_rows_past_its_first_ones() -> None:
+    collection, api = collected(busy_trace_first(), target_count=3, max_rows_per_trace=2)
+    # Capped rows do not count toward the target, so reading goes on to page 2.
+    assert api.cursors == [None, "cursor-2"]
+    assert [row.id for row in collection.rows] == [
+        "busy:span-busy-0",
+        "busy:span-busy-1",
+        "quiet-1:span-quiet-1-0",
+    ]
+    capped = [e for e in collection.exclusions if e.code is ExclusionCode.TRACE_ROW_CAP]
+    assert [e.row_id for e in capped] == [f"busy:span-busy-{n}" for n in range(2, 6)]
+    assert "--max-rows-per-trace 2" in capped[0].detail
+
+
+def test_a_random_sample_reads_every_candidate_and_takes_a_row_of_every_trace_first() -> None:
+    first, _ = collected(busy_trace_first(), target_count=5)
+    assert set(traces(first.rows)) == {"busy"}
+    collection, api = collected(busy_trace_first(), target_count=5, sample="random")
+    assert api.cursors == [None, "cursor-2"]
+    assert collection.stopped == "exhausted"
+    assert sorted(traces(collection.rows)) == ["busy", "quiet-1", "quiet-2", "quiet-3", "quiet-4"]
+    assert collection.over_target == 5
+
+
+def test_a_random_sample_is_fixed_by_its_seed() -> None:
+    def ids(seed: int) -> tuple[str, ...]:
+        return tuple(row.id for row in sampled(seed, target_count=3).rows)
+
+    assert ids(0) == ids(0)
+    samples = {ids(seed) for seed in range(5)}
+    assert len(samples) > 1
+    # Whatever the seed, three rows of three traces.
+    assert {len({row_id.split(":")[0] for row_id in sample}) for sample in samples} == {3}
+
+
+def test_a_random_sample_deals_a_trace_s_next_row_only_up_to_the_cap() -> None:
+    collection = sampled(target_count=8, max_rows_per_trace=2)
+    # One row of each of the five traces, then busy's second; its other four are capped.
+    assert len(collection.rows) == 6
+    assert traces(collection.rows)[-1] == "busy"
+    assert traces(collection.rows).count("busy") == 2
+    capped = [e for e in collection.exclusions if e.code is ExclusionCode.TRACE_ROW_CAP]
+    assert [e.trace_id for e in capped] == ["busy"] * 4
+    assert "past the --max-rows-per-trace 2 rows kept of trace 'busy'" in capped[0].detail
+
+
+@pytest.mark.parametrize(
+    ("sample", "expected"),
+    [
+        (
+            "first",
+            ["row:busy:span-x", "row:quiet:span-copy", "excluded:trace_row_cap:busy:span-shared"],
+        ),
+        # Seed 42 deals quiet first and ranks busy's shared row first.
+        (
+            "random",
+            [
+                "row:quiet:span-copy",
+                "row:busy:span-x",
+                "excluded:duplicate_conversation:busy:span-shared",
+            ],
+        ),
+    ],
+)
+def test_a_row_past_the_cap_does_not_make_its_copy_in_another_trace_a_duplicate(
+    sample: str, expected: list[str]
+) -> None:
+    busy = [
+        item("span-x", [SYSTEM, Q1, A1], trace_id="busy"),
+        item("span-shared", [SYSTEM, Q2, A2], trace_id="busy"),
+    ]
+    copy = item("span-copy", [SYSTEM, Q2, A2], trace_id="quiet")
+    collection, _ = collected([page([*busy, copy])], max_rows_per_trace=1, sample=sample)
+    assert outcome(collection) == expected
+
+
+@pytest.mark.parametrize("seed", range(10))
+def test_a_duplicate_does_not_cost_a_trace_its_turn_in_a_random_sample(seed: int) -> None:
+    greet = {"role": "user", "content": "Hello?"}
+    spans = []
+    for trace in ("a", "b", "c"):
+        own = {"role": "user", "content": f"Question {trace}?"}
+        spans += [
+            item(f"{trace}-greet", [SYSTEM, greet, A1], trace_id=trace),
+            item(f"{trace}-own", [SYSTEM, own, A2], trace_id=trace),
+        ]
+    api = FakeExportApi([page(spans)])
+    pup = api.install(FakePup()).client()
+    options = PullOptions(SpanQuery(ml_app="synthetic"), sample="random", target_count=3)
+    collection = collect(pup, options, seed=seed)
+    assert sorted(traces(collection.rows)) == ["a", "b", "c"]
+
+
+def test_rows_dropped_from_a_random_sample_are_replaced_by_the_next_ones_dealt() -> None:
+    dealt = [row.id for row in sampled(target_count=10).rows]
+    collection = sampled(target_count=2, dropped=frozenset(dealt[:1]))
+    assert [row.id for row in collection.rows] == dealt[:3]
+
+
+def pull_sample(dataset: DatasetDir, **options: Any) -> Any:
+    api = FakeExportApi(busy_trace_first())
+    pup = api.install(FakePup()).client()
+    query = SpanQuery(ml_app="synthetic")
+    return pull(pup, PullOptions(query, sample="random", **options), dataset, SplitParams())
+
+
+def test_a_random_pull_resumes_to_its_rows_and_deals_on_from_them(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    pull_sample(dataset, target_count=2, max_candidates=4)  # page 1 holds trace busy alone
+    assert traces(dataset.rows()) == ["busy", "busy"]
+    stored, rows = [row.id for row in dataset.rows()], dataset.rows_path.read_bytes()
+    _, again = pull_sample(dataset, target_count=2, max_candidates=4)
+    assert (again.added, again.unchanged) == (0, 2)
+    assert dataset.rows_path.read_bytes() == rows
+    # Reading every span keeps the stored rows first: the target is met, so none is added.
+    _, wider = pull_sample(dataset, target_count=2)
+    assert (wider.added, wider.unchanged) == (0, 2)
+    # A higher target deals on: two quiet traces' rows come before busy's third.
+    _, more = pull_sample(dataset, target_count=4)
+    assert more.added == 2
+    assert [row.id for row in dataset.rows()][:2] == stored
+    new = traces(dataset.rows()[2:])
+    assert len(set(new)) == 2
+    assert all(trace.startswith("quiet-") for trace in new)
+
+
+def test_a_random_rerun_reading_less_counts_the_stored_rows_it_does_not_reach(
+    tmp_path: Path,
+) -> None:
+    def row(n: int) -> dict[str, Any]:
+        question = {"role": "user", "content": f"Question {n}?"}
+        answer = {"role": "assistant", "content": f"Answer {n}."}
+        return item(f"span-{n}", [SYSTEM, question, answer], trace_id=f"trace-{n}")
+
+    items = [row(n) for n in range(8)]
+    pages = [page(items[:4], after="cursor-2"), page(items[4:])]
+    dataset = DatasetDir(tmp_path / "ds")
+
+    def pull_random(**limits: Any) -> Any:
+        api = FakeExportApi(pages)
+        pup = api.install(FakePup()).client()
+        query = SpanQuery(ml_app="synthetic")
+        options = PullOptions(query, sample="random", target_count=4, **limits)
+        return pull(pup, options, dataset, SplitParams())
+
+    pull_random()
+    stored = [row.id for row in dataset.rows()]
+    assert {"trace-4", "trace-5", "trace-6", "trace-7"} & set(traces(dataset.rows()))
+    # Page 1 alone holds part of the sample; the stored rows on page 2 still count.
+    collection, added = pull_random(max_candidates=4)
+    assert collection.stopped == "max_candidates"
+    assert added.added == 0
+    assert [row.id for row in dataset.rows()] == stored
+
+
+def test_a_pull_holds_a_trace_to_the_cap_with_the_rows_it_stored(tmp_path: Path) -> None:
+    # Trace A's first conversation continues on page 2 into a row past the cap, so the stored
+    # one is not retired and still takes the trace's one place.
+    sub_agent = {"role": "system", "content": "You are a synthetic sub-agent."}
+    other = item("synthetic-span-a3", [sub_agent, Q2, A2], trace_id="synthetic-trace-a")
+    pages = [page([a_prefix(), other], after="cursor-2"), page([a_long()])]
+    dataset = DatasetDir(tmp_path / "ds")
+
+    def pull_pages(target_count: int) -> Any:
+        api = FakeExportApi(pages)
+        pup = api.install(FakePup()).client()
+        query = SpanQuery(ml_app="synthetic")
+        options = PullOptions(query, target_count=target_count, max_rows_per_trace=1)
+        return pull(pup, options, dataset, SplitParams())
+
+    pull_pages(1)
+    assert [row.id for row in dataset.rows()] == ["synthetic-trace-a:synthetic-span-a1"]
+    collection, added = pull_pages(5)
+    assert [row.id for row in collection.rows] == ["synthetic-trace-a:synthetic-span-a3"]
+    assert added.added == 0
+    assert [row.id for row in dataset.rows()] == ["synthetic-trace-a:synthetic-span-a1"]
+    records = {record["row_id"]: record for record in dataset.excluded()}
+    record = records["synthetic-trace-a:synthetic-span-a3"]
+    assert record["code"] == "trace_row_cap"
+    assert "already has --max-rows-per-trace 1 rows in the dataset" in record["detail"]

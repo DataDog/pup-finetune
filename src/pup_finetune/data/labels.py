@@ -37,10 +37,11 @@ from pup_finetune.data.schema import lone_surrogate
 from pup_finetune.errors import FinetuneError, StateError
 from pup_finetune.storage import parse_jsonl_line
 
-LabelSource = Literal["manual", "judge"]
+LabelSource = Literal["manual", "judge", "check"]
 """How the decision was made: ``manual`` when recorded with ``dataset label`` (by the user or
-their coding agent), ``judge`` when the judge council of ``dataset triage`` decided. Labels
-written before these two existed say ``agent`` or ``human``, and are read as ``manual``."""
+their coding agent), ``judge`` when the judge council of ``dataset triage`` decided, ``check``
+when one of its ``--checks`` failed the row. Labels written before ``manual`` and ``judge``
+existed say ``agent`` or ``human``, and are read as ``manual``."""
 
 _LEGACY_SOURCES = frozenset({"agent", "human"})
 

@@ -59,6 +59,16 @@ decisions (and each judge's votes) agree with those labels (:class:`Agreement`: 
 Cohen's kappa, the confusion counts and the rows they disagree on), so a rubric can be
 checked against decisions the user made before the council labels the rest. Its votes are
 stored and frozen like any other.
+
+**Checks.** With ``checks`` (a :class:`~pup_finetune.user_checks.CheckModule`), every public
+function of the file runs first, free, on each row reviewed (:func:`run_row_checks`): a row
+one fails is labeled ``by: check`` with the first failing check's reason, before any judge
+call, and is never sent to a judge; the council judges only the rest, and with ``agreement``
+the checks are compared with the labels apart (:meth:`TriagePlan.check_agreement`). Checks
+are not frozen: they run again on every triage given them, so rows labeled ``by: check`` are
+reviewed only then, and are otherwise skipped (``triage.json`` records the last council's
+file, :func:`recorded_checks`). A plan with checks and no criteria calls no judge:
+:func:`apply_check_labels` labels its rows at once.
 """
 
 from __future__ import annotations
@@ -80,6 +90,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictBool, Va
 from pup_finetune.concurrency import DaemonPool
 from pup_finetune.curation.labels import Label, LabelReport, apply_labels
 from pup_finetune.data.dataset_dir import DatasetDir
+from pup_finetune.data.jsonl import row_to_dict
 from pup_finetune.data.schema import TrainingRow
 from pup_finetune.display import counted, display_path
 from pup_finetune.errors import ExternalError, SettingsConflict, StateError, UsageError
@@ -97,6 +108,7 @@ from pup_finetune.storage import (
 
 if TYPE_CHECKING:
     from pup_finetune.inference import ChatCompleter, JudgeConfig, JudgeProvider
+    from pup_finetune.user_checks import CheckModule
 
 TriageMode = Literal["label", "agreement"]
 TriageStatus = Literal["none", "incomplete", "complete", "unreadable"]
@@ -110,6 +122,7 @@ __all__ = [
     "SYSTEM_PROMPT",
     "TOO_LONG",
     "Agreement",
+    "CheckFailure",
     "Criteria",
     "Decision",
     "Failure",
@@ -118,6 +131,7 @@ __all__ = [
     "TriageReport",
     "TriageStatus",
     "Vote",
+    "apply_check_labels",
     "build_messages",
     "decide",
     "default_council",
@@ -130,9 +144,11 @@ __all__ = [
     "parse_vote",
     "plan_triage",
     "read_votes",
+    "recorded_checks",
     "row_digest",
     "rubric_sections",
     "rubric_template",
+    "run_row_checks",
     "run_triage",
     "triage_status",
 ]
@@ -140,6 +156,8 @@ __all__ = [
 DEFAULT_CONCURRENCY: Final = 4
 JUDGMENTS_FILE: Final = "judgments.jsonl"
 SETTINGS_FILE: Final = "triage.json"
+CHECKS_FILE_KEY: Final = "checks_file"
+"""The ``triage.json`` key of the last council's ``--checks`` file, which is not frozen."""
 TEMPLATE_FILE: Final = "rubric_template.md"
 PROMPT_VERSION: Final = 1
 """Bumped when the prompt changes, so votes cast under another prompt are not reused."""
@@ -447,6 +465,58 @@ def _drop_settled(keeps: int, missing: int, judges: int) -> bool:
     return (keeps + missing) * 2 <= judges
 
 
+# --- checks -------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class CheckFailure:
+    """A row the checks fail: the first failing check, in definition order, labels it with
+    its reason; ``failed_by`` names every check it failed."""
+
+    row: TrainingRow
+    check: str
+    reason: str
+    failed_by: tuple[str, ...]
+
+    @property
+    def label_reason(self) -> str:
+        return f"check {self.check}: {self.reason or 'failed'}"
+
+
+def run_row_checks(rows: Sequence[TrainingRow], checks: CheckModule) -> dict[str, CheckFailure]:
+    """Every public function of ``checks`` on each of ``rows`` (its stored JSON); the rows
+    one fails, by id, in ``rows`` order. Raises :class:`UsageError` for a file without such a
+    function, a function that does not take one row, and a check that raises or returns
+    anything but ``True``, ``False``, ``None`` or ``(bool, reason)``, naming it and the row."""
+    from pup_finetune.user_checks import CheckError, call
+
+    functions = [(name, checks.function(name, 1)) for name, _ in checks.functions()]
+    if not functions:
+        raise UsageError(
+            f"{display_path(checks.path)} defines no public function to check rows with",
+            hint="define def <name>(row) -> True, False, None or (False, reason)",
+        )
+    failures: dict[str, CheckFailure] = {}
+    for row in rows:
+        data = row_to_dict(row)
+        failed: list[tuple[str, str]] = []
+        for name, function in functions:
+            try:
+                verdict = call(name, function, data)
+            except CheckError as exc:
+                raise UsageError(
+                    f"the check {name} failed on the row {row.id}: {exc.message}",
+                    hint="fix it to return True, False, None or (bool, reason) for every row; "
+                    "checks run before any judge call, free",
+                ) from None
+            if verdict.passed is False:
+                failed.append((name, verdict.reason))
+        if failed:
+            check, reason = failed[0]
+            failures[row.id] = CheckFailure(row, check, reason, tuple(n for n, _ in failed))
+    return failures
+
+
 # --- planning -----------------------------------------------------------------------------
 
 
@@ -461,10 +531,11 @@ class TriagePlan:
     """What a triage of ``dataset`` reviews, and what it has already. See :func:`plan_triage`."""
 
     dataset: DatasetDir
-    criteria: Criteria
+    criteria: Criteria | None
+    """``None`` for a plan of checks alone, which calls no judge."""
     judges: tuple[str, ...]
     rows: list[TrainingRow]
-    """The rows to review, in review order."""
+    """The rows the judges review, in review order (the checks passed them)."""
     skipped_labeled: int
     """Rows not reviewed because the agent or a person labeled them (none with
     ``agreement``)."""
@@ -483,8 +554,27 @@ class TriagePlan:
     votes_sha256: str | None = None
     """The sha256 of ``judgments.jsonl`` as planned from; ``None`` when there was none."""
     references: dict[str, Label] | None = None
-    """With ``agreement``: the agent's or a person's label of each row in :attr:`rows`, which
-    the council's decisions are compared with; ``None`` otherwise."""
+    """With ``agreement``: the agent's or a person's label of each row in :attr:`rows` and
+    :attr:`checked`, which the decisions are compared with; ``None`` otherwise."""
+    checks: CheckModule | None = None
+    checked: dict[str, CheckFailure] = field(default_factory=dict)
+    """The rows the checks failed, in review order: labeled ``by: check``, never judged."""
+    rows_checked: int = 0
+    """The rows the checks ran on: :attr:`rows` and :attr:`checked`."""
+    skipped_checked: int = 0
+    """Rows not reviewed because a check labeled them, without ``checks``."""
+    stale_check_labels: list[str] = field(default_factory=list)
+    """Rows the checks ran on whose ``by: check`` label every check now passes."""
+    checks_to_label: int = 0
+    """Rows of :attr:`checked` whose label would change: unlabeled, labeled by a judge, or
+    for another reason."""
+
+    @property
+    def judged_by(self) -> Criteria:
+        """:attr:`criteria`; a :class:`ValueError` for a plan of checks alone."""
+        if self.criteria is None:
+            raise ValueError("a triage of checks alone has no criteria to judge by")
+        return self.criteria
 
     @property
     def mode(self) -> TriageMode:
@@ -550,7 +640,7 @@ class TriagePlan:
             if row.id not in sizes:
                 sizes[row.id] = sum(
                     len(str(message.get("content") or ""))
-                    for message in build_messages(row, self.criteria)
+                    for message in build_messages(row, self.judged_by)
                 )
             chars[judge] = chars.get(judge, 0) + sizes[row.id]
         return {judge: -(-count // CHARS_PER_TOKEN) for judge, count in chars.items()}
@@ -582,6 +672,14 @@ class TriagePlan:
                 f"{counted(len(self.rows), 'row')} you or the agent labeled, and report how "
                 "often they agree; nothing is labeled"
             )
+        if self.checks_to_label and self.references is None:
+            fail = counted(len(self.checked), "row")
+            which = (
+                f"the {fail}"
+                if self.checks_to_label == len(self.checked)
+                else f"{self.checks_to_label} of the {fail}"
+            )
+            action = f"label {which} the checks fail (free), {action}"
         preview: dict[str, Any] = {
             "action": action,
             "billing": "; ".join(
@@ -595,6 +693,7 @@ class TriagePlan:
             "dataset_dir": display_path(self.dataset.path),
             "mode": self.mode,
             "rows": {"to_review": len(self.rows), "skipped_labeled": self.skipped_labeled},
+            **({"checks": self.checks_block()} if self.checks is not None else {}),
             "judges": [
                 {
                     "model": spec,
@@ -610,19 +709,27 @@ class TriagePlan:
             "approx_input_tokens": sum(tokens.values()),
             "approx_input_tokens_note": f"approximate: about {CHARS_PER_TOKEN} characters "
             "per token of each call's messages; each provider counts its own",
-            "criteria": self.criteria.source,
-            "rule_count": self.criteria.rules,
-            "rubric_hash": self.criteria.sha256[:RUBRIC_HASH_SHOWN],
+            "criteria": self.judged_by.source,
+            "rule_count": self.judged_by.rules,
+            "rubric_hash": self.judged_by.sha256[:RUBRIC_HASH_SHOWN],
             "data_destination": f"each row's full content is sent to {_and(places)} for "
             "judging (paid, per token)",
             "data_recipients": [f"full rows -> {judged_at}"],
         }
+        if self.skipped_checked:
+            preview["rows"]["skipped_checked"] = self.skipped_checked
+        if self.checks is not None:
+            preview["notes"] = [
+                f"{display_path(self.checks.path)} is Python you wrote: its checks run in this "
+                "process with your privileges (this preview ran them on the rows to review); "
+                "nothing is sent"
+            ]
         if self.references is not None:
             preview["agreement_note"] = (
                 "the council reviews the rows you or the agent labeled and labels nothing; "
                 "the result says how often it agrees with those labels"
             )
-            if (noisy := noisy_agreement(len(self.references))) is not None:
+            if (noisy := noisy_agreement(len(self.rows))) is not None:
                 preview["warnings"] = [noisy]
         elif self.skipped_labeled:
             preview["agreement_note"] = (
@@ -644,6 +751,39 @@ class TriagePlan:
             if self.votes_unreadable:
                 preview["reset"]["judgments_unreadable"] = True
         return preview
+
+    @property
+    def check_names(self) -> list[str]:
+        """The checks, in definition order; none without :attr:`checks`."""
+        return [name for name, _ in self.checks.functions()] if self.checks is not None else []
+
+    def checks_block(self) -> dict[str, Any]:
+        """The ``checks`` block of a preview or a result: the file, its checks, and the
+        rows they ran on and failed (every failure of each check counted)."""
+        if self.checks is None:
+            raise ValueError("this triage runs no checks")
+        failures = self.checked.values()
+        return {
+            "file": display_path(self.checks.path),
+            "sha256": self.checks.sha256[:RUBRIC_HASH_SHOWN],
+            "functions": self.check_names,
+            "rows_checked": self.rows_checked,
+            "failed": len(self.checked),
+            "failed_by_check": {
+                name: sum(name in f.failed_by for f in failures) for name in self.check_names
+            },
+        }
+
+    def check_agreement(self) -> dict[str, dict[str, int]]:
+        """With ``agreement``: each check's failed rows, and how many of them you or the agent
+        labeled drop (``agree``)."""
+        references = self.references or {}
+        agreement: dict[str, dict[str, int]] = {}
+        for name in self.check_names:
+            failed = [row_id for row_id, f in self.checked.items() if name in f.failed_by]
+            agree = sum(1 for row_id in failed if not references[row_id].keep)
+            agreement[name] = {"failed": len(failed), "agree": agree}
+        return agreement
 
 
 def _by_provider(
@@ -711,34 +851,38 @@ def _settings(criteria: Criteria, judges: Sequence[str]) -> dict[str, Any]:
 
 def plan_triage(
     dataset: DatasetDir,
-    criteria: Criteria,
+    criteria: Criteria | None,
     judges: Sequence[str],
     *,
     max_rows: int | None = None,
     only: frozenset[str] | None = None,
     reset: bool = False,
     agreement: bool = False,
+    checks: CheckModule | None = None,
 ) -> TriagePlan:
-    """Plan a triage of ``dataset``'s accepted rows; reads only local files.
+    """Plan a triage of ``dataset``'s accepted rows; reads only local files, and runs
+    ``checks`` (see the module docstring) on the rows reviewed.
 
     The rows reviewed are those without a label by the agent or a person, or with
     ``agreement`` exactly those (see the module docstring); ``only`` (row ids, not frozen)
-    restricts them to a subset, and ``max_rows`` then caps them. Raises
+    restricts them to a subset, and ``max_rows`` then caps them, before the checks run.
+    ``criteria`` ``None`` (with ``checks`` and no judges) reads no vote. Raises
     :class:`StateError` when votes exist under another rubric or other judges (see the module
     docstring) and ``reset`` is false, and :class:`UsageError` for a judge spec with an empty
     model after its provider prefix, for an id in ``only`` that is not an accepted row, or
-    with ``agreement`` when no row (of ``only``) carries such a label.
+    with ``agreement`` when no row (of ``only``) carries such a label or, with ``criteria``,
+    the checks fail every such row reviewed, and as :func:`run_row_checks` does.
     """
     for spec in judges:
         judge_config(spec)
     dataset.settings()  # A UsageError when this is not a dataset directory.
-    settings = _settings(criteria, judges)
+    settings = _settings(criteria, judges) if criteria is not None else {}
     votes_path = dataset.path / JUDGMENTS_FILE
     unreadable = False
     # Before the votes are read: a vote stored in between then shows as a change in run_triage.
     votes_sha256 = _file_sha256(votes_path)
     try:
-        stored_votes = read_votes(votes_path)
+        stored_votes = read_votes(votes_path) if criteria is not None else []
     except StateError:
         if not reset:
             raise
@@ -753,21 +897,25 @@ def plan_triage(
     reviewable: list[TrainingRow] = []
     references: dict[str, Label] = {}
     judge_labels: dict[str, Label] = {}
-    skipped = 0
+    skipped = skipped_checked = 0
     for row in stored_rows:
         label = labels.get(row.id)
         if only is not None and row.id not in only:
             if label is not None and label.by == "judge":
                 judge_labels[row.id] = label
             continue
-        if label is not None and label.by != "judge":
+        if label is not None and label.by == "manual":
             references[row.id] = label
             if agreement:
                 reviewable.append(row)
             else:
                 skipped += 1
             continue
-        if label is not None:
+        if label is not None and label.by == "check" and checks is None:
+            if not agreement:
+                skipped_checked += 1
+            continue
+        if label is not None and label.by == "judge":
             judge_labels[row.id] = label
         if not agreement:
             reviewable.append(row)
@@ -775,13 +923,38 @@ def plan_triage(
         among = " that --rows names" if only is not None else ""
         raise UsageError(
             f"no row of {dataset.path}{among} carries a label by you or the agent to compare "
-            "the council with",
+            f"the {'council' if criteria is not None else 'checks'} with",
             hint="label a sample first (`dataset sample`, then `dataset label --file`)",
         )
     reviewable.sort(key=_review_order)
     rows = reviewable[:max_rows] if max_rows is not None else reviewable
+    checked = run_row_checks(rows, checks) if checks is not None else {}
+    if agreement and criteria is not None and len(checked) == len(rows):
+        among = " that --rows names" if only is not None else ""
+        capped = len(rows) < len(reviewable)
+        failed = (
+            f"every labeled row --max-rows {max_rows} takes"
+            if capped
+            else f"every row labeled by you or the agent{among}"
+        )
+        raise UsageError(
+            f"the checks fail {failed}, so the council has none to compare with",
+            hint=("raise --max-rows, " if capped else "")
+            + "compare the checks alone with those labels (leave out --rubric and --rule; "
+            "free), or label more rows (`dataset sample`, then `dataset label --file`)",
+        )
+    for row_id in checked:
+        judge_labels.pop(row_id, None)  # its check label replaces it
+    stale_checked = [
+        row.id
+        for row in rows
+        if checks is not None
+        and row.id not in checked
+        and (label := labels.get(row.id)) is not None
+        and label.by == "check"
+    ]
     counted: dict[str, dict[str, Vote]] = {}
-    if not reset:
+    if not reset and criteria is not None:
         digests = {row.id: row_digest(row) for row in stored_rows}
         for vote in stored_votes:
             if (
@@ -794,7 +967,7 @@ def plan_triage(
         dataset=dataset,
         criteria=criteria,
         judges=tuple(judges),
-        rows=rows,
+        rows=[row for row in rows if row.id not in checked],
         skipped_labeled=skipped,
         votes=counted,
         judge_labels=judge_labels,
@@ -804,6 +977,17 @@ def plan_triage(
         votes_unreadable=unreadable,
         votes_sha256=votes_sha256,
         references={row.id: references[row.id] for row in rows} if agreement else None,
+        checks=checks,
+        checked=checked,
+        rows_checked=len(rows) if checks is not None else 0,
+        skipped_checked=skipped_checked,
+        stale_check_labels=stale_checked,
+        checks_to_label=sum(
+            1
+            for row_id, failure in checked.items()
+            if (label := labels.get(row_id)) is None
+            or (label.keep, label.reason, label.by) != (False, failure.label_reason, "check")
+        ),
     )
 
 
@@ -879,6 +1063,17 @@ def triage_status(dataset: DatasetDir) -> tuple[TriageStatus, str | None]:
     return "complete", None
 
 
+def recorded_checks(dataset: DatasetDir) -> Path | None:
+    """The ``--checks`` file the last council triage of ``dataset`` ran, as ``triage.json``
+    records it; ``None`` without one, or when that file cannot be read."""
+    try:
+        settings = read_json(dataset.path / SETTINGS_FILE)
+    except (OSError, StateError):
+        return None
+    recorded = settings.get(CHECKS_FILE_KEY) if isinstance(settings, dict) else None
+    return Path(recorded) if isinstance(recorded, str) else None
+
+
 def _readable_settings(settings: Any) -> bool:
     """Whether ``settings`` (``triage.json``) names the judges and the rubric's hash."""
     if not isinstance(settings, dict):
@@ -907,6 +1102,8 @@ def _check_frozen(dataset: DatasetDir, settings: Mapping[str, Any], votes: int) 
     if not votes or not settings_path.exists():
         return
     stored = read_json(settings_path)
+    if isinstance(stored, dict):
+        stored.pop(CHECKS_FILE_KEY, None)
     if canonical_json(stored) == canonical_json(settings):
         return
     changed = sorted(
@@ -1113,6 +1310,8 @@ class TriageReport:
     or the votes cast decided it (see :func:`_settled`)."""
     agreement: Agreement | None = None
     """With ``agreement``: the council against the labels of the rows it reviewed."""
+    check_labels: LabelReport | None = None
+    """The ``by: check`` labels recorded for the rows the checks failed."""
 
     @property
     def complete(self) -> bool:
@@ -1206,7 +1405,8 @@ def run_triage(
     each judge's calls go to (see the module docstring). A row a judge finds too long gets
     that judge's ``too_long`` vote, and its calls not yet made are skipped. With
     ``plan.references`` (``agreement``), nothing is labeled and the report has the
-    :class:`Agreement` of the decisions with those labels.
+    :class:`Agreement` of the decisions with those labels. The rows ``plan``'s checks failed
+    are labeled first, before any call (:func:`apply_check_labels`).
 
     Holds the dataset's directory lock while voting and labeling; each vote is appended to
     ``judgments.jsonl`` as it arrives. Under the lock, before anything is written, the rows
@@ -1224,6 +1424,7 @@ def run_triage(
     """
     if concurrency < 1:
         raise ValueError(f"concurrency must be at least 1, got {concurrency}")
+    criteria = plan.judged_by
     dataset = plan.dataset
     votes_path = dataset.path / JUDGMENTS_FILE
     settings_path = dataset.path / SETTINGS_FILE
@@ -1249,7 +1450,7 @@ def run_triage(
 
     def ask(row: TrainingRow, judge: str) -> _Answer:
         judge_client, config = routes[judge]
-        return _ask(judge_client, row, config, plan.criteria)
+        return _ask(judge_client, row, config, criteria)
 
     with DirectoryLock(dataset.path):
         _check_rows_unchanged(plan)
@@ -1259,7 +1460,11 @@ def run_triage(
         else:
             _check_unchanged(plan)
             _repair_torn_tail(votes_path)
-        atomic_write_json(settings_path, plan.settings)
+        checks = (
+            {CHECKS_FILE_KEY: str(plan.checks.path.absolute())} if plan.checks is not None else {}
+        )
+        atomic_write_json(settings_path, {**plan.settings, **checks})
+        check_labels, check_skipped = _label_checked(plan, now)
         pool = DaemonPool(concurrency, name="triage")
         futures: dict[Future[_Answer], tuple[TrainingRow, str]] = {}
         try:
@@ -1280,7 +1485,7 @@ def run_triage(
                             row_id=row.id,
                             row_sha256=row_digest(row),
                             judge=judge,
-                            criteria_sha256=plan.criteria.sha256,
+                            criteria_sha256=criteria.sha256,
                             keep=keep,
                             reason=reason,
                             at=now(),
@@ -1328,7 +1533,7 @@ def run_triage(
         relabeled = {
             row.id
             for row in plan.rows
-            if (label := current.get(row.id)) is not None and label.by != "judge"
+            if (label := current.get(row.id)) is not None and label.by == "manual"
         }
         plan.judge_labels = {
             row_id: label
@@ -1353,16 +1558,58 @@ def run_triage(
         decisions=decisions,
         labels=report,
         stale_labels=tuple(plan.stale_labels(judged=True)),
-        skipped_labeled=len(relabeled),
+        skipped_labeled=len(relabeled) + check_skipped,
         calls_skipped=skipped,
+        check_labels=check_labels,
     )
+
+
+def apply_check_labels(
+    plan: TriagePlan, *, now: Callable[[], datetime] = lambda: datetime.now(UTC)
+) -> TriageReport:
+    """Label the rows ``plan``'s checks failed ``by: check``, under the dataset's lock, with
+    no judge call (a plan of checks alone; :func:`run_triage` does it before its calls). A
+    row stored with other content since planning is a :class:`StateError`; one the agent or
+    a person labeled since is skipped. With ``agreement``, nothing is labeled."""
+    with DirectoryLock(plan.dataset.path):
+        _check_rows_unchanged(plan)
+        labels, skipped = _label_checked(plan, now)
+    return TriageReport(
+        calls_made=0,
+        votes_cast=0,
+        failures=(),
+        decisions=(),
+        labels=None,
+        skipped_labeled=skipped,
+        check_labels=labels,
+    )
+
+
+def _label_checked(plan: TriagePlan, now: Callable[[], datetime]) -> tuple[LabelReport | None, int]:
+    """Under the lock: the ``by: check`` labels of ``plan.checked`` recorded, and how many
+    rows were skipped for a label the agent or a person wrote since planning."""
+    if plan.references is not None or not plan.checked:
+        return None, 0
+    current = plan.dataset.labels()
+    manual = {
+        row_id
+        for row_id in plan.checked
+        if (label := current.get(row_id)) is not None and label.by == "manual"
+    }
+    labels = [
+        Label(id=row_id, keep=False, reason=failure.label_reason, by="check", at=now())
+        for row_id, failure in plan.checked.items()
+        if row_id not in manual
+    ]
+    return (apply_labels(plan.dataset, labels, locked=True) if labels else None), len(manual)
 
 
 def _check_rows_unchanged(plan: TriagePlan) -> None:
     """Under the lock: every row ``plan`` reviews is stored with the content it was planned
     with; :class:`StateError` otherwise."""
     current = {row.id: row_digest(row) for row in plan.dataset.rows()}
-    changed = [row.id for row in plan.rows if current.get(row.id) != row_digest(row)]
+    planned = [*plan.rows, *(failure.row for failure in plan.checked.values())]
+    changed = [row.id for row in planned if current.get(row.id) != row_digest(row)]
     if changed:
         raise StateError(
             f"the rows of {plan.dataset.path} changed since this triage was planned: "

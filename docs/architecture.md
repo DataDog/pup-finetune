@@ -67,7 +67,9 @@ side of a session:
 - converting each `TokenizedExample` to the SDK's own datum type;
 - `forward_backward`, `forward` and `optim_step`, returning `PendingResult`s. A backend whose
   forward-only call returns per-token logprobs instead of a loss computes the loss itself, as
-  the weighted sum of the negative logprobs;
+  the weighted sum of the negative logprobs. `optim_step` takes an `AdamConfig` per call whose
+  learning rate follows the run's schedule (`TrainSpec.learning_rate_at`); pass it through on
+  every call, never cache it;
 - saving training checkpoints (weights and optimizer state, resumable) and sampler checkpoints
   (weights only), within the provider's checkpoint-name limit
   (`max_checkpoint_name_len`);
@@ -167,14 +169,17 @@ needs a user or tool message before each turn it trains or samples. The renderer
 `prompt_refusal` runs that check without a tokenizer, so `evaluate` and `benchmark` leave
 such test cases out at planning (`excluded_cases`), as they do a turn with no message before
 it (`empty_prompt`) for every model. Each benchmarked model replays the cases it can and gets
-its own pass rate; the leaderboard ranks the finished models on the cases every one of them
-has a result for, so a model a rerun can still advance never narrows them. A refusal that
+its own headline pass rate; the leaderboard ranks the finished models on the cases the
+headline scored for every one of them, so a model a rerun can still advance never narrows
+them. A refusal that
 still reaches a sampler is an error result a rerun never retries. Only
 `supervised_example` raises `not_prefix_stable`; a per-turn failure carries its own code, so
 the loop never retries it per turn.
 
 A tokenizer that cannot be loaded fails every row alike, so the renderer reports it as an
 `ExternalError` (a `UsageError` when the `hf` extra is missing) rather than rejecting rows.
+A benchmark plans a model whose renderer cannot load as an error entry and runs the others;
+without the renderer its identity cannot be checked, so its directory is left unread.
 
 The Qwen3.8 response parser knows its generation prompt opens `<think>`: sampled text that
 never reaches `</think>` (cut off at the token limit) is all reasoning and `format_valid` is
@@ -404,6 +409,44 @@ provider, and talks to models only through the `Sampler` protocol.
   case, as the judge decides, and the summary counts those per target
   (`judge_no_verdict`). Ctrl-C or SIGTERM stops new pairs from starting and keeps what
   finished. The directory is made `0700` even when it already existed.
+- **Evaluators** ([`evaluators.py`](../src/pup_finetune/evaluation/evaluators.py), over
+  [`user_checks.py`](../src/pup_finetune/user_checks.py)). `evaluate --evaluators` adds the
+  user's own LLM judges (a rubric in place of the substitution rules, on the same untrusted
+  blocks, calibrated only on the user's graded examples, since corruptions of the reference
+  can pass a tone rubric that works) and Python checks, run in this process, one at a time,
+  on copies. They are frozen by name in `evaluators.json`, which only grows, and each result
+  line carries their entries, so a pair is done once every attached evaluator scored it: an
+  evaluator added to a complete evaluation scores the stored answers without a generation, a
+  built-in judgment or a training session. An evaluator's outage, or a check that raises, is
+  that entry's error, in no rate; a rerun retries an outage, but not a check, whose frozen
+  file raises again. The summary adds each evaluator's rates and the composite
+  `all` (the judge and every evaluator pass), with paired deltas through the same bootstrap;
+  the headline (`judge`, an evaluator or `all`) leads the result and ranks a benchmark. Only
+  base answers and built-in verdicts go to the dataset's store; evaluators are scored per
+  directory.
+- **Reuse** ([`reuse.py`](../src/pup_finetune/evaluation/reuse.py)). Base answers are shared
+  across the evaluations of one dataset through a content-addressed store in the dataset
+  directory, `replay_cache/`, since runs and their evaluation directories can live anywhere
+  and a case id does not prove a case's content. An answer's key hashes what the base model
+  is sent and how (provider, base model, context, renderer identity with a family's
+  `prompt_check` and `message_rewrite`, `max_tokens`, prefix, tools); a verdict's hashes the judge's settings and its exact request. Base sampling is
+  greedy on pinned weights, so the seed only picks cases and is left out. The plan reads the
+  store once, so the preview and the run agree; after calibration passes, the run copies the
+  matching answers and verdicts into its directory, and the ordinary resume skips them. The
+  samplers are chosen from the directory after that copy, so a base model with every answer
+  reused costs no base sampler (on Baseten, one less GPU deployment). After the replay, the
+  run adds its own base answers and its verdicts with a judge answer (never tuned or compare
+  ones) under the store's lock, tried once: a busy or unwritable store is a warning. It
+  shares only when the directory's `reuse.json`, written before its first answer, holds the
+  key's current inputs, so a directory resumed after an upgrade never shares old answers
+  under new keys; an evaluation directory made before `reuse.json` shares as version 1
+  (`REUSE_VERSION`), since its identity pins every other input, and a benchmark one shares
+  nothing. `benchmark` shares its models' answers the same way, keyed on each model's
+  full renderer identity, so evaluating the model it recommends reuses the base side; a
+  benchmark model with every answer reused opens no session, and a rerun of a complete one
+  shares what an earlier run could not. There is no age limit: the preview shows the oldest
+  answer reused, and `--no-reuse`, frozen in `evaluation.json` only when set, makes them
+  again.
 - **Summary** (`summary.json`). Per target, the judge pass rate, every metric's rate and the
   mean of per-trajectory agreement. Across targets, the cases both answered are compared
   verdict by verdict (wins, regressions, ties), and `tuned_minus_base` is the mean paired
@@ -429,8 +472,9 @@ provider, and talks to models only through the `Sampler` protocol.
   steps as its output; each case is a child span in the same trace, `replay_assistant`, with
   the prefix and tools in, the generated message out and the recorded one expected, timed by
   its generation. Metrics join spans by id: a boolean per deterministic metric that applies
-  and `judge_pass` (with the judge's reason) on children, `trajectory_agreement` and
-  `completed_actions` on roots; an error case is an error span with no metric, as it counts
+  and `judge_pass` (with the judge's reason) on children, with a boolean per evaluator that
+  scored it (never the composite `all`), `trajectory_agreement` and `completed_actions` on
+  roots; an error case is an error span with no metric, as it counts
   in no local rate either. Metrics are stamped when they are sent (the API refuses ones more
   than a day old), and a request carries at most 100 spans. Span ids are uuid5 of the
   evaluation's identity, the target and the row or case, the experiments are recorded in
@@ -442,7 +486,10 @@ provider, and talks to models only through the `Sampler` protocol.
   response was lost is sent again by the rerun, with the same deterministic span ids. A
   span already published keeps the result it was sent with: a retried error updates only
   the local results, and the experiments keep the error (the result's hint says so, and a
-  new `--out-dir` publishes experiments with every result). A cancel stops between requests
+  new `--out-dir` publishes experiments with every result). Evaluator metrics go only with
+  the spans being sent, so a span published before an evaluator scored it is a warning
+  naming the evaluator (`published.json` keeps the evaluators each span went out with). A
+  cancel stops between requests
   and leaves a `cancelled` publication the rerun continues. A read-back waits up to two
   minutes, one budget for both experiments, for the events to be indexed (each count may
   take only the time left, and a cancel is checked before each); spans not indexed
@@ -605,6 +652,19 @@ with those labels (`Agreement`: the rate, Cohen's kappa, the confusion counts, e
 agreement, and the rows they disagree on). Its votes are stored and frozen like
 any other, so the same rubric then labels the remaining rows.
 
+`--checks FILE` runs the user's Python row checks first, through the loader `evaluate
+--evaluators` shares (`user_checks.py`): every public function of the file gets a copy of each
+row reviewed (after `--rows` and `--max-rows`), in this process and free. A row one fails is
+labeled `by: check` with the first failing check's reason, under the dataset's lock before any
+judge call (so a stopped council keeps them), and is never sent to a judge; with `--agreement`
+the checks are compared with the labels apart from the council. Checks are not frozen in
+`triage.json`: they run again whenever given, so rows they labeled are reviewed only then and
+skipped otherwise, and one an edited check now passes goes to the council. `triage.json`
+records the last council's file as `checks_file`, so a dataset's step to finish the triage
+passes it again while it exists. `--checks` alone
+calls no judge and labels at once, reporting such rows as stale check labels. `triage_status`
+reads only files, so `dataset show` never runs user code.
+
 ## How a new provider plugs in
 
 Using Baseten as the example:
@@ -615,12 +675,12 @@ Using Baseten as the example:
 2. **Backend.** Implement `TrainingBackend` with the Baseten Loops SDK. `open_session` returns
    a context manager that deactivates the session on exit, whether training finished,
    stopped early or failed. Convert each `TokenizedExample` to the SDK's datum type, map
-   `AdamConfig` onto its optimizer parameters, size the trainer from the `seed` and
-   `max_seq_len` passed to `open_session`, set `max_checkpoint_name_len` to the provider's
-   limit, and declare `supports_resume` and `supports_promotion`. Map SDK failures onto the
-   neutral errors in `providers/base.py`: `ProviderCapacityError` when there is no capacity
-   or quota (end what the failed call started before raising it, and say so in the hint
-   only then), `ProviderAuthError` for a rejected key and
+   `AdamConfig` onto its optimizer parameters on every step, size the trainer from the
+   `seed` and `max_seq_len` passed to `open_session`, set `max_checkpoint_name_len` to the
+   provider's limit, and declare `supports_resume` and `supports_promotion`. Map SDK
+   failures onto the neutral errors in `providers/base.py`: `ProviderCapacityError` when
+   there is no capacity or quota (end what the failed call started before raising it, and
+   say so in the hint only then), `ProviderAuthError` for a rejected key and
    `TransientError` for a retryable server error or dropped connection, with redacted
    messages (`providers/fireworks/client.py` does this in `fireworks_error`).
    `providers/fireworks/backend.py` is a complete backend to follow.

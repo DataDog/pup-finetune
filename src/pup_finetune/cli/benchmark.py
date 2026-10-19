@@ -36,11 +36,14 @@ from pup_finetune.runtime import Runtime
 SETTING_PARAMS: dict[str, tuple[str, ...]] = {
     "judge_model": ("judge_model",),
     "max_cases": ("max_cases",),
+    "max_rows": ("max_rows",),
     "max_tokens": ("max_tokens",),
     "concurrency": ("concurrency",),
     "seed": ("seed",),
     "calibration": ("skip_calibration",),
     "target_pass_rate": ("target_pass_rate",),
+    "reuse": ("no_reuse",),
+    "evaluators": ("evaluators",),
 }
 """Each setting of a benchmark preview, and the parameters that set it."""
 
@@ -62,19 +65,27 @@ DOC = CommandDoc(
         "Each model runs in a session of its own, one after another, into OUT/<model> "
         "(PROVIDER/MODEL for a model both providers offer); rerun "
         "the same command to continue a benchmark that stopped; adding a model reuses the "
-        "finished ones. Each model replays the test cases it can and gets its own judge pass "
-        "rate. The finished models (nothing pending, no error a rerun retries) are ranked on "
+        "finished ones. Each model replays the test cases it can and gets its own pass rate on "
+        "them. The finished models (nothing pending, no error a rerun retries) are ranked on "
         "the cases every one of them answered; a model a rerun can still advance is listed "
         "unranked and never narrows them. The best one is worth fine-tuning below "
         "--target-pass-rate; at or above it on its own cases, judged on at least 90% of the "
         "test cases with a prompt, it may need no training. "
         "Models within noise of the best are named, so the cheapest to serve can be chosen. "
-        "Tools are not executed, so the scores measure agreement with the recorded behavior, "
-        "not task success.",
+        "--max-rows replays a seeded sample of the test conversations instead, for a quicker, "
+        "cheaper comparison. Tools are not executed, so the scores measure agreement with the "
+        "recorded behavior, not task success. Base answers from another evaluation or "
+        "benchmark of the same dataset, made under the same settings, are reused from "
+        "DATASET/replay_cache, together with their judgments when the judge is the same, and "
+        "a model with every answer reused opens no session; --no-reuse makes them again. "
+        "--evaluators FILE adds your own LLM judges and Python checks to each model's "
+        "directory, as for evaluate, and the spec's headline (judge, an evaluator or all) ranks "
+        "the models and meets --target-pass-rate.",
     ),
     examples=(
         "pup finetune benchmark ds --models qwen3p5-9b,baseten/glm-5p3-flash",
-        "pup finetune benchmark ds --models qwen3p5-9b,baseten/glm-5p3-flash --max-cases 1",
+        "pup finetune benchmark ds --models qwen3p5-9b,baseten/glm-5p3-flash --max-cases 1 "
+        "--max-rows 20",
     ),
     safety=Safety(
         data="sends test rows to each model's provider and to the judge",
@@ -154,7 +165,7 @@ def benchmark_command(
             min=0.0,
             max=1.0,
             metavar="RATE",
-            help="Judge pass rate at which a base model needs no fine-tuning.",
+            help="Headline pass rate at which a base model needs no fine-tuning.",
             rich_help_panel=MODELS,
         ),
     ] = benchmark.DEFAULT_TARGET_PASS_RATE,
@@ -168,6 +179,17 @@ def benchmark_command(
             rich_help_panel=CASES,
         ),
     ] = runner.DEFAULT_MAX_CASES_PER_TRAJECTORY,
+    max_rows: Annotated[
+        int | None,
+        typer.Option(
+            "--max-rows",
+            min=1,
+            metavar="N",
+            help=f"Test conversations to sample and replay. {default_note('all')}",
+            show_default=False,
+            rich_help_panel=CASES,
+        ),
+    ] = None,
     max_tokens: Annotated[
         int,
         typer.Option(
@@ -193,6 +215,16 @@ def benchmark_command(
             metavar="MODEL",
             help="An alias (glm-5p3-flash), anthropic/MODEL, openai/MODEL or a Fireworks id. "
             f"{default_note(BY_KEY)}",
+            show_default=False,
+            rich_help_panel=JUDGE,
+        ),
+    ] = None,
+    evaluators: Annotated[
+        Path | None,
+        typer.Option(
+            "--evaluators",
+            metavar="FILE",
+            help="More judges and Python checks, from a TOML file.",
             show_default=False,
             rich_help_panel=JUDGE,
         ),
@@ -225,6 +257,14 @@ def benchmark_command(
             rich_help_panel=RUN,
         ),
     ] = runner.DEFAULT_CONCURRENCY,
+    no_reuse: Annotated[
+        bool,
+        typer.Option(
+            "--no-reuse",
+            help="Do not reuse results of earlier runs.",
+            rich_help_panel=RUN,
+        ),
+    ] = False,
     confirm: Annotated[
         bool,
         typer.Option(
@@ -241,12 +281,15 @@ def benchmark_command(
     settings = benchmark.BenchmarkSettings(
         out_dir=out_dir if out_dir is not None else dataset_dir / benchmark.DEFAULT_OUT_DIR_NAME,
         max_cases_per_trajectory=max_cases,
+        max_rows=max_rows,
         judge_model=judge_model,
         concurrency=concurrency,
         max_tokens=max_tokens,
         seed=seed,
         skip_calibration=skip_calibration,
         target_pass_rate=target_pass_rate,
+        reuse=not no_reuse,
+        evaluators=evaluators,
     )
     plan = benchmark.plan_benchmark(runtime, dataset_dir, resolved, settings)
     # PUP_READ_ONLY refuses paid and remote runs, not one that never leaves the machine.

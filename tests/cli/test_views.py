@@ -154,6 +154,20 @@ def test_an_evaluation_without_a_summary_prints_as_it_is() -> None:
     assert evaluation_view(skipped) == skipped
 
 
+def test_an_evaluation_names_only_the_targets_that_reused_results(tmp_path: Path) -> None:
+    def target(generations: int, verdicts: int) -> dict[str, Any]:
+        return {"reused": {"generations": generations, "verdicts": verdicts}}
+
+    result = {
+        "status": "complete",
+        "out_dir": str(tmp_path),
+        "summary": {"targets": {"base": target(4, 3), "tuned": target(0, 0)}},
+    }
+    assert evaluation_view(result)["reused"] == {"base": {"generations": 4, "verdicts": 3}}
+    result["summary"] = {"targets": {"base": target(0, 0), "tuned": target(0, 0)}}
+    assert evaluation_view(result)["reused"] == {}
+
+
 def test_every_table_view_names_a_command() -> None:
     assert set(TABLE_VIEWS) <= set(COMMAND_ORDER)
 

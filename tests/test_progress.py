@@ -16,10 +16,12 @@ from rich.console import Console
 
 from pup_finetune import output
 from pup_finetune.progress import (
+    REASON_CHARS,
     EvaluationProgress,
     TrainingProgress,
     describe_pair,
     every_line,
+    failure_cause,
 )
 from pup_finetune.runtime import Runtime
 
@@ -177,6 +179,26 @@ def test_every_step_mode_prints_every_step_and_each_checkpoint_with_its_reason()
     ]
 
 
+@pytest.mark.parametrize(
+    ("schedule", "shown"),
+    [
+        ({}, False),
+        ({"lr_schedule": "constant", "warmup_steps": 0}, False),
+        ({"lr_schedule": "constant", "warmup_steps": 1}, True),
+        ({"lr_schedule": "cosine", "warmup_steps": 0}, True),
+    ],
+)
+def test_a_step_line_shows_the_learning_rate_only_when_it_varies(
+    schedule: dict[str, Any], shown: bool
+) -> None:
+    lines: list[str] = []
+    progress = TrainingProgress(write=lines.append, every_step=True, fold=False, clock=Clock())
+    progress(plan(steps_per_epoch=2, **schedule))
+    progress({**step(1, 1), "learning_rate": 9.619e-05})
+    rate = ", lr 9.6e-05" if shown else ""
+    assert lines == [f"epoch 1/2 step 1/4: loss 2.000{rate}"]
+
+
 def test_steps_mode_comes_from_the_environment_or_a_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -214,6 +236,8 @@ def pair(done: int, total: int, status: str = "ok", **extra: Any) -> dict[str, A
         "passed": extra.pop("passed", False),
         "no_verdict": extra.pop("no_verdict", None),
         "error": extra.pop("error", None),
+        "max_tokens": 16,
+        **extra,
     }
 
 
@@ -254,3 +278,73 @@ def test_off_a_terminal_evaluation_prints_every_tenth_and_every_error() -> None:
     assert lines[2] == "evaluated 8/40 pairs (20%): 2 judged pass, 5 judged fail, 1 error"
     assert lines[-1] == "evaluated 40/40 pairs (100%): 10 judged pass, 29 judged fail, 1 error"
     assert len(lines) == 11  # ten progress lines and the error
+
+
+CUT_OFF = {"stop_reason": "length", "format_valid": False}
+
+
+def test_a_failed_pair_names_its_cause() -> None:
+    assert failure_cause(pair(1, 2, passed=True, reason="same")) is None
+    assert failure_cause(pair(1, 2, **CUT_OFF)) == (
+        "cut_off",
+        "cut off at --max-tokens 16; raise --max-tokens",
+    )
+    assert failure_cause(pair(1, 2, **CUT_OFF, target="compare")) == (
+        "cut_off",
+        "cut off at its limit of 16 tokens",
+    )
+    assert failure_cause(pair(1, 2, format_valid=False, stop_reason="stop")) == (
+        "unparseable",
+        "answer could not be parsed (format_valid false)",
+    )
+    assert failure_cause(pair(1, 2, no_verdict="refused")) == ("no_verdict", "")
+    assert failure_cause(pair(1, 2, reason="wrong\n tool")) == ("judge", "wrong tool")
+    error = {"stage": "generation", "type": "TransientError", "message": "boom\nmore"}
+    assert failure_cause(pair(1, 2, "error", error=error)) == ("error", "boom")
+
+
+def test_a_long_judge_reason_is_cut_to_one_short_line() -> None:
+    cause = failure_cause(pair(1, 2, reason="because " * 100))
+    assert cause is not None
+    kind, text = cause
+    assert kind == "judge"
+    assert len(text) == REASON_CHARS
+    assert text.endswith("...")
+    assert "\n" not in text
+
+
+def test_every_pair_mode_puts_the_cause_on_failing_lines() -> None:
+    lines: list[str] = []
+    progress = EvaluationProgress(write=lines.append, every_pair=True)
+    progress(pair(1, 4, passed=True, reason="same"))
+    progress(pair(2, 4, **CUT_OFF))
+    progress(pair(3, 4, reason="the candidate calls the wrong tool"))
+    error = {"stage": "judge", "type": "ProviderCapacityError", "message": "429"}
+    progress(pair(4, 4, "error", error=error))
+    assert lines == [
+        "evaluated 1/4: tuned row-1:1 (judged pass)",
+        "evaluated 2/4: base row-2:1 (judged fail): cut off at --max-tokens 16; raise --max-tokens",
+        "evaluated 3/4: tuned row-3:1 (judged fail): the candidate calls the wrong tool",
+        "evaluated 4/4: base row-4:1 (error at judge: ProviderCapacityError): 429",
+    ]
+
+
+def test_off_a_terminal_each_cause_is_shown_once_then_counted() -> None:
+    lines: list[str] = []
+    progress = EvaluationProgress(write=lines.append, every_pair=False)
+    for done in range(1, 11):
+        if done <= 6:
+            progress(pair(done, 10, **CUT_OFF))
+        elif done <= 8:
+            progress(pair(done, 10, format_valid=False, stop_reason="stop"))
+        else:
+            progress(pair(done, 10, reason=f"reason {done}"))
+    assert [line for line in lines if not line.startswith("evaluated")] == [
+        "tuned row-1:1: judged fail: cut off at --max-tokens 16; raise --max-tokens",
+        "tuned row-7:1: judged fail: answer could not be parsed (format_valid false)",
+        "tuned row-9:1: judged fail: reason 9",
+    ]
+    assert lines[-1] == (
+        "evaluated 10/10 pairs (100%): 0 judged pass, 10 judged fail (6 cut off, 2 "
+        "unparseable), 0 errors"
+    )

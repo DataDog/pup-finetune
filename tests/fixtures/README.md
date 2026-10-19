@@ -36,3 +36,19 @@ has no cursor, so it is the last.
 - `synthetic-span-0401` - an output message with no `role`.
 - `synthetic-span-0501` - a span with no `output`.
 - `synthetic-span-0601` - user content as a list of parts, one of them an image.
+
+## `evaluators/`
+
+An `evaluate --evaluators` spec and what it names, and `dataset triage --checks` row checks,
+for the tests and the offline dev loop.
+
+- `evals.toml` - the spec: a rubric judge (`polite`, on the evaluation's judge) calibrated on
+  `polite-examples.jsonl`, two checks from `checks.py`, and the headline `all`.
+- `polite-examples.jsonl` - two graded answers, one passing and one failing, each with a
+  reference so the offline fake judge grades them as labelled.
+- `checks.py` - `no_card_numbers` (fails an answer showing a card-like number) and
+  `answers_in_text` (does not apply when the reference calls a tool).
+- `row_checks.py` - `dataset triage --checks` row checks: `declares_tools` (fails a row
+  without tools; `row-plain-001` in `rows/tool_use.jsonl`) and `no_tool_errors` (fails a row
+  whose tool returned an `error`, `row-inventory-001` and `row-weather-004`; does not apply
+  without tool results).

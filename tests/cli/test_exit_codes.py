@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import shutil
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -116,6 +117,28 @@ def _wrong_judge_settings(w: World) -> list[str]:
     return ["evaluate", str(w.run), "--no-publish", "--max-tokens", "64"]
 
 
+def _evaluators(
+    text: str, checks: str = "def card(case, candidate):\n    return True\n"
+) -> Callable[[World], list[str]]:
+    def setup(w: World) -> list[str]:
+        (w.tmp / "checks.py").write_text(checks)
+        spec = w.tmp / "evals.toml"
+        spec.write_text(text)
+        return ["evaluate", str(w.run), "--no-publish", "--evaluators", str(spec)]
+
+    return setup
+
+
+_CARD = '[[evaluator]]\nname = "card"\ntype = "check"\nfile = "checks.py"\n'
+
+
+def _changed_evaluator(w: World) -> list[str]:
+    args = _evaluators(_CARD)(w)
+    assert _invoke(*args, "--confirm").exit_code == 0
+    (w.tmp / "checks.py").write_text("def card(case, candidate):\n    return None\n")
+    return args
+
+
 def _still_training(command: str) -> Callable[[World], list[str]]:
     def setup(w: World) -> list[str]:
         w.set_state(phase="training")
@@ -127,6 +150,16 @@ def _still_training(command: str) -> Callable[[World], list[str]]:
 def _read_only_deploy(w: World) -> list[str]:
     w.monkeypatch.setenv("PUP_READ_ONLY", "1")
     return ["deploy", str(w.run), "--confirm"]
+
+
+def _unwritable_markdown(w: World) -> list[str]:
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory permissions")
+    locked = w.tmp / "locked"
+    locked.mkdir()
+    locked.chmod(0o500)
+    w.held.callback(locked.chmod, 0o700)
+    return ["dataset", "sample", str(w.dataset), "--markdown", str(locked / "review.md")]
 
 
 def _corrupt_state(w: World) -> list[str]:
@@ -195,10 +228,13 @@ MISTAKES: list[tuple[str, Setup, int, str]] = [
     ("a mistyped option", lambda w: ["train", "--conf"], 2, "usage"),
     ("a mistyped command", lambda w: ["evalute"], 2, "usage"),
     ("a malformed value", lambda w: w.train("--max-epochs", "many"), 2, "usage"),
+    ("an unknown schedule", lambda w: w.train("--lr-schedule", "step"), 2, "usage"),
+    ("a warmup of every step", lambda w: w.train("--warmup-fraction", "1"), 2, "usage"),
     ("a flag without the one it needs", lambda w: w.train("--eval-max-tokens", "9"), 2, "usage"),
     ("--team without --remote", lambda w: w.train("--team", "T"), 2, "usage"),
     ("--remote with --detach", lambda w: w.train("--remote", "--detach"), 2, "usage"),
     ("--remote on a provider without it", lambda w: w.train("--remote"), 2, "usage"),
+    ("--markdown in an unwritable directory", _unwritable_markdown, 2, "usage"),
     # A preview is exit 2 too: nothing ran.
     ("train without --confirm", lambda w: w.train(), 2, "confirmation_required"),
     ("a remote write under PUP_READ_ONLY", _read_only_deploy, 2, "read_only"),
@@ -222,6 +258,20 @@ MISTAKES: list[tuple[str, Setup, int, str]] = [
         "settings_conflict",
     ),
     ("evaluate again with other settings", _wrong_judge_settings, 2, "settings_conflict"),
+    (
+        "evaluate again without reuse",
+        lambda w: ["evaluate", str(w.run), "--no-publish", "--no-reuse"],
+        2,
+        "settings_conflict",
+    ),
+    ("evaluators that are not TOML", _evaluators("[[evaluator]\n"), 2, "usage"),
+    ("an evaluator changed since attached", _changed_evaluator, 2, "settings_conflict"),
+    (
+        "a check that raises on a reference",
+        _evaluators(_CARD, "def card(case, candidate):\n    raise ValueError('x')\n"),
+        2,
+        "usage",
+    ),
     # The wrong phase.
     ("resume a completed run", lambda w: ["resume", str(w.run), "--confirm"], 2, "wrong_phase"),
     ("cancel a completed run", lambda w: ["cancel", str(w.run), "--confirm"], 2, "wrong_phase"),

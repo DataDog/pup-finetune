@@ -50,7 +50,7 @@ These print text on stdout instead of one JSON document: `help` (alone or with a
 - [`pup finetune dataset show`](#pup-finetune-dataset-show): Show a dataset's counts, exclusions, splits and settings.
 - [`pup finetune dataset sample`](#pup-finetune-dataset-sample): Show a small, readable sample of a dataset's rows.
 - [`pup finetune dataset label`](#pup-finetune-dataset-label): Record keep/drop labels for a dataset's rows.
-- [`pup finetune dataset triage`](#pup-finetune-dataset-triage): Label rows with judge models (paid; previews without --confirm).
+- [`pup finetune dataset triage`](#pup-finetune-dataset-triage): Label rows with checks and judge models (judges paid; preview first).
 - [`pup finetune dataset push`](#pup-finetune-dataset-push): Push kept rows to Datadog (previews without --confirm).
 - [`pup finetune dataset fetch`](#pup-finetune-dataset-fetch): Fetch an Agent Observability dataset to train on.
 - [`pup finetune benchmark`](#pup-finetune-benchmark): Compare base models before training (paid; previews without --confirm).
@@ -80,9 +80,9 @@ What each command does without and with `--confirm`, where its data goes, and wh
 | `pup finetune dataset pull` | pulls rows into DIR | no `--confirm` | DIR: reads Datadog through pup | allowed |
 | `pup finetune dataset import` | imports rows into DIR | no `--confirm` | nowhere: local files | allowed |
 | `pup finetune dataset show` | shows the dataset | no `--confirm` | nowhere: local files | allowed |
-| `pup finetune dataset sample` | shows rows | no `--confirm` | nowhere: local files | allowed |
+| `pup finetune dataset sample` | shows rows; --markdown writes them to FILE | no `--confirm` | nowhere: local files | allowed |
 | `pup finetune dataset label` | records labels in DIR | no `--confirm` | nowhere: local files | allowed |
-| `pup finetune dataset triage` | previews the judge calls | runs the judges and labels rows (paid) | each judge's provider: Fireworks, Anthropic or OpenAI | allowed |
+| `pup finetune dataset triage` | previews the judge calls (--checks alone labels at once, free) | runs the judges and labels rows (paid) | each judge's provider: Fireworks, Anthropic or OpenAI | allowed |
 | `pup finetune dataset push` | previews the records | pushes the kept rows (a remote write) | Datadog: an Agent Observability dataset | preview allowed; `--confirm` refused |
 | `pup finetune dataset fetch` | fetches the dataset into DIR | no `--confirm` | nowhere: reads the dataset through pup into local files | allowed |
 | `pup finetune benchmark` | previews the calls | benchmarks every model (paid) | each model's provider, the judge's provider | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider and judge) |
@@ -275,9 +275,9 @@ Safety: Free · reads nothing · PUP_READ_ONLY: allowed.
 
 ## `pup finetune dataset pull`
 
-Pull --ml-app's LLM spans from Datadog into DIR as training rows, with splits. The filter, the time range, --reasoning, --include-errors and the splits are frozen on the first pull, so a rerun needs no flag: `dataset pull DIR` resumes, and a higher --target-count reads further.
+Pull --ml-app's LLM spans from Datadog into DIR as training rows, with splits. The filter, the time range, the Rows options and the splits are frozen on the first pull, so a rerun needs no flag: `dataset pull DIR` resumes, and a higher --target-count reads further.
 
-Excluded rows are recorded in excluded.jsonl with their reason. On a rerun, a flag left out takes the frozen value and a flag with another value fails, so use a new directory for other settings. Raw pages are cached in DIR/raw/, so a rerun resumes without fetching them again, and a higher --target-count or --max-candidates (which are not frozen) reads further (a stored row that turns out to be a prefix of a longer conversation of its trace is then excluded as contained_conversation). A relative --from or --to, such as the default 7d, is resolved when the first pull starts and that window is frozen with the expressions: a rerun reads the same window, however much later it runs, and its result's window says so. Spans are LLM spans of --ml-app in the time range, narrowed by --span-name, --query and --tag. Each span becomes a conversation (input then output messages; a plain input or output value is the user or assistant message); per trace, a conversation another one contains is dropped, so sub-agents stay their own rows. Errored LLM calls are excluded as span_error unless --include-errors is passed. Reading stops once --target-count rows are accepted or --max-candidates spans are read, unreadable ones included. A relative time is a number and a unit (s, m, h, d or w, or spelled out, such as 5min or 2hours), with or without now- in front (7d is now-7d), or now; it is resolved once, when the command starts. A bare number is epoch milliseconds, not seconds: one below 10^11 (before March 1973) is refused.
+Excluded rows are recorded in excluded.jsonl with their reason. On a rerun, a flag left out takes the frozen value and a flag with another value fails, so use a new directory for other settings. Raw pages are cached in DIR/raw/, so a rerun resumes without fetching them again, and a higher --target-count or --max-candidates (which are not frozen) reads further (a stored row that turns out to be a prefix of a longer conversation of its trace is then excluded as contained_conversation). A relative --from or --to, such as the default 7d, is resolved when the first pull starts and that window is frozen with the expressions: a rerun reads the same window, however much later it runs, and its result's window says so. Spans are LLM spans of --ml-app in the time range, narrowed by --span-name, --query and --tag. Each span becomes a conversation (input then output messages; a plain input or output value is the user or assistant message); per trace, a conversation another one contains is dropped, so sub-agents stay their own rows. Errored LLM calls are excluded as span_error unless --include-errors is passed. Reading stops once --target-count rows are accepted or --max-candidates spans are read, unreadable ones included. --max-rows-per-trace N keeps a trace's first N rows and excludes the rest as trace_row_cap. --sample random instead reads every span up to --max-candidates, then deals rows round-robin over the traces in an order --seed fixes (one row of every trace, then a second one, and so on, the rows a pull already stored first; with --max-rows-per-trace, N rounds) and keeps the first --target-count, so one long trace cannot fill the dataset. A relative time is a number and a unit (s, m, h, d or w, or spelled out, such as 5min or 2hours), with or without now- in front (7d is now-7d), or now; it is resolved once, when the command starts. A bare number is epoch milliseconds, not seconds: one below 10^11 (before March 1973) is refused.
 
 ```
 pup finetune dataset pull [OPTIONS] DIR
@@ -297,13 +297,15 @@ pup finetune dataset pull [OPTIONS] DIR
 | `--from` | `TIME` | `7d` | Start: ISO 8601, epoch ms, or relative: 7d, 24h, now-7d, now. |
 | `--to` | `TIME` | `now` | End, in the same forms as --from. |
 | **Limits** | | | |
-| `--target-count` | `N (x>=1)` | `200` | Stop once this many rows are accepted. |
+| `--target-count` | `N (x>=1)` | `200` | Rows to accept (--sample first stops reading there). |
 | `--max-candidates` | `N (x>=1)` | `5000` | Read at most this many spans. |
 | **Rows** | | | |
 | `--reasoning` | `omit\|preserve` | `omit` | omit or preserve reasoning messages. |
 | `--include-errors` |  |  | Keep errored LLM calls. |
+| `--sample` | `first\|random` | `first` | first rows read, or random: spread over traces (by --seed). |
+| `--max-rows-per-trace` | `N (x>=1)` |  | At most this many rows from any one trace. |
 | **Splits** | | | |
-| `--seed` | `N` | `42` | Seed for the split assignment. |
+| `--seed` | `N` | `42` | Seed for the splits and --sample random. |
 | `--validation-fraction` | `X` | `0.1` | Share of traces for validation. |
 | `--test-fraction` | `X` | `0.1` | Share of traces for test. |
 
@@ -370,9 +372,9 @@ Safety: Free · local files only · PUP_READ_ONLY: allowed.
 
 ## `pup finetune dataset sample`
 
-Show up to --count rows of DIR in brief, to review them before labeling: id, split, label, turns, tools, and the first user and final assistant messages cut to 300 characters. The same --seed picks the same rows. Rows labeled drop are left out unless --include-dropped is passed.
+Show up to --count rows of DIR in brief, to review them before labeling: id, split, label, turns, tools, and the first user and final assistant messages cut to 300 characters. --markdown FILE also writes those rows in full to a private (0600) Markdown file, each with a labels line to copy. Rows labeled drop are left out unless --include-dropped is passed.
 
-A final message without text shows its tool calls as name(args). The full rows stay in rows.jsonl.
+The same --seed picks the same rows. A final message without text shows its tool calls as name(args). The full rows stay in rows.jsonl. The Markdown file has the `dataset label` command to run, then per row its split and label and the conversation in reading order: the system prompt's first lines, the user messages, the assistant messages with their reasoning and tool calls (a turn of weight 0 marked not trained), the tool results and the final answer; long reasoning, tool calls and tool results are cut, their length noted. An existing FILE is replaced only when it is a review file.
 
 ```
 pup finetune dataset sample [OPTIONS] DIR
@@ -388,11 +390,13 @@ pup finetune dataset sample [OPTIONS] DIR
 | `--split` | `train\|validation\|test\|all` | `all` | train, validation, test or all. |
 | `--seed` | `N` | `0` | Seed that picks the rows. |
 | `--include-dropped` |  |  | Also sample rows labeled drop. |
+| `--markdown` | `FILE` |  | Also write the rows in full to FILE (.md). |
 
 Examples:
 
 ```sh
 pup finetune dataset sample datasets/my-agent -n 20
+pup finetune dataset sample datasets/my-agent -n 20 --markdown datasets/my-agent-review.md
 pup finetune dataset sample datasets/my-agent --split test --include-dropped
 ```
 
@@ -429,7 +433,7 @@ Safety: Free · local files only · PUP_READ_ONLY: allowed.
 
 Have each judge model vote keep or drop on each whole row of DIR against --rubric and/or --rule; a strict majority of keep votes keeps a row. Without --confirm, previews the calls and where the rows go. Rerun the same command to resume; start with --max-rows 20 to calibrate the rubric.
 
-A judge reviews every turn of a row and its tools, since training imitates every assistant turn. A tie drops a row; a row missing a vote (a failed call) stays undecided and unlabeled, unless the votes cast already drop it (one drop of two judges, two of three), which also skips its other calls. Decisions are recorded as labels by judge; rows the agent or a person labeled are not reviewed. Votes are appended to DIR/judgments.jsonl as they arrive, so a rerun retries only failed calls. The rubric and the judges are frozen in DIR/triage.json once votes exist: change them in a new directory or with --reset-triage. Row content is sent to each judge's provider, Anthropic, OpenAI or Fireworks serverless, with that provider's API key; the preview names every one and where the council came from (judges_source). Without --judges, the council is the one triage.json froze, else anthropic/claude-haiku-5-5 and openai/gpt-5.4-mini when both credentials resolve, anthropic/claude-haiku-5-5 and anthropic/claude-sonnet-5-5 with only Anthropic's, openai/gpt-5.4-mini and openai/gpt-6-astra with only OpenAI's, else Fireworks' deepseek-v4p1-flash and glm-5p3-flash. --agreement measures the council against rows you labeled first; --rows FILE (one row id per line) reviews only those rows in either mode, and is not frozen; --print-template prints a rubric to start from.
+A judge reviews every turn of a row and its tools, since training imitates every assistant turn. A tie drops a row; a row missing a vote (a failed call) stays undecided and unlabeled, unless the votes cast already drop it (one drop of two judges, two of three), which also skips its other calls. Decisions are recorded as labels by judge; rows the agent or a person labeled are not reviewed. Votes are appended to DIR/judgments.jsonl as they arrive, so a rerun retries only failed calls. The rubric and the judges are frozen in DIR/triage.json once votes exist: change them in a new directory or with --reset-triage. Row content is sent to each judge's provider, Anthropic, OpenAI or Fireworks serverless, with that provider's API key; the preview names every one and where the council came from (judges_source). Without --judges, the council is the one triage.json froze, else anthropic/claude-haiku-5-5 and openai/gpt-5.4-mini when both credentials resolve, anthropic/claude-haiku-5-5 and anthropic/claude-sonnet-5-5 with only Anthropic's, openai/gpt-5.4-mini and openai/gpt-6-astra with only OpenAI's, else Fireworks' deepseek-v4p1-flash and glm-5p3-flash. --agreement measures the council against rows you labeled first; --rows FILE (one row id per line) reviews only those rows in either mode, and is not frozen; --print-template prints a rubric to start from. --checks FILE runs every public function of a Python file on each row reviewed first, free and in this process: a row one fails is labeled drop by: check and never sent to a judge (with --agreement, the checks are compared with your labels apart). --checks alone calls no judge and labels at once, without --confirm; without --checks, rows a check labeled are skipped.
 
 ```
 pup finetune dataset triage [OPTIONS] [DIR]
@@ -444,6 +448,7 @@ pup finetune dataset triage [OPTIONS] [DIR]
 | **Rubric** | | | |
 | `--rubric` | `FILE` |  | A rubric file (see --print-template). |
 | `--rule` | `TEXT, repeatable` |  | A rule to judge by; repeatable. |
+| `--checks` | `FILE` |  | Python row checks, run first (free). |
 | `--allow-template-rubric` |  |  | With --rubric: allow the template's Task text. |
 | `--print-template` |  |  | Print a rubric template and exit. |
 | **Judges** | | | |
@@ -461,8 +466,8 @@ Examples:
 ```sh
 pup finetune dataset triage --print-template > rubric.md
 pup finetune dataset triage datasets/my-agent --rubric rubric.md --max-rows 20
-pup finetune dataset triage datasets/my-agent --rubric rubric.md --judges glm-5p3-flash
 pup finetune dataset triage datasets/my-agent --rubric rubric.md --agreement
+pup finetune dataset triage datasets/my-agent --checks checks.py
 ```
 
 Safety: Paid with --confirm · sends rows to each judge's provider · PUP_READ_ONLY: allowed.
@@ -533,7 +538,7 @@ Safety: Free · reads Datadog · PUP_READ_ONLY: allowed.
 
 Replay each held-out test conversation of a dataset with several base models, one recorded assistant turn at a time, and score each with the tool-call metrics and the LLM judge evaluate uses. Without --confirm, previews the calls and where the data goes. The result ranks the models and recommends the one to fine-tune.
 
-The dataset must be in Datadog, as for `train`. Each model runs in a session of its own, one after another, into OUT/&lt;model&gt; (PROVIDER/MODEL for a model both providers offer); rerun the same command to continue a benchmark that stopped; adding a model reuses the finished ones. Each model replays the test cases it can and gets its own judge pass rate. The finished models (nothing pending, no error a rerun retries) are ranked on the cases every one of them answered; a model a rerun can still advance is listed unranked and never narrows them. The best one is worth fine-tuning below --target-pass-rate; at or above it on its own cases, judged on at least 90% of the test cases with a prompt, it may need no training. Models within noise of the best are named, so the cheapest to serve can be chosen. Tools are not executed, so the scores measure agreement with the recorded behavior, not task success.
+The dataset must be in Datadog, as for `train`. Each model runs in a session of its own, one after another, into OUT/&lt;model&gt; (PROVIDER/MODEL for a model both providers offer); rerun the same command to continue a benchmark that stopped; adding a model reuses the finished ones. Each model replays the test cases it can and gets its own pass rate on them. The finished models (nothing pending, no error a rerun retries) are ranked on the cases every one of them answered; a model a rerun can still advance is listed unranked and never narrows them. The best one is worth fine-tuning below --target-pass-rate; at or above it on its own cases, judged on at least 90% of the test cases with a prompt, it may need no training. Models within noise of the best are named, so the cheapest to serve can be chosen. --max-rows replays a seeded sample of the test conversations instead, for a quicker, cheaper comparison. Tools are not executed, so the scores measure agreement with the recorded behavior, not task success. Base answers from another evaluation or benchmark of the same dataset, made under the same settings, are reused from DATASET/replay_cache, together with their judgments when the judge is the same, and a model with every answer reused opens no session; --no-reuse makes them again. --evaluators FILE adds your own LLM judges and Python checks to each model's directory, as for evaluate, and the spec's headline (judge, an evaluator or all) ranks the models and meets --target-pass-rate.
 
 ```
 pup finetune benchmark [OPTIONS] DATASET
@@ -547,33 +552,36 @@ pup finetune benchmark [OPTIONS] DATASET
 | --- | --- | --- | --- |
 | **Models** | | | |
 | `--models` | `M1,M2` | required | Base models to compare, comma-separated (see models list); PROVIDER/MODEL names the provider of a model several offer. |
-| `--target-pass-rate` | `RATE (0.0<=x<=1.0)` | `0.9` | Judge pass rate at which a base model needs no fine-tuning. |
+| `--target-pass-rate` | `RATE (0.0<=x<=1.0)` | `0.9` | Headline pass rate at which a base model needs no fine-tuning. |
 | **Cases** | | | |
 | `--max-cases` | `N (x>=1)` | `2` | Turns replayed per conversation. |
+| `--max-rows` | `N (x>=1)` | all | Test conversations to sample and replay. |
 | `--max-tokens` | `N (x>=1)` | `4096` | Most tokens each generation may produce. |
 | `--seed` | `N (x>=0)` | `0` | Seed for picking cases and the bootstrap. |
 | **Judge** | | | |
 | `--judge-model` | `MODEL` | by key: Anthropic, OpenAI, else Fireworks | An alias (glm-5p3-flash), anthropic/MODEL, openai/MODEL or a Fireworks id. |
+| `--evaluators` | `FILE` |  | More judges and Python checks, from a TOML file. |
 | `--skip-calibration` |  |  | Do not check the judge on known answers first. |
 | **Run** | | | |
 | `--out-dir` | `DIR` | DATASET/benchmark | Output directory. |
 | `--concurrency` | `N (1<=x<=64)` | `4` | Cases at once (1-64). |
+| `--no-reuse` |  |  | Do not reuse results of earlier runs. |
 | `--confirm` |  |  | Run it (paid); without it, only preview. |
 
 Examples:
 
 ```sh
 pup finetune benchmark ds --models qwen3p5-9b,baseten/glm-5p3-flash
-pup finetune benchmark ds --models qwen3p5-9b,baseten/glm-5p3-flash --max-cases 1
+pup finetune benchmark ds --models qwen3p5-9b,baseten/glm-5p3-flash --max-cases 1 --max-rows 20
 ```
 
 Safety: Paid with --confirm · sends test rows to each model's provider and to the judge · PUP_READ_ONLY: preview only unless offline.
 
 ## `pup finetune train`
 
-Fine-tune --model with LoRA SFT on --dataset's train split, keeping the best epoch by validation loss. Without --confirm, previews the run and prints the command that starts it. With --confirm, trains (Ctrl-C cancels gracefully).
+Fine-tune --model with LoRA SFT on --dataset's train split, keeping the best epoch by validation loss. Previews without --confirm; trains with it.
 
---dataset must be in Datadog: every kept row pushed with `dataset push`, or the directory made by `dataset fetch` (the offline fake provider trains on any). The run goes in runs/RUN_ID unless --run-dir names another directory (a runs/ this creates gets a .gitignore, since runs hold trace-derived rows). --model takes a model's alias, or in any case the provider's model id or its Hugging Face tokenizer name, and --provider is inferred from it when one provider offers that model; the preview says so (provider_source), and its next_command pins both, with the alias. The preview lists rows and rendered tokens per split, the rejected rows, tokens per epoch and in total, the settings and where the data goes. --detach trains in a background worker; follow it with `status --watch`. Training stops early after --patience epochs without a validation-loss improvement; a Ctrl-C or `cancel` still promotes the best epoch. With --evaluate, the run is also evaluated on the test split in its training session once the best epoch is promoted (see `evaluate`): the judge is calibrated and --eval-out-dir checked before training starts, so a failed calibration trains nothing; --detach is refused with it; and the evaluation stops, partial, at --max-spend-usd. --max-seq-len caps the context (and so the cost): longer rows are left out, as the preview shows (exceeds_context). --remote (Baseten only) runs the training loop in a Baseten CPU job, so training continues while this machine sleeps; --team names the team (default: your only or default team). It needs the baseten CLI and uv on PATH, a source checkout of pup-finetune and a team secret pup_finetune_api_key; it uploads the train and validation rows, the run files and pup-finetune's source to Baseten storage, and is refused with --detach and --evaluate. status copies the job's state into the run directory; cancel cannot stop the job yet.
+--dataset must be in Datadog: every kept row pushed with `dataset push`, or the directory made by `dataset fetch` (the offline fake provider trains on any). The run goes in runs/RUN_ID unless --run-dir names another directory (a runs/ this creates gets a .gitignore, since runs hold trace-derived rows). --model takes a model's alias, or in any case the provider's model id or its Hugging Face tokenizer name, and --provider is inferred from it when one provider offers that model; the preview says so (provider_source), and its next_command pins both, with the alias. The preview lists rows and rendered tokens per split, the rejected rows, tokens per epoch and in total, the settings and where the data goes. --detach trains in a background worker; follow it with `status --watch`. Training stops early after --patience epochs without a validation-loss improvement; a Ctrl-C or `cancel` still promotes the best epoch. --learning-rate is constant unless --lr-schedule linear or cosine decays it over the steps of --max-epochs epochs (the preview's max_steps; early stopping or a cap ends the run first), after a linear warmup over --warmup-fraction of them (warmup_steps); it never reaches zero, and the other Adam parameters are fixed (run.json settings.optimizer). With --evaluate, the run is also evaluated on the test split in its training session once the best epoch is promoted (see `evaluate`): the judge is calibrated and --eval-out-dir checked before training starts, so a failed calibration trains nothing; --detach is refused with it; and the evaluation stops, partial, at --max-spend-usd. --max-seq-len caps the context (and so the cost): longer rows are left out, as the preview shows (exceeds_context). --remote (Baseten only) runs the training loop in a Baseten CPU job, so training continues while this machine sleeps; --team names the team (default: your only or default team). It needs the baseten CLI and uv on PATH, a source checkout of pup-finetune and a team secret pup_finetune_api_key; it uploads the train and validation rows, the run files and pup-finetune's source to Baseten storage, and is refused with --detach and --evaluate. status copies the job's state into the run directory; cancel cannot stop the job yet.
 
 ```
 pup finetune train [OPTIONS]
@@ -597,6 +605,8 @@ pup finetune train [OPTIONS]
 | `--patience` | `N` | `1` | Epochs without improvement to stop. |
 | `--min-delta` | `X` | `0.0` | Least improvement that counts. |
 | `--learning-rate` | `X` | `0.0001` | Learning rate. |
+| `--lr-schedule` | `NAME` | `constant` | Constant, linear or cosine. |
+| `--warmup-fraction` | `X` | `0.0` | Share of steps warming up. |
 | `--batch-size` | `N` | `32` | Rows per optimizer step. |
 | `--lora-rank` | `N` | the model's | LoRA rank. |
 | `--lora-alpha` | `N` | the provider's | LoRA alpha. |
@@ -626,7 +636,7 @@ Examples:
 
 ```sh
 pup finetune train --dataset ds --model qwen3p5-9b
-pup finetune train --provider fireworks --model qwen3p8-27b --dataset ds --run-dir run --max-seq-len 8192 --detach
+pup finetune train --dataset ds --model qwen3p5-9b --lr-schedule cosine
 ```
 
 Safety: Paid with --confirm · sends rows to the provider (and the judge) · PUP_READ_ONLY: preview only unless offline.
@@ -736,7 +746,7 @@ Safety: Free · signals the local training process · PUP_READ_ONLY: allowed.
 
 Replay each held-out test conversation of a run, one recorded assistant turn at a time, with the base model and the run's best checkpoint, and score both with tool-call metrics and an LLM judge. Without --confirm, previews the calls and where the data goes. A complete evaluation is published to Datadog as two experiments, three with --compare-model, when the dataset was pushed (--no-publish skips it).
 
-The result compares the two: pass rates, wins and regressions, and the tuned-minus-base delta with a bootstrap confidence interval. --compare-model, named as --judge-model is, replays a third model on the same cases, judged alike, with its own token limit (16000, thinking included) and the provider's lowest reasoning effort, and adds tuned-minus-compare; added to a complete evaluation, it reuses the base and tuned results and opens no training session. The directory keeps its compare model: a rerun without the flag continues it, and another one needs a new --out-dir. Tools are not executed, so the scores measure agreement with the recorded behavior, not task success. With --confirm, the judge is calibrated first, then every case is replayed; rerun the same command to continue an evaluation that stopped. A changed --max-tokens, judge, seed or --max-cases needs a new --out-dir. Without --judge-model, the judge is the one the --out-dir holds an evaluation by, else anthropic/claude-haiku-5-5 when an Anthropic credential resolves (ANTHROPIC_API_KEY, the OS keychain or the Anthropic SDK's login), else openai/gpt-5.4-mini when an OpenAI one does, else Fireworks' deepseek-v4p1-flash; the preview names it and where it came from (judge_source).
+The result compares the two: pass rates, wins and regressions, and the tuned-minus-base delta with a bootstrap confidence interval. --compare-model, named as --judge-model is, replays a third model on the same cases, judged alike, with its own token limit (16000, thinking included) and the provider's lowest reasoning effort, and adds tuned-minus-compare; added to a complete evaluation, it reuses the base and tuned results and opens no training session. The directory keeps its compare model: a rerun without the flag continues it, and another one needs a new --out-dir. Tools are not executed, so the scores measure agreement with the recorded behavior, not task success. With --confirm, the judge is calibrated first, then every case is replayed; rerun the same command to continue an evaluation that stopped. A changed --max-tokens, judge, seed or --max-cases needs a new --out-dir. Without --judge-model, the judge is the one the --out-dir holds an evaluation by, else anthropic/claude-haiku-5-5 when an Anthropic credential resolves (ANTHROPIC_API_KEY, the OS keychain or the Anthropic SDK's login), else openai/gpt-5.4-mini when an OpenAI one does, else Fireworks' deepseek-v4p1-flash; the preview names it and where it came from (judge_source). Base answers from another evaluation or benchmark of the same dataset, made under the same settings, are reused from DATASET/replay_cache, together with their judgments when the judge is the same; --no-reuse makes them again. --evaluators FILE adds your own evaluators from a TOML spec: LLM judges, each with a rubric, an optional model and optional graded examples that calibrate it, and Python checks, each a function of the case and the answer that returns True, False, None (does not apply) or (False, reason); its headline is judge, an evaluator's name or all (the judge and every evaluator pass). Added to a complete evaluation, they score the stored answers, so only their judges' calls are paid. The directory keeps its evaluators: a rerun may add some, never drop or change one (add the new version under another name, or use a new --out-dir). Checks run in this process with your privileges.
 
 ```
 pup finetune evaluate [OPTIONS] RUN_DIR
@@ -755,11 +765,13 @@ pup finetune evaluate [OPTIONS] RUN_DIR
 | **Models** | | | |
 | `--judge-model` | `MODEL` | by key: Anthropic, OpenAI, else Fireworks | An alias (glm-5p3-flash), anthropic/MODEL, openai/MODEL or a Fireworks id. |
 | `--compare-model` | `MODEL` |  | Also replay this model, named as --judge-model. |
+| `--evaluators` | `FILE` |  | More judges and Python checks, from a TOML file. |
 | `--skip-calibration` |  |  | Do not check the judge on known answers first. |
 | **Run** | | | |
 | `--out-dir` | `DIR` | RUN_DIR/eval | Output directory. |
 | `--concurrency` | `N (1<=x<=64)` | `4` | Cases at once (1-64). |
 | `--no-publish` |  |  | Do not publish the evaluation to Datadog. |
+| `--no-reuse` |  |  | Do not reuse base results of other runs. |
 | `--confirm` |  |  | Run it (paid); without it, only preview. |
 
 Examples:
@@ -767,8 +779,8 @@ Examples:
 ```sh
 pup finetune evaluate run
 pup finetune evaluate run --judge-model glm-5p3-flash
-pup finetune evaluate run --max-cases 4 --out-dir run/eval-4
 pup finetune evaluate run --compare-model anthropic/claude-opus-5-5
+pup finetune evaluate run --evaluators evals.toml
 ```
 
 Safety: Paid with --confirm · sends test rows to the provider and the judge, results to Datadog · PUP_READ_ONLY: preview only unless offline.

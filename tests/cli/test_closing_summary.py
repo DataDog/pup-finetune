@@ -211,9 +211,9 @@ def test_steps_progress_restores_a_line_per_step_and_per_pair(
     evaluated = invoke(
         "evaluate", str(tmp_path / "run"), "--judge-model", "fake-judge", "--confirm"
     )
-    # One line per pair; which pair finishes when depends on the thread pool.
+    # One line per pair, a fail with its cause; which pair finishes when depends on the pool.
     pairs = re.findall(
-        r"^18:03:16 evaluated (\d)/8: (?:base|tuned) \S+ \(judged (?:pass|fail)\)$",
+        r"^18:03:16 evaluated (\d)/8: (?:base|tuned) \S+ \(judged (?:pass\)|fail\): .+)$",
         evaluated.stderr,
         re.MULTILINE,
     )
@@ -421,6 +421,46 @@ def test_triage_agreement_reports_the_rate_and_kappa() -> None:
     )
 
 
+CHECKS_AGREEMENT = {
+    "declares_tools": {"failed": 1, "agree": 1},
+    "no_tool_errors": {"failed": 2, "agree": 0},
+}
+
+
+def test_a_triage_with_checks_counts_the_rows_they_dropped() -> None:
+    checks = {"failed": 4, "rows_checked": 22, "labels": {"applied": 3, "unchanged": 1}}
+    found = summarize("dataset triage", {**EXAMPLES["dataset triage"], "checks": checks})
+    assert found is not None
+    assert found.lines[0] == (
+        "triage complete: 12 kept, 3 dropped, 1 undecided, 2 too long, 3 newly dropped by checks"
+    )
+
+
+def test_an_agreement_with_checks_compares_each_check_with_the_labels() -> None:
+    against = (
+        "checks against your labels: declares_tools fails 1 row (1 labeled drop), "
+        "no_tool_errors fails 2 rows (0 labeled drop)"
+    )
+    alone = {
+        "mode": "checks",
+        "checks": {"failed": 2, "rows_checked": 3, "labels": {"applied": 0, "unchanged": 0}},
+        "agreement": {"checks": CHECKS_AGREEMENT},
+        "next_command": None,
+    }
+    found = summarize("dataset triage", alone)
+    assert found is not None
+    assert found.line == f"checks: 2 of 3 labeled rows failed, nothing labeled; {against}"
+    council = {
+        "mode": "agreement",
+        "status": "complete",
+        "agreement": {"rows_compared": 1, "rows_agreed": 1, "checks": CHECKS_AGREEMENT},
+        "next_command": None,
+    }
+    found = summarize("dataset triage", council)
+    assert found is not None
+    assert against in found.lines
+
+
 def test_a_calibration_failure_says_nothing_was_evaluated() -> None:
     for command in ("evaluate", "train"):
         found = summarize(command, _calibration_failed())
@@ -625,3 +665,31 @@ def test_the_deploy_headline_names_a_different_deployment_id() -> None:
     )
     assert found is not None
     assert found.lines[0] == "deployed m as d (ready)"
+
+
+def test_the_headline_evaluator_s_line_comes_first() -> None:
+    entry = {"base": 0.45, "tuned": 0.65, "delta": 0.2, "ci95": [0.05, 0.33], "n": 40}
+    result = {
+        "status": "complete",
+        "judge_model": "j",
+        "calibration": {"ok": True},
+        "errors": {"base": 0, "tuned": 0},
+        "headline": {
+            "judge_pass_rate": {"base": 0.5, "tuned": 0.75, "delta": 0.25},
+            "paired": {"wins": 1, "regressions": 0, "ties": 3},
+            "evaluator": "all",
+            "evaluators": {"polite": entry, "all": entry},
+            "cases": 40,
+            "trajectories": 20,
+        },
+    }
+    found = summarize("evaluate", result)
+    assert found is not None
+    assert found.lines[1] == (
+        "headline all (the judge and every evaluator): base 45%, tuned 65%, tuned - base "
+        "+20 pts (95% CI +5 to +33)"
+    )
+    plain = summarize(
+        "evaluate", {**result, "headline": {**result["headline"], "evaluator": "judge"}}
+    )
+    assert plain is not None and not plain.lines[1].startswith("headline")

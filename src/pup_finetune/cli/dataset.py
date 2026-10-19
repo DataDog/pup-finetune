@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import shlex
 import time
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -34,9 +35,12 @@ from pup_finetune.curation.pipeline import Pipeline, pipeline_state
 from pup_finetune.curation.samples import (
     DEFAULT_SAMPLE_SEED,
     DEFAULT_SAMPLE_SIZE,
+    REVIEW_FIRST_LINE,
     SampleSplit,
-    sample_rows,
+    pick_sample,
+    review_markdown,
 )
+from pup_finetune.curation.triage import recorded_checks
 from pup_finetune.data.convert import ReasoningMode
 from pup_finetune.data.dataset_dir import (
     DatasetDir,
@@ -49,6 +53,7 @@ from pup_finetune.data.pull import (
     DEFAULT_TARGET_COUNT,
     Collection,
     PullOptions,
+    SampleMode,
     frozen_window,
     pull,
     read_limits,
@@ -64,6 +69,7 @@ from pup_finetune.data.push import (
     push_path,
     read_push_state,
 )
+from pup_finetune.data.schema import TrainingRow
 from pup_finetune.data.split import (
     DEFAULT_SEED,
     DEFAULT_TEST_FRACTION,
@@ -83,11 +89,16 @@ from pup_finetune.display import counted, display_path
 from pup_finetune.errors import SettingsConflict, UsageError, require_confirm, require_writable
 from pup_finetune.next_steps import command, step, template
 from pup_finetune.output import info
+from pup_finetune.storage import atomic_write_text, ensure_private_dir
 from pup_finetune.workspace import ParentSetup, ignore_new_parent
 
 SAMPLE_IDS_PER_SPLIT = 5
 EXPLAINED_CODES = 5
 """How many of the most frequent exclusion codes get an explanation in the output."""
+SPREAD_MIN_ROWS = 20
+"""Below this many accepted rows, one trace giving most of them is not warned about."""
+SPREAD_MAX_SHARE = 0.25
+"""The share of the accepted rows one trace may give before a warning."""
 
 DEFAULT_FROM = "7d"
 DEFAULT_TO = "now"
@@ -122,6 +133,12 @@ DirArgument = Annotated[
 SeedOption = Annotated[
     int,
     typer.Option(metavar="N", help="Seed for the split assignment.", rich_help_panel=SPLITS_PANEL),
+]
+PullSeedOption = Annotated[
+    int,
+    typer.Option(
+        metavar="N", help="Seed for the splits and --sample random.", rich_help_panel=SPLITS_PANEL
+    ),
 ]
 ValidationFractionOption = Annotated[
     float,
@@ -194,7 +211,7 @@ TargetCountOption = Annotated[
     typer.Option(
         min=1,
         metavar="N",
-        help="Stop once this many rows are accepted.",
+        help="Rows to accept (--sample first stops reading there).",
         rich_help_panel=LIMITS_PANEL,
     ),
 ]
@@ -223,6 +240,24 @@ IncludeErrorsOption = Annotated[
         rich_help_panel=ROWS_PANEL,
     ),
 ]
+SampleOption = Annotated[
+    SampleMode,
+    typer.Option(
+        metavar="MODE",
+        help="first rows read, or random: spread over traces (by --seed).",
+        rich_help_panel=ROWS_PANEL,
+    ),
+]
+MaxRowsPerTraceOption = Annotated[
+    int | None,
+    typer.Option(
+        min=1,
+        metavar="N",
+        help="At most this many rows from any one trace.",
+        show_default=False,
+        rich_help_panel=ROWS_PANEL,
+    ),
+]
 
 _PULL_FLAGS = (
     "Spans are LLM spans of --ml-app in the time range, narrowed by --span-name, --query and "
@@ -231,9 +266,14 @@ _PULL_FLAGS = (
     "contains is dropped, so sub-agents stay their own rows. "
     "Errored LLM calls are excluded as span_error unless --include-errors is passed. Reading "
     "stops once --target-count rows are accepted or --max-candidates spans are read, "
-    "unreadable ones included. A relative time is a number and a unit (s, m, h, d or w, or "
-    "spelled out, such as 5min or 2hours), with or without now- in front (7d is now-7d), or "
-    "now; it is resolved once, when the command starts. A bare number is epoch "
+    "unreadable ones included. --max-rows-per-trace N keeps a trace's first N rows and excludes "
+    "the rest as trace_row_cap. --sample random instead reads every span up to "
+    "--max-candidates, then deals rows round-robin over the traces in an order --seed fixes "
+    "(one row of every trace, then a second one, and so on, the rows a pull already stored "
+    "first; with --max-rows-per-trace, N rounds) and keeps the first --target-count, so one "
+    "long trace cannot fill the dataset. A relative time is a number and a unit (s, m, h, d "
+    "or w, or spelled out, such as 5min or 2hours), with or without now- in front (7d is "
+    "now-7d), or now; it is resolved once, when the command starts. A bare number is epoch "
     "milliseconds, not seconds: one below 10^11 (before March 1973) is refused."
 )
 
@@ -336,9 +376,9 @@ PULL_DOC = CommandDoc(
     short="Pull training rows from Datadog into a dataset directory.",
     description=describe(
         "Pull --ml-app's LLM spans from Datadog into DIR as training rows, with splits. "
-        "The filter, the time range, --reasoning, --include-errors and the splits are frozen "
-        "on the first pull, so a rerun needs no flag: `dataset pull DIR` resumes, and a "
-        "higher --target-count reads further.",
+        "The filter, the time range, the Rows options and the splits are frozen on the first "
+        "pull, so a rerun needs no flag: `dataset pull DIR` resumes, and a higher "
+        "--target-count reads further.",
         "Excluded rows are recorded in excluded.jsonl with their reason. On a rerun, a flag "
         "left out takes the frozen value and a flag with another value fails, so use a new "
         "directory for other settings. Raw pages are cached in DIR/raw/, so a rerun resumes "
@@ -385,16 +425,25 @@ SAMPLE_DOC = CommandDoc(
     description=describe(
         "Show up to --count rows of DIR in brief, to review them before labeling: id, split, "
         "label, turns, tools, and the first user and final assistant messages cut to 300 "
-        "characters. The same --seed picks the same rows. Rows labeled drop are left out "
+        "characters. --markdown FILE also writes those rows in full to a private (0600) "
+        "Markdown file, each with a labels line to copy. Rows labeled drop are left out "
         "unless --include-dropped is passed.",
-        "A final message without text shows its tool calls as name(args). The full rows stay "
-        "in rows.jsonl.",
+        "The same --seed picks the same rows. A final message without text shows its tool "
+        "calls as name(args). The full rows stay in rows.jsonl. The Markdown file has the "
+        "`dataset label` command to run, then per row its split and label and the "
+        "conversation in reading order: the system prompt's first lines, the user messages, "
+        "the assistant messages with their reasoning and tool calls (a turn of weight 0 marked "
+        "not trained), the tool results and the final answer; long reasoning, tool calls and "
+        "tool results are cut, their length noted. An existing FILE is replaced only when it "
+        "is a review file.",
     ),
     examples=(
         "pup finetune dataset sample datasets/my-agent -n 20",
+        "pup finetune dataset sample datasets/my-agent -n 20 "
+        "--markdown datasets/my-agent-review.md",
         "pup finetune dataset sample datasets/my-agent --split test --include-dropped",
     ),
-    safety=local("shows rows"),
+    safety=local("shows rows; --markdown writes them to FILE"),
 )
 
 
@@ -408,20 +457,23 @@ def dataset_next(
     *,
     summary: Mapping[str, Any] | None = None,
     sampled: bool = False,
+    review: Path | None = None,
 ) -> dict[str, Any]:
     """The ``pipeline`` block of a dataset directory, and the ``next_command`` and
     ``next_steps`` it leads to.
 
     With accepted rows and none labeled, the next command is a ``dataset sample`` to
     review (``None`` right after one, ``sampled``), and labeling them, by hand or with a
-    judge council, are the steps; a fetched dataset (``dataset fetch``) was curated in
+    judge council, are the steps (labels a check wrote count as none while rows are
+    unlabeled: no review decided them); a fetched dataset (``dataset fetch``) was curated in
     Datadog, so its rows go straight to training. A triage that is not complete gets a step
     to finish it. Once rows are labeled, the push is a step
     (:meth:`~pup_finetune.curation.pipeline.Pipeline.push_gap`). Training (and
     benchmarking) is a step only once every kept row is pushed as it is now. Kept copies of
     a request outside their group's split come first: a ``dataset label`` step with the drop
     labels the summary wrote for them. ``directory`` is the directory as the user typed it;
-    ``summary`` is the dataset's summary when the caller has it already. A pipeline file
+    ``summary`` is the dataset's summary when the caller has it already; ``review`` is the
+    Markdown file a sample wrote, whose labels lines the label step copies. A pipeline file
     that cannot be read adds ``warnings`` (see :func:`merge_next`).
     """
     summary = summary if summary is not None else dataset.summary()
@@ -433,7 +485,7 @@ def dataset_next(
         shown["warnings"] = list(state.warnings)
     if not state.accepted:
         return {**shown, "next_command": None, "next_steps": []}
-    following = _next_by_state(dataset, directory, state, push_step, sampled=sampled)
+    following = _next_by_state(dataset, directory, state, push_step, sampled=sampled, review=review)
     conflicts = summary["split_conflicts"]
     if conflicts["labels_file"] is not None:
         following["next_steps"].insert(
@@ -458,22 +510,21 @@ def _next_by_state(
     push_step: dict[str, str] | None,
     *,
     sampled: bool,
+    review: Path | None,
 ) -> dict[str, Any]:
     """:func:`dataset_next`'s ``next_command`` and ``next_steps`` for ``state``, which has
     accepted rows."""
     label_step = step(
         template("dataset", "label", directory, "--file", "<LABELS_FILE>"),
         'record keep/drop decisions: write <LABELS_FILE> first, one {"id", "keep", '
-        '"reason"} object per line (a reason is required to drop)',
+        '"reason"} object per line (a reason is required to drop)'
+        if review is None
+        else f"record keep/drop decisions: copy the labels line of each row you decided from "
+        f'{display_path(review)} into <LABELS_FILE>, with "keep": false and a reason on the '
+        "rows to drop",
     )
     triage_steps = (
-        [
-            step(
-                template("dataset", "triage", directory, "--rubric", "<RUBRIC_FILE>"),
-                "finish the triage: the same --rubric and --judges resume it, reusing the "
-                "votes cast (paid; it previews first)",
-            )
-        ]
+        [_finish_triage(dataset, directory)]
         if state.triage == "incomplete"
         else [
             step(
@@ -490,7 +541,7 @@ def _next_by_state(
     source = dataset.settings().get("source")
     # A fetched dataset was curated in Datadog: its rows are the ones to train on.
     fetched = isinstance(source, Mapping) and source.get("kind") == "datadog_dataset"
-    if not state.labeled and not fetched:
+    if state.labeled == state.checked and state.unlabeled and not fetched:
         triage_step = step(
             template(
                 "dataset",
@@ -548,13 +599,30 @@ def _next_by_state(
     return {"next_command": None, "next_steps": steps}
 
 
+def _finish_triage(dataset: DatasetDir, directory: Path) -> dict[str, str]:
+    """The step that finishes an incomplete triage, with the last council's checks file
+    (never frozen) while it exists."""
+    words: list[object] = ["dataset", "triage", directory, "--rubric", "<RUBRIC_FILE>"]
+    why = "finish the triage: the same --rubric and --judges resume it, reusing the votes cast"
+    checks = recorded_checks(dataset)
+    if checks is not None and checks.is_file():
+        words += ["--checks", checks]
+        why += ", and --checks keeps the rows a check fails from the judges"
+    elif checks is not None:
+        why += (
+            f"; the last triage ran the checks in {display_path(checks)}, which no longer "
+            "exists: pass --checks FILE again, or the judges review rows a check would fail"
+        )
+    return step(template(*words), f"{why} (paid; it previews first)")
+
+
 def _pull_more_steps(dataset: DatasetDir, directory: Path, state: Pipeline) -> list[dict[str, str]]:
     """A step to pull more rows when a review dropped some and fewer than the last pull's
     ``--target-count`` are kept: a rerun reads on to replace them (dropped rows do not count
     toward the target)."""
     limits = read_limits(dataset)
     if limits is None or limits[2] or not state.dropped or state.kept >= limits[0]:
-        return []  # no pull, or the last one read every matching span
+        return []  # no pull, or the last one read and kept every matching row
     return [
         step(
             command("dataset", "pull", directory),
@@ -876,7 +944,9 @@ def pull_rows(
     max_candidates: MaxCandidatesOption = DEFAULT_MAX_CANDIDATES,
     reasoning: ReasoningOption = "omit",
     include_errors: IncludeErrorsOption = False,
-    seed: SeedOption = DEFAULT_SEED,
+    sample: SampleOption = "first",
+    max_rows_per_trace: MaxRowsPerTraceOption = None,
+    seed: PullSeedOption = DEFAULT_SEED,
     validation_fraction: ValidationFractionOption = DEFAULT_VALIDATION_FRACTION,
     test_fraction: TestFractionOption = DEFAULT_TEST_FRACTION,
 ) -> dict[str, Any]:
@@ -894,6 +964,8 @@ def pull_rows(
             "to": to,
             "reasoning": reasoning,
             "include_errors": include_errors,
+            "sample": sample,
+            "max_rows_per_trace": max_rows_per_trace,
             "seed": seed,
             "validation_fraction": validation_fraction,
             "test_fraction": test_fraction,
@@ -918,6 +990,8 @@ def pull_rows(
         max_candidates=max_candidates,
         reasoning=values["reasoning"],
         include_errors=values["include_errors"],
+        sample=values["sample"],
+        max_rows_per_trace=values["max_rows_per_trace"],
     )
     frozen = frozen_window(options, dataset) is not None
     options = resolve_window(options, dataset, clock)
@@ -964,6 +1038,7 @@ def pull_rows(
             "matched_spans": collection.spans,
             "traces": collection.traces,
             "accepted": len(collection.rows),
+            **_spread(collection.rows),
             "added": added.added,
             "unchanged": added.unchanged,
             "excluded": added.excluded,
@@ -1086,6 +1161,8 @@ def _frozen_pull_values(dataset: DatasetDir) -> dict[str, Any] | None:
         "to": expr("to_expr", "to", DEFAULT_TO),
         "reasoning": source.get("reasoning", "omit"),
         "include_errors": bool(source.get("include_errors", False)),
+        "sample": source.get("sample", "first"),
+        "max_rows_per_trace": source.get("max_rows_per_trace"),
         "seed": split.seed,
         "validation_fraction": split.validation_fraction,
         "test_fraction": split.test_fraction,
@@ -1152,31 +1229,89 @@ def sample(
         bool,
         typer.Option("--include-dropped", help="Also sample rows labeled drop."),
     ] = False,
+    markdown: Annotated[
+        Path | None,
+        typer.Option(
+            "--markdown",
+            metavar="FILE",
+            help="Also write the rows in full to FILE (.md).",
+            dir_okay=False,
+            show_default=False,
+        ),
+    ] = None,
     old_count: Annotated[
         int | None, typer.Option("--n", min=1, hidden=True, help="The old name of --count.")
     ] = None,
 ) -> dict[str, Any]:
     n = renamed("count", "old_count")
+    # The suffix keeps a typo from replacing a dataset's .json or .jsonl files.
+    if markdown is not None and markdown.suffix.lower() != ".md":
+        raise UsageError(f"--markdown must name a .md file, not {markdown}")
+    if markdown is not None and markdown.exists() and not _is_review_file(markdown):
+        raise UsageError(
+            f"{markdown} exists and is not a review file `dataset sample` wrote",
+            hint="choose another --markdown path, or remove the file first",
+        )
     require_dataset_dir(directory)
     dataset = DatasetDir(directory)
     dataset.settings()  # A UsageError when this is not a dataset directory.
-    rows, eligible = sample_rows(
-        dataset, n=n, split=split, seed=seed, include_dropped=include_dropped
-    )
-    result = {
+    picked = pick_sample(dataset, n=n, split=split, seed=seed, include_dropped=include_dropped)
+    result: dict[str, Any] = {
         "dataset_dir": display_path(dataset.path),
         "split": split,
         "seed": seed,
         "include_dropped": include_dropped,
-        "eligible": eligible,
-        "rows": rows,
+        "eligible": picked.eligible,
+        "rows": picked.described(),
         "rows_file": display_path(dataset.rows_path),
+        "markdown_file": None,
         "hint": (
             "review these rows with the user, then record decisions as JSON lines of "
             '{"id": ..., "keep": true|false, "reason": ...}; a reason is required to drop'
         ),
     }
-    return merge_next(result, dataset_next(dataset, directory, sampled=True))
+    review = markdown if markdown is not None and picked.picked else None
+    if markdown is not None and review is None:
+        result["notes"] = [
+            f"no row matched the sample, so {display_path(markdown)} was not written"
+        ]
+    if review is not None:
+        label_command = template("dataset", "label", directory, "--file", "<LABELS_FILE>")
+        text = review_markdown(
+            picked,
+            dataset_dir=display_path(dataset.path),
+            split=split,
+            seed=seed,
+            label_command=label_command,
+        )
+        replacing = review.exists()
+        try:
+            atomic_write_text(ensure_private_dir(review.parent) / review.name, text)
+        except OSError as exc:
+            raise UsageError(
+                f"cannot write --markdown {markdown}: {exc.strerror or exc}",
+                hint="choose a writable --markdown path",
+            ) from exc
+        shown = display_path(review)
+        result["markdown_file"] = shown
+        wrote = f"replaced the earlier review file {shown}" if replacing else f"wrote {shown}"
+        result["notes"] = [
+            f"{wrote} (0600): it holds trace content, so keep it out of git and do not share it"
+        ]
+        result["hint"] = (
+            f"review these rows with the user in {shown}, then copy the labels line of each "
+            'row you decided into a labels file, with "keep": false and a reason on the rows '
+            "to drop"
+        )
+    return merge_next(result, dataset_next(dataset, directory, sampled=True, review=review))
+
+
+def _is_review_file(path: Path) -> bool:
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            return REVIEW_FIRST_LINE.match(handle.readline()) is not None
+    except OSError:
+        return False
 
 
 def _push_brief(dataset: DatasetDir) -> dict[str, Any] | None:
@@ -1197,7 +1332,8 @@ def _push_brief(dataset: DatasetDir) -> dict[str, Any] | None:
 def _read_label_file(path: Path, *, at: datetime) -> list[Label]:
     """The labels in ``path``, all ``manual``; ``at`` fills in lines that leave it out.
 
-    A line claiming ``"by": "judge"`` is refused: judge labels come only from the council."""
+    A line claiming ``"by": "judge"`` or ``"check"`` is refused: those labels come only from
+    ``dataset triage``."""
     labels = parse_labels(
         path,
         defaults={"at": at},
@@ -1206,12 +1342,13 @@ def _read_label_file(path: Path, *, at: datetime) -> list[Label]:
     )
     if not labels:
         raise UsageError(f"{path} has no labels")
-    judged = next((label.id for label in labels if label.by == "judge"), None)
-    if judged is not None:
+    claimed = next((label for label in labels if label.by != "manual"), None)
+    if claimed is not None:
+        by = "the judge council" if claimed.by == "judge" else "a check"
         raise UsageError(
-            f"{path} labels {judged!r} as decided by the judge council",
-            hint='leave "by" out: `dataset label` records your decisions, and judge labels '
-            "come only from `pup finetune dataset triage`",
+            f"{path} labels {claimed.id!r} as decided by {by}",
+            hint='leave "by" out: `dataset label` records your decisions, and judge and check '
+            "labels come only from `pup finetune dataset triage`",
         )
     return labels
 
@@ -1231,6 +1368,8 @@ def _pull_options(
     max_candidates: int,
     reasoning: ReasoningMode,
     include_errors: bool,
+    sample: SampleMode,
+    max_rows_per_trace: int | None,
 ) -> PullOptions:
     if not ml_app.strip():
         raise UsageError("--ml-app must not be empty")
@@ -1248,6 +1387,8 @@ def _pull_options(
         include_errors=include_errors,
         target_count=target_count,
         max_candidates=max_candidates,
+        max_rows_per_trace=max_rows_per_trace,
+        sample=sample,
     )
 
 
@@ -1329,10 +1470,11 @@ def _collection_warnings(collection: Collection, options: PullOptions) -> list[s
             "an LLM span, such as a trace id), so there was nothing to convert"
         )
         return warnings
+    anew = " in a new directory (this one froze them)"
     if not collection.spans:
         warnings.append(
             "no LLM spans matched; check --ml-app, --span-name, --query, --tag and the time "
-            "range (--from, --to)"
+            f"range (--from, --to){anew}"
         )
     elif collection.counted < options.target_count:
         if collection.stopped == "max_candidates":
@@ -1345,13 +1487,39 @@ def _collection_warnings(collection: Collection, options: PullOptions) -> list[s
             warnings.append(
                 f"only {collection.counted} rows were accepted from every matching span, "
                 f"fewer than --target-count {options.target_count}; widen the filter or the "
-                "time range for more"
+                f"time range{anew} for more"
             )
+    if options.sample == "random" and collection.stopped == "max_candidates":
+        warnings.append(
+            f"--sample random covers only the first --max-candidates {options.max_candidates} "
+            "spans of the time range (oldest first), not all of it; raise --max-candidates to "
+            "sample the whole range"
+        )
+    busiest, accepted = _spread(collection.rows)["busiest_trace_rows"], len(collection.rows)
+    if (
+        options.max_rows_per_trace is None
+        and accepted >= SPREAD_MIN_ROWS
+        and busiest > accepted * SPREAD_MAX_SHARE
+    ):
+        warnings.append(
+            f"one trace gives {busiest} of the {accepted} accepted rows; --sample random "
+            "--max-rows-per-trace N in a new directory (this one froze its row options) "
+            "spreads the rows over more traces"
+        )
     if unreadable:
         warnings.append(
             f"{unreadable} spans could not be read and were skipped (excluded as unreadable_span)"
         )
     return warnings
+
+
+def _spread(rows: Sequence[TrainingRow]) -> dict[str, int]:
+    """How many traces the accepted ``rows`` come from, and the most rows one trace gives."""
+    by_trace = Counter(row.source.trace_id for row in rows)
+    return {
+        "accepted_traces": len(by_trace),
+        "busiest_trace_rows": max(by_trace.values(), default=0),
+    }
 
 
 def register(app: typer.Typer) -> None:

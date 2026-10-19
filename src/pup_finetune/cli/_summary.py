@@ -430,6 +430,19 @@ def _publication(result: Mapping[str, Any]) -> str | None:
     return None if line is None else line + compare
 
 
+def _headline_evaluator(headline: Mapping[str, Any]) -> str | None:
+    """The line of the evaluator the headline names, when it is not the built-in judge."""
+    name = headline.get("evaluator")
+    if not isinstance(name, str) or name == "judge":
+        return None
+    entry = (headline.get("evaluators") or {}).get(name) or {}
+    label = "all (the judge and every evaluator)" if name == "all" else name
+    return (
+        f"headline {label}: base {_agreement(entry.get('base'))}, tuned "
+        f"{_agreement(entry.get('tuned'))}, tuned - base {_difference(entry)}"
+    )
+
+
 def _evaluation_parts(result: Mapping[str, Any], *, compact: bool) -> Summary:
     """An evaluation's lines and its one-line form, without the next command; ``compact``
     (inside ``train --evaluate``) leaves out the table."""
@@ -438,9 +451,14 @@ def _evaluation_parts(result: Mapping[str, Any], *, compact: bool) -> Summary:
         calibration = result.get("calibration") or {}
         checks = [check for check in calibration.get("checks") or [] if isinstance(check, dict)]
         wrong = sum(1 for check in checks if not check.get("ok"))
+        who = (
+            f"the evaluator {result['evaluator']}"
+            if result.get("evaluator")
+            else f"the judge {result.get('judge_model')}"
+        )
         headline = (
-            f"calibration failed: the judge {result.get('judge_model')} got {wrong} of "
-            f"{len(checks)} checks wrong, so nothing was evaluated"
+            f"calibration failed: {who} got {wrong} of {len(checks)} checks wrong, so nothing "
+            "was evaluated"
         )
         # The hint spells the flags of the command that ran it (evaluate or train).
         hint = result.get("hint")
@@ -454,9 +472,11 @@ def _evaluation_parts(result: Mapping[str, Any], *, compact: bool) -> Summary:
     headline_data = result["headline"]
     rates = headline_data["judge_pass_rate"]
     errors = int(sum(int(count) for count in (result.get("errors") or {}).values()))
+    scoring = sum(int(entry["errors"]) for entry in (result.get("evaluator_errors") or {}).values())
     what = {
         "complete": "complete",
-        "complete_with_errors": f"complete with {_n(errors, 'error')}",
+        "complete_with_errors": f"complete with {_n(errors, 'error')}"
+        + (f" and {_n(scoring, 'evaluator error')}" if scoring else ""),
         "partial": f"partial ({_n(result.get('pending', 0), 'pair')} left)",
     }.get(str(status), str(status))
     judge = result.get("judge_model")
@@ -471,20 +491,22 @@ def _evaluation_parts(result: Mapping[str, Any], *, compact: bool) -> Summary:
     verdicts = _verdicts(headline_data.get("paired") or {}, result.get("errors"), ("base", "tuned"))
     paired = "paired: " + verdicts
     publication = _publication(result)
+    chosen = [line] if (line := _headline_evaluator(headline_data)) is not None else []
     if isinstance(headline_data.get("tuned_minus_compare"), Mapping):
-        return _compared_parts(result, headline, verdicts, publication)
+        return _compared_parts(result, headline, verdicts, publication, chosen)
     agreement = f"judge agreement: base {base}, tuned {tuned}, tuned - base {difference}"
     if compact:
-        lines = [headline, agreement, paired, CAVEAT]
+        lines = [headline, *chosen, agreement, paired, CAVEAT]
     else:
         lines = [
             headline,
+            *chosen,
             f"{'':<21}{'base':<11}{'tuned':<11}tuned - base",
             f"{'judge agreement':<21}{base:<11}{tuned:<11}{difference}",
             paired,
             CAVEAT,
         ]
-    parts = [headline, agreement, verdicts, CAVEAT]
+    parts = [headline, *chosen, agreement, verdicts, CAVEAT]
     if publication is not None:
         lines.append(publication)
         parts.append(publication)
@@ -492,7 +514,11 @@ def _evaluation_parts(result: Mapping[str, Any], *, compact: bool) -> Summary:
 
 
 def _compared_parts(
-    result: Mapping[str, Any], headline: str, verdicts: str, publication: str | None
+    result: Mapping[str, Any],
+    headline: str,
+    verdicts: str,
+    publication: str | None,
+    chosen: Sequence[str] = (),
 ) -> Summary:
     """An evaluation with a compare target: each target's judge agreement, then each
     comparison with its paired verdicts (``verdicts`` is base against tuned)."""
@@ -502,6 +528,7 @@ def _compared_parts(
     names = [name for name in rates if name not in ("delta", "ci95")]
     found = [
         headline,
+        *chosen,
         "judge agreement: " + ", ".join(f"{name} {_agreement(rates[name])}" for name in names),
         f"tuned - base: {_difference(rates)}; {verdicts}",
         f"tuned - compare: {_difference(versus)}; "
@@ -525,8 +552,9 @@ def evaluate_summary(result: Mapping[str, Any]) -> Summary | None:
 
 
 def benchmark_summary(result: Mapping[str, Any]) -> Summary | None:
-    """``benchmark``: the cases and judge, each model's judge agreement on its own cases with
-    its CI, the gap of each ranked one to the best, the recommendation and the caveat."""
+    """``benchmark``: the cases and judge, each model's agreement on its own cases with its
+    CI, the gap of each ranked one to the best and its answers cut off or unparseable, the
+    recommendation and the caveat."""
     status = result.get("status")
     if status == "calibration_failed":
         return _evaluation_parts(result, compact=False)
@@ -541,6 +569,9 @@ def benchmark_summary(result: Mapping[str, Any]) -> Summary | None:
         f"{_n(result.get('trajectories'), 'test conversation')}, {ranked}; judge "
         f"{result.get('judge_model')}"
     )
+    by = (result.get("recommendation") or {}).get("headline")
+    if isinstance(by, str) and by != "judge":
+        headline += f", ranked by {by}"
     width = max(len(str(entry.get("model"))) for entry in board) + 2
     rows = []
     for entry in board:
@@ -549,16 +580,25 @@ def benchmark_summary(result: Mapping[str, Any]) -> Summary | None:
         if entry.get("judged_cases"):
             text += f" on {_n(entry.get('judged_cases'), 'case')}"
         gap = entry.get("gap_to_best")
-        if isinstance(gap, Mapping) and isinstance(gap.get("judge_pass_rate"), int | float):
+        if isinstance(gap, Mapping) and isinstance(gap.get("pass_rate"), int | float):
             noise = ", within noise" if entry.get("within_noise_of_best") else ""
-            text += f"  {_points(-float(gap['judge_pass_rate']))} vs best{noise}"
+            text += f"  {_points(-float(gap['pass_rate']))} vs best{noise}"
         elif entry.get("status") == "error":
             text = f"  {_error_text(entry.get('error')) or 'error'}"
         elif not entry.get("finished"):
             text += "  unfinished, not ranked"
-        rows.append(
-            f"{entry.get('model')!s:<{width}}{_percent(entry.get('judge_pass_rate'))}{text}"
-        )
+        flaws = [
+            f"{entry[key]} {name}"
+            for key, name in (
+                ("truncated", "cut off at --max-tokens"),
+                ("unparseable", "unparseable"),
+            )
+            if entry.get(key)
+        ]
+        if flaws:
+            text += f"  {', '.join(flaws)}"
+        rate = entry.get("headline_pass_rate", entry.get("judge_pass_rate"))
+        rows.append(f"{entry.get('model')!s:<{width}}{_percent(rate)}{text}")
     recommendation = result.get("recommendation") or {}
     verdict = {
         "fine_tune": f"recommended: fine-tune {recommendation.get('model')}",
@@ -646,13 +686,32 @@ def sample_summary(result: Mapping[str, Any]) -> Summary:
     )
     if not result.get("include_dropped"):
         headline += ", rows labeled drop left out"
-    full = f"full rows: {result.get('rows_file')}"
-    return _summary(headline, [full], next_command=result.get("next_command"))
+    lines = [f"full rows: {result.get('rows_file')}"]
+    if result.get("markdown_file"):
+        lines.append(f"review file: {result['markdown_file']} (0600; it holds trace content)")
+    return _summary(headline, lines, next_command=result.get("next_command"))
 
 
 def triage_summary(result: Mapping[str, Any]) -> Summary:
     """``dataset triage``: kept, dropped, undecided and too long, or with ``--agreement`` how
-    often the council agreed with the labels (and Cohen's kappa)."""
+    often the council agreed with the labels (and Cohen's kappa), or with ``--checks`` alone
+    the rows they failed."""
+    against = _checks_against(result.get("agreement"))
+    if result.get("mode") == "checks":
+        checks = result.get("checks") or {}
+        rows = _n(checks.get("rows_checked", 0), "row" if against is None else "labeled row")
+        headline = f"checks: {checks.get('failed', 0)} of {rows} failed, "
+        if against is not None:
+            return _summary(
+                headline + "nothing labeled",
+                [against],
+                brief=[against],
+                next_command=result.get("next_command"),
+            )
+        headline += f"{(checks.get('labels') or {}).get('applied', 0)} newly labeled drop"
+        stale = result.get("stale_check_labels")
+        details = [f"{_n(stale, 'check label')} the checks no longer back"] if stale else []
+        return _summary(headline, details, next_command=result.get("next_command"))
     calls = (
         f"{_n(result.get('calls_made', 0), 'judge call')}, {result.get('calls_failed', 0)} failed"
     )
@@ -672,12 +731,17 @@ def triage_summary(result: Mapping[str, Any]) -> Summary:
             f"{agreement.get('rows_too_long', 0)} too long"
         )
         return _summary(
-            headline, [apart, calls], brief=[apart], next_command=result.get("next_command")
+            headline,
+            [apart, calls, *([against] if against is not None else [])],
+            brief=[apart],
+            next_command=result.get("next_command"),
         )
     headline = (
         f"triage {status}: {result.get('kept', 0)} kept, {result.get('dropped', 0)} dropped, "
         f"{result.get('undecided', 0)} undecided, {result.get('too_long', 0)} too long"
     )
+    if isinstance(checks := result.get("checks"), Mapping):
+        headline += f", {(checks.get('labels') or {}).get('applied', 0)} newly dropped by checks"
     details = [calls]
     reasons = [
         f"{entry.get('reason')} ({entry.get('count')})"
@@ -689,6 +753,19 @@ def triage_summary(result: Mapping[str, Any]) -> Summary:
     if stale := result.get("stale_judge_labels"):
         details.append(f"{_n(stale, 'judge label')} the votes no longer back")
     return _summary(headline, details, brief=[calls], next_command=result.get("next_command"))
+
+
+def _checks_against(agreement: object) -> str | None:
+    """With ``--agreement`` and ``--checks``: each check's failed rows, and how many of them
+    were labeled drop; ``None`` otherwise."""
+    checks = agreement.get("checks") if isinstance(agreement, Mapping) else None
+    if not isinstance(checks, Mapping):
+        return None
+    return "checks against your labels: " + ", ".join(
+        f"{name} fails {_n(entry.get('failed'), 'row')} ({entry.get('agree', 0)} labeled drop)"
+        for name, entry in checks.items()
+        if isinstance(entry, Mapping)
+    )
 
 
 def push_summary(result: Mapping[str, Any]) -> Summary:
@@ -1031,9 +1108,12 @@ def _training_settings(settings: Mapping[str, Any]) -> str:
     lora = settings.get("lora") or {}
     text = (
         f"up to {_n(settings.get('max_epochs'), 'epoch')} (patience {settings.get('patience')}), "
-        f"batch {settings.get('batch_size')}, lr {_rate(settings.get('learning_rate'))}, "
-        f"LoRA rank {lora.get('rank')} ({lora.get('rank_source')})"
+        f"batch {settings.get('batch_size')}, lr {_rate(settings.get('learning_rate'))}"
     )
+    schedule, warmup = settings.get("lr_schedule", "constant"), settings.get("warmup_fraction", 0)
+    if schedule != "constant" or warmup:
+        text += f" ({schedule}, warmup {warmup})"
+    text += f", LoRA rank {lora.get('rank')} ({lora.get('rank_source')})"
     if lora.get("alpha") is not None:
         text += f", alpha {lora['alpha']}"
     source = settings.get("max_seq_len_source")
@@ -1120,6 +1200,9 @@ def _benchmark_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
         f"{_n(settings.get('max_cases'), 'turn')} per conversation, target pass rate "
         f"{_percent(settings.get('target_pass_rate'))}"
     )
+    tested = preview.get("rows") or {}
+    if tested.get("test_total", 0) > tested.get("test", 0):
+        detail += f", --max-rows {tested['test']} of {tested['test_total']} conversations"
     rows = [
         _row("data", _evaluation_calls(preview)),
         _row("settings", detail),
@@ -1146,13 +1229,25 @@ def _triage_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
     shown = ", ".join(
         f"{alias_of(str(judge.get('model')))} ({judge.get('provider')})" for judge in judges
     )
+    checks = preview.get("checks")
     return headline, [
         _row("data", data),
         _row("judges", shown),
         _row("rubric", _criteria(preview)),
+        _row("checks", _checks_card(checks, preview.get("mode") == "agreement"))
+        if isinstance(checks, Mapping)
+        else None,
         _row("sends", _sends(preview)),
         _row("bills", _bills(preview.get("billing")) or "nothing: the judges run offline"),
     ]
+
+
+def _checks_card(checks: Mapping[str, Any], agreement: bool) -> str:
+    """What the checks do to the rows they fail: labeled drop, or with ``--agreement``
+    compared with the labels apart; never judged either way."""
+    rows = _n(checks.get("rows_checked"), "labeled row" if agreement else "row")
+    done = "compared with your labels apart" if agreement else "labeled drop"
+    return f"{checks.get('failed')} of {rows} fail: {done}, never judged"
 
 
 def _criteria(preview: Mapping[str, Any]) -> str:

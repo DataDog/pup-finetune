@@ -88,6 +88,9 @@ uv run pup-finetune undeploy /tmp/run --confirm  # deletes it; the model is kept
 uv run pup-finetune evaluate /tmp/run --compare-model fake-compare --confirm
                                      # adds the offline compare target to the same
                                      # directory: compare pairs only, no training session
+uv run pup-finetune evaluate /tmp/run --evaluators tests/fixtures/evaluators/evals.toml --confirm
+                                     # adds a rubric judge and two checks: they score the
+                                     # stored answers, nothing is generated again
 ```
 
 A complete evaluation is also published to Datadog as two Agent Observability experiments
@@ -112,7 +115,9 @@ two minutes (one budget for both experiments) are a warning. Tests serve it with
 
 `evaluate` on a fake run uses the offline fake judge (`--judge-model fake-judge`, dev mode
 only), and the fake's tuned checkpoint calls the tools its training data called, so the
-result shows a positive `headline.judge_pass_rate.delta` (`tuned_minus_base` in `summary.json`). `train ... --evaluate --confirm` evaluates in the
+result shows a positive `headline.judge_pass_rate.delta` (`tuned_minus_base` in `summary.json`).
+Evaluating a second run of the same dataset reuses the first one's base answers and verdicts
+from `/tmp/ds/replay_cache` (the preview's `reuse`; `--no-reuse` makes them again). `train ... --evaluate --confirm` evaluates in the
 training session right after promotion instead (foreground only; `--eval-out-dir`, which must
 be new or empty and is checked before training, `--eval-max-cases`,
 `--eval-judge-model`, `--eval-concurrency`, `--eval-max-tokens`, `--eval-seed` and
@@ -129,7 +134,9 @@ fake provider and judge and not published, is allowed: nothing leaves the machin
 `resume` on the fake provider likewise). A changed `--max-tokens`, judge, seed or cap needs a
 new `--out-dir`. An evaluation whose pairs ended in errors (a sampler or judge outage) reports
 `complete_with_errors` with an error count and a `next_command` that retries them, and exits
-1 when a target has no verdict at all; a cancelled one reports `partial`.
+1 when a target has no verdict at all; a cancelled one reports `partial`. `evaluator_errors`
+counts each evaluator's errors with the first one; a check that raised is not retried (its
+frozen file raises again), and the hint names it with the fix.
 
 To build a dataset from your own Agent Observability traces (Datadog reads through pup, so
 both work with `PUP_READ_ONLY` set; test a filter with `pup llm-obs spans search` first):
@@ -141,11 +148,15 @@ uv run pup-finetune dataset pull /tmp/ds   # rerun to resume: the frozen setting
                                      # the flags (pages cached in /tmp/ds/raw)
 uv run pup-finetune dataset show /tmp/ds
 uv run pup-finetune dataset sample /tmp/ds -n 20              # rows in brief, to review
+uv run pup-finetune dataset sample /tmp/ds --markdown /tmp/review.md  # and in full (0600)
 uv run pup-finetune dataset label /tmp/ds --file labels.jsonl  # {id, keep, reason} per line
 uv run pup-finetune dataset triage --print-template > rubric.md  # Task / Keep / Drop / Examples
 uv run pup-finetune dataset triage /tmp/ds --rubric rubric.md --max-rows 20
                                      # preview only (exit 2): rows, judge calls, rubric hash;
                                      # add --confirm to have the judge council label them (paid)
+uv run pup-finetune dataset triage /tmp/ds --checks tests/fixtures/evaluators/row_checks.py
+                                     # labels the rows a check fails by: check, at once (free,
+                                     # local, no --confirm); with --rubric they run first
 uv run pup-finetune dataset push /tmp/ds --name my-dataset --project pup-finetune-dev
                                      # preview only (exit 2); add --confirm to push the kept rows
 uv run pup-finetune dataset push /tmp/ds   # later pushes: push.json names the dataset
@@ -158,9 +169,10 @@ epoch ms when the command starts; a bare number is epoch milliseconds (pup reads
 first pull into a directory freezes that window together with the expressions, and a re-run
 with the same expressions reads the frozen window, so a resumed pull reads the same spans. On
 a re-run, every source flag left out (`--ml-app`, the filter, the time range, `--reasoning`,
-`--include-errors` and the split flags) takes the frozen value, and one given with another
-value is a `settings_conflict` naming the frozen one; `--ml-app` is required only for the
-first pull. The result's `window` holds the bounds read and whether they are the frozen ones.
+`--include-errors`, `--sample`, `--max-rows-per-trace` and the split flags) takes the frozen
+value, and one given with another value is a `settings_conflict` naming the frozen one;
+`--ml-app` is required only for the first pull. The result's `window` holds the bounds read
+and whether they are the frozen ones.
 
 Every dataset command's result holds a `pipeline` block (`curation/pipeline.py`): `rows`
 (`accepted`, `kept`, `dropped`, `unlabeled`), `triage` (`none`, `incomplete`, `complete`; see
@@ -193,6 +205,14 @@ labeling the rest. A label cannot be withdrawn, so judge labels the current vote
 (after a reset with `--max-rows`, or on undecided rows) are reported as `stale_judge_labels`,
 and the triage stays `incomplete` until a run over every row replaces them. It is paid, so it
 needs `--confirm`, but it writes nothing to Datadog, so `PUP_READ_ONLY` does not block it.
+`--checks FILE.py` runs the user's row checks first (after `--rows` and `--max-rows`): a row
+one fails is labeled `by: check` before any judge call and never judged, the preview runs them
+too (one that raises is a `usage` error naming the row), and they are not frozen, so rows they
+labeled are skipped without `--checks` (`skipped_checked`); `triage.json` records a council's
+file as `checks_file`, which a dataset's step to finish the triage passes again while it
+exists. With `--checks` alone it calls no
+judge and labels at once, without `--confirm` (refusing `--judges`, `--concurrency` and
+`--reset-triage`), reporting `stale_check_labels`; `dataset label --file` refuses `by: check`.
 Tests replace the judges' clients (`cli/triage.py`'s `open_clients`) with a fake.
 
 Judges can run on Anthropic or OpenAI too: `--judge-model`, `--eval-judge-model` and each
@@ -360,11 +380,11 @@ Source lives under `src/pup_finetune/`.
   alone; `run_command` prints it, after the result's warnings, unless `PUP_FINETUNE_QUIET`
   is on. `dataset.py` has `dataset import`,
   `fetch`, `pull`, `show`, `sample`, `label` and `push`, and `dataset_next`, the next
-  command and steps a dataset directory's state calls for (unlabeled: `dataset sample`;
-  labeled: training steps, since the model is the user's to choose; the provider follows from
-  it and the run directory defaults); `train.py` has `train` (`provider_for_model` infers
-  `--provider` from any of a model's names in the registry, failing on a name several
-  providers offer; the rerun pins the alias),
+  command and steps a dataset directory's state calls for (unlabeled, or labeled only `by:
+  check` with rows left: `dataset sample`; labeled: training steps, since the model is the
+  user's to choose; the provider follows from it and the run directory defaults); `train.py`
+  has `train` (`provider_for_model` infers `--provider` from any of a model's names in the
+  registry, failing on a name several providers offer; the rerun pins the alias),
   `resume`,
   `status`, `cancel` and the hidden `_worker` a detached run executes (and `train
   --evaluate`), and `run_next`, the next command a run's phase calls for; `models.py` has `models list` (every provider's
@@ -404,7 +424,7 @@ Source lives under `src/pup_finetune/`.
   never in Typer's box);
   `default_note` writes a default the option itself cannot hold. `tests/cli/test_help_layout.py`
   holds every `--help` to 80 columns with nothing cut off and at most 60 lines (`train`, with
-  35 options in six panels, 65), and parses every example against the app.
+  37 options in six panels, 65), and parses every example against the app.
 - `skill.py` - the bundled agent skill: `bundled_skills_dir` (the package's `_skills/`, else
   the repository's `skills/`), `npx_argv`, `npx_env` (the environment without
   `datadog/pup.py`'s `SECRET_ENV` and every registered provider key variable) and
@@ -464,8 +484,12 @@ Source lives under `src/pup_finetune/`.
 - `progress.py` - `TrainingProgress` (the loop's `on_event`) and `EvaluationProgress` (the
   replay's `on_progress`): on a terminal, or with `PUP_FINETUNE_PROGRESS=steps`, a line per
   step and per pair; otherwise a step line at most every 30 s or quarter epoch, each epoch's
-  checkpoint folded into its epoch line, and an evaluation line every 10% of the pairs plus
-  one per error. Retries inside the judge and sampler clients print no evaluation line yet
+  checkpoint folded into its epoch line, and an evaluation line every 10% of the pairs
+  (counting failures cut off at `--max-tokens`, unparseable or without a verdict) plus one per
+  error and one for the first failure of each cause. A failed pair's line names its cause
+  (`failure_cause`: the cut-off with the `--max-tokens` hint, or a compare model's own limit,
+  `format_valid` false, the judge's reason on one line, the no-verdict flaw or the error's
+  message). Retries inside the judge and sampler clients print no evaluation line yet
   (training's retries do). Tests pass `write`, `clock` and the modes in.
 - `storage.py` - atomic writes, `0600` files and `0700` directories, directory locks, frozen
   settings, and `identity_changes`, the keys two recorded identities differ in.
@@ -484,6 +508,12 @@ Source lives under `src/pup_finetune/`.
   `key_source` is where a key would come from without reading it out, or a `KeyUnreadable`
   when the lookup raised anything; `doctor`'s key checks and the default judges both use it.
 - `redaction.py` - masks resolved secrets and `Bearer` tokens in error output and logs.
+- `user_checks.py` - the user's Python checks, shared by `evaluate --evaluators` and `dataset
+  triage --checks`:
+  `load_checks` runs a file as a module named by its sha256 (`CheckModule`: its public
+  functions in definition order, `function` with an arity check), `call` runs one check on
+  deep copies under one lock and reads `True`, `False`, `None` or `(bool, reason)`; anything
+  else, or an exception, is a `CheckError` (not a `FinetuneError`), redacted.
 - `concurrency.py` - `DaemonPool`, worker threads for parallel remote calls that never hold
   up the process's exit, so Ctrl-C stops at once instead of waiting for a call in flight.
 - `http_common.py` - what the `httpx` clients that send a provider key share: `bearer_key`
@@ -595,7 +625,11 @@ Source lives under `src/pup_finetune/`.
   first; tests run `collect` in memory), a relative time range resolved once (a re-run
   reuses the frozen window, `resolve_window`): export a page at a time, check, convert, drop
   repeated conversations, and stop at `--target-count` rows or `--max-candidates` spans before
-  fetching another page. Unreadable items are excluded as `unreadable_span` and count toward
+  fetching another page. `--max-rows-per-trace` excludes a trace's rows past the cap as
+  `trace_row_cap` (in the dataset too: `trace_capped`); `--sample random` reads every
+  candidate, then deals rows round-robin over traces in a seeded order, stored rows first
+  (`_ordered`); both are frozen only when set, so older `settings.json` files still match.
+  Unreadable items are excluded as `unreadable_span` and count toward
   `--max-candidates` (`SpanQuery.max_spans` caps export items, readable or not); a re-run that reads
   further retires a stored row its trace now shows to be a prefix of a longer conversation
   (`retirements`, `contained_conversation`), and one with lower limits does not add such a row
@@ -626,7 +660,8 @@ Source lives under `src/pup_finetune/`.
 - `curation/` - deciding which accepted rows to train on. `labels.py` has `apply_labels`
   (every id an accepted row, last label per id wins, repeats skipped, appended through
   `DatasetDir.append_labels`); `samples.py` picks a seeded, readable sample of rows for
-  review (`row_summary` is a row's brief form); `pipeline.py`
+  review (`row_summary` is a row's brief form; `review_markdown` is `sample --markdown`'s
+  file, message text fenced); `pipeline.py`
   has `pipeline_state`, the `pipeline` block of every dataset result. `triage.py` is the judge council behind `dataset triage`: `Criteria` (rubric and/or
   rules, hashed), `build_messages` (the untrusted-data system prompt with the rubric, the
   whole row JSON-encoded in blocks), `parse_vote` (strict `{"keep", "reason"}`), `Vote`s in
@@ -638,7 +673,10 @@ Source lives under `src/pup_finetune/`.
   arrive, failed calls reported and retried next run, a row's calls skipped once a judge
   found it too long, labels `by: judge` for decided rows, judge labels the votes do not back
   reported as stale, or with `agreement` no label and `measure_agreement`'s `Agreement`; a
-  torn last vote line is cut before appending). `rubric_template.md` ships in the wheel. Curation builds on
+  torn last vote line is cut before appending), with `checks` `run_row_checks` (the rows a
+  check fails, `CheckFailure`s, labeled `by: check` first, also by `apply_check_labels` for
+  checks alone, and with `agreement` compared apart, `check_agreement`). `rubric_template.md`
+  ships in the wheel. Curation builds on
   `data/`; `data/` never imports `curation/`.
 - `training/` - the shared, provider-neutral SFT loop. `datums.py` renders rows into
   `TokenizedExample`s (per turn when a renderer is not prefix-stable) and rejects rows that
@@ -646,7 +684,9 @@ Source lives under `src/pup_finetune/`.
   optimizer steps into microbatches; `budget.py` caps trained tokens and wall-clock spend;
   `loop.py` has `run_training` (pipelined steps, validation loss, early stopping, best epoch,
   epoch-end and time-based checkpoints, cancellation, deterministic resume at an epoch and
-  step, and the `finalize` hook, whose failure raises `FinalizeFailed` carrying the result);
+  step, and the `finalize` hook, whose failure raises `FinalizeFailed` carrying the result;
+  it sends each step its scheduled learning rate, `TrainSpec.learning_rate_at` over
+  `max_steps`, so a resume sends the same rates);
   `records.py` has its records (`EpochMetrics`, `TrainResult`, `ResumePoint`, `Resume`);
   `promotion.py` has `Promotion`, the `finalize` hook that promotes the best checkpoint
   before the session ends (re-creating its sampler checkpoint when that session expired) or
@@ -818,28 +858,66 @@ Source lives under `src/pup_finetune/`.
   before it; Anthropic also a prefix that opens or ends on an assistant turn; Anthropic is
   judged on the turns its client sends, `anthropic_messages.py`'s conversion; Fireworks and
   the fake take any), with `compare_skips` over cases; it takes the `compare.json` path and imports nothing from `replay.py`, which imports it.
-  `benchmark.py` is `benchmark`: `plan_benchmark` (the test split's cases, the judge and one
-  `Candidate` per base model, with its renderer identity and the cases it cannot replay,
-  `excluded`; a model is named `PROVIDER/ALIAS` when another provider offers its alias,
-  `Candidate.target`; a preview whose models share no case they all replay fails), `execute`
-  (the judge calibrated once, then each model replayed in a session of its own, sized on its
-  own cases, into `OUT/<model>` through `run_replay` with the model as its one target, so
-  each resumes; each model's directory is identified by its own cases and renderer identity,
-  `BenchmarkPlan.identity`, never by the other models, so adding or dropping a model reuses
-  the finished ones; a model whose session fails is an error entry and the others still
-  run), `leaderboard` (a `Leaderboard`: each model's judge pass rate with a bootstrap CI
-  over trajectories on its own judged cases, `judged_cases` and `coverage`; the finished
-  models, with nothing pending, no error a rerun retries and no session error, ranked on the
-  cases every one of them has an `ok` result for, `common_cases`, by their rate there, with
-  each one's paired gap to the best; a model a rerun can still advance listed unranked,
-  never narrowing that set) and `recommend` (`fine_tune`; `base_meets_target` when the best
-  ranked model's own rate reaches `--target-pass-rate` and its judged cases cover
+  `benchmark.py` is `benchmark`: `plan_benchmark` (the test split's cases, with `--max-rows`
+  only those of a seeded sample of its conversations, `sample_conversations`; the judge and
+  one `Candidate` per base model, with its renderer identity and the cases of that sample it
+  cannot replay, `excluded`; a model is named `PROVIDER/ALIAS` when another provider offers
+  its alias, `Candidate.target`; a model whose renderer cannot load is planned as an error,
+  `Candidate.unavailable`, its directory unread; a preview whose models share no case they
+  all replay fails), `execute` (the judge calibrated once, then each model replayed in a
+  session of its own, sized on its own cases, into `OUT/<model>` through `run_replay` with the
+  model as its one target, so each resumes; each model's directory is identified by its own
+  cases and renderer identity, `BenchmarkPlan.identity`, never by the other models, so adding
+  or dropping a model reuses the finished ones; a model whose session fails is an error entry
+  and the others still run; each model first copies what it takes from the dataset's store,
+  so one with every answer reused opens no session, and shares its own answers after, a
+  complete one included; `BenchmarkPlan.inputs` and `keys`, from each model's renderer
+  identity, are read at plan time only when the store exists), `leaderboard` (a
+  `Leaderboard`: each model's headline pass rate, the judge's unless `--evaluators` names
+  another, with a bootstrap CI over trajectories on its own cases, its judge pass rate,
+  `judged_cases` and `coverage`, and its answers `truncated` at `--max-tokens` or
+  `unparseable`, each a warning; the finished models, with no session error, nothing pending,
+  no error a rerun retries and no score the headline still needs, ranked on the cases the
+  headline scored for every one of them, `common_cases`, by their headline rate there, with
+  each one's paired gap to the best; a model a rerun can still advance listed unranked, never
+  narrowing that set; `rerun`, whether a rerun has work left, an evaluator score outside the
+  headline included) and `recommend` (`fine_tune`; `base_meets_target` when the best ranked
+  model's own headline rate reaches `--target-pass-rate` and its judged cases cover
   `TARGET_COVERAGE`, 90% of the test cases with a prompt; or `no_result`; the reason says
   when results are partial, and models within noise of the best are named).
   The package exports its names lazily, so importing the runner (the CLI does, for every
   command) loads no judge client. `targets.py` makes the two samplers from a session: the live training
   session's best sampler checkpoint, or the best training checkpoint loaded and saved again
-  as an `ev...` sampler checkpoint in a new session (`run_samplers`).
+  as an `ev...` sampler checkpoint in a new session (`run_samplers`), only for the targets
+  with a case left to generate (`targets`). `reuse.py` is the dataset's store of base
+  results, `DATASET/replay_cache` (`generations.jsonl` by `generation_key`: provider, base
+  model, context, renderer identity (a family's `prompt_check` and `message_rewrite`
+  included), `max_tokens`, prefix and tools; `verdicts.jsonl` by
+  `verdict_key`: the judge's identity and exact request; append-only, first line of a key
+  wins): `ReuseIndex.load` reads it once at plan time (`EvalPlan.reuse`, `None` with
+  `--no-reuse`), `plan_target` is what a target takes (the preview's `reuse` block and
+  `EvalWork.reused`), `import_target` copies it in after calibration passed
+  (`prepare_eval_dir`; answers get `reused_from`, results `reused`), and `export_target`
+  adds the run's own base answers and verdicts with a judge answer after the replay
+  (`share_base`), under the store's lock tried once (a busy one is a warning naming the
+  command that shares them), only from a directory whose `reuse.json` (`stamp`, written
+  before its first answer) holds the current `key_inputs` (an evaluation made before stamps
+  counts as version 1). Only base answers are shared; `evaluation.json` records
+  `"reuse": false` only with `--no-reuse`, so a rerun without the flag is a conflict whose
+  hint adds it first (`no_reuse_hint`, in `benchmark` too). `evaluators.py` is `--evaluators`
+  (evaluate and benchmark): `load_spec` (the TOML spec through `tomllib` and pydantic,
+  `extra="forbid"`), `JudgeEvaluator` (a rubric, `judge.py`'s `RUBRIC_PROMPT`, calibrated on
+  the user's examples by `calibrate_examples`) and `CheckEvaluator`, each with the
+  `identity()` frozen by name in
+  `evaluators.json` (`attach_evaluators` under the lock: the list only grows, a change is a
+  `SettingsConflict` naming a new version beside it or a free `--out-dir`), `resolve_evaluators`
+  (the flag, which no `--confirm` command but the preview's repeats, since a run attaches the
+  whole spec; else the stored record, in a benchmark the longest of its models' (the newest
+  on a tie), which a complete model does not attach; a stored check loads only with cases
+  left) and `scorers`, which `run_replay` runs on every pair
+  missing an entry (`replay.outcome` reads a result for the judge, an evaluator or `all`).
+  Evaluators are scored per directory, never shared through the store; their metrics go only
+  with spans being published, and one added after is a warning.
 - `providers/` - the provider seam. `base.py` has the neutral types (`ModelProfile`,
   `TrainSpec`, `CheckpointRef`, `StepMetrics`, ...) and the `Provider`, `TrainingBackend`,
   `TrainingSession` and `Sampler` protocols; `__init__.py` is the lazy registry

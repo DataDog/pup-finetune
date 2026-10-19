@@ -1,0 +1,2 @@
+{"conversation": [{"role": "user", "content": "Where is my order 1001?"}], "reference": {"role": "assistant", "content": "Your order 1001 ships tomorrow; here is the tracking link."}, "candidate": "Your order 1001 ships tomorrow; here is the tracking link.", "pass": true}
+{"conversation": [{"role": "user", "content": "Where is my order 1002?"}], "reference": {"role": "assistant", "content": "Your order 1002 ships tomorrow; here is the tracking link."}, "candidate": "Check the tracking page yourself.", "pass": false}

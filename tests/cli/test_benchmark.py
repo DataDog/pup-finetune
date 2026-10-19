@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import shlex
+import shutil
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -24,11 +26,13 @@ from pup_finetune import providers
 from pup_finetune.cli import app
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.evaluation import benchmark as benchmark_module
+from pup_finetune.evaluation.fake_judge import FakeJudge
 from pup_finetune.inference import ChatCompletion
 from pup_finetune.providers import fake as fake_module
 from pup_finetune.providers.base import ModelProfile, Sampler
-from pup_finetune.providers.fake import FakeRenderer
+from pup_finetune.providers.fake import FakeBackend, FakeProvider, FakeRenderer
 from pup_finetune.rendering.base import ChatMessage, RendererError, RendererErrorCode, ToolSpec
+from pup_finetune.storage import DirectoryLock
 from tests.fakes.rows import (
     import_with_opening_assistant_test_row,
     import_with_refused_test_row,
@@ -38,6 +42,7 @@ from tests.fakes.rows import (
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
 
 runner = CliRunner()
+OPEN_JUDGE_CLIENT = benchmark_module.open_judge_client
 
 
 @pytest.fixture(autouse=True)
@@ -140,6 +145,84 @@ def test_other_settings_in_the_same_out_dir_are_refused_at_preview(dataset: Path
     assert result.exit_code == 2
     assert "settings_conflict" in result.stderr
     assert "--out-dir" in result.stderr
+
+
+def test_max_rows_replays_a_seeded_sample_and_needs_a_new_out_dir_to_change(
+    dataset: Path,
+) -> None:
+    full = output(invoke("benchmark", str(dataset), "--models", "fake-model"))["preview"]
+    previewed = invoke("benchmark", str(dataset), "--models", "fake-model", "--max-rows", "1")
+    preview = output(previewed)
+
+    shown = preview["preview"]
+    assert shown["trajectories"] == shown["rows"]["test"] == 1 < full["trajectories"]
+    assert shown["rows"]["test_total"] == full["rows"]["test_total"] == full["trajectories"]
+    assert f"--max-rows 1 of {full['trajectories']} conversations" in previewed.stderr
+    assert shown["cases"] == shown["generation_calls"] < full["cases"]
+    assert f"(of {full['trajectories']}, --max-rows)" in shown["action"]
+    assert shown["settings"]["max_rows"] == 1
+    assert "max_rows" not in shown["defaults_used"]
+    assert "--max-rows 1 --judge-model fake-judge --confirm" in preview["next_command"]
+    result = rerun(preview["next_command"])
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    assert data["leaderboard"][0]["cases"] == shown["cases"]
+    assert any("raise --max-rows" in warning for warning in data["warnings"])
+    stored = (dataset / "benchmark" / "fake-model" / "generations.jsonl").read_text().splitlines()
+    assert len({json.loads(line)["case_id"].rsplit(":", 1)[0] for line in stored}) == 1
+
+    changed = invoke("benchmark", str(dataset), "--models", "fake-model", "--max-rows", "2")
+
+    assert changed.exit_code == 2
+    assert "settings_conflict" in changed.stderr
+    assert "max_rows" in changed.stderr
+
+
+def test_a_max_rows_that_samples_nothing_resumes_without_it(dataset: Path) -> None:
+    args = ("benchmark", str(dataset), "--models", "fake-model")
+    assert invoke(*args, "--max-rows", "50", "--confirm").exit_code == 0
+
+    preview = invoke(*args)
+
+    assert preview.exit_code == 2, preview.stderr
+    assert output(preview)["preview"]["generation_calls"] == 0
+    assert invoke(*args, "--confirm").exit_code == 0
+
+
+def test_answers_cut_off_at_max_tokens_are_explained_while_and_after_it_runs(
+    dataset: Path,
+) -> None:
+    result = invoke(
+        "benchmark", str(dataset), "--models", "fake-model", "--max-tokens", "2", "--confirm"
+    )
+
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    [entry] = data["leaderboard"]
+    assert entry["truncated"] == entry["cases"] > 0
+    assert any("reached --max-tokens (2)" in warning for warning in data["warnings"])
+    assert "judged fail: cut off at --max-tokens 2; raise --max-tokens" in result.stderr
+    assert f"({entry['cases']} cut off)" in result.stderr
+    assert f"{entry['cases']} cut off at --max-tokens" in result.stderr.splitlines()[-1]
+    assert data["next_command"] is None
+    assert [step["command"] for step in data["next_steps"]] == [
+        f"pup finetune benchmark {dataset} --models fake-model --judge-model fake-judge "
+        "--max-tokens 4 --out-dir <NEW_DIR>",
+        f"pup finetune train --provider fake --dataset {dataset} --model fake-model",
+    ]
+
+
+def test_every_failed_pair_shows_the_judges_reason_with_progress_steps(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PUP_FINETUNE_PROGRESS", "steps")
+
+    result = invoke("benchmark", str(dataset), "--models", "fake-model", "--confirm")
+
+    assert result.exit_code == 0, result.stderr
+    failed = [line for line in result.stderr.splitlines() if "(judged fail): " in line]
+    assert len(failed) == output(result)["cases"]
+    assert "the reference calls a tool and the candidate does not" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -450,6 +533,31 @@ def test_adding_a_model_reuses_the_finished_ones_and_ranks_on_the_shared_cases(
     assert all(entry["gap_to_best"] is not None for entry in data["leaderboard"][1:])
 
 
+def test_max_rows_samples_the_conversations_before_each_model_plans_its_cases(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    register_fake_model(monkeypatch, shy="tests.cli.test_benchmark:ToolShyProvider")
+    models = "fake/fake-model,shy/fake-model"
+    args = ("benchmark", str(dataset), "--models", models, "--max-cases", "10")
+
+    preview = output(invoke(*args, "--max-rows", "1"))
+
+    shown = preview["preview"]
+    assert shown["rows"] == {"test": 1, "test_total": 2}
+    full, shy = shown["models"]
+    assert (full["cases"], full["excluded_cases"]) == (shown["cases"], 0)
+    assert 0 < shy["excluded_cases"] < shown["cases"]
+    assert shy["cases"] == shown["replayed_by_every_model"]
+    result = rerun(preview["next_command"])
+    assert result.exit_code == 0, result.stderr
+    assert output(result)["common_cases"] == shy["cases"]
+    rows = [
+        {line["row_id"] for line in lines(dataset / "benchmark" / model / "results.jsonl")}
+        for model in models.split(",")
+    ]
+    assert rows[0] == rows[1] and len(rows[0]) == 1
+
+
 def test_a_changed_renderer_conflicts_with_the_finished_results(
     dataset: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -567,3 +675,404 @@ def test_a_model_whose_stop_tokens_do_not_resolve_fails_the_preview(
     assert result.exit_code == 2
     assert "is not a single token" in result.stderr
     assert "--confirm" not in result.stdout
+
+
+# --- reuse --------------------------------------------------------------------------------
+
+
+def lines(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def no_session(*args: Any, **kwargs: Any) -> Any:
+    raise AssertionError("no session may open")
+
+
+def test_a_model_with_every_answer_reused_opens_no_session(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = invoke("benchmark", str(dataset), "--models", "fake-model", "--confirm")
+    assert first.exit_code == 0, first.stderr
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--out-dir", str(dataset / "b2"))
+    preview = output(invoke(*args))["preview"]
+    cases = preview["cases"]
+    [model] = preview["models"]
+    assert model["generation_calls"] == preview["generation_calls"] == 0
+    assert model["reused"] == {"generations": cases, "verdicts": cases}
+    assert "(fake-model (no session for it))" in preview["action"]
+    assert "every answer is already generated, so no session opens" in preview["action"]
+    assert preview["data_recipients"] == [
+        "test split -> the offline fake judge (judge; nothing is sent)"
+    ]
+    stored = lines(dataset / "benchmark" / "fake-model" / "generations.jsonl")
+    assert preview["reuse"] == {
+        "status": "on",
+        "store": str(dataset / "replay_cache"),
+        "oldest_sampled_at": min(line["sampled_at"] for line in stored),
+        "saved": {
+            "generation_calls": cases,
+            "judge_calls": cases,
+            "max_generated_tokens": cases * 4096,
+            "sessions": 1,
+        },
+    }
+    assert preview["settings"]["reuse"] is True
+    monkeypatch.setattr(FakeBackend, "open_session", no_session)
+    result = invoke(*args, "--confirm")
+    assert result.exit_code == 0, result.stderr
+    [entry] = output(result)["leaderboard"]
+    assert entry["reused"] == {"generations": cases, "verdicts": cases}
+    assert entry["judge_pass_rate"] == output(first)["leaderboard"][0]["judge_pass_rate"]
+    assert f"reusing {cases} answers of fake-model ({cases} judged)" in result.stderr
+
+
+@pytest.mark.usefixtures("judge_keys")
+def test_a_benchmark_with_every_verdict_reused_needs_no_judge_key(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    @contextmanager
+    def fake_judge(config: Any, **options: Any) -> Iterator[FakeJudge]:
+        yield FakeJudge()
+
+    monkeypatch.setattr(benchmark_module, "open_judge_client", fake_judge)
+    judged = ("benchmark", str(dataset), "--models", "fake-model")
+    judged += ("--judge-model", "fireworks/some-judge", "--skip-calibration")
+    assert invoke(*judged, "--confirm").exit_code == 0
+    monkeypatch.delenv("FIREWORKS_API_KEY")
+    monkeypatch.setattr(benchmark_module, "open_judge_client", OPEN_JUDGE_CLIENT)
+    again = (*judged, "--out-dir", str(dataset / "b2"))
+    preview = invoke(*again)
+    assert preview.exit_code == 2, preview.stderr
+    assert output(preview)["preview"]["judge_calls"] == 0
+    result = invoke(*again, "--confirm")
+    assert result.exit_code == 0, result.stderr
+    assert output(result)["status"] == "complete"
+
+
+def test_no_reuse_is_frozen_in_the_out_dir(dataset: Path) -> None:
+    args = ("benchmark", str(dataset), "--models", "fake-model")
+    assert invoke(*args, "--confirm").exit_code == 0
+    changed = invoke(*args, "--no-reuse")
+    assert changed.exit_code == 2
+    assert "settings_conflict" in changed.stderr
+    assert "(changed: reuse)" in changed.stderr
+    assert "to continue it" not in changed.stderr
+    fresh = output(invoke(*args, "--no-reuse", "--out-dir", str(dataset / "fresh")))
+    assert fresh["preview"]["reuse"] == {"status": "off"}
+    assert fresh["preview"]["generation_calls"] == fresh["preview"]["cases"]
+    assert "reuse" not in fresh["preview"]["defaults_used"]
+    assert fresh["next_command"].endswith("--no-reuse --confirm")
+    assert rerun(fresh["next_command"]).exit_code == 0
+    again = invoke(*args, "--out-dir", str(dataset / "fresh"))
+    assert again.exit_code == 2
+    assert "Hint: it was made with --no-reuse: add --no-reuse to continue it, or" in again.stderr
+    assert "a new --out-dir" in again.stderr
+
+
+def test_a_rerun_of_a_complete_benchmark_shares_its_answers(dataset: Path) -> None:
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--confirm")
+    first = invoke(*args)
+    assert first.exit_code == 0, first.stderr
+    store = dataset / "replay_cache"
+    shutil.rmtree(store)
+    assert invoke(*args).exit_code == 0
+    shared = lines(store / "generations.jsonl")
+    assert len(shared) == output(first)["cases"]
+    assert {json.dumps(line["source"]) for line in shared} == {
+        json.dumps({"command": "benchmark", "run_id": None})
+    }
+    assert len(lines(store / "verdicts.jsonl")) == len(shared)
+
+
+def test_a_max_rows_sample_reuses_the_answers_it_matches(dataset: Path) -> None:
+    assert invoke("benchmark", str(dataset), "--models", "fake-model", "--confirm").exit_code == 0
+    sample = invoke(
+        "benchmark", str(dataset), "--models", "fake-model", "--max-rows", "1",
+        "--out-dir", str(dataset / "sample"),
+    )  # fmt: skip
+    preview = output(sample)["preview"]
+    assert preview["models"][0]["reused"] == {
+        "generations": preview["cases"],
+        "verdicts": preview["cases"],
+    }
+    assert preview["generation_calls"] == 0
+
+
+def test_a_rerun_after_a_renderer_change_shares_nothing(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--confirm")
+    assert invoke(*args).exit_code == 0
+    store = dataset / "replay_cache" / "generations.jsonl"
+    before = store.read_text()
+    original = FakeRenderer.identity
+    monkeypatch.setattr(
+        FakeRenderer, "identity", lambda self: {**original(self), "renderer_version": "2"}
+    )
+    again = invoke(*args)
+    assert again.exit_code == 2
+    assert "changed: rendering" in again.stderr
+    assert store.read_text() == before
+
+
+def test_a_model_whose_renderer_gains_a_prompt_check_reuses_no_answer(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert invoke("benchmark", str(dataset), "--models", "fake-model", "--confirm").exit_code == 0
+    identity = FakeRenderer.identity
+    monkeypatch.setattr(
+        FakeRenderer, "identity", lambda self: {**identity(self), "prompt_check": "after_user@1"}
+    )
+    args = ("benchmark", str(dataset), "--models", "fake-model")
+    preview = output(invoke(*args, "--out-dir", str(dataset / "checked")))["preview"]
+    [model] = preview["models"]
+    assert model["reused"] == {"generations": 0, "verdicts": 0}
+    assert model["generation_calls"] == model["cases"]
+
+
+def unloadable(self: FakeProvider, profile: Any) -> Any:
+    raise ExternalError("the tokenizer of fake-model cannot be loaded", source="huggingface")
+
+
+def test_a_model_whose_renderer_cannot_load_is_an_error_entry(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert invoke("benchmark", str(dataset), "--models", "fake-model", "--confirm").exit_code == 0
+    monkeypatch.setattr(FakeProvider, "renderer", unloadable)
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--out-dir", str(dataset / "b2"))
+    preview = invoke(*args)
+    assert preview.exit_code == 2, preview.stderr
+    assert output(preview)["preview"]["models"][0]["reused"] == {"generations": 0, "verdicts": 0}
+    result = invoke(*args, "--confirm")
+    assert result.exit_code == 1, result.stderr
+    [entry] = output(result)["leaderboard"]
+    assert entry["error"]["message"].endswith("the tokenizer of fake-model cannot be loaded")
+    assert (dataset / "b2" / "benchmark.json").exists()
+
+
+def test_a_complete_model_whose_renderer_cannot_load_is_an_error_until_it_loads(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--confirm")
+    assert invoke(*args).exit_code == 0
+    shutil.rmtree(dataset / "replay_cache")
+    results = dataset / "benchmark" / "fake-model" / "results.jsonl"
+    before = results.read_bytes()
+    loadable = FakeProvider.renderer
+    monkeypatch.setattr(FakeProvider, "renderer", unloadable)
+    result = invoke(*args)
+    assert result.exit_code == 1, result.stderr
+    data = output(result)
+    [entry] = data["leaderboard"]
+    assert (entry["status"], entry["finished"], entry["judged_cases"]) == ("error", False, 0)
+    assert entry["error"]["message"].endswith("the tokenizer of fake-model cannot be loaded")
+    assert results.read_bytes() == before
+    assert not (dataset / "replay_cache").exists()
+    monkeypatch.setattr(FakeProvider, "renderer", loadable)
+    preview = output(rerun(data["next_command"]))
+    assert preview["preview"]["generation_calls"] == 0
+    assert rerun(preview["next_command"]).exit_code == 0
+    assert (dataset / "replay_cache" / "generations.jsonl").exists()
+
+
+def test_a_benchmark_made_before_reuse_neither_shares_nor_warns(dataset: Path) -> None:
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--confirm")
+    assert invoke(*args).exit_code == 0
+    (dataset / "benchmark" / "fake-model" / "reuse.json").unlink()
+    shutil.rmtree(dataset / "replay_cache")
+    result = invoke(*args)
+    assert result.exit_code == 0, result.stderr
+    assert not [line for line in output(result)["warnings"] if "not shared" in line]
+    assert not (dataset / "replay_cache").exists()
+
+
+def test_evaluators_attach_per_model_and_one_added_later_opens_no_session(
+    dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec_dir = tmp_path / "spec"
+    shutil.copytree(ROWS.parent.parent / "evaluators", spec_dir)
+    spec = spec_dir / "evals.toml"
+    args = ("benchmark", str(dataset), "--models", "fake-model")
+    assert invoke(*args, "--confirm").exit_code == 0
+
+    def no_session(*_: Any, **__: Any) -> Any:
+        raise AssertionError("no session may open")
+
+    monkeypatch.setattr(FakeBackend, "open_session", no_session)
+    preview = output(invoke(*args, "--evaluators", str(spec)))
+    shown = preview["preview"]
+    assert (shown["generation_calls"], shown["judge_calls"]) == (0, 0)
+    assert shown["evaluators"]["headline"] == "all"
+    assert shown["settings"]["headline"] == "all"
+    assert "and score each with polite, no_card_numbers and text_when_expected" in shown["action"]
+    assert f"--evaluators {spec}" in preview["next_command"]
+    result = rerun(preview["next_command"])
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    (entry,) = data["leaderboard"]
+    assert set(entry["evaluators"]) == {"polite", "no_card_numbers", "text_when_expected", "all"}
+    assert entry["headline_pass_rate"] == entry["evaluators"]["all"]
+    assert data["recommendation"]["headline"] == "all"
+    assert (dataset / "benchmark" / "fake-model" / "evaluators.json").is_file()
+    stored = json.loads((dataset / "benchmark" / "calibration.json").read_text())
+    assert stored["evaluators"]["polite"]["ok"] is True
+    assert "ranked by all" in result.stderr
+
+
+def test_an_evaluator_that_fails_calibration_can_be_fixed_under_its_name(
+    dataset: Path, tmp_path: Path
+) -> None:
+    spec_dir = tmp_path / "spec"
+    shutil.copytree(ROWS.parent.parent / "evaluators", spec_dir)
+    examples = spec_dir / "polite-examples.jsonl"
+    swapped = {"true": "false", "false": "true"}
+    examples.write_text(
+        re.sub(r'(?<="pass": )(true|false)', lambda m: swapped[m[0]], examples.read_text())
+    )
+    result = invoke(
+        "benchmark", str(dataset), "--models", "fake-model", "--confirm",
+        "--evaluators", str(spec_dir / "evals.toml"),
+    )  # fmt: skip
+    assert result.exit_code == 1
+    data = output(result)
+    assert (data["status"], data["evaluator"]) == ("calibration_failed", "polite")
+    assert "fix its rubric or examples, or pick another model for it" in data["hint"]
+
+
+def test_evaluator_errors_are_reported_and_retried(dataset: Path, tmp_path: Path) -> None:
+    spec_dir = tmp_path / "spec"
+    spec_dir.mkdir()
+    outage = spec_dir / "outage"
+    outage.touch()
+    (spec_dir / "flaky.py").write_text(
+        "import os\n\n\ndef same_as_reference(case, candidate):\n"
+        f"    if candidate != case['reference'] and os.path.exists({str(outage)!r}):\n"
+        "        raise ValueError('not the reference')\n"
+        "    return True\n"
+    )
+    spec = spec_dir / "evals.toml"
+    spec.write_text(
+        'headline = "same_as_reference"\n[[evaluator]]\nname = "same_as_reference"\n'
+        'type = "check"\nfile = "flaky.py"\n'
+    )
+    result = invoke(
+        "benchmark", str(dataset), "--models", "fake-model", "--evaluators", str(spec), "--confirm"
+    )
+    assert result.exit_code == 0, result.stderr
+    data = output(result)
+    (entry,) = data["leaderboard"]
+    assert (data["status"], entry["status"]) == ("complete_with_errors", "complete_with_errors")
+    assert (entry["errors"], entry["evaluator_errors"]) == (0, data["cases"])
+    assert f"{data['cases']} evaluator score(s) are missing after an error" in result.stderr
+    assert data["recommendation"]["verdict"] == "no_result"
+    assert "same_as_reference" in data["recommendation"]["reason"]
+    assert data["next_command"] == (
+        f"pup finetune benchmark {dataset} --models fake-model --judge-model fake-judge "
+        f"--evaluators {spec}"
+    )
+    outage.unlink()
+    preview = output(rerun(data["next_command"]))
+    assert preview["preview"]["evaluators"]["items"][0]["reference_pass_rate"] == 1.0
+    assert (preview["preview"]["generation_calls"], preview["preview"]["judge_calls"]) == (0, 0)
+    retried = output(rerun(preview["next_command"]))
+    assert retried["status"] == "complete"
+    assert retried["leaderboard"][0]["headline_pass_rate"] == 1.0
+
+
+def test_a_stored_set_s_command_runs_only_the_evaluators_it_previewed(
+    dataset: Path, tmp_path: Path
+) -> None:
+    spec_dir = tmp_path / "spec"
+    shutil.copytree(ROWS.parent.parent / "evaluators", spec_dir)
+    spec = spec_dir / "checks.toml"
+    spec.write_text('[[evaluator]]\nname = "no_card_numbers"\ntype = "check"\nfile = "checks.py"\n')
+    args = ("benchmark", str(dataset), "--models", "fake-model")
+    assert invoke(*args, "--evaluators", str(spec), "--confirm").exit_code == 0
+    spec.write_text(
+        spec.read_text() + '[[evaluator]]\nname = "text_when_expected"\ntype = "check"\n'
+        'file = "checks.py"\nfunction = "answers_in_text"\n'
+    )
+    preview = output(invoke(*args))
+    assert [item["name"] for item in preview["preview"]["evaluators"]["items"]] == [
+        "no_card_numbers"
+    ]
+    assert "--evaluators" not in preview["next_command"]
+    assert rerun(preview["next_command"]).exit_code == 0
+    stored = json.loads((dataset / "benchmark" / "fake-model" / "evaluators.json").read_text())
+    assert [item["name"] for item in stored["evaluators"]] == ["no_card_numbers"]
+
+
+def test_a_rerun_with_nothing_left_records_the_spec_s_headline_and_files(
+    dataset: Path, tmp_path: Path
+) -> None:
+    spec_dir = tmp_path / "spec"
+    shutil.copytree(ROWS.parent.parent / "evaluators", spec_dir)
+    check = '[[evaluator]]\nname = "no_card_numbers"\ntype = "check"\nfile = "checks.py"\n'
+    (spec_dir / "checks.toml").write_text(check)
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--confirm")
+    assert invoke(*args, "--evaluators", str(spec_dir / "checks.toml")).exit_code == 0
+    moved = tmp_path / "moved"
+    spec_dir.rename(moved)
+    (moved / "checks.toml").write_text(f'headline = "no_card_numbers"\n{check}')
+    assert invoke(*args, "--evaluators", str(moved / "checks.toml")).exit_code == 0
+    stored = json.loads((dataset / "benchmark" / "fake-model" / "evaluators.json").read_text())
+    assert stored["headline"] == "no_card_numbers"
+    assert stored["evaluators"][0]["file"] == str(moved / "checks.py")
+    assert output(invoke(*args))["recommendation"]["headline"] == "no_card_numbers"
+
+
+def test_the_share_command_continues_the_evaluators_without_the_spec(
+    dataset: Path, tmp_path: Path
+) -> None:
+    spec_dir = tmp_path / "spec"
+    shutil.copytree(ROWS.parent.parent / "evaluators", spec_dir)
+    spec = spec_dir / "checks.toml"
+    spec.write_text('[[evaluator]]\nname = "no_card_numbers"\ntype = "check"\nfile = "checks.py"\n')
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--evaluators", str(spec))
+    assert invoke(*args, "--confirm").exit_code == 0
+    store = dataset / "replay_cache"
+    shutil.rmtree(store)
+    store.mkdir(mode=0o700)
+    with DirectoryLock(store):
+        warning = output(invoke(*args, "--confirm"))["warnings"][-1]
+    shared = re.search(r"run `(.+)` to share them", warning)
+    assert shared is not None and "--evaluators" not in shared[1]
+    spec.write_text(
+        spec.read_text() + '[[evaluator]]\nname = "text_when_expected"\ntype = "check"\n'
+        'file = "checks.py"\nfunction = "answers_in_text"\n'
+    )
+    assert rerun(shared[1]).exit_code == 0
+    stored = json.loads((dataset / "benchmark" / "fake-model" / "evaluators.json").read_text())
+    assert [item["name"] for item in stored["evaluators"]] == ["no_card_numbers"]
+
+
+def test_a_conflict_s_hint_names_a_free_benchmark_directory(dataset: Path, tmp_path: Path) -> None:
+    spec_dir = tmp_path / "spec"
+    shutil.copytree(ROWS.parent.parent / "evaluators", spec_dir)
+    spec = spec_dir / "evals.toml"
+    args = ("benchmark", str(dataset), "--models", "fake-model", "--evaluators", str(spec))
+    assert invoke(*args, "--confirm").exit_code == 0
+    spec.write_text(spec.read_text().replace('name = "polite"', 'name = "polite_v2"'))
+    conflict = invoke(*args)
+    assert conflict.exit_code == 2
+    assert f"pass --out-dir {dataset / 'benchmark-2'}" in conflict.stderr
+
+
+def test_recalibrating_the_judge_keeps_the_evaluators_calibrations(
+    dataset: Path, tmp_path: Path
+) -> None:
+    spec_dir = tmp_path / "spec"
+    shutil.copytree(ROWS.parent.parent / "evaluators", spec_dir)
+    args = ("benchmark", str(dataset), "--models", "fake-model")
+    args += ("--evaluators", str(spec_dir / "evals.toml"))
+    assert invoke(*args, "--confirm").exit_code == 0
+    path = dataset / "benchmark" / "calibration.json"
+    stored = json.loads(path.read_text())
+    path.write_text(json.dumps({**stored, "judge": {**stored["judge"], "model": "another"}}))
+    preview = output(invoke(*args))["preview"]
+    assert preview["calibration_calls"] > 0
+    assert preview["evaluators"]["items"][0]["calibration_calls"] == 0
+    result = invoke(*args, "--confirm")
+    assert result.exit_code == 0, result.stderr
+    assert "calibrating the evaluator polite" not in result.stderr
+    assert json.loads(path.read_text())["evaluators"] == stored["evaluators"]

@@ -107,9 +107,12 @@ The pull reports how many rows it accepted, and why it left the rest out
 (`excluded_by_code`, with `exclusion_explanations`). `--tag` repeats, and every tag must match.
 `--query` takes a search query, and `--include-errors` keeps errored LLM calls. `--from` and
 `--to` take ISO 8601, epoch milliseconds (a bare number is milliseconds), or a relative time:
-`7d`, `24h`, `now-7d`, `now`.
+`7d`, `24h`, `now-7d`, `now`. So that a few long traces do not fill the dataset,
+`--max-rows-per-trace N` keeps at most N rows of any trace, and `--sample random` reads every
+span up to `--max-candidates`, then deals `--target-count` rows round-robin over the traces
+in an order `--seed` fixes, instead of keeping the first rows read.
 
-The first pull freezes the filter and the time window, so `pup finetune dataset pull datasets/my-agent`
+The first pull freezes the filter, these options and the time window, so `pup finetune dataset pull datasets/my-agent`
 with no flags resumes it over the same window and limits. `--target-count` is the number of
 rows to keep: rows a review drops do not count, so pulling again after a review reads on to
 replace them. Every dataset command reports a `pipeline`
@@ -117,11 +120,13 @@ block (rows kept, dropped and unlabeled, triage, push), and its `next_command` f
 
 ### Review the rows
 
-Read a sample and record which rows to keep. `labels.jsonl` holds one
-`{"id": "<row id>", "keep": true, "reason": "..."}` per line; dropping a row needs a reason:
+Read a sample and record which rows to keep. `--markdown` also writes the sampled
+conversations in full to a private file, each with its labels line to copy. `labels.jsonl`
+holds one `{"id": "<row id>", "keep": true, "reason": "..."}` per line; dropping a row needs
+a reason:
 
 ```sh
-pup finetune dataset sample datasets/my-agent --count 20
+pup finetune dataset sample datasets/my-agent --count 20 --markdown datasets/review.md
 pup finetune dataset label datasets/my-agent --file labels.jsonl
 ```
 
@@ -140,6 +145,14 @@ council of two judges, a row is kept only when both vote keep; add a third judge
 `--judges` for a true majority. A row is dropped as soon as the votes cast decide it (one drop
 of two judges, two of three), so its remaining calls are not made, and a failed call does not
 leave it undecided.
+
+`--checks checks.py` runs your own Python row checks first, free and on this machine: each
+public function of the file gets a copy of every row reviewed (as `rows.jsonl` stores it) and
+returns `True`, `False` or `(False, "why")`, or `None` when it does not apply. A row one fails
+is labeled drop `by: check` and never sent to a judge. With `--checks` alone no judge runs, so
+`pup finetune dataset triage datasets/my-agent --checks checks.py` labels at once, without
+`--confirm`. A triage without `--checks` skips the rows a check labeled; checks are not frozen,
+so an edited file applies on the next run that passes it.
 
 ### Push the dataset
 
@@ -180,6 +193,15 @@ also trains `deepseek-v4-flash-0731` and `muse-glimmer-30b`. The Baseten models 
 `qwen3p5-9b`, `glm-5p3-flash`, `qwen3p8-27b` and `kimi-k3`:
 `pup finetune train --dataset datasets/my-agent --model qwen3p5-9b --detach`.
 
+Training uses Adam on a LoRA adapter: `--learning-rate` (1e-4), `--batch-size` rows per step,
+up to `--max-epochs` epochs with early stopping after `--patience` epochs without a
+validation-loss gain, and `--lora-rank`. The rate is constant by default; `--lr-schedule
+linear` or `cosine` decays it toward zero over the steps of `--max-epochs` epochs (the
+preview's `max_steps`), after `--warmup-fraction` of them ramping up (`warmup_steps`). Early
+stopping or a cap ends a run before its decay does: set `--max-epochs` to the length you
+intend, and raise `--patience` to let the decay run. The preview's `settings` and `run.json`
+record every value; the other Adam parameters are fixed (`settings.optimizer`).
+
 `--remote` (Baseten only) runs the training loop in a Baseten CPU job, so training continues
 while this machine sleeps; `--team` names the Baseten team (by default your only or default
 team). It needs the `baseten` CLI and `uv` on `PATH`, pup-finetune installed from a source
@@ -210,6 +232,14 @@ cases every one of them answered and recommends one to fine-tune. A base model a
 cases with a prompt, may need no training, and models within noise of the best are named, so
 the cheapest to serve can win.
 Results go in `datasets/my-agent/benchmark`; rerun the command to continue one that stopped.
+`--max-rows 20` replays a seeded sample of 20 test conversations, for a quicker, cheaper
+first comparison. Base answers already made on the dataset (see [Evaluate](#evaluate)) are
+reused, and a model with every answer reused opens no session; a benchmark also shares its
+answers, so evaluating the model it recommends reuses the base side. On a terminal, each
+failed case says why on stderr (cut off at `--max-tokens`, an answer that could not be
+parsed, or the judge's reason). Off a terminal, only the first failure of each cause gets a
+line and the progress line counts the rest; set `PUP_FINETUNE_PROGRESS=steps` to see every
+one.
 
 ### A cheap first run
 
@@ -248,6 +278,15 @@ compare them (`publication.comparison_url`), and fill in as cases finish. Replay
 agreement with the recorded behavior, not task success. Rerun the command to continue an
 evaluation; other settings need a new `--out-dir`.
 
+Base answers are shared within a dataset: `evaluate`, `train --evaluate` and `benchmark` keep
+the base model's answers and their judgments in `DATASET/replay_cache`, and a later
+evaluation of the same dataset reuses those made with the same base model, renderer,
+`--max-tokens` and context (judgments only with the same judge). Only the tuned model's
+answers are then paid for, and no base sampler starts. The preview shows what is reused, from
+which runs and since when (`reuse`); the result counts it per model (`reused`). Every run on
+the dataset then shares one base sample, so their deltas compare directly but share its
+noise. `--no-reuse` makes the answers again; deleting the directory only costs new answers.
+
 A generation cut off at `--max-tokens` fails, so the result counts them per model
 (`headline.truncated`) and warns. A reasoning base model can spend the whole budget thinking
 while a tuned model that learned to answer directly does not: raise `--max-tokens` before
@@ -278,6 +317,66 @@ opens or ends on an assistant turn) is never sent: the preview counts it per rea
 (`compare.skipped_by_reason`), the preview and the result warn, and it counts in none of the
 compare model's rates, nor in `tuned_minus_compare`. A compare model that would be sent no
 case at all is refused by the preview.
+
+### Your own evaluators
+
+```sh
+pup finetune evaluate ft-20261007183443-a8b181 --evaluators evals.toml
+```
+
+`--evaluators` scores every answer with your own LLM judges and Python checks too, next to the
+built-in judge. The spec is TOML, its paths relative to it:
+
+```toml
+headline = "all"                 # "judge" (the default), an evaluator's name, or "all"
+
+[[evaluator]]
+name = "polite"
+type = "judge"
+model = "anthropic/claude-sonnet-5-5"   # optional, named as --judge-model; default: the judge
+rubric = """
+Pass when the answer is courteous and does not blame the user. Fail when it is curt or sarcastic.
+"""
+examples = "polite-examples.jsonl"      # optional: answers you graded, to calibrate it
+
+[[evaluator]]
+name = "no_card_numbers"
+type = "check"
+file = "checks.py"
+function = "no_card_numbers"     # optional; default: the name
+```
+
+A check is a plain function of the case and the answer:
+
+```python
+def no_card_numbers(case, candidate):
+    if any(char.isdigit() for char in candidate.get("content") or ""):
+        return False, "the answer shows digits"
+    return True
+```
+
+It returns `True` (pass), `False` or `(False, "why")` (fail), or `None` (does not apply). `case`
+holds the recorded `prefix`, `tools` and `reference`; `candidate` is the generated assistant
+message. Each examples line is `{"conversation": [...], "candidate": "...", "pass": true}`
+(`tools` and `reference` optional), with at least one passing and one failing answer; a judge
+without examples is not calibrated, and the preview and the result warn. The result's
+`headline` names the `evaluator` it leads with and has `evaluators`: each one's pass rate per
+model and tuned minus base with its interval, and `all`, which passes a case when the built-in
+judge and every evaluator pass it (one that does not apply counts as a pass).
+`evaluator_errors` counts each evaluator's errors with the first one. A check that raised is
+not retried, since its frozen file would raise again: the hint names it and how to fix it.
+
+Added to a complete evaluation, evaluators reuse every stored answer: nothing is generated
+again and no training session opens, so only their judges' calls are paid, and checks cost
+nothing. The directory keeps its evaluators: a rerun without the flag continues them, a rerun
+may add new ones, and one is never dropped or changed: keep it as it was attached and add a
+changed rubric, model or check under a new name (`polite_v2`; a changed check in a new file),
+or use a new `--out-dir`. Each evaluator becomes one boolean metric per case in the
+experiments; one added after they were published is a warning, since those experiments do not
+show it. `benchmark --evaluators` works the same way, and the headline ranks the models. Checks
+are Python you wrote: they run in this process with your privileges, previews included (the
+preview runs each one on every recorded answer, free, so a broken check fails before anything
+is paid).
 
 ## Deploy
 
@@ -336,9 +435,12 @@ A rerun with nothing left to judge needs no judge key.
 ## Data handling
 
 Dataset and run directories hold trace content: conversations, tool calls and tool results.
+A dataset's `replay_cache` also holds base model answers to its test conversations and the
+judge's reasons, like an evaluation directory.
 `pup-finetune` creates them with `0700` permissions and their files with `0600`. When it
 creates `runs/` or `datasets/` in the working directory, it adds a `.gitignore` there so they
-stay out of version control.
+stay out of version control. `dataset sample --markdown FILE` writes the sampled conversations
+to `FILE` (`0600`); keep it under `datasets/` so git ignores it.
 
 Training, `evaluate` and `dataset triage` send conversation content to the providers you
 choose, and every preview lists each recipient in `data_recipients`. `PUP_READ_ONLY=true` (or
@@ -346,7 +448,9 @@ choose, and every preview lists each recipient in `data_recipients`. `PUP_READ_O
 `deploy` and `undeploy`; previews still run. `dataset triage` writes nothing to Datadog, so it
 stays allowed, and it still sends rows to the judges. `train --remote` uploads the train and
 validation rows, their split assignments, the run files and pup-finetune's source to Baseten
-storage for its job; the test split and dropped rows stay on this machine.
+storage for its job; the test split and dropped rows stay on this machine. The checks of
+`--evaluators` and `dataset triage --checks` run on this machine and send nothing; the
+evaluators' judges are recipients like the built-in judge.
 
 Rows are rendered with each model's own tokenizer and chat template, downloaded from Hugging
 Face at a pinned commit. Kimi K3's tokenizer is Python code from the model's repository

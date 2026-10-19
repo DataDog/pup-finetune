@@ -145,6 +145,7 @@ class RecordingSession:
         self.outstanding: list[TrackedResult[Any]] = []
         self.resolved: list[str] = []
         self.saved: list[CheckpointRef] = []
+        self.adams: list[AdamConfig] = []
         self.max_steps_in_flight = 0
 
     @property
@@ -175,6 +176,7 @@ class RecordingSession:
 
     def optim_step(self, adam: AdamConfig) -> PendingResult[None]:
         self.calls.append("optim_step")
+        self.adams.append(adam)
         result: TrackedResult[None] = TrackedResult(self, "optim_step", self.inner.optim_step(adam))
         self.max_steps_in_flight = max(self.max_steps_in_flight, self.steps_in_flight())
         return result

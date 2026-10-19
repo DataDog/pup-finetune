@@ -150,6 +150,7 @@ cannot see. `dataset show` counts them.
 | `unreadable_span` | dataset | The exported span does not have the fields of an LLM span (such as its trace id), so it could not be converted. |
 | `unreadable_record` | dataset | The dataset record's input is not chat messages, or its expected output is not an assistant message, so it is not a conversation to train on. |
 | `split_conflict` | dataset | The dataset record names another split than a record of the same trace does, and a trace is never in two splits. |
+| `trace_row_cap` | dataset | Its trace already gives --max-rows-per-trace rows, so one trace cannot dominate the dataset. |
 <!-- END GENERATED: exclusion codes -->
 
 `train` can also leave rows out when it renders them for the model. These rows stay in the
@@ -173,14 +174,15 @@ content. Keep it out of version control.
 | `settings.json` | The source (`import`, `datadog`, or `datadog_dataset` for `dataset fetch`, which freezes the dataset's project, name, id and version) and its settings, such as the span filter and time window, plus the split settings. Frozen on first use: later runs may leave a flag out (it takes the frozen value), but may not pass another value (later imports pass the same split settings). |
 | `rows.jsonl` | The accepted rows, one canonical row per line. Never rewritten by labeling. |
 | `excluded.jsonl` | One `{"code", "detail", "row_id", "trace_id", "span_id", "line_sha256"}` per excluded row (fields that do not apply are left out). |
-| `labels.jsonl` | Keep/drop decisions appended by `dataset label` and `dataset triage`: `{"id", "keep", "reason", "by", "at"}`, where `by` is `manual` (recorded with `dataset label`) or `judge` (decided by the `dataset triage` council; triage never relabels a manual row). Older files that say `agent` or `human` read as `manual`. The last label of an id wins, a reason is required to drop, and a dropped row never trains and is never pushed. |
+| `labels.jsonl` | Keep/drop decisions appended by `dataset label` and `dataset triage`: `{"id", "keep", "reason", "by", "at"}`, where `by` is `manual` (recorded with `dataset label`), `judge` (decided by the `dataset triage` council) or `check` (a row one of `dataset triage --checks` failed, with the reason `check <name>: <reason>`); triage never relabels a manual row. Older files that say `agent` or `human` read as `manual`. The last label of an id wins, a reason is required to drop, and a dropped row never trains and is never pushed. |
 | `splits.json` | The split of every trace (one per group of traces and copies of one request) and the frozen seed and fractions. A trace never changes split once assigned. |
 | `summary.json` | Counts, splits and warnings, rewritten after every change. |
 | `split_conflicts.jsonl` | While a group of copies has kept rows in more than one split, a drop label (`{"id", "keep": false, "reason"}`) for each kept row outside the split holding most of the group, for `dataset label --file`; rewritten with `summary.json`, and removed once there are none. |
 | `raw/` | For a Datadog pull, the Export API pages it read, so a rerun resumes without fetching them again. |
 | `pull_limits.json` | For a Datadog pull, the last pull's `--target-count` and `--max-candidates`, which a rerun without them continues toward. Not frozen. |
-| `judgments.jsonl`, `triage.json` | For `dataset triage`, every judge vote (`{"row_id", "row_sha256", "judge", "criteria_sha256", "keep", "reason", "at"}`, plus `"too_long": true` when the judge refused the row as longer than its context window, which drops it) and the frozen rubric hash, judges and the settings they are called with. |
+| `judgments.jsonl`, `triage.json` | For `dataset triage`, every judge vote (`{"row_id", "row_sha256", "judge", "criteria_sha256", "keep", "reason", "at"}`, plus `"too_long": true` when the judge refused the row as longer than its context window, which drops it) and the frozen rubric hash, judges and the settings they are called with, plus `checks_file`, the absolute path of the last council's `--checks` file (not frozen), which the step to finish the triage passes again. |
 | `push.json` | The receipt `dataset push` writes (see below). |
+| `replay_cache/` | Base model answers and judge verdicts shared by the evaluations and benchmarks of the dataset: `generations.jsonl` (`{"key", "message", "format_valid", "prompt_tokens", "completion_tokens", "latency_s", "stop_reason", "sampled_at", "source"}`, `source` the `{"command", "run_id"}` that made it) and `verdicts.jsonl` (`{"key", "judgment", "judged_at"}`). The keys are hashes of what the model or the judge is sent and how; append-only, the first line of a key wins. Safe to delete: it only costs new answers. A run that reuses a line copies it into its own directory with `reused_from` (an answer, keeping its `sampled_at`) or `"reused": true` (a result, its metrics computed again). |
 
 ## The pushed record
 
@@ -235,7 +237,13 @@ so `evaluate` publishes onto that dataset and `dataset push` has nothing to send
 An evaluation directory (`RUN_DIR/eval` by default) holds `evaluation.json` (the identity a
 rerun must match), `generations.jsonl` and `results.jsonl` (one line per target and case,
 appended; the last line of a pair wins), `calibration.json` and `summary.json`, and, once
-published, `experiments.json` and `published.json`.
+published, `experiments.json` and `published.json`. `reuse.json`, written before the first
+answer, records what its base answers are sampled under (every input of their
+`replay_cache` key but the case); they are shared to the dataset's `replay_cache` only while
+it matches, so a directory resumed after an upgrade that changes them shares none. An
+evaluation directory made before `reuse.json` shares as one made under the first release
+that writes it (its `evaluation.json` pins every other input); a benchmark model directory
+made before it shares nothing.
 
 With `evaluate --compare-model`, `compare.json` records the compare target, written once it
 has answered one short probe and never changed: `{"spec", "model": {"provider", "model",
@@ -248,7 +256,8 @@ has answered one short probe and never changed: `{"spec", "model": {"provider", 
 stage, `errors_too_long` (requests longer than a context window, no retry fixes them) and
 `errors_too_long_by_stage` (the same requests by the stage that sent them: `generation` for
 the target's own model, `judge` for the judge),
-`truncated` (generations cut off at their limit) and `refused` (answers the provider refused).
+`truncated` (generations cut off at their limit), `refused` (answers the provider refused)
+and `reused` (`{"generations", "verdicts"}` copied from the dataset's `replay_cache`).
 With base and tuned, `paired` and `tuned_minus_base`; with a compare target,
 `tuned_minus_compare` (`judge_pass_rate`, `ci95`, `n_cases`, `n_trajectories`, `resamples`,
 `seed`, and its own `paired` counts), over the cases the compare model was sent. Each target
@@ -260,6 +269,41 @@ conversation whose first turn is the assistant's), `unanswered_tool_call` (a too
 no tool result right after it), `orphan_tool_result` (a tool result with no call right
 before it) and `ends_on_assistant` (on Anthropic, a conversation that ends on an assistant
 turn).
+
+## Evaluator specs and checks
+
+`evaluate --evaluators FILE` (and `benchmark --evaluators FILE`) reads a TOML spec, its paths
+relative to it: an optional `headline` (`judge`, the default, an evaluator's name, or `all`)
+and one `[[evaluator]]` table per evaluator. Every evaluator has a `name` (lowercase letters,
+digits and `_`, starting with a letter, at most 40 characters; not `judge`, `all`,
+`judge_pass`, `trajectory_agreement`, `completed_actions` or a metric's name) and a `type`. A
+`judge` has a `rubric`, an optional `model` (named as `--judge-model`; the evaluation's judge
+by default) and optional `examples`, a JSON Lines file of graded answers
+(`{"conversation", "candidate", "pass"}`, with optional `tools` and `reference`; `candidate`
+a string or an assistant message), at least one with `"pass": true` and one with
+`"pass": false`. A `check` has a `file` and an optional `function` (its name by default):
+`function(case, candidate)` gets copies of the case (`id`, `row_id`, `trace_id`,
+`message_index`, `prefix`, `tools`, `reference`, `future_tool_results`) and of the generated
+assistant message, and returns `True`, `False`, `None` (does not apply) or `(bool, reason)`.
+An unknown key, a repeated or reserved name, or a headline that names no evaluator is a usage
+error.
+
+The evaluation directory then holds `evaluators.json`: `{"evaluators": [...], "headline",
+"spec"}`, each evaluator `{"name", "type": "judge", "rubric_sha256", "rubric", "model"}`
+(`model` as in `compare.json`) or `{"name", "type": "check", "function", "file_sha256",
+"file"}`. Evaluators are added, never changed or dropped: a changed rubric, model or check
+file (its whole sha256) is a `settings_conflict`, while the same ones attached from a spec
+elsewhere take its `file` paths. Each line of `results.jsonl` gains
+`evaluators`, by name: `{"status": "ok" | "not_applicable" | "error", "passed", "reason",
+"raw", "no_verdict", "error"}`. `calibration.json` gains `evaluators`, each judge's report on
+its examples. `summary.json` gains, per target, `evaluators.<name>` and `evaluators.all`
+(`{"pass": {"rate", "passed", "n"}, "not_applicable", "no_verdict", "errors", "pending"}`),
+and at the top `evaluators` (`{"headline", "names", "tuned_minus_base", "tuned_minus_compare"}`,
+each by name: `{"delta", "ci95", "n_cases", "n_trajectories", "wins", "regressions", "ties",
+"both_error", "one_error", "pending", "not_applicable"}`). `all` passes a case when the
+judge passes it and every evaluator passes or does not apply; a case with an evaluator error
+is left out of it. `published.json` keeps, after a span's digest, `+` and the evaluators it
+was sent with.
 
 ## Where a dataset stands
 
@@ -275,8 +319,9 @@ Every dataset command's result (`import`, `pull`, `show`, `sample`, `label`, `tr
 }
 ```
 
-`triage` is `none` before any triage, `complete` once every row has a label and every judge
-label is backed by the votes under the frozen rubric and judges, `unreadable` when
+`triage` is `none` before any council triage (check labels alone leave it there), `complete`
+once every row has a label (a check's included) and every judge label is backed by the votes
+under the frozen rubric and judges, `unreadable` when
 `triage.json` or `judgments.jsonl` cannot be read, and `incomplete` otherwise (for example
 after `--max-rows`). `push.status` is `not_pushed` without `push.json`, `pushed` when it lists
 every kept row as it is now, `pushed_with_new_rows` when `pending` kept rows are not pushed yet
@@ -305,7 +350,7 @@ is:
 | --- | --- | --- |
 | `train`, `resume` | How the run ended (`status`), the best epoch and its validation loss, each epoch's losses (`best: true` on the best one), the promoted model, the deployable checkpoint's name, the elapsed seconds and what next. | `files.result` (`result.json`: every checkpoint with its URI, and each epoch's checkpoints and tokens) and `files.epochs` (`epochs.json`). |
 | `status` | The phase, epoch and step against their maximums, the last training loss, the validation losses, the best epoch, the elapsed time and ETA, the promoted model, what next; `resume_mode` only for a resumable run, and `worker` (`pid`, `state`: `running`, `starting`, `stale` or `exited`, `heartbeat_age_s`, `log`) only when the run has a worker or is training. | `files.state` (`state.json`), `files.epochs` and `files.result` (`null` until the run has one). |
-| `evaluate` | `judge_model` and `compare_model` (`null` without one), `headline` (the judge pass rate of `base` and `tuned`, and `compare` with a compare target, their `delta` with its `ci95`, the paired `wins`, `regressions` and `ties`, `tuned_minus_compare` with a compare target, with the cases it `skipped`, and the numbers of `cases` and `trajectories`), each metric's rate per target, the errors per target, the publication and the caveat. | `files.summary` (`summary.json`: per target the judge's passes, every metric's `n`, `passed` and `rate`, the agreement per trajectory, tokens and errors by stage; the paired counts; the bootstrap's resamples and seed) and `files.results` (`results.jsonl`, one line per judged pair). |
+| `evaluate` | `judge_model` and `compare_model` (`null` without one), `headline` (the judge pass rate of `base` and `tuned`, and `compare` with a compare target, their `delta` with its `ci95`, the paired `wins`, `regressions` and `ties`, `tuned_minus_compare` with a compare target, with the cases it `skipped`, with `--evaluators` the headline `evaluator` and each one's rates and deltas under `evaluators`, and the numbers of `cases` and `trajectories`), each metric's rate per target, the errors per target, `reused` (the targets that took answers or verdicts from the store, with how many), the publication and the caveat. | `files.summary` (`summary.json`: per target the judge's passes, every metric's `n`, `passed` and `rate`, the agreement per trajectory, tokens and errors by stage; the paired counts; the bootstrap's resamples and seed) and `files.results` (`results.jsonl`, one line per judged pair). |
 
 Under pup, `--output table` (or `csv`) without a `--jq` filter shows the rows of a list:
 `models list` one row per model, `auth status` per provider, `doctor` per check and

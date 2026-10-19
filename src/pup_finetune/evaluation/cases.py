@@ -243,12 +243,15 @@ class Exclusion:
     detail: str
 
 
-def exclusions(cases: Sequence[ReplayCase], renderer: Renderer) -> dict[str, Exclusion]:
-    """The cases that ``renderer``'s model cannot replay, by case id."""
+def exclusions(cases: Sequence[ReplayCase], renderer: Renderer | None) -> dict[str, Exclusion]:
+    """The cases that ``renderer``'s model cannot replay, by case id; without a renderer,
+    those with no prompt."""
     found: dict[str, Exclusion] = {}
     for case in cases:
         if not case.prefix:
             found[case.id] = Exclusion(EMPTY_PROMPT, "the recorded turn has no message before it")
+        elif renderer is None:
+            continue
         elif (error := renderer.prompt_refusal(case.prefix, case.tools)) is not None:
             found[case.id] = Exclusion(error.code.value, error.detail)
     return found

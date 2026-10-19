@@ -178,6 +178,51 @@ def test_a_pull_warns_when_max_candidates_stops_it_short(api: FakeExportApi) -> 
     assert any("--max-candidates" in warning for warning in data["warnings"])
 
 
+def test_a_pull_with_sample_random_reads_every_span_and_spreads_the_rows(
+    api: FakeExportApi,
+) -> None:
+    data = output_json(fresh("--sample", "random", "--target-count", "3"))
+    assert api.cursors == [None, PAGE_2_CURSOR]
+    assert data["pull"]["stopped"] == "exhausted"
+    rows = [json.loads(line) for line in Path("ds/rows.jsonl").read_text().splitlines()]
+    traces = [row["source"]["trace_id"] for row in rows]
+    assert len(traces) == len(set(traces)) == 3
+
+
+def test_a_random_pull_cut_short_by_max_candidates_warns_it_samples_the_oldest_spans(
+    api: FakeExportApi,
+) -> None:
+    data = output_json(fresh("--sample", "random", "--max-candidates", "3", "--target-count", "1"))
+    assert data["pull"]["stopped"] == "max_candidates"
+    (warning,) = [warning for warning in data["warnings"] if "oldest first" in warning]
+    assert "--max-candidates 3" in warning
+    assert "--from" not in warning  # the directory froze the window
+
+
+def test_a_pull_reports_how_the_accepted_rows_spread_over_traces(use_pup: UsePup) -> None:
+    busy = [conversation(f"span-busy-{n}", "busy", f"Q{n}?", f"A{n}.") for n in range(20)]
+    quiet = [conversation(f"span-quiet-{n}", f"quiet-{n}", "Q?", f"A{n}.") for n in range(10)]
+    pages = [page([*busy, *quiet])]
+
+    def spread_warnings(data: dict[str, Any]) -> list[str]:
+        return [warning for warning in data["warnings"] if "one trace gives" in warning]
+
+    serve(use_pup, pages)
+    data = output_json(pull(Path("a")))
+    assert (data["accepted"], data["pull"]["accepted_traces"]) == (30, 11)
+    assert data["pull"]["busiest_trace_rows"] == 20
+    (warning,) = spread_warnings(data)
+    assert "20 of the 30 accepted rows" in warning
+    assert "--sample random --max-rows-per-trace N in a new directory" in warning
+    # Not once --max-rows-per-trace is set, nor for a few rows.
+    serve(use_pup, pages)
+    capped = output_json(pull(Path("b"), "--max-rows-per-trace", "10"))
+    assert (capped["accepted"], capped["pull"]["busiest_trace_rows"]) == (20, 10)
+    assert spread_warnings(capped) == []
+    serve(use_pup, pages)
+    assert spread_warnings(output_json(pull(Path("c"), "--target-count", "19"))) == []
+
+
 def test_max_candidates_equal_to_every_span_is_not_a_short_read(api: FakeExportApi) -> None:
     data = output_json(fresh("--max-candidates", "10"))
     assert data["pull"]["matched_spans"] == 10
@@ -191,7 +236,7 @@ def test_a_pull_warns_when_no_span_matched(use_pup: UsePup) -> None:
     assert data["pull"]["matched_spans"] == 0
     assert data["warnings"][0] == (
         "no LLM spans matched; check --ml-app, --span-name, --query, --tag and the time "
-        "range (--from, --to)"
+        "range (--from, --to) in a new directory (this one froze them)"
     )
 
 
@@ -371,6 +416,8 @@ def test_pull_stops_at_the_target_count_and_reads_further_with_a_higher_one(
     assert api.cursors == [None, PAGE_2_CURSOR]
     assert more["accepted"] == FIXTURE_ROWS
     assert (more["pull"]["added"], more["pull"]["unchanged"]) == (2, 2)
+    # The directory froze the filter and time range, so widening them needs a new one.
+    assert any("time range in a new directory" in warning for warning in more["warnings"])
 
 
 def test_a_rerun_retires_a_stored_prefix_of_a_conversation_on_a_later_page(
@@ -420,6 +467,8 @@ def test_a_rerun_retires_a_stored_prefix_of_a_conversation_on_a_later_page(
         ("--from", "1766620800000"),
         ("--to", "now-1h"),
         ("--seed", "7"),
+        ("--sample", "random"),
+        ("--max-rows-per-trace", "1"),
     ],
 )
 def test_pulling_with_other_settings_is_rejected(
@@ -632,6 +681,29 @@ def test_a_flagless_pull_into_an_imported_dataset_is_a_settings_conflict(
     assert api.requests == []
 
 
+def test_a_pull_freezes_the_sample_and_the_cap_and_a_rerun_takes_them(
+    api: FakeExportApi, tmp_path: Path
+) -> None:
+    first = pull(tmp_path / "ds", "--sample", "random", "--max-rows-per-trace", "1")
+    assert first.exit_code == 0, first.stderr
+    # Trace synthetic-trace-0101 has two rows.
+    assert output_json(first)["excluded_by_code"]["trace_row_cap"] == 1
+    source = json.loads((tmp_path / "ds" / "settings.json").read_text())["source"]
+    assert (source["sample"], source["max_rows_per_trace"]) == ("random", 1)
+    rows = (tmp_path / "ds" / "rows.jsonl").read_bytes()
+
+    rerun = invoke("pull", "ds")
+    assert rerun.exit_code == 0, rerun.stderr
+    assert "using its --ml-app, --sample, --max-rows-per-trace" in rerun.stderr
+    assert output_json(rerun)["pull"]["added"] == 0
+    assert (tmp_path / "ds" / "rows.jsonl").read_bytes() == rows
+    other = invoke("pull", "ds", "--max-rows-per-trace", "2")
+    assert other.exit_code == 2
+    assert other.stderr.startswith(
+        "Error [settings_conflict]: ds froze --max-rows-per-trace 1 on its first pull\n"
+    )
+
+
 def test_tags_given_in_another_order_are_the_frozen_ones(
     api: FakeExportApi, tmp_path: Path
 ) -> None:
@@ -696,6 +768,22 @@ def test_a_rerun_keeps_the_last_target_and_a_review_s_drops_are_replaced(
     refilled = output_json(pull(target))
     assert refilled["pull"]["added"] == 1
     assert refilled["pipeline"]["rows"]["kept"] == 2
+
+
+def test_a_random_pull_that_read_every_span_still_steps_to_replace_a_review_s_drops(
+    api: FakeExportApi, tmp_path: Path
+) -> None:
+    target = tmp_path / "ds"
+    first = output_json(pull(target, "--sample", "random", "--target-count", "2"))
+    # Every span is read, but the target cut rows a rerun can replace drops with.
+    assert (first["pull"]["stopped"], first["pull"]["rows_over_target"]) == ("exhausted", 2)
+    first_row = json.loads((target / "rows.jsonl").read_text().splitlines()[0])["id"]
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(json.dumps({"id": first_row, "keep": False, "reason": "synthetic"}) + "\n")
+    labeled = output_json(invoke("label", str(target), "--file", str(labels)))
+    pull_more = [step for step in labeled["next_steps"] if " dataset pull " in step["command"]]
+    assert pull_more and pull_more[0]["command"].endswith("dataset pull ds")
+    assert output_json(pull(target))["pull"]["added"] == 1
 
 
 def test_the_pull_more_step_stops_once_every_matching_span_was_read(

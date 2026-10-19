@@ -21,6 +21,7 @@ from pydantic import SecretStr
 
 from pup_finetune import redaction
 from pup_finetune.errors import ExternalError, StateError, UsageError
+from pup_finetune.evaluation.targets import session_samplers
 from pup_finetune.providers.base import (
     AdamConfig,
     CheckpointRef,
@@ -40,6 +41,7 @@ from pup_finetune.providers.baseten.client import to_loops_datum
 from pup_finetune.rendering.families import QWEN3_5
 from pup_finetune.rendering.hf import HFChatTemplateRenderer
 from pup_finetune.rendering.tokens import TokenizedExample
+from pup_finetune.training.records import TrainResult
 from tests.fakes.baseten import (
     Answer,
     FakeAdamParams,
@@ -470,6 +472,14 @@ def test_optim_step_passes_every_adam_parameter(setup: Setup) -> None:
     ]
 
 
+def test_each_optim_step_sends_its_own_learning_rate(setup: Setup) -> None:
+    with setup.session() as session:
+        for rate in (5e-5, 1e-4):
+            session.optim_step(AdamConfig(learning_rate=rate)).result()
+    sent = [kwargs["adam_params"].learning_rate for kwargs in setup.loops.kwargs("optim_step")]
+    assert sent == [5e-5, 1e-4]
+
+
 @pytest.mark.parametrize(
     ("call", "error", "on_result", "transient"),
     [
@@ -617,6 +627,27 @@ def test_a_checkpoint_sampler_loads_the_checkpoint_with_one_sample(setup: Setup)
         assert setup.loops.kwargs("SamplingClient")[0]["checkpoint_path"] == ckpt.uri
         (load,) = setup.loops.kwargs("sample")
         assert load["sampling_params"].max_tokens == 1
+
+
+def test_a_tuned_only_evaluation_deploys_no_base_sampler(setup: Setup) -> None:
+    with setup.session() as session:
+        training = session.save_training_checkpoint("t1", epoch=1, step=1)
+        result = TrainResult(
+            best_epoch=1,
+            best_val_loss=1.0,
+            stopped_reason="completed",
+            epochs=[],
+            best_sampler_ckpt=None,
+            best_training_ckpt=training,
+            last_training_ckpt=training,
+            warnings=[],
+        )
+        with session_samplers(
+            session, result, run_id="ft-x", max_checkpoint_name_len=50, targets=["tuned"]
+        ) as targets:
+            assert list(targets.samplers) == ["tuned"]
+    (body,) = setup.transport.bodies("POST /v1/loops/samplers")
+    assert body["model_path"] == targets.tuned_checkpoint.uri  # type: ignore[union-attr]
 
 
 def test_tool_call_arguments_keep_the_types_the_tools_declare(

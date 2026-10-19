@@ -86,6 +86,9 @@ class Pipeline:
     """The project of that dataset."""
     warnings: tuple[str, ...] = ()
     """Why a part is ``unreadable``: the file and the problem, and what to do about it."""
+    checked: int = 0
+    """Accepted rows whose label in force a triage check wrote (``by: check``), which no
+    review decided."""
 
     @property
     def labeled(self) -> int:
@@ -244,6 +247,8 @@ def pipeline_state(
                 else "pushed"
             )
     triage, triage_warning = triage_status(dataset)
+    checks = {row_id for row_id, label in dataset.labels().items() if label.by == "check"}
+    checked = sum(row.id in checks for row in dataset.rows()) if checks else 0
     if triage_warning is not None:
         warnings.insert(0, triage_warning)
     return Pipeline(
@@ -259,6 +264,7 @@ def pipeline_state(
         dataset_name=name,
         project=project,
         warnings=tuple(warnings),
+        checked=checked,
     )
 
 
