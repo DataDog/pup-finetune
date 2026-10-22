@@ -15,7 +15,8 @@ arguments, options, examples and safety, the safety table built from every comma
 codes from ``pup_finetune.errors.ERROR_CODES``), the exclusion-code table between
 the markers in ``docs/data-format.md`` from ``pup_finetune.data.exclusions``, and the table
 of what each step needs between the markers in ``README.md`` from what ``doctor`` checks
-(``pup_finetune.readiness``, the provider and credential registries). With ``--check``,
+(``pup_finetune.readiness``, the provider and credential registries), and the table of
+supported models there from the registered providers' model profiles. With ``--check``,
 writes nothing and exits 1 when any of them is out of date.
 
 The output is deterministic: it is built from the commands' parameters, not from rendered
@@ -40,6 +41,8 @@ EXCLUSIONS_BEGIN = "<!-- BEGIN GENERATED: exclusion codes (scripts/gen_command_d
 EXCLUSIONS_END = "<!-- END GENERATED: exclusion codes -->"
 REQUIREMENTS_BEGIN = "<!-- BEGIN GENERATED: what each step needs (scripts/gen_command_docs.py) -->"
 REQUIREMENTS_END = "<!-- END GENERATED: what each step needs -->"
+MODELS_BEGIN = "<!-- BEGIN GENERATED: supported models (scripts/gen_command_docs.py) -->"
+MODELS_END = "<!-- END GENERATED: supported models -->"
 
 _DEFAULT_NOTE = re.compile(r"\s*\[dim\]\\\[default: (?P<default>.*?)\]\[/dim\]")
 """A default written into an option's help (``_presentation.default_note``)."""
@@ -465,12 +468,45 @@ def with_requirements(text: str) -> str:
     )
 
 
+def render_models() -> str:
+    """The table of supported models that goes between the markers in ``README.md``.
+
+    Read from the registry's model profiles (each alias with its names, the Hugging Face name
+    last), one row per Hugging Face model, in the order the providers (in registration order)
+    list them, with a column per provider. Development-only providers are left out.
+    """
+    from pup_finetune.providers import provider_infos
+    from pup_finetune.runtime import Runtime
+
+    infos = provider_infos(Runtime())  # not development mode
+    aliases: dict[str, dict[str, None]] = {}
+    offered: dict[str, set[str]] = {}
+    for info in infos:
+        for alias, names in info.models.items():
+            aliases.setdefault(names[-1], {})[alias] = None
+            offered.setdefault(names[-1], set()).add(info.name)
+    lines = [
+        "| Model | `--model` | " + " | ".join(info.label for info in infos) + " |",
+        "| --- | --- | " + " | ".join("---" for _ in infos) + " |",
+    ]
+    for model, model_aliases in aliases.items():
+        names = ", ".join(f"`{alias}`" for alias in model_aliases)
+        cells = " | ".join("yes" if info.name in offered[model] else "-" for info in infos)
+        lines.append(f"| `{model}` | {names} | {cells} |")
+    return "\n".join(lines)
+
+
+def with_models(text: str) -> str:
+    """``text`` (``README.md``) with its generated table of supported models replaced."""
+    return between(text, MODELS_BEGIN, MODELS_END, render_models(), name=README.name)
+
+
 def expected() -> dict[Path, str]:
     """Each generated file and the content it should have."""
     return {
         COMMANDS_DOC: render_commands(),
         DATA_FORMAT_DOC: with_exclusions(DATA_FORMAT_DOC.read_text(encoding="utf-8")),
-        README: with_requirements(README.read_text(encoding="utf-8")),
+        README: with_models(with_requirements(README.read_text(encoding="utf-8"))),
     }
 
 

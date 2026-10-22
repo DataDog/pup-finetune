@@ -82,6 +82,29 @@ def test_the_table_of_what_each_step_needs_comes_from_the_registries() -> None:
     ]
 
 
+def test_the_table_of_supported_models_in_the_readme_is_up_to_date() -> None:
+    text = gen.README.read_text(encoding="utf-8")
+    assert gen.with_models(text) == text, _FIX
+
+
+def test_the_table_of_supported_models_comes_from_the_profiles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pup_finetune.providers import get_provider, registered_providers
+    from pup_finetune.runtime import Runtime
+
+    monkeypatch.setenv("PUP_FINETUNE_DEV", "1")  # the table must not follow the environment
+    table = gen.render_models()
+    assert table.splitlines()[0] == "| Model | `--model` | Fireworks | Baseten |"
+    for name in registered_providers():
+        for profile in get_provider(name, Runtime()).models():
+            assert f"| `{profile.tokenizer_model}` | `{profile.alias}` |" in table, profile.alias
+    assert "fake" not in table.casefold()  # development-only providers stay out of the README
+    # A model both providers offer is one row.
+    assert "| `Qwen/Qwen3.8-27B` | `qwen3p8-27b` | yes | yes |" in table
+    assert "| `Qwen/Qwen3.5-9B` | `qwen3p5-9b` | - | yes |" in table
+
+
 def test_check_mode_reports_nothing_stale() -> None:
     assert gen.stale() == []
     assert gen.main(["--check"]) == 0

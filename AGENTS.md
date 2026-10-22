@@ -25,8 +25,9 @@ uv run mypy src                      # type-check (strict)
 uv run python scripts/check_headers.py  # license header on every tracked .py and shell script
 uv run python scripts/check_3rdparty.py # LICENSE-3rdparty.csv covers every dependency
 uv run python scripts/gen_command_docs.py  # regenerate docs/commands.md, the exclusion
-                                     # table in docs/data-format.md and README.md's table of
-                                     # what each step needs; a test fails when stale
+                                     # table in docs/data-format.md and README.md's tables of
+                                     # supported models and of what each step needs; a test
+                                     # fails when stale
 uv run pre-commit install            # run the hooks above on every commit
 uv run pup-finetune --help           # run the CLI from the checkout
 ```

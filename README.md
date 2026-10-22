@@ -63,6 +63,19 @@ what bills, then exit `2`. The preview's `next_command` runs it, with `--confirm
 | A dataset in Agent Observability | `pup finetune dataset fetch`, then [Train](#train) |
 | A finished run | [Evaluate](#evaluate) or [Deploy](#deploy) |
 
+### Supported models
+
+<!-- BEGIN GENERATED: supported models (scripts/gen_command_docs.py) -->
+| Model | `--model` | Fireworks | Baseten |
+| --- | --- | --- | --- |
+| `Qwen/Qwen3.8-27B` | `qwen3p8-27b` | yes | yes |
+| `zai-org/GLM-5.3-Flash` | `glm-5p3-flash` | yes | yes |
+| `moonshotai/Kimi-K3` | `kimi-k3` | yes | yes |
+| `deepseek-ai/DeepSeek-V4-Flash-0731` | `deepseek-v4-flash-0731` | yes | - |
+| `meta-models/Muse-Glimmer-30B` | `muse-glimmer-30b` | yes | - |
+| `Qwen/Qwen3.5-9B` | `qwen3p5-9b` | - | yes |
+<!-- END GENERATED: supported models -->
+
 ### What each step needs
 
 `doctor` checks all of this and says which steps are ready. A key comes from its environment
