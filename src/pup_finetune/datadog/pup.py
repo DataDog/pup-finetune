@@ -38,7 +38,7 @@ FIXED_FLAGS: tuple[str, ...] = ("--no-agent", "--output", "json")
 """Flags placed before the arguments of every internal pup call."""
 
 INSTALL_HINT = (
-    "install pup with `brew install datadog/pack/pup` (or see the pup README), "
+    "install pup with `brew install datadog-labs/pack/pup` (or see the pup README), "
     f"or set {PUP_BINARY_ENV} to its path"
 )
 

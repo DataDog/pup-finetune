@@ -41,7 +41,7 @@ from pup_finetune.providers import ProviderInfo, provider_info, provider_infos, 
 from pup_finetune.runtime import Runtime
 
 _LOGIN_HINT = "run `pup auth login`"
-_UPGRADE_HINT = "upgrade with `brew upgrade datadog/pack/pup`"
+_UPGRADE_HINT = "upgrade with `brew upgrade datadog-labs/pack/pup`"
 _DATADOG_NEEDED_FOR = "reading traces and pushing datasets"
 
 DOCTOR_NEEDS: dict[str, str] = {"check": "provider_name"}

@@ -317,7 +317,7 @@ def test_old_pup_fails_but_still_emits_the_report(use_pup: UsePup) -> None:
     pup_check = report["checks"][0]
     assert pup_check["status"] == "fail"
     assert "older than the minimum 1.10.7" in pup_check["detail"]
-    assert pup_check["fix"] == "upgrade with `brew upgrade datadog/pack/pup`"
+    assert pup_check["fix"] == "upgrade with `brew upgrade datadog-labs/pack/pup`"
     assert report["checks"][1]["status"] == "pass"
     assert report["ready"]["dataset pull"]["blocked_by"] == ["pup"]
 
@@ -331,7 +331,7 @@ def test_missing_pup_fails_and_skips_auth(use_pup: UsePup, tmp_path: Path) -> No
     assert report["versions"]["pup"] is None
     pup_check, auth_check = report["checks"][:2]
     assert pup_check["status"] == "fail"
-    assert "brew install datadog/pack/pup" in pup_check["fix"]
+    assert "brew install datadog-labs/pack/pup" in pup_check["fix"]
     assert auth_check["status"] == "skipped"
     assert auth_check["detail"].startswith("skipped")
     assert report["ready"]["dataset show"]["ready"] is True
@@ -451,7 +451,9 @@ def test_a_failed_pup_check_comes_before_the_live_check(
     result = invoke("--provider", "fireworks")
     assert result.exit_code == 1
     assert report_of(result)["next_command"] is None
-    assert result.stderr.splitlines()[-1] == "Next: upgrade with `brew upgrade datadog/pack/pup`"
+    assert (
+        result.stderr.splitlines()[-1] == "Next: upgrade with `brew upgrade datadog-labs/pack/pup`"
+    )
 
 
 def test_a_named_provider_s_steps_are_the_only_ones_not_ready(
@@ -649,10 +651,10 @@ def test_a_failing_doctor_still_prints_its_checklist(use_pup: UsePup, tmp_path: 
     assert result.exit_code == 1
     lines = result.stderr.splitlines()
     assert lines[1].startswith("FAIL  pup not found")
-    assert lines[2].startswith("      fix: install pup with `brew install datadog/pack/pup`")
+    assert lines[2].startswith("      fix: install pup with `brew install datadog-labs/pack/pup`")
     assert lines[3].startswith("skip  Datadog login not checked (no pup)")
     assert lines[-2].startswith("Ready: dataset show.  Not ready: dataset pull, push")
-    assert lines[-1].startswith("Next: install pup with `brew install datadog/pack/pup`")
+    assert lines[-1].startswith("Next: install pup with `brew install datadog-labs/pack/pup`")
 
 
 def test_a_named_provider_s_failure_shows_its_fix_and_the_next_command(use_pup: UsePup) -> None:
