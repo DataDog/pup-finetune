@@ -62,16 +62,20 @@ These steps install Pup and `pup-finetune` and check that both work:
 
    | Provider | You need | Key's environment variable | `deploy` creates |
    | --- | --- | --- | --- |
-   | Baseten | A Baseten account. Training runs on Baseten Loops. | `BASETEN_API_KEY` | A dedicated model. The workspace needs BDN volumes and an `hf_access_token` secret. |
-   | Fireworks | A Fireworks account with access to Serverless Training. | `FIREWORKS_API_KEY` | An on-demand deployment. |
+   | Baseten | A Baseten workspace enabled to train the model on Loops. To deploy, BDN volumes and an `hf_access_token` secret. | `BASETEN_API_KEY` | A dedicated Baseten model, with 0 to 1 replicas. |
+   | Fireworks | A Fireworks account with access to Serverless Training. | `FIREWORKS_API_KEY` | An on-demand Fireworks deployment, with 0 to 1 replicas. |
+
+   Replace `<PROVIDER>` with `baseten` or `fireworks`, here and in later commands:
 
    ```sh
    pup finetune auth login <PROVIDER>
    ```
 
-   Replace `<PROVIDER>` with `baseten` or `fireworks`, here and in the commands below. The
-   command asks for the key at a hidden prompt and stores it in the OS keychain. You can set
-   the provider's environment variable instead. To build a dataset, you need only the Datadog login.
+   The command asks for the key at a hidden prompt and stores it in the OS keychain. You can
+   set the provider's environment variable instead. Judges grade `evaluate` and `benchmark` and
+   label rows in `dataset triage`, and they need an Anthropic, OpenAI or Fireworks key, as
+   [Your credentials pick the default judges](#your-credentials-pick-the-default-judges)
+   explains. To build a dataset, you need only the Datadog login.
 
 6. Check your setup:
 
@@ -298,7 +302,7 @@ This step is optional. Before you train, `benchmark` replays the test split with
 candidate base model and grades them with the judge `evaluate` uses.
 
 ```sh
-pup finetune benchmark datasets/my-agent --models qwen3p5-9b,baseten/glm-5p3-flash
+pup finetune benchmark datasets/my-agent --models baseten/qwen3p5-9b,fireworks/glm-5p3-flash
 ```
 
 The result ranks the models by judge pass rate, with a confidence interval, and recommends one
@@ -312,6 +316,8 @@ guide explains the [failure lines](docs/evaluate.md#see-why-cases-fail) that `be
 
 ## Train a model
 
+Set `--provider` to `baseten` or `fireworks`:
+
 ```sh
 pup finetune train --provider <PROVIDER> --dataset datasets/my-agent --model qwen3p8-27b --detach
 pup finetune status --watch
@@ -323,8 +329,8 @@ watch.
 
 Training keeps the epoch with the best validation loss, even when a cap stops the run. On
 Baseten, the run records it as its `deployable_checkpoint`. On Fireworks, the run promotes it
-to a Fireworks model. Cap the spend with `--max-train-tokens`, or with
-`--max-spend-usd` and `--hourly-rate-usd`.
+to a Fireworks model and records it as its `promoted_model`. Cap the spend with
+`--max-train-tokens`, or with `--max-spend-usd` and `--hourly-rate-usd`.
 
 The [`train` reference](docs/commands.md#pup-finetune-train) lists the training settings.
 The learning rate stays constant unless `--lr-schedule linear` or `cosine` decays it. A
@@ -347,17 +353,17 @@ pup finetune train --provider <PROVIDER> --dataset datasets/my-agent --model qwe
 ```
 
 Set `--max-train-tokens` above the preview's `tokens_per_epoch`. Below it, no epoch finishes,
-so the run keeps no epoch and evaluates nothing, and the preview warns.
+so the run keeps no epoch and evaluates nothing. The preview warns when the cap is that low.
 
-### Train on Baseten while your machine sleeps
+### Train in a Baseten job
 
 ```sh
 pup finetune train --dataset datasets/my-agent --model qwen3p5-9b --remote
 ```
 
-`--remote` runs the training loop in a Baseten CPU job, which bills on top of the trainer. Your
-Baseten team needs a secret named `pup_finetune_api_key` that holds a Baseten API key of your
-workspace.
+`--remote` runs the training loop in a Baseten CPU job instead of on your machine, so training
+goes on while your machine sleeps. The job bills on top of the trainer. Your Baseten team needs
+a secret named `pup_finetune_api_key` that holds a Baseten API key of your workspace.
 
 `status` reads the job, so `status --watch`, `evaluate` and `deploy` work as for a local run.
 `cancel` cannot stop a remote run, so stop its job and its Loops trainer in the Baseten UI.
@@ -473,17 +479,18 @@ pup finetune undeploy ft-20261007183443-a8b181
 ```
 
 Both preview first. `deploy --confirm` creates the deployment, waits until it serves and
-sends one chat completion as a smoke test. The result's `usage` gives the base URL, the model
-to request and an example request.
+sends one smoke-test chat completion. The deployment scales between 0 and 1 replicas and bills
+per GPU-second while a replica runs, until you undeploy it. The result's `usage` gives the base
+URL, the model to request and an example request.
 
-On Baseten, `deploy` serves the run's `deployable_checkpoint` as a dedicated model on exactly
-the GPUs of `--shape TYPE:COUNT`, by default `H100:1`. The workspace needs BDN volumes and an
-`hf_access_token` secret. The model scales between 0 and 1 replicas and bills per GPU-second
-while a replica runs. Undeploying deletes the model and keeps the checkpoint.
+On Baseten, `deploy` serves the run's `deployable_checkpoint` as a dedicated Baseten model on
+exactly the GPUs of `--shape TYPE:COUNT`, by default `H100:1`. The workspace needs BDN volumes
+and an `hf_access_token` secret. Undeploying deletes the Baseten model. The checkpoint stays,
+so you can deploy the run again.
 
-On Fireworks, `deploy` creates an on-demand deployment of the run's promoted model. The
-deployment scales to zero when idle and bills per GPU-second while a replica runs, until you
-undeploy it. Undeploying keeps the model.
+On Fireworks, `deploy` creates an on-demand deployment of the run's `promoted_model`, on the
+first shape Fireworks validates for it unless `--shape` names one. Undeploying deletes the
+deployment. The promoted model stays, so you can deploy the run again.
 
 ## Keys live in your environment or the OS keychain
 
@@ -552,6 +559,7 @@ that code at its pinned commit and runs it on this machine, and the `train`, `ev
 ## Every command prints one JSON result
 
 Each command prints one JSON result on stdout, and progress, warnings and a summary on stderr.
+A command that fails prints its error on stderr and leaves stdout empty.
 Exit code `0` means the command finished. `2` means a preview, or a mistake you can fix in the
 command or the directory. `1` means something outside failed, or local state is broken. The
 files listed under `files` hold the full record.
