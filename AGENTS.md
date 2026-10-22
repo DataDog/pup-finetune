@@ -9,10 +9,12 @@ traces, fine-tunes an open-weight model on it, evaluates the tuned model against
 and deploys it. It ships as a `pup` extension, so users run it as `pup finetune ...`; the
 standalone executable is `pup-finetune`. All Datadog reads and writes go through `pup` and its
 OAuth login. The project is in early development: commands and file formats may change.
-User-facing docs: `README.md` (quickstart first, then one section per step: dataset, train,
-evaluate, deploy, credentials, data handling), `docs/commands.md` (every command and
-flag), `docs/data-format.md` (rows, exclusion codes, dataset files) and the agent skill in
-`skills/datadog-finetune/SKILL.md`.
+User-facing docs: `README.md` (quickstart first, how paid steps preview, the supported
+models, then one how-to section per step: dataset, base model, train, evaluate, deploy, then
+credentials, data handling and reading results; it links the reference docs and the guide),
+`docs/commands.md` (every command and flag), `docs/data-format.md` (rows, exclusion codes,
+dataset files, row checks), `docs/evaluate.md` (a how-to guide to judges, reuse, the compare
+model and evaluators) and the agent skill in `skills/datadog-finetune/SKILL.md`.
 
 ## Commands
 
