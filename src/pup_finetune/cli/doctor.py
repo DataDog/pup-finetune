@@ -310,7 +310,7 @@ DOC = CommandDoc(
     ),
     examples=(
         "pup finetune doctor",
-        "pup finetune doctor --provider fireworks",
+        "pup finetune doctor --provider baseten",
         "pup finetune doctor --provider fireworks --check",
     ),
     safety=Safety(

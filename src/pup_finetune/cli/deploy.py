@@ -77,12 +77,6 @@ from pup_finetune.runs import RunDir
 
 DEFAULT_TIMEOUT_MINUTES = 30.0
 
-_AGENT_RULE = (
-    "Fireworks' own CLI refuses to create deployments when run by an AI agent; this command "
-    "uses the API and relies on --confirm, so an agent must pass --confirm only with the "
-    "user's explicit authorization."
-)
-
 RunDirArgument = Annotated[
     Path,
     typer.Argument(
@@ -105,7 +99,7 @@ DEPLOY_DOC = CommandDoc(
         "to call the model (usage: the base URL, the model to request and an example request "
         "that reads the key from its environment variable) and how to delete it "
         f"(undeploy_command). {BILLING[0].upper()}{BILLING[1:]}. A failed smoke test exits 1 "
-        f"and keeps the deployment. {_AGENT_RULE}",
+        "and keeps the deployment.",
     ),
     examples=("pup finetune deploy run", "pup finetune deploy run --timeout-minutes 45"),
     safety=Safety(

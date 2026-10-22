@@ -422,7 +422,7 @@ def _profile_brief(profile: ModelProfile) -> dict[str, Any]:
 
 def no_epoch_can_finish(spec: TrainSpec, inputs: RunInputs) -> bool:
     """Whether ``--max-train-tokens`` is below one epoch's tokens: training then stops
-    before the first epoch ends, so nothing is promoted or evaluated."""
+    before the first epoch ends, so nothing is kept or evaluated."""
     cap = spec.max_train_tokens
     return cap is not None and cap < inputs.tokens_per_epoch
 
@@ -431,7 +431,7 @@ def no_epoch_warning(spec: TrainSpec, inputs: RunInputs) -> str:
     return (
         f"no epoch will finish: --max-train-tokens {spec.max_train_tokens} is below the "
         f"{inputs.tokens_per_epoch} tokens of one epoch (tokens_per_epoch), so nothing is "
-        "promoted or evaluated; set --max-train-tokens above tokens_per_epoch"
+        "kept or evaluated; set --max-train-tokens above tokens_per_epoch"
     )
 
 
@@ -1764,7 +1764,7 @@ def cancel(run_dir: RunDirArgument, confirm: CancelConfirmOption = False) -> dic
         **_by_id(source),
         "pid": pid,
         "action": f"send SIGTERM to process {pid}: training stops after the current step, "
-        "saves a resumable checkpoint and promotes the best epoch so far",
+        "saves a resumable checkpoint and keeps the best epoch so far",
         **({"warnings": sync.warnings} if sync is not None and sync.warnings else {}),
     }
     require_confirm(confirm, preview, command("cancel", run_dir, "--confirm"))
@@ -1830,14 +1830,14 @@ TRAIN_DOC = CommandDoc(
         "The preview lists rows and rendered tokens per split, the rejected rows, tokens per "
         "epoch and in total, the settings and where the data goes. --detach trains in a "
         "background worker; follow it with `status --watch`. Training stops early after --patience epochs without a "
-        "validation-loss improvement; a Ctrl-C or `cancel` still promotes the best epoch. "
+        "validation-loss improvement; a Ctrl-C or `cancel` still keeps the best epoch. "
         "--learning-rate is constant unless --lr-schedule linear or cosine decays it over the "
         "steps of --max-epochs epochs (the preview's max_steps; early stopping or a cap ends "
         "the run first), after a linear warmup over --warmup-fraction of them (warmup_steps); "
         "it never reaches zero, and the other Adam parameters are fixed (run.json "
         "settings.optimizer). "
         "With --evaluate, the run is also evaluated on the test split in its training "
-        "session once the best epoch is promoted (see `evaluate`): the judge is calibrated "
+        "session once the best epoch is kept (see `evaluate`): the judge is calibrated "
         "and --eval-out-dir checked before training starts, so a failed calibration trains "
         "nothing; --detach is refused with it; and the evaluation stops, partial, at "
         "--max-spend-usd. --max-seq-len caps the context (and so the cost): longer rows "
@@ -1851,8 +1851,8 @@ TRAIN_DOC = CommandDoc(
         "directory; cancel cannot stop the job yet.",
     ),
     examples=(
-        "pup finetune train --dataset ds --model qwen3p5-9b",
         "pup finetune train --dataset ds --model qwen3p5-9b --lr-schedule cosine",
+        "pup finetune train --dataset ds --model muse-glimmer-30b",
     ),
     safety=Safety(
         data="sends rows to the provider (and the judge)",
@@ -1920,7 +1920,7 @@ CANCEL_DOC = CommandDoc(
     short="Stop a training run gracefully (previews without --confirm).",
     description=(
         "Stop the process training a run: it finishes the current step, saves a resumable "
-        "checkpoint and promotes the best epoch so far. Without --confirm, previews which "
+        "checkpoint and keeps the best epoch so far. Without --confirm, previews which "
         "process gets the signal."
     ),
     examples=("pup finetune cancel run", "pup finetune cancel ft-20261007183443-a8b181"),

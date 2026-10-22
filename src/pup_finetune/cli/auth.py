@@ -46,7 +46,7 @@ LOGIN_DOC = CommandDoc(
         "history and process listings."
     ),
     examples=(
-        "pup finetune auth login fireworks",
+        "pup finetune auth login baseten",
         "pup finetune auth login anthropic --stdin < anthropic.key",
     ),
     safety=Safety(

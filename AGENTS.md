@@ -264,12 +264,26 @@ uv run pup-finetune models list                               # every provider's
 uv run pup-finetune models list --provider fireworks --check  # plus the tokenizer and a preflight
 ```
 
-`--check` asks Fireworks about each model (one GET each, nothing paid) and needs the API key:
-`FIREWORKS_API_KEY`, or the OS keychain after `pup finetune auth login fireworks`.
+`--check` asks each model's provider about it (one read-only call per model, nothing paid) and
+needs that provider's key: `BASETEN_API_KEY` or `FIREWORKS_API_KEY`, or the OS keychain after
+`pup finetune auth login <PROVIDER>`.
+
+Training on Baseten Loops is paid: `--provider baseten --model qwen3p5-9b` (or
+`glm-5p3-flash`, `qwen3p8-27b` or `kimi-k3`) needs the `baseten` extra and a Baseten API key
+(`BASETEN_API_KEY`, the OS keychain after `pup finetune auth login baseten`, or the default
+remote's key in `~/.trussrc`, read only). Its preview asks Baseten, read only, whether the
+workspace can train the model; `--confirm` starts a billed dedicated trainer, deactivated when
+the session ends.
+`result.json` records the best sampler checkpoint as `deployable_checkpoint`, and `deploy`
+serves it as a dedicated Baseten model named after the deployment id (the run id made safe, or
+`--deployment-id`), on an instance type with exactly the GPUs of `--shape TYPE:COUNT` (default
+`H100:1`), scaling 0 to 1 replicas. The workspace needs BDN volumes and an `hf_access_token`
+secret (the deployment downloads the base weights from Hugging Face). A name Baseten already
+has is refused before anything is created. `undeploy` deletes that Baseten model with its
+deployment; the checkpoint is kept, so the run can be deployed again.
 
 Training on Fireworks is paid: it needs the API key and the Training SDK, which comes with the
-`fireworks` extra (`uv sync --all-extras`). Train only on synthetic
-rows, pushed to `pup-finetune-dev`, while developing:
+`fireworks` extra (`uv sync --all-extras`).
 
 ```sh
 uv run pup-finetune train --provider fireworks --model qwen3p8-27b --dataset /tmp/ds \
@@ -283,32 +297,18 @@ previews an on-demand Fireworks deployment of it (paid per GPU-second while a re
 until `undeploy`); `--confirm` creates it (first validated shape unless `--shape`, at most
 one replica, scaling to zero when idle, hot loading off), waits until it is `READY`
 (`--timeout-minutes`, default 30), smoke-tests one chat completion and prints the inference
-model (`accounts/<account>/deployments/<id>`). Fireworks' own CLI refuses to create
-deployments when an AI agent runs it; we use the API, so an agent must pass `--confirm` only
-with the user's explicit authorization. Always `undeploy` what you deploy while developing.
-`--max-seq-len <n>` (the `max_seq_len` provider option, which `--provider-option
-max_seq_len=<n>` still sets) cuts the profile's context to `n` tokens: the run records the cut
-profile, and the preview already leaves longer rows out (`exceeds_context`). The fake provider
-takes it too.
+model (`accounts/<account>/deployments/<id>`).
 Training runs in the key's own account (Fireworks refuses a key that sees several accounts);
 `FIREWORKS_ACCOUNT_ID` only overrides the account lookup, i.e. the account id pup-finetune
 records.
 
-Training on Baseten Loops is paid too: `--provider baseten --model qwen3p5-9b` (or
-`glm-5p3-flash` or `qwen3p8-27b`, which Fireworks offers too) needs the `baseten` extra and a
-Baseten API key (`BASETEN_API_KEY`, the OS keychain after `pup finetune auth login baseten`,
-or the default remote's key in `~/.trussrc`, read only). Its preview asks Baseten, read only,
-whether the workspace can train the model; `--confirm` starts a billed dedicated trainer,
-deactivated when the session ends.
-Baseten has no promotion, so `result.json` records the best sampler checkpoint as
-`deployable_checkpoint`, and `deploy` serves it as a dedicated Baseten model named after the
-deployment id (the run id made safe, or `--deployment-id`), on an instance type with exactly
-the GPUs of `--shape TYPE:COUNT` (default `H100:1`), scaling 0 to 1 replicas. The workspace
-needs BDN volumes and an `hf_access_token` secret (the deployment downloads the base weights
-from Hugging Face). A name Baseten already has is refused before anything is created.
-`undeploy` deletes that Baseten model with its deployment; the checkpoint is kept, so the run
-can be deployed again. `--max-seq-len <n>` (at least 1024) cuts the profile's context as on
-Fireworks.
+Train only on synthetic rows, pushed to `pup-finetune-dev`, while developing. `deploy` creates
+deployments through each provider's API, so an agent must pass `--confirm` only with the
+user's explicit authorization. Always `undeploy` what you deploy while developing.
+`--max-seq-len <n>` (the `max_seq_len` provider option, which `--provider-option
+max_seq_len=<n>` still sets; at least 1024 on Baseten) cuts the profile's context to `n`
+tokens: the run records the cut profile, and the preview already leaves longer rows out
+(`exceeds_context`). The fake provider takes it too.
 
 Add `--detach` to train in a background worker (output in `/tmp/run/worker.log`) and follow it
 with `status /tmp/run --watch`. `--timeout DURATION` (`90s`, `10m`, `2h` or seconds; 90s by
