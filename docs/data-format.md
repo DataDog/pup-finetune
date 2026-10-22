@@ -305,6 +305,28 @@ judge passes it and every evaluator passes or does not apply; a case with an eva
 is left out of it. `published.json` keeps, after a span's digest, `+` and the evaluators it
 was sent with.
 
+## Row checks
+
+`dataset triage --checks FILE` runs every public function that FILE defines (not one it
+imports), in definition order, on each row it reviews, before any judge call. A function
+takes one argument, a copy of the row as `rows.jsonl` stores it (see
+[The canonical row](#the-canonical-row)), and returns `True`, `False`, `None` (does not
+apply) or `(bool, reason)`. Anything else it returns, and anything it raises, is a usage
+error naming the check and the row. Checks run in this process, with your privileges, one at
+a time, and cost nothing.
+
+A row that a check fails is labeled drop `by: check`, with the reason `check <name>:
+<reason>` of the first check it fails, and is never sent to a judge. With `--checks` alone,
+no judge is called, so the rows are labeled at once, without `--confirm`. A triage without
+`--checks` skips the rows a check labeled. With `--agreement`, the checks are compared with
+your labels apart from the council.
+
+The file is not frozen. `triage.json` records its absolute path as `checks_file`, and an
+edited file applies the next time a triage passes it. A label is never withdrawn, so a row
+that an earlier version of a check dropped keeps that label after every check passes it. The
+result counts those rows in `stale_check_labels`. Relabel them with `dataset label`, or add
+`--rubric` so the council judges them.
+
 ## Where a dataset stands
 
 Every dataset command's result (`import`, `pull`, `show`, `sample`, `label`, `triage` and

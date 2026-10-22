@@ -353,10 +353,11 @@ copies it to `.agents/skills/` and `.claude/skills/` under the project (or the h
 with `-g`). Neither makes a Datadog or provider call, so both work with `PUP_READ_ONLY` set.
 When you change a command the skill names, keep the skill in step:
 `tests/test_doc_commands.py` checks every `pup finetune` command and flag in it (and in the
-README) against the app, and `tests/test_skill.py` checks its structure (the flow and
-start table, eight short rules, the preview and status templates, Steps 0 to 7 with a `Check:`
-list each, and the error-code and debugging tables). Its commands use example paths and run
-ids (`./ds`, `ft-...`), never shell variables, and `<UPPER>` only for values to fill in.
+README and `docs/evaluate.md`) against the app, and `tests/test_skill.py` checks its
+structure (the flow and start table, eight short rules, the preview and status templates,
+Steps 0 to 7 with a `Check:` list each, and the error-code and debugging tables). Its
+commands use example paths and run ids (`./ds`, `ft-...`), never shell variables, and
+`<UPPER>` only for values to fill in.
 `SKILL.md` has no license header: its frontmatter must come first, and
 `scripts/check_headers.py` checks only code.
 

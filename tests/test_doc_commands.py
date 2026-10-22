@@ -4,9 +4,11 @@
 #
 # This product includes software developed at Datadog (https://www.datadoghq.com/).
 # Copyright 2026-present Datadog, Inc.
-"""Every `pup finetune` command and flag the skill and the README mention exists in the CLI.
+"""Every `pup finetune` command and flag the skill, the README and the evaluation guide mention
+exists in the CLI.
 
-So does every `--provider` and `--model` they pass, and both name each real provider.
+So does every `--provider` and `--model` they pass, and the skill and the README name each real
+provider.
 
 Also: the README names the Pup version `doctor` requires.
 """
@@ -29,7 +31,12 @@ from pup_finetune.providers import get_provider, providers_for_model
 from pup_finetune.runtime import Runtime
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DOCS = [REPO_ROOT / "skills" / "datadog-finetune" / "SKILL.md", REPO_ROOT / "README.md"]
+SKILL = REPO_ROOT / "skills" / "datadog-finetune" / "SKILL.md"
+README = REPO_ROOT / "README.md"
+GUIDE = REPO_ROOT / "docs" / "evaluate.md"
+TRAINING_DOCS = [SKILL, README]
+"""The docs whose examples train on both providers, so their `--model` checks must name both."""
+DOCS = [*TRAINING_DOCS, GUIDE]
 
 PREFIX = ("pup", "finetune")
 SHELL_STOP = {">", ">>", "|", "&&", "||", ";", "#", "\\"}
@@ -190,7 +197,8 @@ def test_every_provider_and_model_passed_exists(doc: Path) -> None:
             elif name is not None and not name.startswith("<"):
                 get_provider(name, Runtime())
                 providers.add(name)
-    assert {"fireworks", "baseten"} <= providers, f"{doc.name} names only {providers}"
+    if doc in TRAINING_DOCS:
+        assert {"fireworks", "baseten"} <= providers, f"{doc.name} names only {providers}"
 
 
 def test_the_checker_catches_a_wrong_command_and_flag() -> None:
