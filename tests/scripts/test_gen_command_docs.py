@@ -66,8 +66,6 @@ def test_the_table_of_what_each_step_needs_comes_from_the_registries() -> None:
         ("`dataset import`, `show`, `sample`, `label`; `status`, `runs`", "", "", ""),
         ("`dataset triage`", "", "`FIREWORKS_API_KEY`", ""),
         ("`dataset push`", "yes", "", ""),
-        ("`train`, `evaluate` on Fireworks", "", "`FIREWORKS_API_KEY`", "`fireworks`, `hf`"),
-        ("`deploy`, `undeploy` on Fireworks", "", "`FIREWORKS_API_KEY`", "`fireworks`"),
         ("`train` on Baseten", "", "`BASETEN_API_KEY`", "`baseten`, `hf`"),
         # Evaluating needs the default judge's key too.
         (
@@ -77,6 +75,8 @@ def test_the_table_of_what_each_step_needs_comes_from_the_registries() -> None:
             "`baseten`, `hf`",
         ),
         ("`deploy`, `undeploy` on Baseten", "", "`BASETEN_API_KEY`", ""),
+        ("`train`, `evaluate` on Fireworks", "", "`FIREWORKS_API_KEY`", "`fireworks`, `hf`"),
+        ("`deploy`, `undeploy` on Fireworks", "", "`FIREWORKS_API_KEY`", "`fireworks`"),
         ("`anthropic/<model>` judges", "", "`ANTHROPIC_API_KEY`", "`anthropic`"),
         ("`openai/<model>` judges", "", "`OPENAI_API_KEY`", ""),
     ]
@@ -95,14 +95,14 @@ def test_the_table_of_supported_models_comes_from_the_profiles(
 
     monkeypatch.setenv("PUP_FINETUNE_DEV", "1")  # the table must not follow the environment
     table = gen.render_models()
-    assert table.splitlines()[0] == "| Model | `--model` | Fireworks | Baseten |"
+    assert table.splitlines()[0] == "| Model | `--model` | Baseten | Fireworks |"
     for name in registered_providers():
         for profile in get_provider(name, Runtime()).models():
             assert f"| `{profile.tokenizer_model}` | `{profile.alias}` |" in table, profile.alias
     assert "fake" not in table.casefold()  # development-only providers stay out of the README
     # A model both providers offer is one row.
     assert "| `Qwen/Qwen3.8-27B` | `qwen3p8-27b` | yes | yes |" in table
-    assert "| `Qwen/Qwen3.5-9B` | `qwen3p5-9b` | - | yes |" in table
+    assert "| `Qwen/Qwen3.5-9B` | `qwen3p5-9b` | yes | - |" in table
 
 
 def test_check_mode_reports_nothing_stale() -> None:

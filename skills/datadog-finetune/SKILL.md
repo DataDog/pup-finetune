@@ -1,6 +1,6 @@
 ---
 name: datadog-finetune
-description: Fine-tune an open-weight model from Datadog Agent Observability (LLM Observability) traces with pup finetune. Use when the user wants to build a supervised fine-tuning (SFT) dataset from the LLM spans of an ml_app, review or label that data, push it to an Agent Observability dataset, train a LoRA on Fireworks or Baseten, evaluate the tuned model against the base model, deploy or undeploy it, or resume, check or debug a training run, an evaluation or a deployment made with pup finetune.
+description: Fine-tune an open-weight model from Datadog Agent Observability (LLM Observability) traces with pup finetune. Use when the user wants to build a supervised fine-tuning (SFT) dataset from the LLM spans of an ml_app, review or label that data, push it to an Agent Observability dataset, train a LoRA on Baseten or Fireworks, evaluate the tuned model against the base model, deploy or undeploy it, or resume, check or debug a training run, an evaluation or a deployment made with pup finetune.
 ---
 
 # Fine-tune a model from Datadog Agent Observability traces
@@ -96,7 +96,7 @@ row-weather-002 (train, 2 turns, tools: get_weather)
 pup finetune doctor --provider fireworks --check
 ```
 
-Pass the provider the user trains on (`fireworks` or `baseten`). `ready` lists what blocks each
+Pass the provider the user trains on (`baseten` or `fireworks`). `ready` lists what blocks each
 step (`blocked_by`); a failed check has a `fix` (a missing key: the user runs `auth login`).
 
 Check:
@@ -261,8 +261,8 @@ pup finetune cancel ft-20261007183443-a8b181
 Check:
 
 - [ ] The user saw the token counts and authorized this training (and any resume).
-- [ ] `status` ends `completed` (or `cancelled`) with a `best_epoch` and a `promoted_model`
-      (Fireworks) or a `deployable_checkpoint` (Baseten).
+- [ ] `status` ends `completed` (or `cancelled`) with a `best_epoch` and a `deployable_checkpoint`
+      (Baseten) or a `promoted_model` (Fireworks).
 - [ ] Validation loss fell, then flattened; if it rose from the first epoch, tell the user
       (overfitting or too little data). After rebalancing it no longer tracks the user's metric.
 

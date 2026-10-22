@@ -107,7 +107,7 @@ pup finetune doctor [OPTIONS]
 
 | Option | Value | Default | Description |
 | --- | --- | --- | --- |
-| `--provider` | `NAME` |  | Require this provider's checks too: fireworks or baseten. |
+| `--provider` | `NAME` |  | Require this provider's checks too: baseten or fireworks. |
 | `--check` |  |  | With --provider: also preflight its models live (read-only; needs its key). |
 
 Examples:
@@ -197,7 +197,7 @@ pup finetune models list [OPTIONS]
 
 | Option | Value | Default | Description |
 | --- | --- | --- | --- |
-| `--provider` | `NAME` | every provider | Only this provider: fireworks or baseten. |
+| `--provider` | `NAME` | every provider | Only this provider: baseten or fireworks. |
 | `--check` |  |  | Preflight each model with its provider (needs its API key). |
 
 Examples:
@@ -591,9 +591,9 @@ pup finetune train [OPTIONS]
 | --- | --- | --- | --- |
 | **Required** | | | |
 | `--dataset` | `DIR` | required | The dataset directory to train on. |
-| `--model` | `MODEL` | required | A model, e.g. qwen3p8-27b; see models list. |
+| `--model` | `MODEL` | required | Model, e.g. glm-5p3-flash; see models list. |
 | **Run** | | | |
-| `--provider` | `NAME` | from --model | Provider: fireworks or baseten. |
+| `--provider` | `NAME` | from --model | Provider: baseten or fireworks. |
 | `--run-dir` | `DIR` | runs/RUN_ID | A new or empty run directory. |
 | `--run-id` | `ID` | generated | Run and model id. |
 | `--detach` |  |  | Train in a background worker; see status. |

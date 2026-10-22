@@ -223,9 +223,11 @@ def provider_choices() -> str:
 
 def model_example() -> str:
     """An example of what ``--model`` takes, for its help: the first model alias of the first
-    provider, e.g. ``qwen3p8-27b`` (``models list`` names them all); development-only
-    providers left out. Imports no provider module."""
-    return next((alias for info in provider_infos(Runtime()) for alias in info.models), "")
+    provider that every provider offers, e.g. ``glm-5p3-flash`` (``models list`` names them
+    all); development-only providers left out. Imports no provider module."""
+    infos = provider_infos(Runtime())
+    aliases = infos[0].models if infos else ()
+    return next((alias for alias in aliases if all(alias in i.models for i in infos)), "")
 
 
 def provider_option_keys() -> str:
@@ -689,7 +691,7 @@ def train(
         typer.Option(
             "--model",
             metavar="MODEL",
-            help=f"A model, e.g. {model_example()}; see models list.",
+            help=f"Model, e.g. {model_example()}; see models list.",
             show_default=False,
             rich_help_panel=REQUIRED,
         ),

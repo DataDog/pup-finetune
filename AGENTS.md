@@ -35,7 +35,7 @@ uv run pup-finetune --help           # run the CLI from the checkout
 ```
 
 The `hf` extra (`transformers`, `jinja2`, `huggingface-hub`) backs the shared renderer and each
-provider SDK has its own extra (`fireworks`, `baseten`); CI installs every extra. CI
+provider SDK has its own extra (`baseten`, `fireworks`); CI installs every extra. CI
 (`.github/workflows/ci.yml`) runs the lint, format, type, test, header and third-party license
 checks on Ubuntu and macOS with Python 3.12 and 3.13, and smoke-tests the built wheel. When you
 add a dependency, add its row to `LICENSE-3rdparty.csv`.
@@ -1089,8 +1089,8 @@ puts a key for every judge provider in the environment, for tests that preview a
 or compare model whose client they fake.
 `tests/providers/contract/` has the `RendererContract`, `BackendContract` and
 `ProviderContract` suites every provider subclasses (`tests/providers/test_fake_contract.py`
-runs them against the fake provider; `tests/providers/fireworks/` against Fireworks on its fakes;
-`tests/providers/baseten/` against Baseten on its fake; `tests/rendering/test_hf_contract.py`
+runs them against the fake provider; `tests/providers/baseten/` against Baseten on its fake;
+`tests/providers/fireworks/` against Fireworks on its fakes; `tests/rendering/test_hf_contract.py`
 runs the `RendererContract` on each family's real tokenizer under `-m tokenizer`).
 Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds canonical rows and
 `llmobs/` raw Export API pages.

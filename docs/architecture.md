@@ -229,9 +229,9 @@ to a `"module:attr"` import path. Listing providers imports no provider implemen
 `get_provider(name, runtime)` imports the module on first use and calls `attr(runtime)`, which
 must return a `Provider`. A provider whose SDK is not installed fails with a hint to install its extra.
 Entries registered with `dev_only=True`, like the offline `fake` provider used for
-development, are visible only with `PUP_FINETUNE_DEV=1`. `fireworks` and `baseten` are
+development, are visible only with `PUP_FINETUNE_DEV=1`. `baseten` and `fireworks` are
 registered for everyone. The registry also imports the lightweight package of every provider
-that has an API key (today `fireworks` and `baseten`, through imports at the bottom of
+that has an API key (today `baseten` and `fireworks`, through imports at the bottom of
 `providers/__init__.py`). That
 package's `__init__.py` does little more than register the provider's `CredentialSpec`, so
 `auth`, `doctor` and every other command know the API key without importing an SDK, an HTTP

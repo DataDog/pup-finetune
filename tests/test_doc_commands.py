@@ -8,7 +8,8 @@
 exists in the CLI.
 
 So does every `--provider` and `--model` they pass, and the skill and the README name each real
-provider.
+provider. A placeholder `--provider`, such as `<PROVIDER>`, needs a `--model` every provider
+offers.
 
 Also: the README names the Pup version `doctor` requires.
 """
@@ -27,7 +28,7 @@ import typer.main
 
 from pup_finetune.cli import app
 from pup_finetune.datadog.pup import MIN_PUP_VERSION
-from pup_finetune.providers import get_provider, providers_for_model
+from pup_finetune.providers import get_provider, providers_for_model, registered_providers
 from pup_finetune.runtime import Runtime
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -189,6 +190,12 @@ def test_every_provider_and_model_passed_exists(doc: Path) -> None:
             name, model = values.get("--provider"), values.get("--model")
             if model is not None and not model.startswith("<"):
                 offered_by = providers_for_model(model, Runtime())
+                if name is not None and name.startswith("<"):
+                    # A placeholder provider stands for any of them, so each must offer it.
+                    assert set(offered_by) == set(registered_providers()), (
+                        f"{doc.name}: --provider {name} --model {model} (offered by {offered_by})"
+                    )
+                    continue
                 assert name is not None or len(offered_by) == 1, (
                     f"{doc.name}: --model {model} needs --provider (offered by {offered_by})"
                 )

@@ -4,7 +4,7 @@
 
 `pup-finetune` fine-tunes an open-weight model on how your agent already behaves. It reads the
 LLM spans your application sends to Datadog Agent Observability and turns them into a reviewed
-training dataset. It trains a LoRA adapter on Fireworks or Baseten, compares the tuned model
+training dataset. It trains a LoRA adapter on Baseten or Fireworks, compares the tuned model
 with the base model on held-out conversations, and can deploy the tuned model.
 
 It is a Pup extension, so you run it as `pup finetune <command>`. Every Datadog read and write
@@ -17,8 +17,7 @@ goes through Pup and its OAuth login.
 
 ### Install and check your setup
 
-To train, you need a Fireworks account with access to Serverless Training, or a Baseten
-account. These steps install Pup and `pup-finetune` and check that both work:
+These steps install Pup and `pup-finetune` and check that both work:
 
 1. Install Pup 1.10.7 or later. With Homebrew, run:
 
@@ -59,15 +58,20 @@ account. These steps install Pup and `pup-finetune` and check that both work:
    copy. Pup's [extensions guide](https://github.com/DataDog/pup/blob/main/docs/EXTENSIONS.md)
    explains how Pup installs and runs extensions.
 
-5. If you plan to train, save your provider key:
+5. If you plan to train, choose a provider and save its key:
+
+   | Provider | You need | Key's environment variable | `deploy` creates |
+   | --- | --- | --- | --- |
+   | Baseten | A Baseten account. Training runs on Baseten Loops. | `BASETEN_API_KEY` | A dedicated model. The workspace needs BDN volumes and an `hf_access_token` secret. |
+   | Fireworks | A Fireworks account with access to Serverless Training. | `FIREWORKS_API_KEY` | An on-demand deployment. |
 
    ```sh
-   pup finetune auth login fireworks
+   pup finetune auth login <PROVIDER>
    ```
 
-   The command asks for the key at a hidden prompt and stores it in the OS keychain. For a
-   Baseten key, replace `fireworks` with `baseten`. You can set `FIREWORKS_API_KEY` or
-   `BASETEN_API_KEY` instead. To build a dataset, you need only the Datadog login.
+   Replace `<PROVIDER>` with `baseten` or `fireworks`, here and in the commands below. The
+   command asks for the key at a hidden prompt and stores it in the OS keychain. You can set
+   the provider's environment variable instead. To build a dataset, you need only the Datadog login.
 
 6. Check your setup:
 
@@ -88,8 +92,8 @@ keychain after the extension is gone. Run `auth logout` once for each provider w
 saved, then remove the extension:
 
 ```sh
-pup finetune auth logout fireworks
 pup finetune auth logout baseten
+pup finetune auth logout fireworks
 pup extension remove finetune
 ```
 
@@ -119,7 +123,7 @@ pup finetune dataset pull datasets/my-agent --ml-app my-agent --from 7d
 pup finetune dataset sample datasets/my-agent --count 20
 pup finetune dataset label datasets/my-agent --file labels.jsonl
 pup finetune dataset push datasets/my-agent --name my-agent-sft
-pup finetune train --provider fireworks --dataset datasets/my-agent --model qwen3p8-27b --detach
+pup finetune train --provider <PROVIDER> --dataset datasets/my-agent --model qwen3p8-27b --detach
 pup finetune status --watch
 pup finetune evaluate ft-20261007183443-a8b181
 pup finetune deploy ft-20261007183443-a8b181
@@ -171,15 +175,20 @@ so it still sends rows to its judges, and its preview still needs their keys. Th
 offer a model, name the provider with `--provider`, or as `PROVIDER/MODEL` in `benchmark`.
 `pup finetune models list` shows every name and each model's context length.
 
+```sh
+pup finetune train --provider baseten --dataset datasets/my-agent --model qwen3p8-27b
+pup finetune train --provider fireworks --dataset datasets/my-agent --model qwen3p8-27b
+```
+
 <!-- BEGIN GENERATED: supported models (scripts/gen_command_docs.py) -->
-| Model | `--model` | Fireworks | Baseten |
+| Model | `--model` | Baseten | Fireworks |
 | --- | --- | --- | --- |
-| `Qwen/Qwen3.8-27B` | `qwen3p8-27b` | yes | yes |
+| `Qwen/Qwen3.5-9B` | `qwen3p5-9b` | yes | - |
 | `zai-org/GLM-5.3-Flash` | `glm-5p3-flash` | yes | yes |
+| `Qwen/Qwen3.8-27B` | `qwen3p8-27b` | yes | yes |
 | `moonshotai/Kimi-K3` | `kimi-k3` | yes | yes |
-| `deepseek-ai/DeepSeek-V4-Flash-0731` | `deepseek-v4-flash-0731` | yes | - |
-| `meta-models/Muse-Glimmer-30B` | `muse-glimmer-30b` | yes | - |
-| `Qwen/Qwen3.5-9B` | `qwen3p5-9b` | - | yes |
+| `deepseek-ai/DeepSeek-V4-Flash-0731` | `deepseek-v4-flash-0731` | - | yes |
+| `meta-models/Muse-Glimmer-30B` | `muse-glimmer-30b` | - | yes |
 <!-- END GENERATED: supported models -->
 
 ## What each step needs
@@ -198,11 +207,11 @@ Fireworks is their last fallback. An Anthropic or OpenAI key changes the default
 | `dataset import`, `show`, `sample`, `label`; `status`, `runs` | - | - | - |
 | `dataset triage` | - | `FIREWORKS_API_KEY` | - |
 | `dataset push` | yes | - | - |
-| `train`, `evaluate` on Fireworks | - | `FIREWORKS_API_KEY` | `fireworks`, `hf` |
-| `deploy`, `undeploy` on Fireworks | - | `FIREWORKS_API_KEY` | `fireworks` |
 | `train` on Baseten | - | `BASETEN_API_KEY` | `baseten`, `hf` |
 | `evaluate` on Baseten | - | `BASETEN_API_KEY`, `FIREWORKS_API_KEY` | `baseten`, `hf` |
 | `deploy`, `undeploy` on Baseten | - | `BASETEN_API_KEY` | - |
+| `train`, `evaluate` on Fireworks | - | `FIREWORKS_API_KEY` | `fireworks`, `hf` |
+| `deploy`, `undeploy` on Fireworks | - | `FIREWORKS_API_KEY` | `fireworks` |
 | `anthropic/<model>` judges | - | `ANTHROPIC_API_KEY` | `anthropic` |
 | `openai/<model>` judges | - | `OPENAI_API_KEY` | - |
 <!-- END GENERATED: what each step needs -->
@@ -304,7 +313,7 @@ guide explains the [failure lines](docs/evaluate.md#see-why-cases-fail) that `be
 ## Train a model
 
 ```sh
-pup finetune train --provider fireworks --dataset datasets/my-agent --model qwen3p8-27b --detach
+pup finetune train --provider <PROVIDER> --dataset datasets/my-agent --model qwen3p8-27b --detach
 pup finetune status --watch
 ```
 
@@ -313,8 +322,8 @@ The run goes in `runs/<run id>`. `--detach` trains in a background worker that l
 watch.
 
 Training keeps the epoch with the best validation loss, even when a cap stops the run. On
-Fireworks, the run promotes it to a Fireworks model. Baseten has no promotion, so the run
-records it as its `deployable_checkpoint`. Cap the spend with `--max-train-tokens`, or with
+Baseten, the run records it as its `deployable_checkpoint`. On Fireworks, the run promotes it
+to a Fireworks model. Cap the spend with `--max-train-tokens`, or with
 `--max-spend-usd` and `--hourly-rate-usd`.
 
 The [`train` reference](docs/commands.md#pup-finetune-train) lists the training settings.
@@ -333,12 +342,12 @@ A first run on a small budget checks the pipeline end to end. It says little abo
 This one trains one epoch on a token budget, then evaluates one turn per test conversation:
 
 ```sh
-pup finetune train --provider fireworks --dataset datasets/my-agent --model qwen3p8-27b \
+pup finetune train --provider <PROVIDER> --dataset datasets/my-agent --model qwen3p8-27b \
   --max-epochs 1 --max-train-tokens 200000 --evaluate --eval-max-cases 1
 ```
 
 Set `--max-train-tokens` above the preview's `tokens_per_epoch`. Below it, no epoch finishes,
-so nothing is promoted or evaluated, and the preview warns.
+so the run keeps no epoch and evaluates nothing, and the preview warns.
 
 ### Train on Baseten while your machine sleeps
 
@@ -463,16 +472,18 @@ pup finetune deploy ft-20261007183443-a8b181
 pup finetune undeploy ft-20261007183443-a8b181
 ```
 
-Both preview first. On Fireworks, `deploy --confirm` creates an on-demand deployment, waits
-until it serves and sends one chat completion as a smoke test. The deployment scales to zero
-when idle and bills per GPU-second while a replica runs, until you undeploy it. The result's
-`usage` gives the base URL, the model to request and an example request. Undeploying keeps
-the model.
+Both preview first. `deploy --confirm` creates the deployment, waits until it serves and
+sends one chat completion as a smoke test. The result's `usage` gives the base URL, the model
+to request and an example request.
 
 On Baseten, `deploy` serves the run's `deployable_checkpoint` as a dedicated model on exactly
 the GPUs of `--shape TYPE:COUNT`, by default `H100:1`. The workspace needs BDN volumes and an
 `hf_access_token` secret. The model scales between 0 and 1 replicas and bills per GPU-second
 while a replica runs. Undeploying deletes the model and keeps the checkpoint.
+
+On Fireworks, `deploy` creates an on-demand deployment of the run's promoted model. The
+deployment scales to zero when idle and bills per GPU-second while a replica runs, until you
+undeploy it. Undeploying keeps the model.
 
 ## Keys live in your environment or the OS keychain
 
@@ -482,9 +493,9 @@ keychain. For Baseten, without either, it reads the key of your default Baseten 
 `~/.trussrc`, and never writes it.
 
 ```sh
-pup finetune auth login fireworks    # hidden prompt; also baseten, anthropic, openai
+pup finetune auth login baseten      # hidden prompt; also fireworks, anthropic, openai
 pup finetune auth status             # where each key comes from, never the key
-pup finetune auth logout fireworks
+pup finetune auth logout baseten
 ```
 
 A key is never a flag value, never printed and never written to a file. Without an OS
