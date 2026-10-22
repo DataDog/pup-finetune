@@ -64,6 +64,7 @@ OTHER_TOOL_FLAGS = {
     "--output",
     "--read-only",
     "--no-agent",
+    "--no-envelope",
     "--all-extras",
     "--extra",
 }

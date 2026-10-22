@@ -1,5 +1,7 @@
 # pup-finetune
 
+[![CI](https://github.com/DataDog/pup-finetune/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/DataDog/pup-finetune/actions/workflows/ci.yml)
+
 `pup-finetune` fine-tunes an open-weight model on how your agent already behaves. It reads the
 LLM spans your application sends to Datadog Agent Observability and turns them into a reviewed
 training dataset. It trains a LoRA adapter on Fireworks or Baseten, compares the tuned model
@@ -15,20 +17,81 @@ goes through Pup and its OAuth login.
 
 ### Install and check your setup
 
-You need Python 3.12 or later, [uv](https://docs.astral.sh/uv/), and Pup 1.10.7 or later,
-signed in to your Datadog organization with `pup auth login`. To train, you also need a
-Fireworks account with access to Serverless Training, or a Baseten account.
+To train, you need a Fireworks account with access to Serverless Training, or a Baseten
+account. These steps install Pup and `pup-finetune` and check that both work:
+
+1. Install Pup 1.10.7 or later. With Homebrew, run:
+
+   ```sh
+   brew install datadog-labs/pack/pup
+   ```
+
+   For the install script, npm or a source build, see
+   [Installation](https://github.com/DataDog/pup#installation) in Pup's README.
+
+2. Sign in to your Datadog organization. If your organization is on a site other than
+   `datadoghq.com`, set `DD_SITE` to that site first. Add the `export` line to your shell
+   profile, so that it stays set when you run `pup finetune`.
+
+   ```sh
+   export DD_SITE=datadoghq.eu    # only for a site other than datadoghq.com
+   pup auth login
+   ```
+
+   Pup opens a browser page to sign in.
+   [Authentication](https://github.com/DataDog/pup#authentication) in Pup's README lists the
+   sites and the other ways to sign in.
+
+3. Install [uv](https://docs.astral.sh/uv/getting-started/installation/). The extension runs
+   `pup-finetune` through `uv run`. If you don't have Python 3.12, uv installs it.
+
+4. Clone this repository, install its dependencies and add it to Pup as the `finetune`
+   extension:
+
+   ```sh
+   git clone https://github.com/DataDog/pup-finetune.git && cd pup-finetune
+   uv sync --all-extras
+   pup extension install --local bin/pup-finetune --link \
+     --description "Fine-tune a model on your Agent Observability traces"
+   ```
+
+   `--link` makes the extension a link to `bin/pup-finetune` in your checkout instead of a
+   copy. Pup's [extensions guide](https://github.com/DataDog/pup/blob/main/docs/EXTENSIONS.md)
+   explains how Pup installs and runs extensions.
+
+5. If you plan to train, save your provider key:
+
+   ```sh
+   pup finetune auth login fireworks
+   ```
+
+   The command asks for the key at a hidden prompt and stores it in the OS keychain. For a
+   Baseten key, replace `fireworks` with `baseten`. You can set `FIREWORKS_API_KEY` or
+   `BASETEN_API_KEY` instead. To build a dataset, you need only the Datadog login.
+
+6. Check your setup:
+
+   ```sh
+   pup finetune doctor
+   ```
+
+   `doctor` lists the commands you can run now, such as `dataset pull` or `train`, and gives
+   the fix for each failed check.
+
+To update `pup-finetune`, run `git pull` and `uv sync --all-extras` in your checkout. The
+extension is a link to your checkout, so Pup runs the new code without a reinstall.
+`pup extension upgrade` updates only extensions installed from GitHub releases, so it does
+not update this one.
+
+To remove `pup-finetune`, delete your stored provider keys first, because they stay in the OS
+keychain after the extension is gone. Run `auth logout` once for each provider whose key you
+saved, then remove the extension:
 
 ```sh
-git clone https://github.com/DataDog/pup-finetune.git && cd pup-finetune
-uv sync --all-extras
-pup extension install --local bin/pup-finetune --link \
-  --description "Fine-tune a model on your Agent Observability traces"
-pup finetune auth login fireworks    # hidden prompt; or set FIREWORKS_API_KEY
-pup finetune doctor                  # what you can run now, and what to fix
+pup finetune auth logout fireworks
+pup finetune auth logout baseten
+pup extension remove finetune
 ```
-
-`doctor` reports each step as ready or blocked, and gives the fix for each failed check.
 
 ### With a coding agent
 
@@ -479,12 +542,18 @@ that code at its pinned commit and runs it on this machine, and the `train`, `ev
 
 Each command prints one JSON result on stdout, and progress, warnings and a summary on stderr.
 Exit code `0` means the command finished. `2` means a preview, or a mistake you can fix in the
-command or the directory. `1` means something outside failed, or local state is broken. Under
-a coding agent, Pup wraps the result in an envelope whose `data` is the result. The files
-listed under `files` hold the full record.
+command or the directory. `1` means something outside failed, or local state is broken. The
+files listed under `files` hold the full record.
 
-Pup's flags go before `finetune`, as in `pup --output yaml finetune status` or
-`pup --jq .phase finetune status`. `pup finetune help <command>` prints a command's help.
+On Pup 2.0 and later, JSON and YAML output wrap the result in Pup's envelope,
+`{"status", "data", "metadata"}`, with the result as `data`. With `--jq`, the filtered value
+becomes `data`. Earlier Pup releases add the envelope only to JSON output, and only under a
+coding agent.
+
+Pup's flags go before `finetune`, as in `pup --output yaml finetune status`. To print the
+result alone, add `--no-envelope`, as in `pup --no-envelope --jq .phase finetune status`,
+which prints only the run's phase. `--no-envelope` is a Pup 2.x flag, so on earlier releases
+run the command without it. `pup finetune help <command>` prints a command's help.
 
 ## More docs
 
@@ -497,6 +566,7 @@ Pup's flags go before `finetune`, as in `pup --output yaml finetune status` or
 | Work on the code, with an offline loop that needs no credentials | [AGENTS.md](AGENTS.md) |
 | Contribute a change | [CONTRIBUTING.md](CONTRIBUTING.md) |
 | Report a vulnerability | [SECURITY.md](SECURITY.md) |
+| Install Pup, sign in to another Datadog site and use Pup's other commands | [Pup's README](https://github.com/DataDog/pup) |
 
 ## License
 
