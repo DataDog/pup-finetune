@@ -431,7 +431,7 @@ def no_epoch_warning(spec: TrainSpec, inputs: RunInputs) -> str:
     return (
         f"no epoch will finish: --max-train-tokens {spec.max_train_tokens} is below the "
         f"{inputs.tokens_per_epoch} tokens of one epoch (tokens_per_epoch), so nothing is "
-        "kept or evaluated; set --max-train-tokens above tokens_per_epoch"
+        "kept or evaluated; set --max-train-tokens to at least tokens_per_epoch"
     )
 
 
@@ -1383,7 +1383,7 @@ def watch_command(path: Path) -> str:
 
 NOTHING_TRAINED_STEP = (
     "no epoch finished, so there is nothing to evaluate or deploy: train a new run (with a "
-    "--max-train-tokens above the preview's tokens_per_epoch, or a larger --max-spend-usd, "
+    "--max-train-tokens of at least the preview's tokens_per_epoch, or a larger --max-spend-usd, "
     "if a cap stopped it; a free preview)"
 )
 
