@@ -239,7 +239,7 @@ def render_errors() -> list[str]:
         "provider failed, a local file is unreadable or inconsistent, another process holds "
         "the directory's lock, or Ctrl-C or SIGTERM stopped the command.",
         "",
-        "A failure leaves stdout empty and prints two lines on stderr: "
+        "An error leaves stdout empty and prints two lines on stderr: "
         "`Error [<code>]: <message>`, then `Hint: <what to do>` when there is a hint, for "
         "example `Error [run_dir_not_empty]: run1 already holds run ft-... (completed)`. "
         "The code is stable and listed below; the message is for people and may change. "
@@ -252,7 +252,9 @@ def render_errors() -> list[str]:
         "of at most seven lines generated from it (`Preview only, nothing was run: ...`, then "
         "the data, settings, recipients, who bills it and the cost; a longer card drops the "
         "settings first, never the cost or a refusal), its warnings and `Next: <command>`, and "
-        "exits `2`; its code is `confirmation_required`. A run records the error that "
+        "exits `2`; its code is `confirmation_required`. A command that returns a result with "
+        "a nonzero exit, such as `doctor` when a required check fails, still prints the result "
+        "on stdout. A run records the error that "
         "stopped it, with the same `code`, under `error` in `state.json`.",
         "",
         "| Code | Exit | Meaning |",
