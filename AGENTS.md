@@ -9,12 +9,15 @@ traces, fine-tunes an open-weight model on it, evaluates the tuned model against
 and deploys it. It ships as a `pup` extension, so users run it as `pup finetune ...`; the
 standalone executable is `pup-finetune`. All Datadog reads and writes go through `pup` and its
 OAuth login. The project is in early development: commands and file formats may change.
-User-facing docs: `README.md` (quickstart first, how paid steps preview, the supported
-models, then one how-to section per step: dataset, base model, train, evaluate, deploy, then
-credentials, data handling and reading results; it links the reference docs and the guide),
+User-facing docs: `README.md` (the flow and where to start, a quickstart, installation,
+credentials, one table of the training providers' differences, how paid steps preview,
+then one how-to section per step: dataset, base model, train, evaluate, deploy, then the
+supported models, data handling and output; it links the reference docs and the guides),
 `docs/commands.md` (every command and flag), `docs/data-format.md` (rows, exclusion codes,
-dataset files, row checks), `docs/evaluate.md` (a how-to guide to judges, reuse, the compare
-model and evaluators) and the agent skill in `skills/datadog-finetune/SKILL.md`.
+dataset files, row checks, what a command prints), `docs/train.md` (a how-to guide to spend
+caps, the learning-rate schedule, stopping and resuming, and `train --remote`),
+`docs/evaluate.md` (a how-to guide to judges, reuse, the compare model and evaluators, with an
+evaluator spec and check) and the agent skill in `skills/datadog-finetune/SKILL.md`.
 
 ## Commands
 
@@ -357,9 +360,9 @@ copies it to `.agents/skills/` and `.claude/skills/` under the project (or the h
 with `-g`). Neither makes a Datadog or provider call, so both work with `PUP_READ_ONLY` set.
 When you change a command the skill names, keep the skill in step:
 `tests/test_doc_commands.py` checks every `pup finetune` command and flag in it (and in the
-README and `docs/evaluate.md`) against the app, and `tests/test_skill.py` checks its
-structure (the flow and start table, eight short rules, the preview and status templates,
-Steps 0 to 7 with a `Check:` list each, and the error-code and debugging tables). Its
+README, `docs/train.md` and `docs/evaluate.md`) against the app, and `tests/test_skill.py`
+checks its structure (the flow and start table, eight short rules, the preview and status
+templates, Steps 0 to 7 with a `Check:` list each, and the error-code and debugging tables). Its
 commands use example paths and run ids (`./ds`, `ft-...`), never shell variables, and
 `<UPPER>` only for values to fill in.
 `SKILL.md` has no license header: its frontmatter must come first, and
