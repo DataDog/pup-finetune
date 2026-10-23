@@ -207,17 +207,14 @@ Fireworks is their last fallback. An Anthropic or OpenAI key changes the default
 <!-- BEGIN GENERATED: what each step needs (scripts/gen_command_docs.py) -->
 | Step | Datadog login | API key | Extra |
 | --- | --- | --- | --- |
-| `dataset pull` | yes | - | - |
+| `dataset pull`, `fetch` | yes | - | - |
 | `dataset import`, `show`, `sample`, `label`; `status`, `runs` | - | - | - |
-| `dataset triage` | - | `FIREWORKS_API_KEY` | - |
 | `dataset push` | yes | - | - |
-| `train` on Baseten | - | `BASETEN_API_KEY` | `baseten`, `hf` |
-| `evaluate` on Baseten | - | `BASETEN_API_KEY`, `FIREWORKS_API_KEY` | `baseten`, `hf` |
+| `train`, `evaluate`, `benchmark` on Baseten | - | `BASETEN_API_KEY` | `baseten`, `hf` |
 | `deploy`, `undeploy` on Baseten | - | `BASETEN_API_KEY` | - |
-| `train`, `evaluate` on Fireworks | - | `FIREWORKS_API_KEY` | `fireworks`, `hf` |
+| `train`, `evaluate`, `benchmark` on Fireworks | - | `FIREWORKS_API_KEY` | `fireworks`, `hf` |
 | `deploy`, `undeploy` on Fireworks | - | `FIREWORKS_API_KEY` | `fireworks` |
-| `anthropic/<model>` judges | - | `ANTHROPIC_API_KEY` | `anthropic` |
-| `openai/<model>` judges | - | `OPENAI_API_KEY` | - |
+| Judges for `dataset triage`, `evaluate` and `benchmark` | - | one of `ANTHROPIC_API_KEY`, `FIREWORKS_API_KEY` or `OPENAI_API_KEY` | `anthropic` for Anthropic |
 <!-- END GENERATED: what each step needs -->
 
 ## Build a dataset

@@ -62,23 +62,26 @@ def test_the_table_of_what_each_step_needs_comes_from_the_registries() -> None:
         assert f"`train` on {name.capitalize()}" in table or f"on {name.capitalize()} |" in table
     assert "Fake" not in table  # development-only providers stay out of the README
     assert gen.requirement_rows() == [
-        ("`dataset pull`", "yes", "", ""),
+        ("`dataset pull`, `fetch`", "yes", "", ""),
         ("`dataset import`, `show`, `sample`, `label`; `status`, `runs`", "", "", ""),
-        ("`dataset triage`", "", "`FIREWORKS_API_KEY`", ""),
         ("`dataset push`", "yes", "", ""),
-        ("`train` on Baseten", "", "`BASETEN_API_KEY`", "`baseten`, `hf`"),
-        # Evaluating needs the default judge's key too.
-        (
-            "`evaluate` on Baseten",
-            "",
-            "`BASETEN_API_KEY`, `FIREWORKS_API_KEY`",
-            "`baseten`, `hf`",
-        ),
+        # No training provider's row names another provider's key for its judges.
+        ("`train`, `evaluate`, `benchmark` on Baseten", "", "`BASETEN_API_KEY`", "`baseten`, `hf`"),
         ("`deploy`, `undeploy` on Baseten", "", "`BASETEN_API_KEY`", ""),
-        ("`train`, `evaluate` on Fireworks", "", "`FIREWORKS_API_KEY`", "`fireworks`, `hf`"),
+        (
+            "`train`, `evaluate`, `benchmark` on Fireworks",
+            "",
+            "`FIREWORKS_API_KEY`",
+            "`fireworks`, `hf`",
+        ),
         ("`deploy`, `undeploy` on Fireworks", "", "`FIREWORKS_API_KEY`", "`fireworks`"),
-        ("`anthropic/<model>` judges", "", "`ANTHROPIC_API_KEY`", "`anthropic`"),
-        ("`openai/<model>` judges", "", "`OPENAI_API_KEY`", ""),
+        # The judges take one key, of whichever judge provider there is.
+        (
+            "Judges for `dataset triage`, `evaluate` and `benchmark`",
+            "",
+            "one of `ANTHROPIC_API_KEY`, `FIREWORKS_API_KEY` or `OPENAI_API_KEY`",
+            "`anthropic` for Anthropic",
+        ),
     ]
 
 
