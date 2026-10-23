@@ -96,11 +96,13 @@ uv run pup-finetune evaluate /tmp/run --evaluators tests/fixtures/evaluators/eva
                                      # stored answers, nothing is generated again
 ```
 
-A complete evaluation is also published to Datadog as two Agent Observability experiments
+An evaluation is also published to Datadog as two Agent Observability experiments
 (`pup-finetune-base-<run id>` and `pup-finetune-tuned-<run id>`, plus
 `pup-finetune-compare-<run id>` with a compare target) on the dataset `dataset push`
-created, at the version it pushed: a root span per test conversation linked to its dataset
-record and a child span per replayed action, with the metrics and judge verdicts. It needs the
+created, at the version it pushed. It creates them when it starts, prints a link comparing
+them, and sends each test conversation once all its cases have a result (one with an error
+waits for the end): a root span linked to its dataset record and a child span per replayed
+action, with the metrics and judge verdicts. It needs the
 dataset's push receipt (`push.json`): without one the preview and the result warn and the
 evaluation is not published (the local results are complete either way); the result's
 `next_command` is then `null`, and its `next_steps` push the dataset and rerun the evaluation,
