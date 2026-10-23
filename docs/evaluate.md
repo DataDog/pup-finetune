@@ -6,6 +6,9 @@ model and adding your own evaluators. The [README](../README.md#evaluate-the-tun
 shows a first evaluation. [`evaluate`](commands.md#pup-finetune-evaluate) and
 [`benchmark`](commands.md#pup-finetune-benchmark) list every flag.
 
+In the examples, replace `<RUN_ID>` with the run id that `train` prints or `pup finetune runs`
+lists.
+
 ## Choose the judge
 
 LLM judges grade `evaluate` and `benchmark`, and they label rows in `dataset triage`. Without
@@ -20,7 +23,8 @@ The [`evaluate`](commands.md#pup-finetune-evaluate) and
 model. To choose the judge yourself, name it:
 
 ```sh
-pup finetune evaluate ft-20261007183443-a8b181 --judge-model anthropic/claude-opus-5-5
+# Grade with the judge you name (preview)
+pup finetune evaluate <RUN_ID> --judge-model anthropic/claude-opus-5-5
 ```
 
 The preview names the judge and where the choice came from, in `judge_source`. An evaluation
@@ -34,7 +38,8 @@ Anthropic SDK does, for example, with `ANTHROPIC_AUTH_TOKEN` or `ant auth login`
 Before it offers `--confirm`, the preview looks for a key for each model that still has
 calls to make: the judge, the compare model and each evaluator's judge. If one is missing, the
 preview fails and says how to sign in. With `PUP_READ_ONLY` set, it warns instead. A rerun
-with nothing left to judge needs no judge key.
+with nothing left to judge needs no judge key. A `dataset triage` preview fails on a missing key
+even with `PUP_READ_ONLY` set, because read-only mode still allows triage's `--confirm`.
 
 ## Calibrate the judge
 
@@ -84,7 +89,8 @@ the noise of those answers. To make the base answers again, add `--no-reuse`. De
 ## Compare with the model your app runs today
 
 ```sh
-pup finetune evaluate ft-20261007183443-a8b181 --compare-model anthropic/claude-opus-5-5
+# Replay a third model and grade it with the same judge (preview)
+pup finetune evaluate <RUN_ID> --compare-model anthropic/claude-opus-5-5
 ```
 
 `--compare-model` replays the same cases with a third model and grades it with the same judge.
@@ -112,11 +118,44 @@ To score answers with your own LLM judges and Python checks, write a TOML spec a
 with `--evaluators`:
 
 ```sh
-pup finetune evaluate ft-20261007183443-a8b181 --evaluators evals.toml
+# Score the answers with your own evaluators too (preview)
+pup finetune evaluate <RUN_ID> --evaluators evals.toml
 ```
 
-[Evaluator specs and checks](data-format.md#evaluator-specs-and-checks) has the format. The
-[README](../README.md#add-your-own-evaluators) has a short spec and a check.
+A spec names each evaluator and its type. A `judge` grades with your rubric, and a `check`
+runs a Python function:
+
+```toml
+headline = "all"                 # "judge" (the default), an evaluator's name, or "all"
+
+[[evaluator]]
+name = "polite"
+type = "judge"
+rubric = "Pass when the answer is courteous and does not blame the user."
+examples = "polite-examples.jsonl"      # optional: answers you graded, to calibrate it
+
+[[evaluator]]
+name = "no_card_numbers"
+type = "check"
+file = "checks.py"
+```
+
+A check is a plain function of the case and the generated answer. It returns `True`, `False`,
+`None` when it does not apply, or `(bool, reason)`:
+
+```python
+# In checks.py, a check that fails any answer showing digits
+def no_card_numbers(case, candidate):
+    if any(char.isdigit() for char in candidate.get("content") or ""):
+        return False, "the answer shows digits"
+    return True
+```
+
+Checks are Python you wrote, and they run in this process with your privileges. The preview
+runs each check on every recorded answer, free, so a broken check fails before anything is
+paid. Added to a complete evaluation, evaluators score the stored answers, so only their
+judges' calls are paid. `benchmark --evaluators` works the same way.
+[Evaluator specs and checks](data-format.md#evaluator-specs-and-checks) has the full format.
 
 ### Calibrate a judge evaluator
 

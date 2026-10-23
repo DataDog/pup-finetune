@@ -4,8 +4,8 @@
 #
 # This product includes software developed at Datadog (https://www.datadoghq.com/).
 # Copyright 2026-present Datadog, Inc.
-"""Every `pup finetune` command and flag the skill, the README and the evaluation guide mention
-exists in the CLI.
+"""Every `pup finetune` command and flag the skill, the README and the guides mention exists in
+the CLI.
 
 So does every `--provider` and `--model` they pass, and the skill and the README name each real
 provider. A placeholder `--provider`, such as `<PROVIDER>`, needs a `--model` every provider
@@ -34,10 +34,10 @@ from pup_finetune.runtime import Runtime
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL = REPO_ROOT / "skills" / "datadog-finetune" / "SKILL.md"
 README = REPO_ROOT / "README.md"
-GUIDE = REPO_ROOT / "docs" / "evaluate.md"
+GUIDES = [REPO_ROOT / "docs" / "evaluate.md", REPO_ROOT / "docs" / "train.md"]
 TRAINING_DOCS = [SKILL, README]
 """The docs whose examples train on both providers, so their `--model` checks must name both."""
-DOCS = [*TRAINING_DOCS, GUIDE]
+DOCS = [*TRAINING_DOCS, *GUIDES]
 
 PREFIX = ("pup", "finetune")
 SHELL_STOP = {">", ">>", "|", "&&", "||", ";", "#", "\\"}
