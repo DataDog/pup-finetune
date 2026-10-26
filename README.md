@@ -13,9 +13,6 @@ deploys it.
 pup-finetune is a Pup extension, so you run it as `pup finetune <COMMAND>`. Every Datadog read
 and write goes through Pup's login.
 
-> **Early development.** Commands and file formats may change. Report problems in
-> [GitHub issues](https://github.com/DataDog/pup-finetune/issues).
-
 ## How it works
 
 ```text

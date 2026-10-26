@@ -8,8 +8,7 @@ Guide for contributors and coding agents working in this repository.
 traces, fine-tunes an open-weight model on it, evaluates the tuned model against the base model,
 and deploys it. It ships as a `pup` extension, so users run it as `pup finetune ...`; the
 standalone executable is `pup-finetune`. All Datadog reads and writes go through `pup` and its
-OAuth login. The project is in early development: commands and file formats may change.
-User-facing docs: `README.md` (the flow and where to start, a quickstart, installation,
+OAuth login. User-facing docs: `README.md` (the flow and where to start, a quickstart, installation,
 credentials, one table of the training providers' differences, how paid steps preview,
 then one how-to section per step: dataset, base model, train, evaluate, deploy, then the
 supported models, data handling and output; it links the reference docs and the guides),
