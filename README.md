@@ -4,10 +4,11 @@
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-pup-finetune fine-tunes an open-weight model on your agent's own conversations. It reads the
-LLM spans your application sends to Datadog Agent Observability and turns them into a training
-dataset you review. It then trains a LoRA adapter on Baseten or Fireworks, compares the tuned
-model with the base model, and deploys it.
+pup-finetune fine-tunes an open-weight model on your agent's trajectories, the messages, tool
+calls and tool results of its recorded runs. It reads the LLM spans your application sends to
+Datadog Agent Observability and turns them into a training dataset you review. It then trains
+a LoRA adapter on Baseten or Fireworks, compares the tuned model with the base model, and
+deploys it.
 
 pup-finetune is a Pup extension, so you run it as `pup finetune <COMMAND>`. Every Datadog read
 and write goes through Pup's login.
@@ -286,11 +287,11 @@ The dataset goes in the `pup-finetune` project unless `--project` names another.
 
 ## Choose a base model
 
-This step is optional. `benchmark` replays the test conversations with each candidate base model
+This step is optional. `benchmark` replays the test trajectories with each candidate base model
 and grades the answers with the judge `evaluate` uses.
 
 ```bash
-# Compare two base models on 20 test conversations (preview)
+# Compare two base models on 20 test trajectories (preview)
 pup finetune benchmark datasets/my-agent \
   --models <PROVIDER>/qwen3p8-27b,<PROVIDER>/glm-5p3-flash --max-rows 20
 ```
@@ -328,7 +329,7 @@ A first run on a small budget checks the pipeline end to end, though it says lit
 quality.
 
 ```bash
-# One epoch of at most 200,000 trained tokens, then one turn per test conversation (preview)
+# One epoch of at most 200,000 trained tokens, then one turn per test trajectory (preview)
 pup finetune train --provider <PROVIDER> --dataset datasets/my-agent --model qwen3p8-27b \
   --max-epochs 1 --max-train-tokens 200000 --evaluate --eval-max-cases 1
 ```
@@ -339,7 +340,7 @@ epoch finish, so the run keeps nothing to evaluate.
 ## Evaluate the tuned model
 
 ```bash
-# Replay the test conversations with the base and tuned models (preview)
+# Replay the test trajectories with the base and tuned models (preview)
 pup finetune evaluate <RUN_ID>
 ```
 
@@ -365,7 +366,7 @@ is. Before you trust the delta, evaluate into a new `--out-dir` with a higher `-
 
 When the dataset was pushed, the evaluation publishes two Agent Observability experiments, one
 per model. It creates them when it starts, prints a link to compare them
-(`publication.comparison_url`) and fills them in as conversations finish. Rerun the command to
+(`publication.comparison_url`) and fills them in as trajectories finish. Rerun the command to
 continue an evaluation that stopped.
 
 The [evaluation guide](docs/evaluate.md) covers the rest:
@@ -412,16 +413,17 @@ show every name and context length.
 
 ## Data handling
 
-- Dataset and run directories hold conversations, tool calls and tool results from your traces.
+- Dataset and run directories hold trajectories from your traces, with their messages, tool
+  calls and tool results.
   A dataset's `replay_cache` also holds base model answers and the judge's reasons.
   pup-finetune creates the directories `0700` and their files `0600`.
 - pup-finetune adds a `.gitignore` to the `datasets/` and `runs/` it creates. Keep the file
   `dataset sample --markdown` writes under `datasets/` too.
-- Training, `benchmark`, `evaluate` and `dataset triage` send conversations to the providers you
+- Training, `benchmark`, `evaluate` and `dataset triage` send trajectories to the providers you
   choose, every judge and any `--compare-model` included. Previews list them in
   `data_recipients`.
 - `train --remote` uploads the train and validation rows with their split assignments, the run
-  files and pup-finetune's source to Baseten storage. The test conversations and dropped rows
+  files and pup-finetune's source to Baseten storage. The test trajectories and dropped rows
   stay on your machine.
 - Row checks and evaluator checks are your Python code. They run locally with your privileges
   and send nothing.

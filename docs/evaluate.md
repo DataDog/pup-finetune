@@ -106,7 +106,7 @@ One short call first checks that the compare model answers. A mistyped model or 
 key fails at that call. After it passes, the evaluation directory keeps the compare model. A
 rerun without the flag continues it, and another compare model needs a new `--out-dir`.
 
-Some APIs refuse certain conversations every time. Anthropic refuses one that starts or ends
+Some APIs refuse certain cases every time. Anthropic refuses a case whose turns start or end
 on an assistant turn, for example. `pup-finetune` never sends those cases. The preview counts
 them by reason in `compare.skipped_by_reason` and warns, and they count in none of the compare
 model's rates. If no case is left to send, the preview refuses the compare model.

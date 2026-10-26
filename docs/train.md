@@ -99,7 +99,7 @@ Before you confirm, check that you have:
   workspace as your local key. `--team` names the team, by default your only or default team.
 
 `train --remote` uploads the train and validation rows, their split assignments, the run files
-and pup-finetune's source to Baseten storage. The test conversations and the dropped rows stay
+and pup-finetune's source to Baseten storage. The test trajectories and the dropped rows stay
 on your machine. `--remote` is refused with either `--detach` or `--evaluate`.
 
 `status` reads the job and its logs and copies the run's state into the run directory. Then
