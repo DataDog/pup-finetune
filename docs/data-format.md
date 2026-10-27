@@ -184,6 +184,19 @@ content. Keep it out of version control.
 | `push.json` | The receipt `dataset push` writes (see below). |
 | `replay_cache/` | Base model answers and judge verdicts shared by the evaluations and benchmarks of the dataset: `generations.jsonl` (`{"key", "message", "format_valid", "prompt_tokens", "completion_tokens", "latency_s", "stop_reason", "sampled_at", "source"}`, `source` the `{"command", "run_id"}` that made it) and `verdicts.jsonl` (`{"key", "judgment", "judged_at"}`). The keys are hashes of what the model or the judge is sent and how; append-only, the first line of a key wins. Safe to delete: it only costs new answers. A run that reuses a line copies it into its own directory with `reused_from` (an answer, keeping its `sampled_at`) or `"reused": true` (a result, its metrics computed again). |
 
+**Editing a dataset.** Only `dataset import`, `pull`, `fetch`, `label`, `triage` and `push`
+write these files. Each command checks what it reads: every row valid and under an id of its
+own, and every kept row with a split; `dataset show`, `push`, `train`, `benchmark` and
+`evaluate` also refuse two kept rows that hold one conversation (`Error [state]`, with the
+fix). A label of an id that names no row changes nothing, and the summary warns about it. An
+edit to a pushed row makes it `changed` (`pushed_with_changed_rows`), so `train` and
+`benchmark` on a real provider need the dataset fetched first. Never edit `splits.json`: it is
+the only record of each split (groups of copies and fetched records take splits the hash
+would not give). To prepare rows your own way, analyze a copy of `rows.jsonl`, write the rows
+you change, with new ids, to a file and `dataset import` it into a new directory; check that
+`import.excluded` is 0, as a pandas round trip can write `null` tools or source. Never copy a
+directory that has a `push.json`: the copy pushes into the same dataset.
+
 ## The pushed record
 
 `dataset push` adds one record per kept row to an Agent Observability dataset

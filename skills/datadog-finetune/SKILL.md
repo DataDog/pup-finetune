@@ -213,11 +213,11 @@ Check:
 pup finetune dataset push datasets/my-agent --name <DATASET_NAME> --project <PROJECT>
 ```
 
-Ask which project: everyone with access to it can read the records. It previews; run its
-`next_command` after a yes. The push writes one record per kept row and saves `push.json`.
-`train` and `benchmark` read only a dataset whose kept rows are all pushed, and an evaluation
-publishes onto it. The dataset can then be curated in Datadog (records edited, added or
-removed); to train on it as it is now, fetch it into a new directory with its push receipt:
+Ask which project: everyone with access to it can read the records. `train` and `benchmark`
+read only a dataset whose kept rows are all pushed; an evaluation publishes onto it. Never
+edit or copy a dataset directory: analyze a copy of `rows.jsonl`, and `dataset import` rows
+you rewrote (new ids) into a new one (`import.excluded` must be 0). Curate the pushed dataset
+in Datadog (records edited, added or removed), then fetch it into a new directory to train:
 
 ```sh
 pup finetune dataset fetch datasets/my-agent-v2 --project <PROJECT> --name <DATASET_NAME>

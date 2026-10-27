@@ -58,7 +58,7 @@ from typing import Any
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.jsonl import to_provider_dict
 from pup_finetune.data.schema import TrainingRow
-from pup_finetune.data.split import SPLITS, SplitName, check_isolation
+from pup_finetune.data.split import SPLITS, SplitName
 from pup_finetune.datadog.datasets import (
     RECORDS_BATCH_SIZE,
     LLMObsDatasets,
@@ -440,7 +440,6 @@ def plan_push(dataset: DatasetDir, *, project: str, name: str) -> PushPlan:
     if state is not None:
         _check_state(dataset, state, project=project, name=name, digest=digest)
     by_split = dataset.rows_by_split()
-    check_isolation(by_split)
     kept_by_split = {split: len(by_split[split]) for split in SPLITS}
     comparison = compare_receipt(state, by_split)
     return PushPlan(

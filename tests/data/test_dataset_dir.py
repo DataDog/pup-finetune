@@ -16,11 +16,13 @@ from typing import Any
 
 import pytest
 
+from pup_finetune.curation.labels import apply_labels
 from pup_finetune.data import dataset_dir
 from pup_finetune.data import jsonl as jsonl_module
-from pup_finetune.data.dataset_dir import DatasetDir, DatasetSettings, read_import_file
+from pup_finetune.data.dataset_dir import DatasetDir, DatasetSettings, SourceKind, read_import_file
 from pup_finetune.data.exclusions import Exclusion, ExclusionCode
 from pup_finetune.data.jsonl import read_rows, to_provider_dict
+from pup_finetune.data.labels import Label
 from pup_finetune.data.schema import (
     RowError,
     RowErrorCode,
@@ -660,6 +662,101 @@ def test_isolation_is_checked_on_read(tmp_path: Path) -> None:
     dataset.splits_path.write_text(json.dumps(data))
     with pytest.raises(StateError, match="same conversation in different splits"):
         dataset.export_split_files(tmp_path / "out")
+
+
+def append_line(dataset: DatasetDir, row: TrainingRow) -> None:
+    """Append ``row`` to ``rows.jsonl`` as a hand edit would."""
+    with dataset.rows_path.open("a") as handle:
+        handle.write(json.dumps(row.model_dump(mode="json", exclude_none=True)) + "\n")
+
+
+@pytest.mark.parametrize("text", ["one", "changed"])
+def test_a_repeated_row_id_is_a_state_error(tmp_path: Path, text: str) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    dataset.add([make_row("a", "one", trace_id="t1")], settings=IMPORT)
+    append_line(dataset, make_row("a", text, trace_id="t1"))
+    with pytest.raises(StateError, match="row id 'a' is on more than one line") as raised:
+        dataset.rows()
+    assert "dataset import" in str(raised.value.hint)
+    with pytest.raises(StateError, match="on more than one line"):
+        dataset.add([], settings=IMPORT)
+
+
+def test_a_repeated_conversation_is_refused_until_one_copy_is_dropped(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    dataset.add([make_row("a", "one", trace_id="t1")], settings=IMPORT)
+    append_line(dataset, make_row("a-copy", "one", trace_id="t1"))
+    with pytest.raises(
+        StateError, match=r"'a' \((\w+)\) and 'a-copy' \(\1\) hold the same"
+    ) as raised:
+        dataset.rows_by_split()
+    assert "dataset label --file" in str(raised.value.hint)
+    assert dataset.summary()["accepted"] == 2
+    assert [row.id for row in dataset.rows()] == ["a", "a-copy"]
+    apply_labels(dataset, [Label(id="a-copy", keep=False, reason="a copy")])
+    assert [row.id for rows in dataset.rows_by_split().values() for row in rows] == ["a"]
+
+
+def test_a_reimport_does_not_adopt_a_hand_added_copy(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    dataset.add([make_row("a", "one", trace_id="t1")], settings=IMPORT)
+    append_line(dataset, make_row("a-copy", "one", trace_id="t2"))
+    dataset.add([], settings=IMPORT)  # assigns the copy its group's split
+    with pytest.raises(StateError, match="hold the same conversation in the"):
+        dataset.rows_by_split()
+
+
+def test_a_dropped_copy_in_another_split_still_blocks_an_import(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    dataset.add([make_row("a", "one", trace_id="t1")], settings=IMPORT)
+    append_line(dataset, make_row("a-copy", "one", trace_id="t2"))
+    data = json.loads(dataset.splits_path.read_text())
+    data["assignments"]["t2"] = next(s for s in SPLITS if s != data["assignments"]["t1"])
+    dataset.splits_path.write_text(json.dumps(data))
+    with pytest.raises(StateError, match="in different splits") as raised:
+        dataset.rows_by_split()
+    assert "dataset label" not in str(raised.value.hint)
+    apply_labels(dataset, [Label(id="a-copy", keep=False, reason="a copy")])
+    assert [row.id for rows in dataset.rows_by_split().values() for row in rows] == ["a"]
+    with pytest.raises(StateError, match="in different splits"):
+        dataset.add([], settings=IMPORT)
+
+
+@pytest.mark.parametrize(
+    ("source", "command"),
+    [
+        ("import", "dataset import"),
+        ("datadog", "dataset pull"),
+        ("datadog_dataset", "dataset fetch"),
+    ],
+)
+def test_the_no_split_hint_names_the_command_that_built_it(
+    tmp_path: Path, source: SourceKind, command: str
+) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    dataset.add([make_row("a", "one", trace_id="t1")], settings=DatasetSettings(source))
+    data = json.loads(dataset.splits_path.read_text())
+    data["assignments"].pop("t1")
+    dataset.splits_path.write_text(json.dumps(data))
+    with pytest.raises(StateError, match="row 'a' has no split assignment") as raised:
+        dataset.rows_by_split()
+    assert f"rerun `{command}` into this directory" in str(raised.value.hint)
+
+
+def test_labels_of_unknown_ids_warn(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    rows = [make_row("a", "one", trace_id="t1"), make_row("b", "two", trace_id="t2")]
+    dataset.add(rows, settings=IMPORT)
+    apply_labels(dataset, [Label(id="b", keep=False, reason="off-topic")])
+    dataset.add([], settings=IMPORT, retired=[retire(rows[1])])
+    assert not [w for w in dataset.summary()["warnings"] if "labels.jsonl" in w]
+    with dataset.labels_path.open("a") as handle:
+        handle.write(json.dumps({"id": "a-typo", "keep": False, "reason": "off-topic"}) + "\n")
+    assert [w for w in dataset.summary()["warnings"] if "labels.jsonl" in w] == [
+        "1 label in labels.jsonl names no row of the dataset (e.g. 'a-typo'), so it changes "
+        "nothing; record labels with `dataset label --file`, which refuses such ids"
+    ]
+    assert [row.id for row in dataset.kept_rows()] == ["a"]
 
 
 # --- export -----------------------------------------------------------------------------
