@@ -154,13 +154,13 @@ def test_without_a_provider_it_lists_every_provider_s_models() -> None:
     body = output(result)
     assert body["provider"] is None
     assert [(m["provider"], m["alias"]) for m in body["models"]] == [
-        *(("fireworks", alias) for alias in FIREWORKS_ALIASES),
         ("baseten", "qwen3p5-9b"),
         ("baseten", "glm-5p3-flash"),
         ("baseten", "qwen3p8-27b"),
         ("baseten", "kimi-k3"),
+        *(("fireworks", alias) for alias in FIREWORKS_ALIASES),
     ]
-    assert body["models"][0] == QWEN
+    assert QWEN in body["models"]
     assert all("tokenizer" not in model for model in body["models"])
 
 
@@ -270,14 +270,18 @@ def test_check_works_for_the_fake_provider(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 @pytest.mark.parametrize(
-    ("args", "heavy"),
+    ("args", "heavy", "first"),
     [
-        (["--provider", "fireworks"], ["transformers", "fireworks", "tinker", "httpx"]),
-        ([], ["transformers", "fireworks", "tinker", "baseten"]),
+        (
+            ["--provider", "fireworks"],
+            ["transformers", "fireworks", "tinker", "httpx"],
+            "qwen3p8-27b",
+        ),
+        ([], ["transformers", "fireworks", "tinker", "baseten"], "qwen3p5-9b"),
     ],
 )
 def test_listing_imports_no_sdk_or_tokenizer(
-    args: list[str], heavy: list[str], tmp_path: Path
+    args: list[str], heavy: list[str], first: str, tmp_path: Path
 ) -> None:
     code = (
         textwrap.dedent(
@@ -304,4 +308,4 @@ def test_listing_imports_no_sdk_or_tokenizer(
         [sys.executable, "-c", code], capture_output=True, text=True, env=env, check=False
     )
     assert json.loads(completed.stderr.strip().splitlines()[-1]) == {"exit": 0, "heavy": []}
-    assert json.loads(completed.stdout)["models"][0]["alias"] == "qwen3p8-27b"
+    assert json.loads(completed.stdout)["models"][0]["alias"] == first

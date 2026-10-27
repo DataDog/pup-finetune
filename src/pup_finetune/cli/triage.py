@@ -114,7 +114,7 @@ DOC = CommandDoc(
     ),
     safety=Safety(
         data="sends rows to each judge's provider",
-        recipients="each judge's provider: Fireworks, Anthropic or OpenAI",
+        recipients="each judge's provider: Anthropic, OpenAI or Fireworks",
         without="previews the judge calls (--checks alone labels at once, free)",
         confirm="runs the judges and labels rows (paid)",
         paid=True,

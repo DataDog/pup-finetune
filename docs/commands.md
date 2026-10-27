@@ -12,7 +12,7 @@ Outside Pup, run the same commands as `pup-finetune <command>`.
 - `2`: you can fix it by changing the command or the directory: a usage or validation error, a preview that needs `--confirm`, a paid run or a remote write while `PUP_READ_ONLY` is set, a wrong, missing or non-empty directory, a directory that records other settings, or a run in the wrong phase (still training, not completed, already deployed).
 - `1`: something outside failed or local state is broken: pup, Datadog or a provider failed, a local file is unreadable or inconsistent, another process holds the directory's lock, or Ctrl-C or SIGTERM stopped the command.
 
-A failure leaves stdout empty and prints two lines on stderr: `Error [<code>]: <message>`, then `Hint: <what to do>` when there is a hint, for example `Error [run_dir_not_empty]: run1 already holds run ft-... (completed)`. The code is stable and listed below; the message is for people and may change. Usage errors that Click finds (an unknown command or option, a missing or malformed value) print the same way with the code `usage`, name every missing required option at once (`Error [usage]: train needs --dataset and --model`), keep Click's suggestions (`Did you mean ...`, `Possible options: ...`) and point to `pup finetune help <command>`. A preview is not a failure: it prints its JSON on stdout (`"status": "confirmation_required"`, with `next_command`), then on stderr a card of at most seven lines generated from it (`Preview only, nothing was run: ...`, then the data, settings, recipients, who bills it and the cost; a longer card drops the settings first, never the cost or a refusal), its warnings and `Next: <command>`, and exits `2`; its code is `confirmation_required`. A run records the error that stopped it, with the same `code`, under `error` in `state.json`.
+An error leaves stdout empty and prints two lines on stderr: `Error [<code>]: <message>`, then `Hint: <what to do>` when there is a hint, for example `Error [run_dir_not_empty]: run1 already holds run ft-... (completed)`. The code is stable and listed below; the message is for people and may change. Usage errors that Click finds (an unknown command or option, a missing or malformed value) print the same way with the code `usage`, name every missing required option at once (`Error [usage]: train needs --dataset and --model`), keep Click's suggestions (`Did you mean ...`, `Possible options: ...`) and point to `pup finetune help <command>`. A preview is not a failure: it prints its JSON on stdout (`"status": "confirmation_required"`, with `next_command`), then on stderr a card of at most seven lines generated from it (`Preview only, nothing was run: ...`, then the data, settings, recipients, who bills it and the cost; a longer card drops the settings first, never the cost or a refusal), its warnings and `Next: <command>`, and exits `2`; its code is `confirmation_required`. A command that returns a result with a nonzero exit, such as `doctor` when a required check fails, still prints the result on stdout. A run records the error that stopped it, with the same `code`, under `error` in `state.json`.
 
 | Code | Exit | Meaning |
 | --- | --- | --- |
@@ -82,7 +82,7 @@ What each command does without and with `--confirm`, where its data goes, and wh
 | `pup finetune dataset show` | shows the dataset | no `--confirm` | nowhere: local files | allowed |
 | `pup finetune dataset sample` | shows rows; --markdown writes them to FILE | no `--confirm` | nowhere: local files | allowed |
 | `pup finetune dataset label` | records labels in DIR | no `--confirm` | nowhere: local files | allowed |
-| `pup finetune dataset triage` | previews the judge calls (--checks alone labels at once, free) | runs the judges and labels rows (paid) | each judge's provider: Fireworks, Anthropic or OpenAI | allowed |
+| `pup finetune dataset triage` | previews the judge calls (--checks alone labels at once, free) | runs the judges and labels rows (paid) | each judge's provider: Anthropic, OpenAI or Fireworks | allowed |
 | `pup finetune dataset push` | previews the records | pushes the kept rows (a remote write) | Datadog: an Agent Observability dataset | preview allowed; `--confirm` refused |
 | `pup finetune dataset fetch` | fetches the dataset into DIR | no `--confirm` | nowhere: reads the dataset through pup into local files | allowed |
 | `pup finetune benchmark` | previews the calls | benchmarks every model (paid) | each model's provider, the judge's provider | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider and judge) |
@@ -107,14 +107,14 @@ pup finetune doctor [OPTIONS]
 
 | Option | Value | Default | Description |
 | --- | --- | --- | --- |
-| `--provider` | `NAME` |  | Require this provider's checks too: fireworks or baseten. |
+| `--provider` | `NAME` |  | Require this provider's checks too: baseten or fireworks. |
 | `--check` |  |  | With --provider: also preflight its models live (read-only; needs its key). |
 
 Examples:
 
 ```sh
 pup finetune doctor
-pup finetune doctor --provider fireworks
+pup finetune doctor --provider baseten
 pup finetune doctor --provider fireworks --check
 ```
 
@@ -139,7 +139,7 @@ pup finetune auth login [OPTIONS] PROVIDER
 Examples:
 
 ```sh
-pup finetune auth login fireworks
+pup finetune auth login baseten
 pup finetune auth login anthropic --stdin < anthropic.key
 ```
 
@@ -197,13 +197,14 @@ pup finetune models list [OPTIONS]
 
 | Option | Value | Default | Description |
 | --- | --- | --- | --- |
-| `--provider` | `NAME` | every provider | Only this provider: fireworks or baseten. |
+| `--provider` | `NAME` | every provider | Only this provider: baseten or fireworks. |
 | `--check` |  |  | Preflight each model with its provider (needs its API key). |
 
 Examples:
 
 ```sh
 pup finetune models list
+pup finetune models list --provider baseten --check
 pup finetune models list --provider fireworks --check
 ```
 
@@ -571,8 +572,8 @@ pup finetune benchmark [OPTIONS] DATASET
 Examples:
 
 ```sh
-pup finetune benchmark ds --models qwen3p5-9b,baseten/glm-5p3-flash
-pup finetune benchmark ds --models qwen3p5-9b,baseten/glm-5p3-flash --max-cases 1 --max-rows 20
+pup finetune benchmark ds --models baseten/qwen3p5-9b,fireworks/glm-5p3-flash
+pup finetune benchmark ds --models baseten/qwen3p5-9b,fireworks/glm-5p3-flash --max-cases 1 --max-rows 20
 ```
 
 Safety: Paid with --confirm · sends test rows to each model's provider and to the judge · PUP_READ_ONLY: preview only unless offline.
@@ -581,7 +582,7 @@ Safety: Paid with --confirm · sends test rows to each model's provider and to t
 
 Fine-tune --model with LoRA SFT on --dataset's train split, keeping the best epoch by validation loss. Previews without --confirm; trains with it.
 
---dataset must be in Datadog: every kept row pushed with `dataset push`, or the directory made by `dataset fetch` (the offline fake provider trains on any). The run goes in runs/RUN_ID unless --run-dir names another directory (a runs/ this creates gets a .gitignore, since runs hold trace-derived rows). --model takes a model's alias, or in any case the provider's model id or its Hugging Face tokenizer name, and --provider is inferred from it when one provider offers that model; the preview says so (provider_source), and its next_command pins both, with the alias. The preview lists rows and rendered tokens per split, the rejected rows, tokens per epoch and in total, the settings and where the data goes. --detach trains in a background worker; follow it with `status --watch`. Training stops early after --patience epochs without a validation-loss improvement; a Ctrl-C or `cancel` still promotes the best epoch. --learning-rate is constant unless --lr-schedule linear or cosine decays it over the steps of --max-epochs epochs (the preview's max_steps; early stopping or a cap ends the run first), after a linear warmup over --warmup-fraction of them (warmup_steps); it never reaches zero, and the other Adam parameters are fixed (run.json settings.optimizer). With --evaluate, the run is also evaluated on the test split in its training session once the best epoch is promoted (see `evaluate`): the judge is calibrated and --eval-out-dir checked before training starts, so a failed calibration trains nothing; --detach is refused with it; and the evaluation stops, partial, at --max-spend-usd. --max-seq-len caps the context (and so the cost): longer rows are left out, as the preview shows (exceeds_context). --remote (Baseten only) runs the training loop in a Baseten CPU job, so training continues while this machine sleeps; --team names the team (default: your only or default team). It needs the baseten CLI and uv on PATH, a source checkout of pup-finetune and a team secret pup_finetune_api_key; it uploads the train and validation rows, the run files and pup-finetune's source to Baseten storage, and is refused with --detach and --evaluate. status copies the job's state into the run directory; cancel cannot stop the job yet.
+--dataset must be in Datadog: every kept row pushed with `dataset push`, or the directory made by `dataset fetch` (the offline fake provider trains on any). The run goes in runs/RUN_ID unless --run-dir names another directory (a runs/ this creates gets a .gitignore, since runs hold trace-derived rows). --model takes a model's alias, or in any case the provider's model id or its Hugging Face tokenizer name, and --provider is inferred from it when one provider offers that model; the preview says so (provider_source), and its next_command pins both, with the alias. The preview lists rows and rendered tokens per split, the rejected rows, tokens per epoch and in total, the settings and where the data goes. --detach trains in a background worker; follow it with `status --watch`. Training stops early after --patience epochs without a validation-loss improvement; a Ctrl-C or `cancel` still keeps the best epoch. --learning-rate is constant unless --lr-schedule linear or cosine decays it over the steps of --max-epochs epochs (the preview's max_steps; early stopping or a cap ends the run first), after a linear warmup over --warmup-fraction of them (warmup_steps); it never reaches zero, and the other Adam parameters are fixed (run.json settings.optimizer). With --evaluate, the run is also evaluated on the test split in its training session once the best epoch is kept (see `evaluate`): the judge is calibrated and --eval-out-dir checked before training starts, so a failed calibration trains nothing; --detach is refused with it; and the evaluation stops, partial, at --max-spend-usd. --max-seq-len caps the context (and so the cost): longer rows are left out, as the preview shows (exceeds_context). --remote (Baseten only) runs the training loop in a Baseten CPU job, so training continues while this machine sleeps; --team names the team (default: your only or default team). It needs the baseten CLI and uv on PATH, a source checkout of pup-finetune and a team secret pup_finetune_api_key; it uploads the train and validation rows, the run files and pup-finetune's source to Baseten storage, and is refused with --detach and --evaluate. status copies the job's state into the run directory; cancel cannot stop the job yet.
 
 ```
 pup finetune train [OPTIONS]
@@ -591,9 +592,9 @@ pup finetune train [OPTIONS]
 | --- | --- | --- | --- |
 | **Required** | | | |
 | `--dataset` | `DIR` | required | The dataset directory to train on. |
-| `--model` | `MODEL` | required | A model, e.g. qwen3p8-27b; see models list. |
+| `--model` | `MODEL` | required | Model, e.g. glm-5p3-flash; see models list. |
 | **Run** | | | |
-| `--provider` | `NAME` | from --model | Provider: fireworks or baseten. |
+| `--provider` | `NAME` | from --model | Provider: baseten or fireworks. |
 | `--run-dir` | `DIR` | runs/RUN_ID | A new or empty run directory. |
 | `--run-id` | `ID` | generated | Run and model id. |
 | `--detach` |  |  | Train in a background worker; see status. |
@@ -635,8 +636,8 @@ pup finetune train [OPTIONS]
 Examples:
 
 ```sh
-pup finetune train --dataset ds --model qwen3p5-9b
 pup finetune train --dataset ds --model qwen3p5-9b --lr-schedule cosine
+pup finetune train --dataset ds --model muse-glimmer-30b
 ```
 
 Safety: Paid with --confirm · sends rows to the provider (and the judge) · PUP_READ_ONLY: preview only unless offline.
@@ -719,7 +720,7 @@ Safety: Paid with --confirm · sends rows to the provider · PUP_READ_ONLY: prev
 
 ## `pup finetune cancel`
 
-Stop the process training a run: it finishes the current step, saves a resumable checkpoint and promotes the best epoch so far. Without --confirm, previews which process gets the signal.
+Stop the process training a run: it finishes the current step, saves a resumable checkpoint and keeps the best epoch so far. Without --confirm, previews which process gets the signal.
 
 ```
 pup finetune cancel [OPTIONS] RUN_DIR
@@ -744,7 +745,7 @@ Safety: Free · signals the local training process · PUP_READ_ONLY: allowed.
 
 ## `pup finetune evaluate`
 
-Replay each held-out test conversation of a run, one recorded assistant turn at a time, with the base model and the run's best checkpoint, and score both with tool-call metrics and an LLM judge. Without --confirm, previews the calls and where the data goes. A complete evaluation is published to Datadog as two experiments, three with --compare-model, when the dataset was pushed (--no-publish skips it).
+Replay each held-out test conversation of a run, one recorded assistant turn at a time, with the base model and the run's best checkpoint, and score both with tool-call metrics and an LLM judge. Without --confirm, previews the calls and where the data goes. When the dataset was pushed, an evaluation starts by creating two Datadog experiments, three with --compare-model, prints a link comparing them and fills them in as conversations finish (--no-publish skips it).
 
 The result compares the two: pass rates, wins and regressions, and the tuned-minus-base delta with a bootstrap confidence interval. --compare-model, named as --judge-model is, replays a third model on the same cases, judged alike, with its own token limit (16000, thinking included) and the provider's lowest reasoning effort, and adds tuned-minus-compare; added to a complete evaluation, it reuses the base and tuned results and opens no training session. The directory keeps its compare model: a rerun without the flag continues it, and another one needs a new --out-dir. Tools are not executed, so the scores measure agreement with the recorded behavior, not task success. With --confirm, the judge is calibrated first, then every case is replayed; rerun the same command to continue an evaluation that stopped. A changed --max-tokens, judge, seed or --max-cases needs a new --out-dir. Without --judge-model, the judge is the one the --out-dir holds an evaluation by, else anthropic/claude-haiku-5-5 when an Anthropic credential resolves (ANTHROPIC_API_KEY, the OS keychain or the Anthropic SDK's login), else openai/gpt-5.4-mini when an OpenAI one does, else Fireworks' deepseek-v4p1-flash; the preview names it and where it came from (judge_source). Base answers from another evaluation or benchmark of the same dataset, made under the same settings, are reused from DATASET/replay_cache, together with their judgments when the judge is the same; --no-reuse makes them again. --evaluators FILE adds your own evaluators from a TOML spec: LLM judges, each with a rubric, an optional model and optional graded examples that calibrate it, and Python checks, each a function of the case and the answer that returns True, False, None (does not apply) or (False, reason); its headline is judge, an evaluator's name or all (the judge and every evaluator pass). Added to a complete evaluation, they score the stored answers, so only their judges' calls are paid. The directory keeps its evaluators: a rerun may add some, never drop or change one (add the new version under another name, or use a new --out-dir). Checks run in this process with your privileges.
 
@@ -789,7 +790,7 @@ Safety: Paid with --confirm · sends test rows to the provider and the judge, re
 
 Create an on-demand deployment of a completed run's model on its provider, wait until it serves, and smoke-test it with one chat completion. Without --confirm, previews what would be created; once created, it bills until `undeploy RUN_DIR --confirm`. An agent must pass --confirm only with the user's explicit authorization.
 
-The deployment has at most one replica and scales to zero when idle. The receipt, deployment.json in RUN_DIR, is written as soon as the deployment exists, so a failed or timed-out wait (--timeout-minutes) still records it. The result says how to call the model (usage: the base URL, the model to request and an example request that reads the key from its environment variable) and how to delete it (undeploy_command). The deployment bills per GPU-second while a replica runs (it scales to zero after a few idle minutes and starts again on the next request) until it is undeployed. A failed smoke test exits 1 and keeps the deployment. Fireworks' own CLI refuses to create deployments when run by an AI agent; this command uses the API and relies on --confirm, so an agent must pass --confirm only with the user's explicit authorization.
+The deployment has at most one replica and scales to zero when idle. The receipt, deployment.json in RUN_DIR, is written as soon as the deployment exists, so a failed or timed-out wait (--timeout-minutes) still records it. The result says how to call the model (usage: the base URL, the model to request and an example request that reads the key from its environment variable) and how to delete it (undeploy_command). The deployment bills per GPU-second while a replica runs (it scales to zero after a few idle minutes and starts again on the next request) until it is undeployed. A failed smoke test exits 1 and keeps the deployment.
 
 ```
 pup finetune deploy [OPTIONS] RUN_DIR

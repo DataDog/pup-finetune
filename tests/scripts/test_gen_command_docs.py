@@ -62,24 +62,50 @@ def test_the_table_of_what_each_step_needs_comes_from_the_registries() -> None:
         assert f"`train` on {name.capitalize()}" in table or f"on {name.capitalize()} |" in table
     assert "Fake" not in table  # development-only providers stay out of the README
     assert gen.requirement_rows() == [
-        ("`dataset pull`", "yes", "", ""),
+        ("`dataset pull`, `fetch`", "yes", "", ""),
         ("`dataset import`, `show`, `sample`, `label`; `status`, `runs`", "", "", ""),
-        ("`dataset triage`", "", "`FIREWORKS_API_KEY`", ""),
         ("`dataset push`", "yes", "", ""),
-        ("`train`, `evaluate` on Fireworks", "", "`FIREWORKS_API_KEY`", "`fireworks`, `hf`"),
-        ("`deploy`, `undeploy` on Fireworks", "", "`FIREWORKS_API_KEY`", "`fireworks`"),
-        ("`train` on Baseten", "", "`BASETEN_API_KEY`", "`baseten`, `hf`"),
-        # Evaluating needs the default judge's key too.
-        (
-            "`evaluate` on Baseten",
-            "",
-            "`BASETEN_API_KEY`, `FIREWORKS_API_KEY`",
-            "`baseten`, `hf`",
-        ),
+        # No training provider's row names another provider's key for its judges.
+        ("`train`, `evaluate`, `benchmark` on Baseten", "", "`BASETEN_API_KEY`", "`baseten`, `hf`"),
         ("`deploy`, `undeploy` on Baseten", "", "`BASETEN_API_KEY`", ""),
-        ("`anthropic/<model>` judges", "", "`ANTHROPIC_API_KEY`", "`anthropic`"),
-        ("`openai/<model>` judges", "", "`OPENAI_API_KEY`", ""),
+        (
+            "`train`, `evaluate`, `benchmark` on Fireworks",
+            "",
+            "`FIREWORKS_API_KEY`",
+            "`fireworks`, `hf`",
+        ),
+        ("`deploy`, `undeploy` on Fireworks", "", "`FIREWORKS_API_KEY`", "`fireworks`"),
+        # The judges take one key, of whichever judge provider there is.
+        (
+            "Judges for `dataset triage`, `evaluate` and `benchmark`",
+            "",
+            "one of `ANTHROPIC_API_KEY`, `FIREWORKS_API_KEY` or `OPENAI_API_KEY`",
+            "`anthropic` for Anthropic",
+        ),
     ]
+
+
+def test_the_table_of_supported_models_in_the_readme_is_up_to_date() -> None:
+    text = gen.README.read_text(encoding="utf-8")
+    assert gen.with_models(text) == text, _FIX
+
+
+def test_the_table_of_supported_models_comes_from_the_profiles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pup_finetune.providers import get_provider, registered_providers
+    from pup_finetune.runtime import Runtime
+
+    monkeypatch.setenv("PUP_FINETUNE_DEV", "1")  # the table must not follow the environment
+    table = gen.render_models()
+    assert table.splitlines()[0] == "| Model | `--model` | Baseten | Fireworks |"
+    for name in registered_providers():
+        for profile in get_provider(name, Runtime()).models():
+            assert f"| `{profile.tokenizer_model}` | `{profile.alias}` |" in table, profile.alias
+    assert "fake" not in table.casefold()  # development-only providers stay out of the README
+    # A model both providers offer is one row.
+    assert "| `Qwen/Qwen3.8-27B` | `qwen3p8-27b` | yes | yes |" in table
+    assert "| `Qwen/Qwen3.5-9B` | `qwen3p5-9b` | yes | - |" in table
 
 
 def test_check_mode_reports_nothing_stale() -> None:

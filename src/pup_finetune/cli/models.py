@@ -39,6 +39,7 @@ LIST_DOC = CommandDoc(
     ),
     examples=(
         "pup finetune models list",
+        "pup finetune models list --provider baseten --check",
         "pup finetune models list --provider fireworks --check",
     ),
     safety=Safety(

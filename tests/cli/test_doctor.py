@@ -45,12 +45,12 @@ CHECKOUT_COMMIT = doctor_cli.checkout_commit
 CHECKS = [
     "pup",
     "datadog_auth",
-    "fireworks:key",
-    "fireworks:sdk",
-    "fireworks:renderer",
     "baseten:key",
     "baseten:sdk",
     "baseten:renderer",
+    "fireworks:key",
+    "fireworks:sdk",
+    "fireworks:renderer",
     "anthropic:key",
     "openai:key",
     "anthropic:sdk",
@@ -143,7 +143,7 @@ def test_a_healthy_pup_is_ready_without_any_provider_key(use_pup: UsePup) -> Non
         "refreshes it)"
     )
     # A missing provider key is optional, never a failure, without --provider.
-    key = report["checks"][2]
+    key = checks_of(result)["fireworks:key"]
     assert key == {
         "name": "fireworks:key",
         "status": "optional",
@@ -165,13 +165,13 @@ def test_a_healthy_pup_is_ready_without_any_provider_key(use_pup: UsePup) -> Non
             "`pup llm-obs spans search` showed the spans and filter to read",
         },
         {
+            "command": "pup finetune auth login baseten",
+            "why": f"{doctor_cli.LOGIN_WHY}, for training, evaluation and deployment on baseten",
+        },
+        {
             "command": "pup finetune auth login fireworks",
             "why": f"{doctor_cli.LOGIN_WHY}, for training, evaluation and deployment on "
             "fireworks, and the default judges",
-        },
-        {
-            "command": "pup finetune auth login baseten",
-            "why": f"{doctor_cli.LOGIN_WHY}, for training, evaluation and deployment on baseten",
         },
     ]
     assert "Bearer" not in result.stdout
@@ -283,9 +283,9 @@ def test_the_ready_line_says_which_steps_read_only_mode_blocks(
     ready = next(line for line in lines if line.startswith("Ready: "))
     assert ready == (
         "Ready: dataset pull, show, triage.  Not ready: dataset push (read-only), "
-        "train on fireworks (read-only), evaluate on fireworks (read-only), deploy on "
-        "fireworks (read-only), train on baseten (read-only), evaluate on baseten (read-only), "
-        "deploy on baseten (read-only)."
+        "train on baseten (read-only), evaluate on baseten (read-only), deploy on "
+        "baseten (read-only), train on fireworks (read-only), evaluate on fireworks (read-only), "
+        "deploy on fireworks (read-only)."
     )
 
 
@@ -317,7 +317,7 @@ def test_old_pup_fails_but_still_emits_the_report(use_pup: UsePup) -> None:
     pup_check = report["checks"][0]
     assert pup_check["status"] == "fail"
     assert "older than the minimum 1.10.7" in pup_check["detail"]
-    assert pup_check["fix"] == "upgrade with `brew upgrade datadog/pack/pup`"
+    assert pup_check["fix"] == "upgrade with `brew upgrade datadog-labs/pack/pup`"
     assert report["checks"][1]["status"] == "pass"
     assert report["ready"]["dataset pull"]["blocked_by"] == ["pup"]
 
@@ -331,7 +331,7 @@ def test_missing_pup_fails_and_skips_auth(use_pup: UsePup, tmp_path: Path) -> No
     assert report["versions"]["pup"] is None
     pup_check, auth_check = report["checks"][:2]
     assert pup_check["status"] == "fail"
-    assert "brew install datadog/pack/pup" in pup_check["fix"]
+    assert "brew install datadog-labs/pack/pup" in pup_check["fix"]
     assert auth_check["status"] == "skipped"
     assert auth_check["detail"].startswith("skipped")
     assert report["ready"]["dataset show"]["ready"] is True
@@ -451,7 +451,9 @@ def test_a_failed_pup_check_comes_before_the_live_check(
     result = invoke("--provider", "fireworks")
     assert result.exit_code == 1
     assert report_of(result)["next_command"] is None
-    assert result.stderr.splitlines()[-1] == "Next: upgrade with `brew upgrade datadog/pack/pup`"
+    assert (
+        result.stderr.splitlines()[-1] == "Next: upgrade with `brew upgrade datadog-labs/pack/pup`"
+    )
 
 
 def test_a_named_provider_s_steps_are_the_only_ones_not_ready(
@@ -511,7 +513,8 @@ def test_check_preflights_the_named_provider_s_models(
     report = report_of(result)
     names = [check["name"] for check in report["checks"]]
     aliases = [profile.alias for profile in FIREWORKS_PROFILES]
-    assert names[2 : 5 + len(aliases)] == [
+    start = names.index("fireworks:key")
+    assert names[start : start + 3 + len(aliases)] == [
         "fireworks:key",
         "fireworks:sdk",
         "fireworks:renderer",
@@ -605,7 +608,7 @@ def test_the_fake_provider_needs_dev_mode() -> None:
 
 
 def test_the_provider_help_lists_the_registered_providers() -> None:
-    assert doctor_cli.PROVIDERS == "fireworks or baseten"
+    assert doctor_cli.PROVIDERS == "baseten or fireworks"
 
 
 # --- the checklist on stderr ---------------------------------------------------------------
@@ -624,21 +627,21 @@ def test_the_checklist_follows_the_report_on_stderr(
         f"pup-finetune {version} (checkout cd9cc2e)   read-only: off   dev: off",
         f"ok    pup 1.10.7 at {FAKE_BINARY}                  reading traces and pushing datasets",
         "ok    Datadog: signed in to datadoghq.com          reading traces and pushing datasets",
+        "--    Baseten key not set                          only for training, evaluation and "
+        "deployment on baseten",
+        "ok    Baseten Loops SDK installed                  training and evaluation on baseten",
+        "ok    Baseten renderer (transformers) installed    rendering rows for baseten",
         "ok    Fireworks key (FIREWORKS_API_KEY)            training, evaluation and deployment "
         "on fireworks, and the default judges",
         "--    Fireworks Training SDK missing               only for training, evaluation and "
         "deployment on fireworks",
         "ok    Fireworks renderer (transformers) installed  rendering rows for fireworks",
-        "--    Baseten key not set                          only for training, evaluation and "
-        "deployment on baseten",
-        "ok    Baseten Loops SDK installed                  training and evaluation on baseten",
-        "ok    Baseten renderer (transformers) installed    rendering rows for baseten",
         "--    Anthropic/OpenAI keys not set                only for anthropic/... or openai/... "
         "judges",
         "ok    Anthropic SDK installed                      anthropic/... judges",
-        "Ready: dataset pull, show, push, triage.  Not ready: train on fireworks, "
-        "evaluate on fireworks, deploy on fireworks, train on baseten, evaluate on baseten, "
-        "deploy on baseten.",
+        "Ready: dataset pull, show, push, triage.  Not ready: train on baseten, "
+        "evaluate on baseten, deploy on baseten, train on fireworks, evaluate on fireworks, "
+        "deploy on fireworks.",
         "Next: pup finetune dataset pull <DIR> --ml-app <ML_APP> --from 7d",
     ]
 
@@ -649,10 +652,10 @@ def test_a_failing_doctor_still_prints_its_checklist(use_pup: UsePup, tmp_path: 
     assert result.exit_code == 1
     lines = result.stderr.splitlines()
     assert lines[1].startswith("FAIL  pup not found")
-    assert lines[2].startswith("      fix: install pup with `brew install datadog/pack/pup`")
+    assert lines[2].startswith("      fix: install pup with `brew install datadog-labs/pack/pup`")
     assert lines[3].startswith("skip  Datadog login not checked (no pup)")
     assert lines[-2].startswith("Ready: dataset show.  Not ready: dataset pull, push")
-    assert lines[-1].startswith("Next: install pup with `brew install datadog/pack/pup`")
+    assert lines[-1].startswith("Next: install pup with `brew install datadog-labs/pack/pup`")
 
 
 def test_a_named_provider_s_failure_shows_its_fix_and_the_next_command(use_pup: UsePup) -> None:

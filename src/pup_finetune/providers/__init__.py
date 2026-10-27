@@ -218,15 +218,15 @@ def known_providers(runtime: Runtime) -> list[str]:
 
 
 def registered_providers(*, include_dev: bool = False) -> list[str]:
-    """Every registered provider name, in registration order (the built-in ones: fireworks
-    first); development-only ones only with ``include_dev``. What help lists, so it reads the
-    same in every environment. Imports no provider module."""
+    """Every registered provider name, in registration order; development-only ones only with
+    ``include_dev``. What help lists, so it reads the same in every environment. Imports no
+    provider module."""
     return [name for name, entry in _REGISTRY.items() if include_dev or not entry.dev_only]
 
 
 def provider_infos(runtime: Runtime) -> list[ProviderInfo]:
     """What the registry knows about each provider ``runtime`` may use, in registration
-    order (the built-in ones: fireworks first). Imports no provider module."""
+    order. Imports no provider module."""
     return [entry for entry in _REGISTRY.values() if _visible(entry, runtime)]
 
 
@@ -515,6 +515,44 @@ register_provider(
     offline=True,
 )
 register_provider(
+    "baseten",
+    "pup_finetune.providers.baseten.provider:BasetenProvider",
+    options=("max_seq_len",),
+    models={
+        "qwen3p5-9b": ("qwen3p5-9b", "Qwen/Qwen3.5-9B"),
+        "glm-5p3-flash": ("glm-5p3-flash", "zai-org/GLM-5.3-Flash"),
+        "qwen3p8-27b": ("qwen3p8-27b", "Qwen/Qwen3.8-27B"),
+        "kimi-k3": ("kimi-k3", "moonshotai/Kimi-K3"),
+    },
+    label="Baseten",
+    credential="baseten",
+    packages=(
+        Package(
+            key="sdk",
+            label="Baseten Loops SDK",
+            modules=("baseten.loops",),
+            extra="baseten",
+            steps=("train", "evaluate"),
+            needed_for="training and evaluation on baseten",
+        ),
+        Package(
+            key="renderer",
+            label="Hugging Face transformers package",
+            modules=("transformers",),
+            extra="hf",
+            steps=("train", "evaluate"),
+            needed_for="rendering rows for baseten",
+            short="renderer (transformers)",
+        ),
+    ),
+    refuses=(
+        RefusedFlag(
+            field="lora_alpha", flag="--lora-alpha", reason="Baseten sets the LoRA alpha itself"
+        ),
+    ),
+    remote=True,
+)
+register_provider(
     "fireworks",
     "pup_finetune.providers.fireworks.provider:FireworksProvider",
     options=("max_seq_len",),
@@ -562,44 +600,6 @@ register_provider(
             short="renderer (transformers)",
         ),
     ),
-)
-register_provider(
-    "baseten",
-    "pup_finetune.providers.baseten.provider:BasetenProvider",
-    options=("max_seq_len",),
-    models={
-        "qwen3p5-9b": ("qwen3p5-9b", "Qwen/Qwen3.5-9B"),
-        "glm-5p3-flash": ("glm-5p3-flash", "zai-org/GLM-5.3-Flash"),
-        "qwen3p8-27b": ("qwen3p8-27b", "Qwen/Qwen3.8-27B"),
-        "kimi-k3": ("kimi-k3", "moonshotai/Kimi-K3"),
-    },
-    label="Baseten",
-    credential="baseten",
-    packages=(
-        Package(
-            key="sdk",
-            label="Baseten Loops SDK",
-            modules=("baseten.loops",),
-            extra="baseten",
-            steps=("train", "evaluate"),
-            needed_for="training and evaluation on baseten",
-        ),
-        Package(
-            key="renderer",
-            label="Hugging Face transformers package",
-            modules=("transformers",),
-            extra="hf",
-            steps=("train", "evaluate"),
-            needed_for="rendering rows for baseten",
-            short="renderer (transformers)",
-        ),
-    ),
-    refuses=(
-        RefusedFlag(
-            field="lora_alpha", flag="--lora-alpha", reason="Baseten sets the LoRA alpha itself"
-        ),
-    ),
-    remote=True,
 )
 
 # Providers with an API key register its CredentialSpec in their (lightweight) package, so

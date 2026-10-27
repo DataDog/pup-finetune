@@ -7,12 +7,12 @@
 """Command output: one JSON result on stdout, everything else on stderr.
 
 Under pup (``PUP_OUTPUT`` set), the result is piped through ``pup format`` so pup applies the
-user's output format, ``--jq`` filter and agent envelope (whose metadata names the command and
-the result's ``next_command``); a table or CSV of a list-shaped command shows its rows
-(:func:`table_filter`). Standalone, it is printed as JSON (:func:`to_json`). Either way its
-measurements (losses, rates, times, spend estimates) keep 4 significant digits and values the
-user set are printed exactly (:func:`pup_finetune.display.rounded_floats`); the files commands
-write keep theirs.
+user's output format, ``--jq`` filter and envelope, when that pup version adds one (whose
+metadata names the command and the result's ``next_command``); a table or CSV of a
+list-shaped command shows its rows (:func:`table_filter`). Standalone, it is printed as JSON
+(:func:`to_json`). Either way its measurements (losses, rates, times, spend estimates) keep 4
+significant digits and values the user set are printed exactly
+(:func:`pup_finetune.display.rounded_floats`); the files commands write keep theirs.
 
 After the result, stderr gets every warning it holds (:func:`echo_warnings`) and the closing
 summary (:func:`summary`): what people at a terminal read last. Progress lines

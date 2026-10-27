@@ -229,9 +229,9 @@ to a `"module:attr"` import path. Listing providers imports no provider implemen
 `get_provider(name, runtime)` imports the module on first use and calls `attr(runtime)`, which
 must return a `Provider`. A provider whose SDK is not installed fails with a hint to install its extra.
 Entries registered with `dev_only=True`, like the offline `fake` provider used for
-development, are visible only with `PUP_FINETUNE_DEV=1`. `fireworks` and `baseten` are
+development, are visible only with `PUP_FINETUNE_DEV=1`. `baseten` and `fireworks` are
 registered for everyone. The registry also imports the lightweight package of every provider
-that has an API key (today `fireworks` and `baseten`, through imports at the bottom of
+that has an API key (today `baseten` and `fireworks`, through imports at the bottom of
 `providers/__init__.py`). That
 package's `__init__.py` does little more than register the provider's `CredentialSpec`, so
 `auth`, `doctor` and every other command know the API key without importing an SDK, an HTTP
@@ -258,11 +258,32 @@ that is missing.
 expires) and `versions` (`pup_finetune`, `checkout`, `pup`, `python`); `ok` stays for one
 release.
 
+## Training on Baseten
+
+[`providers/baseten/backend.py`](../src/pup_finetune/providers/baseten/backend.py) trains on
+Baseten Loops through `providers/baseten/client.py`, the only module that loads the Loops SDK:
+
+- **Preflight.** Read only: the SDK loads, and Loops' capabilities must offer and enable the
+  model to the workspace with a limit of at least the `max_seq_len` option, else the
+  profile's context. Nothing is paid before `--confirm`.
+- **Sessions.** `open_session` opens a Loops session and a dedicated LoRA trainer whose
+  context is the next power of two over the session's longest example (at least 1024 tokens,
+  at most the profile's). Leaving the context always deactivates the run and every sampler
+  the session started; a deactivation that fails names what to deactivate by hand. With no
+  capacity, nothing is left running.
+- **Checkpoints.** `bt://loops:` paths that outlive the run; a resume loads a training
+  checkpoint with its optimizer state into a new run. There is no promotion: the best sampler
+  checkpoint is the run's deployable checkpoint, which `deploy` serves (see Deploying).
+- **Sampling.** Each sampler runs on its own dedicated deployment, sized to the profile's
+  context. It renders the prompt with the profile's renderer, samples greedily and parses the
+  completion into an OpenAI message. The `max_seq_len` provider option cuts the training
+  profile, so it also sizes the samplers and the trainer a standalone evaluation opens.
+
 ## Training on Fireworks
 
 [`providers/fireworks/backend.py`](../src/pup_finetune/providers/fireworks/backend.py) is the
-`TrainingBackend` for Fireworks serverless training, and the worked example of a real one. It
-talks to the narrow interface in `providers/fireworks/client.py`, never to the SDK:
+`TrainingBackend` for Fireworks serverless training. It talks to the narrow interface in
+`providers/fireworks/client.py`, never to the SDK:
 
 - **Sessions.** `open_session` opens one serverless training session and creates the LoRA
   run on it (rank, alpha and seed from the run), or continues a training checkpoint with
@@ -296,27 +317,6 @@ talks to the narrow interface in `providers/fireworks/client.py`, never to the S
   transient failure, a bounded number of times with a warning before each retry; training
   calls never are, since the loop owns that policy. `latency_s` times the successful attempt
   only.
-
-## Training on Baseten
-
-[`providers/baseten/backend.py`](../src/pup_finetune/providers/baseten/backend.py) trains on
-Baseten Loops through `providers/baseten/client.py`, the only module that loads the Loops SDK:
-
-- **Preflight.** Read only: the SDK loads, and Loops' capabilities must offer and enable the
-  model to the workspace with a limit of at least the `max_seq_len` option, else the
-  profile's context. Nothing is paid before `--confirm`.
-- **Sessions.** `open_session` opens a Loops session and a dedicated LoRA trainer whose
-  context is the next power of two over the session's longest example (at least 1024 tokens,
-  at most the profile's). Leaving the context always deactivates the run and every sampler
-  the session started; a deactivation that fails names what to deactivate by hand. With no
-  capacity, nothing is left running.
-- **Checkpoints.** `bt://loops:` paths that outlive the run; a resume loads a training
-  checkpoint with its optimizer state into a new run. There is no promotion: the best sampler
-  checkpoint is the run's deployable checkpoint, which `deploy` serves (see Deploying).
-- **Sampling.** Each sampler runs on its own dedicated deployment, sized to the profile's
-  context, and renders, samples and parses as on Fireworks. The `max_seq_len` provider option
-  cuts the training profile, so it also sizes the samplers and the trainer a standalone
-  evaluation opens.
 
 ## Training in a Baseten job (`train --remote`)
 
@@ -530,6 +530,21 @@ with an undeploy hint. It is updated once the deployment serves, with the
 `--confirm`, from the run directory alone (no provider call), and with `PUP_READ_ONLY` set
 only their `--confirm` is refused.
 
+On Baseten, [`providers/baseten/deploy.py`](../src/pup_finetune/providers/baseten/deploy.py)
+serves the run's deployable checkpoint as a dedicated Baseten model named after the deployment
+id. Before `on_creating` it checks Baseten's record of the checkpoint, finds an instance type
+with exactly the GPUs of `--shape TYPE:COUNT` (default `H100:1`), and refuses a name Baseten
+already has, since a create under it would add a deployment to that model. It then sends
+`POST /v1/loops/checkpoints/deploy` once (the workspace needs BDN volumes, and the
+`hf_access_token` secret supplies `HF_TOKEN`). A 4xx created nothing; after any other failure
+the model is read back by name and adopted only when its one deployment serves the checkpoint
+(the `training_checkpoints` of its config) on that instance type. It reads the deployment
+every 15 seconds until `ACTIVE`, sets its autoscaling to 0 to 1 replicas, and smoke-tests one
+chat completion naming the checkpoint on the deployment's `/sync/v1` route. Baseten assigns
+the model and deployment ids, so `deployment_name` is `None`; `owns_deployment` reads the
+model back by name, and `undeploy` deletes the model with its deployment, which keeps the
+checkpoint and frees the name for the next deploy.
+
 On Fireworks, [`providers/fireworks/deploy.py`](../src/pup_finetune/providers/fireworks/deploy.py)
 drives the SDK's `Fireworks` client through `client.py`: the first validated, latest-validated
 shape `deployment_shape_versions.match_for_model` returns (unless `--shape`), then
@@ -547,28 +562,13 @@ seconds until `READY` (`FAILED`, `DELETING` or `DELETED` stop at once, as
 (`accounts/<account>/deployments/<id>`), retrying HTTP 503, 429 and dropped connections
 while a replica starts from zero. `undeploy` refuses a deployment whose resource name places it
 in another account than the key resolves to, where a 404 would not mean it is gone.
-Fireworks' own CLI refuses to create deployments when an AI agent runs it; pup-finetune uses
-the API and relies on `--confirm`, so an agent confirms only with the user's explicit
-authorization.
 
-On Baseten, [`providers/baseten/deploy.py`](../src/pup_finetune/providers/baseten/deploy.py)
-serves the run's deployable checkpoint as a dedicated Baseten model named after the deployment
-id. Before `on_creating` it checks Baseten's record of the checkpoint, finds an instance type
-with exactly the GPUs of `--shape TYPE:COUNT` (default `H100:1`), and refuses a name Baseten
-already has, since a create under it would add a deployment to that model. It then sends
-`POST /v1/loops/checkpoints/deploy` once (the workspace needs BDN volumes, and the
-`hf_access_token` secret supplies `HF_TOKEN`). A 4xx created nothing; after any other failure
-the model is read back by name and adopted only when its one deployment serves the checkpoint
-(the `training_checkpoints` of its config) on that instance type. It reads the deployment
-every 15 seconds until `ACTIVE`, sets its autoscaling to 0 to 1 replicas, and smoke-tests one
-chat completion naming the checkpoint on the deployment's `/sync/v1` route. Baseten assigns
-the model and deployment ids, so `deployment_name` is `None`; `owns_deployment` reads the
-model back by name, and `undeploy` deletes the model with its deployment, which keeps the
-checkpoint and frees the name for the next deploy.
+`deploy` creates deployments through each provider's API, so an agent must pass `--confirm`
+only with the user's explicit authorization.
 
 ## Judges
 
-LLM judges (the replay judge and the triage council) run on Fireworks, Anthropic or OpenAI.
+LLM judges (the replay judge and the triage council) run on Anthropic, OpenAI or Fireworks.
 [`judges.py`](../src/pup_finetune/judges.py) is provider-neutral and imports no SDK:
 `parse_judge` reads a judge spec by prefix (`anthropic/<model>` or `openai/<model>`; any
 other spec is a Fireworks model id such as `accounts/fireworks/models/<model>`, as before)
@@ -685,7 +685,8 @@ Using Baseten as the example:
    say so in the hint only then), `ProviderAuthError` for a rejected key and
    `TransientError` for a retryable server error or dropped connection, with redacted
    messages (`providers/fireworks/client.py` does this in `fireworks_error`).
-   `providers/fireworks/backend.py` is a complete backend to follow.
+   `providers/baseten/backend.py` and `providers/fireworks/backend.py` are complete backends
+   to follow.
 3. **Renderer.** Reuse `HFChatTemplateRenderer` through the model's family in
    `rendering/families.py`: the same model renders the same way on every provider. A new
    family is a new table entry (plus a response parser when its output format is new) and

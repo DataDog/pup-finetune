@@ -113,8 +113,9 @@ DOC = CommandDoc(
         "Replay each held-out test conversation of a run, one recorded assistant turn at a "
         "time, with the base model and the run's best checkpoint, and score both with "
         "tool-call metrics and an LLM judge. Without --confirm, previews the calls and where "
-        "the data goes. A complete evaluation is published to Datadog as two experiments, "
-        "three with --compare-model, when the dataset was pushed (--no-publish skips it).",
+        "the data goes. When the dataset was pushed, an evaluation starts by creating two "
+        "Datadog experiments, three with --compare-model, prints a link comparing them and "
+        "fills them in as conversations finish (--no-publish skips it).",
         "The result compares the two: pass rates, wins and regressions, and the "
         "tuned-minus-base delta with a bootstrap confidence interval. --compare-model, named "
         "as --judge-model is, replays a third model on the same cases, judged alike, with its "

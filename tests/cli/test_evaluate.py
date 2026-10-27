@@ -922,7 +922,7 @@ def test_a_train_preview_warns_when_no_epoch_can_finish(dataset: Path, tmp_path:
         invoke(*train_args(dataset, tmp_path / "run", "--max-train-tokens", str(per_epoch - 1)))
     )["preview"]
     assert any(
-        "no epoch will finish" in warning and "nothing is promoted or evaluated" in warning
+        "no epoch will finish" in warning and "nothing is kept or evaluated" in warning
         for warning in capped["warnings"]
     )
     enough = output(

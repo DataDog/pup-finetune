@@ -15,7 +15,8 @@ arguments, options, examples and safety, the safety table built from every comma
 codes from ``pup_finetune.errors.ERROR_CODES``), the exclusion-code table between
 the markers in ``docs/data-format.md`` from ``pup_finetune.data.exclusions``, and the table
 of what each step needs between the markers in ``README.md`` from what ``doctor`` checks
-(``pup_finetune.readiness``, the provider and credential registries). With ``--check``,
+(``pup_finetune.readiness``, the provider and credential registries), and the table of
+supported models there from the registered providers' model profiles. With ``--check``,
 writes nothing and exits 1 when any of them is out of date.
 
 The output is deterministic: it is built from the commands' parameters, not from rendered
@@ -40,6 +41,8 @@ EXCLUSIONS_BEGIN = "<!-- BEGIN GENERATED: exclusion codes (scripts/gen_command_d
 EXCLUSIONS_END = "<!-- END GENERATED: exclusion codes -->"
 REQUIREMENTS_BEGIN = "<!-- BEGIN GENERATED: what each step needs (scripts/gen_command_docs.py) -->"
 REQUIREMENTS_END = "<!-- END GENERATED: what each step needs -->"
+MODELS_BEGIN = "<!-- BEGIN GENERATED: supported models (scripts/gen_command_docs.py) -->"
+MODELS_END = "<!-- END GENERATED: supported models -->"
 
 _DEFAULT_NOTE = re.compile(r"\s*\[dim\]\\\[default: (?P<default>.*?)\]\[/dim\]")
 """A default written into an option's help (``_presentation.default_note``)."""
@@ -236,7 +239,7 @@ def render_errors() -> list[str]:
         "provider failed, a local file is unreadable or inconsistent, another process holds "
         "the directory's lock, or Ctrl-C or SIGTERM stopped the command.",
         "",
-        "A failure leaves stdout empty and prints two lines on stderr: "
+        "An error leaves stdout empty and prints two lines on stderr: "
         "`Error [<code>]: <message>`, then `Hint: <what to do>` when there is a hint, for "
         "example `Error [run_dir_not_empty]: run1 already holds run ft-... (completed)`. "
         "The code is stable and listed below; the message is for people and may change. "
@@ -249,7 +252,9 @@ def render_errors() -> list[str]:
         "of at most seven lines generated from it (`Preview only, nothing was run: ...`, then "
         "the data, settings, recipients, who bills it and the cost; a longer card drops the "
         "settings first, never the cost or a refusal), its warnings and `Next: <command>`, and "
-        "exits `2`; its code is `confirmation_required`. A run records the error that "
+        "exits `2`; its code is `confirmation_required`. A command that returns a result with "
+        "a nonzero exit, such as `doctor` when a required check fails, still prints the result "
+        "on stdout. A run records the error that "
         "stopped it, with the same `code`, under `error` in `state.json`.",
         "",
         "| Code | Exit | Meaning |",
@@ -369,23 +374,29 @@ def with_exclusions(text: str) -> str:
 _DATASET_STEPS = (
     "dataset pull",
     "dataset show",
-    "dataset triage",
     "dataset push",
 )
-"""The dataset steps of :func:`~pup_finetune.readiness.ready_map`, in workflow order."""
+"""The dataset steps of :func:`~pup_finetune.readiness.ready_map`, in workflow order, but
+for ``dataset triage``, whose only need is the judges."""
+
+
+def one_of(items: Sequence[str]) -> str:
+    """``items`` as a choice: ``one of a, b or c``."""
+    return items[0] if len(items) == 1 else f"one of {', '.join(items[:-1])} or {items[-1]}"
 
 
 def requirement_rows() -> list[tuple[str, str, str, str]]:
     """What each step needs, as (step, Datadog login, API key, extra) rows.
 
-    Read from what ``doctor`` checks: every check is made to fail, so each step of
-    :func:`~pup_finetune.readiness.ready_map` is blocked by exactly what it needs (deploying
-    on each provider that deploys included). Each judge-only provider (Anthropic, OpenAI)
-    gets a row for its judges. Development-only providers are left out.
+    Read from what ``doctor`` checks: every check fails but the judge-only providers'
+    (Anthropic, OpenAI), so each step of :func:`~pup_finetune.readiness.ready_map` is
+    blocked by exactly what it needs besides its judges (deploying on each provider that
+    deploys included). The judges take one key, of any judge provider, so they get a row of
+    their own. Development-only providers are left out.
     """
     from pup_finetune import credentials
     from pup_finetune.doctor import CheckResult
-    from pup_finetune.judges import JUDGE_PACKAGES
+    from pup_finetune.judges import JUDGE_PACKAGES, PROVIDERS
     from pup_finetune.providers import Package, provider_infos
     from pup_finetune.readiness import DATADOG_CHECKS, ready_map
     from pup_finetune.runtime import Runtime
@@ -397,8 +408,14 @@ def requirement_rows() -> list[tuple[str, str, str, str]]:
     }
     packages |= {f"{owner}:{package.key}": package for owner, package in JUDGE_PACKAGES.items()}
     keys = {f"{spec.provider}:key": spec.env_var for spec in credentials.all_specs()}
-    names = [*DATADOG_CHECKS, *keys, *packages]
-    steps = ready_map([CheckResult(name=name, status="fail", detail="") for name in names], runtime)
+    provider_keys = {info.credential for info in infos}
+    judges_met = {name for name in keys if name.partition(":")[0] not in provider_keys}
+    judges_met |= {f"{owner}:{package.key}" for owner, package in JUDGE_PACKAGES.items()}
+    checks = [
+        CheckResult(name=name, status="pass" if name in judges_met else "fail", detail="")
+        for name in [*DATADOG_CHECKS, *keys, *packages]
+    ]
+    steps = ready_map(checks, runtime)
 
     def cells(blocked_by: Sequence[str]) -> tuple[str, str, str]:
         datadog = "yes" if any(name in DATADOG_CHECKS for name in blocked_by) else ""
@@ -424,26 +441,34 @@ def requirement_rows() -> list[tuple[str, str, str, str]]:
         suffix = f" on {where}" if where else ""
         return [(", ".join(labels) + suffix, *needs) for labels, needs in merged]
 
-    labels = {"dataset show": "`dataset import`, `show`, `sample`, `label`; `status`, `runs`"}
+    labels = {
+        "dataset pull": "`dataset pull`, `fetch`",
+        "dataset show": "`dataset import`, `show`, `sample`, `label`; `status`, `runs`",
+    }
     rows = rows_of(
         [(labels.get(name, f"`{name}`"), steps[name]["blocked_by"]) for name in _DATASET_STEPS]
     )
     for info in infos:
         labeled: list[tuple[str, Sequence[str]]] = [
             ("`train`", steps[f"train on {info.name}"]["blocked_by"]),
-            ("`evaluate`", steps[f"evaluate on {info.name}"]["blocked_by"]),
+            ("`evaluate`, `benchmark`", steps[f"evaluate on {info.name}"]["blocked_by"]),
         ]
         if info.deploys:
             labeled.append(("`deploy`, `undeploy`", steps[f"deploy on {info.name}"]["blocked_by"]))
         rows += rows_of(labeled, info.label)
-    provider_keys = {info.credential for info in infos}
-    for spec in credentials.all_specs():
-        if spec.provider in provider_keys:
-            continue
-        judge = [f"{spec.provider}:key"]
-        if spec.provider in JUDGE_PACKAGES:
-            judge.append(f"{spec.provider}:{JUDGE_PACKAGES[spec.provider].key}")
-        rows += rows_of([(f"`{spec.provider}/<model>` judges", judge)])
+    judges = sorted(PROVIDERS.values(), key=lambda judge: keys[f"{judge.credential}:key"])
+    rows.append(
+        (
+            "Judges for `dataset triage`, `evaluate` and `benchmark`",
+            "",
+            one_of([f"`{keys[f'{judge.credential}:key']}`" for judge in judges]),
+            ", ".join(
+                f"`{JUDGE_PACKAGES[judge.credential].extra}` for {judge.name}"
+                for judge in judges
+                if judge.credential in JUDGE_PACKAGES
+            ),
+        )
+    )
     return rows
 
 
@@ -465,12 +490,45 @@ def with_requirements(text: str) -> str:
     )
 
 
+def render_models() -> str:
+    """The table of supported models that goes between the markers in ``README.md``.
+
+    Read from the registry's model profiles (each alias with its names, the Hugging Face name
+    last), one row per Hugging Face model, in the order the providers (in registration order)
+    list them, with a column per provider. Development-only providers are left out.
+    """
+    from pup_finetune.providers import provider_infos
+    from pup_finetune.runtime import Runtime
+
+    infos = provider_infos(Runtime())  # not development mode
+    aliases: dict[str, dict[str, None]] = {}
+    offered: dict[str, set[str]] = {}
+    for info in infos:
+        for alias, names in info.models.items():
+            aliases.setdefault(names[-1], {})[alias] = None
+            offered.setdefault(names[-1], set()).add(info.name)
+    lines = [
+        "| Model | `--model` | " + " | ".join(info.label for info in infos) + " |",
+        "| --- | --- | " + " | ".join("---" for _ in infos) + " |",
+    ]
+    for model, model_aliases in aliases.items():
+        names = ", ".join(f"`{alias}`" for alias in model_aliases)
+        cells = " | ".join("yes" if info.name in offered[model] else "-" for info in infos)
+        lines.append(f"| `{model}` | {names} | {cells} |")
+    return "\n".join(lines)
+
+
+def with_models(text: str) -> str:
+    """``text`` (``README.md``) with its generated table of supported models replaced."""
+    return between(text, MODELS_BEGIN, MODELS_END, render_models(), name=README.name)
+
+
 def expected() -> dict[Path, str]:
     """Each generated file and the content it should have."""
     return {
         COMMANDS_DOC: render_commands(),
         DATA_FORMAT_DOC: with_exclusions(DATA_FORMAT_DOC.read_text(encoding="utf-8")),
-        README: with_requirements(README.read_text(encoding="utf-8")),
+        README: with_models(with_requirements(README.read_text(encoding="utf-8"))),
     }
 
 

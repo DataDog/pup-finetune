@@ -1,6 +1,6 @@
 ---
 name: datadog-finetune
-description: Fine-tune an open-weight model from Datadog Agent Observability (LLM Observability) traces with pup finetune. Use when the user wants to build a supervised fine-tuning (SFT) dataset from the LLM spans of an ml_app, review or label that data, push it to an Agent Observability dataset, train a LoRA on Fireworks or Baseten, evaluate the tuned model against the base model, deploy or undeploy it, or resume, check or debug a training run, an evaluation or a deployment made with pup finetune.
+description: Fine-tune an open-weight model from Datadog Agent Observability (LLM Observability) traces with pup finetune. Use when the user wants to build a supervised fine-tuning (SFT) dataset from the LLM spans of an ml_app, review or label that data, push it to an Agent Observability dataset, train a LoRA on Baseten or Fireworks, evaluate the tuned model against the base model, deploy or undeploy it, or resume, check or debug a training run, an evaluation or a deployment made with pup finetune.
 ---
 
 # Fine-tune a model from Datadog Agent Observability traces
@@ -83,7 +83,7 @@ row-weather-002 (train, 2 turns, tools: get_weather)
 | `phase` `training`, `worker.state` `stale` or `exited` | The worker died or hangs. Read `worker.log`, then see Debugging. |
 | `phase` `completed` | Go to step 6. |
 | `phase` `cancelled` with a `best_epoch` | Evaluate or deploy it as is. Resume only to train further, with a yes. |
-| `phase` `interrupted` or `failed` | Preview `resume` (step 5); `resume_mode` `finalize_only` retries only the promotion. |
+| `phase` `interrupted` or `failed` | Preview `resume` (step 5); `resume_mode` `finalize_only` retries only keeping the best epoch. |
 | evaluate `status` `complete` | Report the headline (step 6). |
 | evaluate `status` `complete_with_errors` | Its `next_command` retries the errors; it is paid, so ask first. A check that raised is not retried: its `hint` says how to fix it. |
 | evaluate `status` `partial` | Rerun the same command to continue. |
@@ -93,16 +93,16 @@ row-weather-002 (train, 2 turns, tools: get_weather)
 ## Step 0: check the setup
 
 ```sh
-pup finetune doctor --provider fireworks --check
+pup finetune doctor --provider <PROVIDER> --check
 ```
 
-Pass the provider the user trains on (`fireworks` or `baseten`). `ready` lists what blocks each
+Pass the provider the user trains on (`baseten` or `fireworks`). `ready` lists what blocks each
 step (`blocked_by`); a failed check has a `fix` (a missing key: the user runs `auth login`).
 
 Check:
 
 - [ ] `"status": "ready"`, signed in to the right Datadog site (the `datadog_auth` check).
-- [ ] The provider's key, SDK, renderer and model checks (`fireworks:model:qwen3p8-27b`) pass.
+- [ ] The provider's key, SDK, renderer and model checks (`<PROVIDER>:model:<MODEL>`) pass.
 
 ## Step 1: explore the spans and agree on the goal
 
@@ -144,8 +144,7 @@ Build a filter only from values you saw, and test it (a `--query` above all) in 
 Check:
 
 - [ ] The ml_app has LLM spans in the window, and every filter value appears in them.
-- [ ] The user named the metric that decides success, and agreed on the quality signal and
-      the time range.
+- [ ] The user named the metric that decides success, and agreed on the quality signal and the time range.
 
 ## Step 2: test the filter, then pull the dataset
 
@@ -165,8 +164,7 @@ Check:
 
 - [ ] The accepted rows and exclusion reasons look right to the user.
 - [ ] Every split is non-empty. Fix a skewed split by pulling more rows, never with the seed.
-- [ ] Trace content stays out of git: keep the dataset, label and review files and rubrics
-      under `datasets/` (ignored).
+- [ ] Trace content stays out of git: keep the dataset, label and review files and rubrics under `datasets/` (ignored).
 
 ## Step 3: review the rows
 
@@ -240,7 +238,7 @@ To choose the model, first compare candidates on the test split (paid; it previe
 `recommendation` names the one to fine-tune, or says a base model already meets the target:
 
 ```sh
-pup finetune benchmark datasets/my-agent --models qwen3p5-9b,baseten/glm-5p3-flash
+pup finetune benchmark datasets/my-agent --models baseten/qwen3p5-9b,fireworks/glm-5p3-flash
 pup finetune train --provider <PROVIDER> --dataset datasets/my-agent --model <MODEL> --detach
 pup finetune status ft-20261007183443-a8b181 --watch --timeout 90s
 ```
@@ -250,8 +248,8 @@ Set `--target-pass-rate` to what the user would accept from a base model. Check
 benchmark again into a new `--out-dir` with a higher `--max-tokens`. `train` previews tokens,
 rows left out and recipients (rerun `doctor --provider` if the provider changed); cap spend
 with `--max-train-tokens`, or `--max-spend-usd` with `--hourly-rate-usd`. Always train with
-`--detach`; watch only with `--timeout`. The best epoch by validation loss is promoted. A
-resume bills again; a cancel promotes the best epoch so far:
+`--detach`; watch only with `--timeout`. The run keeps the best epoch by validation loss. A
+resume bills again, and a cancel keeps the best epoch so far:
 
 ```sh
 pup finetune resume ft-20261007183443-a8b181 --detach
@@ -261,8 +259,7 @@ pup finetune cancel ft-20261007183443-a8b181
 Check:
 
 - [ ] The user saw the token counts and authorized this training (and any resume).
-- [ ] `status` ends `completed` (or `cancelled`) with a `best_epoch` and a `promoted_model`
-      (Fireworks) or a `deployable_checkpoint` (Baseten).
+- [ ] `status` ends `completed` (or `cancelled`) with a `best_epoch` and a `deployable_checkpoint` (Baseten) or a `promoted_model` (Fireworks).
 - [ ] Validation loss fell, then flattened; if it rose from the first epoch, tell the user
       (overfitting or too little data). After rebalancing it no longer tracks the user's metric.
 
@@ -307,8 +304,7 @@ pup finetune deploy ft-20261007183443-a8b181
 pup finetune undeploy ft-20261007183443-a8b181
 ```
 
-A deployment bills per GPU-second while a replica runs, until it is undeployed.
-Deploying needs the user's explicit authorization for this deployment; never deploy alone. `deploy --confirm` waits until it serves and runs a smoke test. Show the user `usage`
+A deployment bills per GPU-second while a replica runs, until it is undeployed. Deploying needs the user's explicit authorization for this deployment; never deploy alone. `deploy --confirm` waits until it serves and runs a smoke test. Show the user `usage`
 and `undeploy_command` (a preview); run its `--confirm` only when they say they are done.
 
 Check:
@@ -329,30 +325,34 @@ Check:
 | `kimi-k3` | `moonshotai/Kimi-K3` | Supports reasoning; its tokenizer runs code from its repository |
 
 - **Setup.** The `baseten` and `hf` extras and a key: `pup finetune auth login baseten`, or
-  read only, the default remote's key in `~/.trussrc`. A model Fireworks offers too (all but `qwen3p5-9b`) needs `--provider baseten`:
+  read only, the default remote's key in `~/.trussrc`. A model both providers offer (all but `qwen3p5-9b`) needs `--provider`:
   `pup finetune train --provider baseten --dataset datasets/my-agent --model glm-5p3-flash --detach`. `--max-seq-len <n>` (at least 1024) caps the context; never pass `--lora-alpha`.
 - **Billing.** `train`, `resume` and `evaluate` provision a dedicated Loops trainer (and
-  samplers) that bills until the run is deactivated; every exit deactivates it. Never `kill -9`
-  a pup-finetune process. On `could not deactivate Baseten run <id> (...); it may still bill`,
-  tell the user at once. A standalone `evaluate` starts a new trainer; `train --evaluate` reuses one.
-- **Remote.** `--remote` (instead of `--detach`) runs the loop in a Baseten CPU job, which also
-  bills, so training survives a sleeping laptop. It needs the `baseten` CLI, `uv` and a team secret
-  `pup_finetune_api_key`. `cancel` cannot stop it: the user stops the job in the Baseten UI.
+  samplers) that bills until the run is deactivated; every exit deactivates it. Never `kill -9` a pup-finetune process.
+  On `could not deactivate Baseten run <id> (...); it may still bill`, tell the user at once. A standalone `evaluate` starts a new trainer; `train --evaluate` reuses one.
+- **Remote.** `--remote` (instead of `--detach`) runs the loop in a Baseten CPU job, which also bills, so training goes on while the user's machine sleeps.
+  It needs the `baseten` CLI, `uv` and a team secret `pup_finetune_api_key`. `cancel` cannot stop it: the user stops the job in the Baseten UI.
 - **Checkpoints.** No promotion: the best epoch's sampler checkpoint is the run's
   `deployable_checkpoint` (`bt://loops:<run>/sampler_weights/<name>`). An expired checkpoint needs a new run.
 - **Deploy.** A dedicated model on exactly the GPUs of `--shape TYPE:COUNT` (default `H100:1`),
   0 to 1 replicas. The workspace needs BDN volumes and an `hf_access_token` secret. `undeploy` deletes the model and keeps the checkpoint.
-- **Environment.** pup-finetune refuses `LOOPS_REQUEST_LOG`, `LOOPS_REUSE_FROM_RUN_ID`,
-  `LOOPS_REUSE_FROM_SESSION_ID`, `INTERNAL_LOOPS_BACKEND_VERSION`, `LOOPS_TEAM`, and
-  `LOOPS_BASE_URL` (`LOOPS_BASE_URL must be unset or https://api.baseten.co`). Ask the user to
-  unset them.
+- **Environment.** pup-finetune refuses `LOOPS_REQUEST_LOG`, `LOOPS_REUSE_FROM_RUN_ID`, `LOOPS_REUSE_FROM_SESSION_ID`,
+  `INTERNAL_LOOPS_BACKEND_VERSION`, `LOOPS_TEAM`, and `LOOPS_BASE_URL` (`LOOPS_BASE_URL must be unset or https://api.baseten.co`). Ask the user to unset them.
+
+### Fireworks
+
+- **Setup.** The `fireworks` and `hf` extras and a key: `pup finetune auth login fireworks`. The account needs access to Serverless Training, and the key must see only that account.
+  A model both providers offer needs `--provider`: `pup finetune train --provider fireworks --dataset datasets/my-agent --model qwen3p8-27b --detach`. `--max-seq-len <n>` caps the context.
+- **Billing.** `train`, `resume` and `evaluate` open a serverless training session that bills at Fireworks' rates for the tokens it trains and samples; every exit ends the session. A standalone `evaluate` opens a new session; `train --evaluate` reuses one.
+- **Checkpoints.** Before the session ends, the best epoch is promoted to a Fireworks model, the run's `promoted_model` (`accounts/<account>/models/<run id>`); a new best that a resume finds after a promotion gets `-e<epoch>s<step>` added to the id.
+- **Deploy.** An on-demand deployment of the `promoted_model` on the first shape Fireworks validates for it unless `--shape` names one, 0 to 1 replicas. `undeploy` deletes the deployment and keeps the model.
 
 ## End state
 
 Hand the user, in one message:
 
 - Dataset: directory, filter, window, kept and dropped rows, its Datadog name and version.
-- Run: id, base model, best epoch, `promoted_model` or `deployable_checkpoint`.
+- Run: id, base model, best epoch, `deployable_checkpoint` or `promoted_model`.
 - Evaluation: delta, interval, the user's metric with its counts, comparison link, caveat.
 - What still bills: each deployment with its `undeploy` command, or none.
 

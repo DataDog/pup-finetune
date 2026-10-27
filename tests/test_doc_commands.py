@@ -4,9 +4,12 @@
 #
 # This product includes software developed at Datadog (https://www.datadoghq.com/).
 # Copyright 2026-present Datadog, Inc.
-"""Every `pup finetune` command and flag the skill and the README mention exists in the CLI.
+"""Every `pup finetune` command and flag the skill, the README and the guides mention exists in
+the CLI.
 
-So does every `--provider` and `--model` they pass, and both name each real provider.
+So does every `--provider` and `--model` they pass, and the skill and the README name each real
+provider. A placeholder `--provider`, such as `<PROVIDER>`, needs a `--model` every provider
+offers.
 
 Also: the README names the Pup version `doctor` requires.
 """
@@ -25,11 +28,16 @@ import typer.main
 
 from pup_finetune.cli import app
 from pup_finetune.datadog.pup import MIN_PUP_VERSION
-from pup_finetune.providers import get_provider, providers_for_model
+from pup_finetune.providers import get_provider, providers_for_model, registered_providers
 from pup_finetune.runtime import Runtime
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DOCS = [REPO_ROOT / "skills" / "datadog-finetune" / "SKILL.md", REPO_ROOT / "README.md"]
+SKILL = REPO_ROOT / "skills" / "datadog-finetune" / "SKILL.md"
+README = REPO_ROOT / "README.md"
+GUIDES = [REPO_ROOT / "docs" / "evaluate.md", REPO_ROOT / "docs" / "train.md"]
+TRAINING_DOCS = [SKILL, README]
+"""The docs whose examples train on both providers, so their `--model` checks must name both."""
+DOCS = [*TRAINING_DOCS, *GUIDES]
 
 PREFIX = ("pup", "finetune")
 SHELL_STOP = {">", ">>", "|", "&&", "||", ";", "#", "\\"}
@@ -57,6 +65,7 @@ OTHER_TOOL_FLAGS = {
     "--output",
     "--read-only",
     "--no-agent",
+    "--no-envelope",
     "--all-extras",
     "--extra",
 }
@@ -181,6 +190,12 @@ def test_every_provider_and_model_passed_exists(doc: Path) -> None:
             name, model = values.get("--provider"), values.get("--model")
             if model is not None and not model.startswith("<"):
                 offered_by = providers_for_model(model, Runtime())
+                if name is not None and name.startswith("<"):
+                    # A placeholder provider stands for any of them, so each must offer it.
+                    assert set(offered_by) == set(registered_providers()), (
+                        f"{doc.name}: --provider {name} --model {model} (offered by {offered_by})"
+                    )
+                    continue
                 assert name is not None or len(offered_by) == 1, (
                     f"{doc.name}: --model {model} needs --provider (offered by {offered_by})"
                 )
@@ -190,7 +205,8 @@ def test_every_provider_and_model_passed_exists(doc: Path) -> None:
             elif name is not None and not name.startswith("<"):
                 get_provider(name, Runtime())
                 providers.add(name)
-    assert {"fireworks", "baseten"} <= providers, f"{doc.name} names only {providers}"
+    if doc in TRAINING_DOCS:
+        assert {"fireworks", "baseten"} <= providers, f"{doc.name} names only {providers}"
 
 
 def test_the_checker_catches_a_wrong_command_and_flag() -> None:

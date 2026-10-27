@@ -8,11 +8,15 @@ Guide for contributors and coding agents working in this repository.
 traces, fine-tunes an open-weight model on it, evaluates the tuned model against the base model,
 and deploys it. It ships as a `pup` extension, so users run it as `pup finetune ...`; the
 standalone executable is `pup-finetune`. All Datadog reads and writes go through `pup` and its
-OAuth login. The project is in early development: commands and file formats may change.
-User-facing docs: `README.md` (quickstart first, then one section per step: dataset, train,
-evaluate, deploy, credentials, data handling), `docs/commands.md` (every command and
-flag), `docs/data-format.md` (rows, exclusion codes, dataset files) and the agent skill in
-`skills/datadog-finetune/SKILL.md`.
+OAuth login. User-facing docs: `README.md` (the flow and where to start, a quickstart, installation,
+credentials, one table of the training providers' differences, how paid steps preview,
+then one how-to section per step: dataset, base model, train, evaluate, deploy, then the
+supported models, data handling and output; it links the reference docs and the guides),
+`docs/commands.md` (every command and flag), `docs/data-format.md` (rows, exclusion codes,
+dataset files, row checks, what a command prints), `docs/train.md` (a how-to guide to spend
+caps, the learning-rate schedule, stopping and resuming, and `train --remote`),
+`docs/evaluate.md` (a how-to guide to judges, reuse, the compare model and evaluators, with an
+evaluator spec and check) and the agent skill in `skills/datadog-finetune/SKILL.md`.
 
 ## Commands
 
@@ -25,14 +29,15 @@ uv run mypy src                      # type-check (strict)
 uv run python scripts/check_headers.py  # license header on every tracked .py and shell script
 uv run python scripts/check_3rdparty.py # LICENSE-3rdparty.csv covers every dependency
 uv run python scripts/gen_command_docs.py  # regenerate docs/commands.md, the exclusion
-                                     # table in docs/data-format.md and README.md's table of
-                                     # what each step needs; a test fails when stale
+                                     # table in docs/data-format.md and README.md's tables of
+                                     # supported models and of what each step needs; a test
+                                     # fails when stale
 uv run pre-commit install            # run the hooks above on every commit
 uv run pup-finetune --help           # run the CLI from the checkout
 ```
 
 The `hf` extra (`transformers`, `jinja2`, `huggingface-hub`) backs the shared renderer and each
-provider SDK has its own extra (`fireworks`, `baseten`); CI installs every extra. CI
+provider SDK has its own extra (`baseten`, `fireworks`); CI installs every extra. CI
 (`.github/workflows/ci.yml`) runs the lint, format, type, test, header and third-party license
 checks on Ubuntu and macOS with Python 3.12 and 3.13, and smoke-tests the built wheel. When you
 add a dependency, add its row to `LICENSE-3rdparty.csv`.
@@ -93,11 +98,13 @@ uv run pup-finetune evaluate /tmp/run --evaluators tests/fixtures/evaluators/eva
                                      # stored answers, nothing is generated again
 ```
 
-A complete evaluation is also published to Datadog as two Agent Observability experiments
+An evaluation is also published to Datadog as two Agent Observability experiments
 (`pup-finetune-base-<run id>` and `pup-finetune-tuned-<run id>`, plus
 `pup-finetune-compare-<run id>` with a compare target) on the dataset `dataset push`
-created, at the version it pushed: a root span per test conversation linked to its dataset
-record and a child span per replayed action, with the metrics and judge verdicts. It needs the
+created, at the version it pushed. It creates them when it starts, prints a link comparing
+them, and sends each test conversation once all its cases have a result (one with an error
+waits for the end): a root span linked to its dataset record and a child span per replayed
+action, with the metrics and judge verdicts. It needs the
 dataset's push receipt (`push.json`): without one the preview and the result warn and the
 evaluation is not published (the local results are complete either way); the result's
 `next_command` is then `null`, and its `next_steps` push the dataset and rerun the evaluation,
@@ -261,12 +268,26 @@ uv run pup-finetune models list                               # every provider's
 uv run pup-finetune models list --provider fireworks --check  # plus the tokenizer and a preflight
 ```
 
-`--check` asks Fireworks about each model (one GET each, nothing paid) and needs the API key:
-`FIREWORKS_API_KEY`, or the OS keychain after `pup finetune auth login fireworks`.
+`--check` asks each model's provider about it (one read-only call per model, nothing paid) and
+needs that provider's key: `BASETEN_API_KEY` or `FIREWORKS_API_KEY`, or the OS keychain after
+`pup finetune auth login <PROVIDER>`.
+
+Training on Baseten Loops is paid: `--provider baseten --model qwen3p5-9b` (or
+`glm-5p3-flash`, `qwen3p8-27b` or `kimi-k3`) needs the `baseten` extra and a Baseten API key
+(`BASETEN_API_KEY`, the OS keychain after `pup finetune auth login baseten`, or the default
+remote's key in `~/.trussrc`, read only). Its preview asks Baseten, read only, whether the
+workspace can train the model; `--confirm` starts a billed dedicated trainer, deactivated when
+the session ends.
+`result.json` records the best sampler checkpoint as `deployable_checkpoint`, and `deploy`
+serves it as a dedicated Baseten model named after the deployment id (the run id made safe, or
+`--deployment-id`), on an instance type with exactly the GPUs of `--shape TYPE:COUNT` (default
+`H100:1`), scaling 0 to 1 replicas. The workspace needs BDN volumes and an `hf_access_token`
+secret (the deployment downloads the base weights from Hugging Face). A name Baseten already
+has is refused before anything is created. `undeploy` deletes that Baseten model with its
+deployment; the checkpoint is kept, so the run can be deployed again.
 
 Training on Fireworks is paid: it needs the API key and the Training SDK, which comes with the
-`fireworks` extra (`uv sync --all-extras`). Train only on synthetic
-rows, pushed to `pup-finetune-dev`, while developing:
+`fireworks` extra (`uv sync --all-extras`).
 
 ```sh
 uv run pup-finetune train --provider fireworks --model qwen3p8-27b --dataset /tmp/ds \
@@ -280,32 +301,18 @@ previews an on-demand Fireworks deployment of it (paid per GPU-second while a re
 until `undeploy`); `--confirm` creates it (first validated shape unless `--shape`, at most
 one replica, scaling to zero when idle, hot loading off), waits until it is `READY`
 (`--timeout-minutes`, default 30), smoke-tests one chat completion and prints the inference
-model (`accounts/<account>/deployments/<id>`). Fireworks' own CLI refuses to create
-deployments when an AI agent runs it; we use the API, so an agent must pass `--confirm` only
-with the user's explicit authorization. Always `undeploy` what you deploy while developing.
-`--max-seq-len <n>` (the `max_seq_len` provider option, which `--provider-option
-max_seq_len=<n>` still sets) cuts the profile's context to `n` tokens: the run records the cut
-profile, and the preview already leaves longer rows out (`exceeds_context`). The fake provider
-takes it too.
+model (`accounts/<account>/deployments/<id>`).
 Training runs in the key's own account (Fireworks refuses a key that sees several accounts);
 `FIREWORKS_ACCOUNT_ID` only overrides the account lookup, i.e. the account id pup-finetune
 records.
 
-Training on Baseten Loops is paid too: `--provider baseten --model qwen3p5-9b` (or
-`glm-5p3-flash` or `qwen3p8-27b`, which Fireworks offers too) needs the `baseten` extra and a
-Baseten API key (`BASETEN_API_KEY`, the OS keychain after `pup finetune auth login baseten`,
-or the default remote's key in `~/.trussrc`, read only). Its preview asks Baseten, read only,
-whether the workspace can train the model; `--confirm` starts a billed dedicated trainer,
-deactivated when the session ends.
-Baseten has no promotion, so `result.json` records the best sampler checkpoint as
-`deployable_checkpoint`, and `deploy` serves it as a dedicated Baseten model named after the
-deployment id (the run id made safe, or `--deployment-id`), on an instance type with exactly
-the GPUs of `--shape TYPE:COUNT` (default `H100:1`), scaling 0 to 1 replicas. The workspace
-needs BDN volumes and an `hf_access_token` secret (the deployment downloads the base weights
-from Hugging Face). A name Baseten already has is refused before anything is created.
-`undeploy` deletes that Baseten model with its deployment; the checkpoint is kept, so the run
-can be deployed again. `--max-seq-len <n>` (at least 1024) cuts the profile's context as on
-Fireworks.
+Train only on synthetic rows, pushed to `pup-finetune-dev`, while developing. `deploy` creates
+deployments through each provider's API, so an agent must pass `--confirm` only with the
+user's explicit authorization. Always `undeploy` what you deploy while developing.
+`--max-seq-len <n>` (the `max_seq_len` provider option, which `--provider-option
+max_seq_len=<n>` still sets; at least 1024 on Baseten) cuts the profile's context to `n`
+tokens: the run records the cut profile, and the preview already leaves longer rows out
+(`exceeds_context`). The fake provider takes it too.
 
 Add `--detach` to train in a background worker (output in `/tmp/run/worker.log`) and follow it
 with `status /tmp/run --watch`. `--timeout DURATION` (`90s`, `10m`, `2h` or seconds; 90s by
@@ -352,10 +359,11 @@ copies it to `.agents/skills/` and `.claude/skills/` under the project (or the h
 with `-g`). Neither makes a Datadog or provider call, so both work with `PUP_READ_ONLY` set.
 When you change a command the skill names, keep the skill in step:
 `tests/test_doc_commands.py` checks every `pup finetune` command and flag in it (and in the
-README) against the app, and `tests/test_skill.py` checks its structure (the flow and
-start table, eight short rules, the preview and status templates, Steps 0 to 7 with a `Check:`
-list each, and the error-code and debugging tables). Its commands use example paths and run
-ids (`./ds`, `ft-...`), never shell variables, and `<UPPER>` only for values to fill in.
+README, `docs/train.md` and `docs/evaluate.md`) against the app, and `tests/test_skill.py`
+checks its structure (the flow and start table, eight short rules, the preview and status
+templates, Steps 0 to 7 with a `Check:` list each, and the error-code and debugging tables). Its
+commands use example paths and run ids (`./ds`, `ft-...`), never shell variables, and
+`<UPPER>` only for values to fill in.
 `SKILL.md` has no license header: its frontmatter must come first, and
 `scripts/check_headers.py` checks only code.
 
@@ -1085,8 +1093,8 @@ puts a key for every judge provider in the environment, for tests that preview a
 or compare model whose client they fake.
 `tests/providers/contract/` has the `RendererContract`, `BackendContract` and
 `ProviderContract` suites every provider subclasses (`tests/providers/test_fake_contract.py`
-runs them against the fake provider; `tests/providers/fireworks/` against Fireworks on its fakes;
-`tests/providers/baseten/` against Baseten on its fake; `tests/rendering/test_hf_contract.py`
+runs them against the fake provider; `tests/providers/baseten/` against Baseten on its fake;
+`tests/providers/fireworks/` against Fireworks on its fakes; `tests/rendering/test_hf_contract.py`
 runs the `RendererContract` on each family's real tokenizer under `-m tokenizer`).
 Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds canonical rows and
 `llmobs/` raw Export API pages.

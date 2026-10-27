@@ -412,7 +412,7 @@ def test_missing_pup_raises_with_install_hint(tmp_path: Path) -> None:
         pup.run_json(["x"])
     assert info.value.message == "pup not found on PATH"
     assert info.value.hint is not None
-    assert "brew install datadog/pack/pup" in info.value.hint
+    assert "brew install datadog-labs/pack/pup" in info.value.hint
     assert "README" in info.value.hint
 
 
