@@ -1159,7 +1159,7 @@ def test_a_model_another_run_directory_promoted_under_the_run_id_is_refused(
             now=lambda: SINCE + timedelta(hours=1),
         )
     assert isinstance(caught.value.__cause__, StateError)
-    assert "before this run first asked to promote it" in str(caught.value.__cause__)
+    assert "already exists" in str(caught.value.__cause__)
     assert not any(call[0] == "promote_session_checkpoint" for call in fw.calls)
     assert (first.read_result() or {})["promoted_model"] is None
     assert _live(fw) == []

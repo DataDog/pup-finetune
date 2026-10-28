@@ -217,15 +217,15 @@ def promote_with(finalize: Promotion, *, epochs: int = 1) -> tuple[str, list[dat
     return result.promoted_model.model_id, session.adopt_since
 
 
-def test_a_promotion_adopts_only_models_created_since_the_run_asked_for_that_checkpoint() -> None:
+def test_a_retry_adopts_only_models_created_since_the_run_asked_for_that_checkpoint() -> None:
     asked = datetime(2026, 10, 6, 12, 0, tzinfo=UTC)
     requests = Requests(asked)
     finalize = dataclasses.replace(promotion(), requests=requests)
-    since = asked - ADOPT_CLOCK_ALLOWANCE
-    assert promote_with(finalize) == ("ft-run-1", [since])
+    # The attempt that records the request adopts nothing: no model can be the run's yet.
+    assert promote_with(finalize) == ("ft-run-1", [None])
     # Promoting the same checkpoint again (a retry) reuses its recorded request.
     requests.now = asked + timedelta(hours=1)
-    assert promote_with(finalize) == ("ft-run-1", [since])
+    assert promote_with(finalize) == ("ft-run-1", [asked - ADOPT_CLOCK_ALLOWANCE])
     assert [(r.model_id, r.epoch, r.step) for r in requests.recorded] == [("ft-run-1", 1, 2)]
     # Without a recorded request, no existing model can be told to be the run's.
     assert promote_with(promotion()) == ("ft-run-1", [None])
@@ -238,14 +238,16 @@ def test_a_new_best_after_a_promotion_gets_its_own_model_id() -> None:
     finalize = dataclasses.replace(promotion(), requests=requests)
     assert promote_with(finalize)[0] == "ft-run-1"
     requests.now = later = asked + timedelta(hours=1)
-    model_id, since = promote_with(finalize, epochs=3)
-    assert (model_id, since) == ("ft-run-1-e3s6", [later - ADOPT_CLOCK_ALLOWANCE])
+    assert promote_with(finalize, epochs=3) == ("ft-run-1-e3s6", [None])
     assert [(r.model_id, r.epoch, r.step) for r in requests.recorded] == [
         ("ft-run-1", 1, 2),
         ("ft-run-1-e3s6", 3, 6),
     ]
     # Asked again, epoch 3 keeps its own id and request.
-    assert promote_with(finalize, epochs=3) == ("ft-run-1-e3s6", since)
+    assert promote_with(finalize, epochs=3) == (
+        "ft-run-1-e3s6",
+        [later - ADOPT_CLOCK_ALLOWANCE],
+    )
 
 
 def test_a_checkpoint_model_id_fits_the_model_id_rules() -> None:

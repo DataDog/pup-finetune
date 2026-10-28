@@ -23,11 +23,13 @@ promotion fails (and the run stays resumable to retry only the promotion).
 
 Before it first asks to promote a checkpoint a run records the request (:class:`PromotionRequest`:
 the model id, the checkpoint's epoch and step, and when; saved in ``state.json`` and kept
-across resumes), and every promotion of that checkpoint passes that time, less
+across resumes), and every later promotion of that checkpoint passes that time, less
 :data:`ADOPT_CLOCK_ALLOWANCE` for the provider's clock, as ``adopt_since``. So a model an
 earlier attempt promoted, whose response was lost, is adopted rather than promoted again
 under a taken id, while a model under the same id that existed before the run first asked
-(another run directory reusing the run id, say) is refused.
+(another run directory reusing the run id, say) is refused. The attempt that records the
+request passes none: no model under that id can be the run's yet, however recently it was
+created.
 
 A provider can only tell a model is the run's, not which weights it holds, so a model id is
 only ever reused for the checkpoint it was requested for. The run's first promotion uses the
@@ -113,11 +115,12 @@ class Promotion:
     re-creation must not be paid for (e.g. the training budget, reserve included, is spent).
     ``requests`` records the run's promotion requests (see the module docstring): right
     before :meth:`~pup_finetune.providers.base.TrainingSession.promote` the request for the
-    best checkpoint is looked up, or recorded under ``model_id`` (the run's first) or
-    :func:`model_id_for_checkpoint` (a later one), and ``promote`` gets its model id and its
-    time less :data:`ADOPT_CLOCK_ALLOWANCE` as ``adopt_since``, so that a model this run
-    already promoted from that checkpoint is adopted. Without it the checkpoint is promoted
-    to ``model_id`` and no existing model is adopted. The returned result carries
+    best checkpoint is looked up, and ``promote`` gets its model id and its time less
+    :data:`ADOPT_CLOCK_ALLOWANCE` as ``adopt_since``, so that a model an earlier attempt of
+    this run promoted from that checkpoint is adopted. When there is none it is recorded
+    under ``model_id`` (the run's first) or :func:`model_id_for_checkpoint` (a later one), and
+    no existing model is adopted. Without ``requests`` the checkpoint is promoted to
+    ``model_id`` and no existing model is adopted. The returned result carries
     ``promoted_model`` (``None`` without promotion) and ``deployable_ckpt``. ``on_event``
     (the loop's event sink) gets ``promoting`` (the epoch and its losses) right before the
     promotion and ``promoted`` (the model id) after it.
@@ -139,8 +142,11 @@ class Promotion:
             best = self._recreate(session, result)
         model_id, since = self.model_id, None
         if self.requests is not None:
-            request = self._request(self.requests, best)
-            model_id, since = request.model_id, request.requested_at - ADOPT_CLOCK_ALLOWANCE
+            earlier = self.requests.promotion_request(best.epoch, best.step)
+            if earlier is None:
+                model_id = self._record(self.requests, best).model_id
+            else:
+                model_id, since = earlier.model_id, earlier.requested_at - ADOPT_CLOCK_ALLOWANCE
         self._emit(
             {
                 "type": "promoting",
@@ -158,11 +164,8 @@ class Promotion:
         if self.on_event is not None:
             self.on_event(finite_json(event))
 
-    def _request(self, requests: PromotionRequests, best: CheckpointRef) -> PromotionRequest:
-        """The recorded request to promote ``best``, recorded first if there is none."""
-        request = requests.promotion_request(best.epoch, best.step)
-        if request is not None:
-            return request
+    def _record(self, requests: PromotionRequests, best: CheckpointRef) -> PromotionRequest:
+        """Record the run's first request to promote ``best``."""
         model_id = self.model_id
         if requests.any_promotion_requested():
             # The run's model id may already hold an earlier best: never reuse it for this one.
