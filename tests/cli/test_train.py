@@ -1063,6 +1063,40 @@ def test_resume_refuses_while_a_worker_is_starting(trained: Path) -> None:
     assert "is starting" in result.stderr
 
 
+def test_of_two_detached_resumes_at_once_only_one_starts_a_worker(
+    trained: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_state(trained, phase="interrupted", pid=_dead_pid(), heartbeat_at=_ago(30))
+    real_popen = subprocess.Popen
+    workers: list[subprocess.Popen[bytes]] = []
+
+    def not_begun(args: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
+        # A worker that has started and not yet begun training the run.
+        workers.append(real_popen([sys.executable, "-c", "import time; time.sleep(60)"]))
+        return workers[-1]
+
+    real_spawn = train_module.spawn_worker
+
+    def after_the_other_resume(run: RunDir, mode: worker_module.WorkerMode) -> int:
+        # The other resume passed the same checks and launched its worker first.
+        real_spawn(run, mode)
+        return real_spawn(run, mode)
+
+    monkeypatch.setattr(subprocess, "Popen", not_begun)
+    monkeypatch.setattr(train_module, "spawn_worker", after_the_other_resume)
+    try:
+        resumed = invoke("resume", str(trained), "--detach", "--confirm")
+        data = output(invoke("status", str(trained)))
+    finally:
+        for worker in workers:
+            worker.kill()
+            worker.wait()
+    assert resumed.exit_code == 2
+    assert "is starting" in resumed.stderr
+    assert len(workers) == 1
+    assert (data["worker"]["pid"], data["worker"]["state"]) == (workers[0].pid, "starting")
+
+
 def test_resume_refuses_a_changed_renderer(trained: Path) -> None:
     _set_state(trained, phase="interrupted")
     manifest = json.loads((trained / "run.json").read_text())

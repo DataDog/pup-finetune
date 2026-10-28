@@ -315,6 +315,22 @@ def test_record_worker_exit_notes_the_error(tmp_path: Path) -> None:
     assert launched["exit_error"]["message"] == "no credentials"
 
 
+def test_record_worker_exit_leaves_the_launch_of_another_live_worker(tmp_path: Path) -> None:
+    run_dir = new_run(tmp_path / "run")
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        launch = {"pid": other.pid, "mode": "resume", "started_at": at(0)}
+        atomic_write_json(run_dir.worker_path, launch)
+        # This worker lost the run to the one launched after it, which is still alive.
+        record_worker_exit(run_dir, "resume", StateError("the run is locked"), now=lambda: NOW)
+        assert read_json(run_dir.worker_path) == launch
+    finally:
+        other.kill()
+        other.wait()
+    record_worker_exit(run_dir, "resume", StateError("the run is locked"), now=lambda: NOW)
+    assert read_json(run_dir.worker_path)["pid"] == os.getpid()
+
+
 def test_record_worker_exit_writes_nothing_outside_a_run(tmp_path: Path) -> None:
     record_worker_exit(RunDir(tmp_path), "train", None)
     assert list(tmp_path.iterdir()) == []
