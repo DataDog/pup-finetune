@@ -869,6 +869,24 @@ def test_cancellation_at_an_epoch_boundary_keeps_the_epochs_checkpoint() -> None
     assert [ref.kind for ref in session.saved] == ["training", "sampler"]
 
 
+@pytest.mark.parametrize(
+    ("max_epochs", "options", "epochs"),
+    [(1, None, [1]), (3, curve(1.0, 2.0), [1, 2])],
+    ids=["last_epoch", "early_stop"],
+)
+def test_a_cancel_during_the_final_validation_ends_the_run_cancelled(
+    max_epochs: int, options: FakeOptions | None, epochs: list[int]
+) -> None:
+    # Asked once the epoch's last step finished: its validation still runs to the end.
+    state = MemoryState(cancel_after_steps=2 * len(epochs))
+    spec = make_spec(max_epochs=max_epochs, batch_size=1, pipeline_depth=1, patience=1)
+    with recording(options) as session:
+        result = train(session, spec, rows=row_examples(2), state=state)
+    assert result.stopped_reason == "cancelled"
+    assert [e.epoch for e in result.epochs] == epochs
+    assert result.best_epoch == 1
+
+
 # --- time-based checkpoints and resume ---------------------------------------------------
 
 
