@@ -791,8 +791,9 @@ class FireworksBackend:
         finally:
             errors = self._end(client, service, session, abandon=failure is not None)
             if errors:
-                # After a normal exit the first failure (closing the service, if that failed:
-                # a session that may still be open) is raised; every other one is a note.
+                # After a normal exit the first failure (an interrupt, else closing the service,
+                # if that failed: a session that may still be open) is raised; every other one
+                # is a note.
                 raised = failure if failure is not None else errors[0]
                 for error in errors if failure is not None else errors[1:]:
                     raised.add_note(f"ending the Fireworks session also failed: {_text(error)}")
@@ -846,9 +847,9 @@ class FireworksBackend:
     ) -> list[BaseException]:
         """End ``session``, then close ``service`` and ``client``; every failure.
 
-        Failures to close the service or the client come first, since a service that failed
-        to close may leave a billed session open; then those of closing the samplers, and
-        last an interrupt, which cuts only the close it interrupted.
+        An interrupt comes first, so the session is recorded as interrupted; then failures to
+        close the service or the client, since a service that failed to close may leave a
+        billed session open; then those of closing the samplers.
         """
         closing: list[BaseException] = []
         ending: list[BaseException] = []
@@ -867,7 +868,7 @@ class FireworksBackend:
                     closing.append(exc)
                 except BaseException as exc:
                     interrupts.append(exc)
-        return [*closing, *ending, *interrupts]
+        return [*interrupts, *closing, *ending]
 
 
 def _text(error: BaseException) -> str:

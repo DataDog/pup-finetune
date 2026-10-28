@@ -922,8 +922,8 @@ class _Service:
         return _Sampler(sampler)
 
     def close(self) -> None:
-        """End the session, then stop its heartbeat; raises the first failure of the two, else
-        an interrupt.
+        """End the session, then stop its heartbeat; raises an interrupt of either, with the
+        other's failure as a note, else the first failure of the two.
 
         Closing is attempted once: the heartbeat stops with the holder even when the SDK's
         close fails or is interrupted, and the session then expires on its own.
@@ -947,10 +947,12 @@ class _Service:
                 first = first or exc
             except BaseException as exc:
                 interrupt = interrupt or exc
+        if interrupt is not None:
+            if first is not None:
+                interrupt.add_note(str(first))
+            raise interrupt
         if first is not None:
             raise first
-        if interrupt is not None:
-            raise interrupt
 
     def _start(self, what: str, create: Callable[[], _SdkTrainingClient]) -> TrainingRun:
         try:

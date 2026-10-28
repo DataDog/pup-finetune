@@ -269,8 +269,8 @@ Baseten Loops through `providers/baseten/client.py`, the only module that loads 
 - **Sessions.** `open_session` opens a Loops session and a dedicated LoRA trainer whose
   context is the next power of two over the session's longest example (at least 1024 tokens,
   at most the profile's). Leaving the context always deactivates the run and every sampler
-  the session started; a deactivation that fails names what to deactivate by hand. With no
-  capacity, nothing is left running.
+  the session started; a deactivation that fails names what to deactivate by hand, as a note
+  on the interrupt when a Ctrl-C cut the close. With no capacity, nothing is left running.
 - **Checkpoints.** `bt://loops:` paths that outlive the run; a resume loads a training
   checkpoint with its optimizer state into a new run. There is no promotion: the best sampler
   checkpoint is the run's deployable checkpoint, which `deploy` serves (see Deploying).
@@ -290,11 +290,12 @@ Baseten Loops through `providers/baseten/client.py`, the only module that loads 
   `create_training_client_from_state_with_optimizer`. Leaving the context always ends the
   session: results still in flight are waited for briefly after a normal exit and abandoned
   after an error or Ctrl-C, then the samplers, the session and the client are closed. A
-  failure to close never hides the error that ended the body, and a failure to close the
-  session (which may leave it billing) is the one raised after a normal exit, any other as a
-  note. With no capacity, nothing is left running. The `max_seq_len` provider option cuts the
-  profile's context (`training_profile`), so longer rows are left out when the rows are
-  rendered; the session also refuses a longer sequence length, as a backstop.
+  failure to close never hides the error that ended the body. After a normal exit a Ctrl-C
+  while closing is the one raised, else a failure to close the session (which may leave it
+  billing), any other as a note. With no capacity, nothing is left running. The
+  `max_seq_len` provider option cuts the profile's context (`training_profile`), so longer
+  rows are left out when the rows are rendered; the session also refuses a longer sequence
+  length, as a backstop.
 - **Losses.** `forward_backward` reports Fireworks' `loss:sum` over `response_tokens`.
   Fireworks' forward pass returns no loss, only per-token logprobs, so the validation loss is
   `-sum(logprob * weight)` over every target token, after checking that the logprobs match

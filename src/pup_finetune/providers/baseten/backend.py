@@ -475,8 +475,9 @@ class BasetenSession:
         """End the session: stop its samplers, close the trainer client, deactivate the run.
 
         :meth:`BasetenBackend.open_session` calls it on exit. Every step is attempted, also
-        after one is interrupted (Ctrl-C cuts only that step's wait); the failures are raised
-        together, each with its manual step, else the interrupt is raised again.
+        after one is interrupted (Ctrl-C cuts only that step's wait). An interrupt is raised
+        again with each failure, and its manual step, as a note; else the failures are raised
+        together.
         """
         if self._closed:
             return
@@ -490,6 +491,10 @@ class BasetenSession:
                 failures.append(exc)
             except BaseException as exc:
                 interrupt = interrupt or exc
+        if interrupt is not None:
+            for failure in failures:
+                interrupt.add_note(str(failure))
+            raise interrupt
         if len(failures) == 1:
             raise failures[0]
         if failures:
@@ -498,8 +503,6 @@ class BasetenSession:
                 source=SOURCE,
                 hint="; ".join(failure.hint for failure in failures if failure.hint),
             )
-        if interrupt is not None:
-            raise interrupt
 
     def _end_run(self) -> None:
         try:
