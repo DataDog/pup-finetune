@@ -103,9 +103,12 @@ def watch(run_dir: Path) -> dict[str, Any]:
     *progress, summary = watched.stderr.splitlines()
     # Off a terminal each progress line starts with the time of day; the closing summary,
     # the run's status line and the next command, comes last and is the only line that
-    # says how the run ended.
+    # says how the run ended. Until a resumed run's worker begins, its state is still how
+    # the last attempt ended, and the line says the worker is starting.
     for line in progress:
-        assert re.fullmatch(r"\d\d:\d\d:\d\d (training|created): epoch .*", line), line
+        training = re.fullmatch(r"\d\d:\d\d:\d\d (training|created): epoch .*", line)
+        starting = re.fullmatch(r"\d\d:\d\d:\d\d .*: epoch .* \(worker pid \d+ starting\)", line)
+        assert training or starting, line
     assert summary.startswith(f"{final['phase']}: epoch "), summary
     assert summary.endswith(f". Next: {final['next_command']}"), summary
     return final
