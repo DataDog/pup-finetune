@@ -550,6 +550,35 @@ def test_status_says_a_worker_is_starting_to_resume_a_stopped_run(trained: Path)
     assert headline.endswith(f" (worker pid {os.getpid()} starting)"), headline
 
 
+def test_status_shows_how_a_run_ended_when_its_worker_ends_while_status_reads(
+    trained: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    completed = json.loads((trained / "state.json").read_text())
+    _set_state(trained, phase="interrupted", heartbeat_at=_ago(30))
+    atomic_write_json(
+        trained / "worker.json", {"pid": os.getpid(), "mode": "resume", "started_at": _ago(1)}
+    )
+    real = train_module.worker_status
+    ends: list[int] = []
+
+    def worker_ends_first(run: RunDir, **state: Any) -> worker_module.WorkerStatus:
+        # The resumed worker finishes after status read the state and before it looks at the
+        # worker: it saves its last state, then records that it ended.
+        if not ends:
+            ends.append(_dead_pid())
+            atomic_write_json(trained / "state.json", {**completed, "heartbeat_at": _ago(0)})
+            worker = {"pid": ends[0], "mode": "resume", "started_at": _ago(1)}
+            atomic_write_json(
+                trained / "worker.json", {**worker, "ended_at": _ago(0), "exit_error": None}
+            )
+        return real(run, **state)
+
+    monkeypatch.setattr(train_module, "worker_status", worker_ends_first)
+    data = output(invoke("status", str(trained)))
+    assert data["phase"] == "completed"
+    assert data["next_command"] == f"pup finetune evaluate {trained}"
+
+
 # --- status: progress numbers and a bounded watch -------------------------------------
 
 
