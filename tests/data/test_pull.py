@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -583,6 +584,26 @@ def test_a_lower_target_count_does_not_add_back_a_retired_prefix(tmp_path: Path)
     assert "synthetic-trace-9000:synthetic-span-2" in records[0]["detail"]
     summary = dataset.summary()
     assert (summary["accepted"], summary["excluded"]) == (1, 1)
+
+
+def test_a_span_read_again_with_new_evaluations_and_tags_keeps_its_stored_row(
+    tmp_path: Path,
+) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+
+    def pull_span(**attributes: Any) -> Any:
+        pages = [page([item("synthetic-span-1", [SYSTEM, Q1, A1], **attributes)])]
+        pup = FakeExportApi(pages).install(FakePup()).client()
+        return pull(pup, PullOptions(SpanQuery(ml_app="synthetic")), dataset, SplitParams())
+
+    pull_span()
+    stored = dataset.rows_path.read_bytes()
+    # Without the page cache (a broken one's hint says to delete it), the span is read again,
+    # evaluated and tagged since.
+    shutil.rmtree(dataset.raw_path)
+    _, added = pull_span(evaluation={"quality": 0.9}, tags=["reviewed:yes"])
+    assert (added.added, added.unchanged, added.updated) == (0, 1, 0)
+    assert dataset.rows_path.read_bytes() == stored
 
 
 def test_contained_leaves_out_new_rows_a_kept_stored_row_contains() -> None:
