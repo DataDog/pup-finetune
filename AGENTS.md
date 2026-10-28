@@ -832,7 +832,9 @@ Source lives under `src/pup_finetune/`.
   not replay as `skipped`), plus the agreement-not-task-success `CAVEAT`. `runner.py`'s
   `headline` shows each delta beside those rates and its `common_cases`, and each target's
   own rate beside its `judged_cases`, so an error or a skipped case never sets a rate
-  beside a delta over other cases.
+  beside a delta over other cases. The closing summary prints them the same way: "judge
+  agreement" is each target's own rate (`of N` once one was graded on fewer cases), and each
+  delta names the cases it pairs and both rates on them.
   A `Publisher` (default `NoopPublisher`) gets a complete evaluation and returns
   what it reports, the outcome's `publication`. `runner.py` is what `evaluate` and `train
   --evaluate` run: `plan_evaluation` (an `EvalPlan`: cases, judge, settings and `Publishing`,

@@ -289,6 +289,8 @@ def test_the_agreement_row_shows_the_rates_the_result_holds(
         f"paired on 2 of 4 cases, tuned {common['tuned']} vs base {common['base']}: 0 wins, "
         "0 regressions, 2 ties, 2 errors"
     ) in lines
+    status = invoke("status", str(run_dir)).stderr
+    assert f"judge agreement base {base}, tuned {tuned}, tuned - base 0 pts" in status
 
 
 @pytest.mark.usefixtures("terminal")
@@ -577,12 +579,16 @@ def test_a_delta_is_shown_beside_the_rates_of_the_cases_it_pairs() -> None:
     found = summarize("evaluate", result)
     assert found is not None
     assert found.lines[1:5] == (
-        "headline polite: base 25%, tuned 75%, tuned - base +50 pts on 4 of 6 cases",
+        "headline polite: base 25% of 4, tuned 50% of 6, tuned - base +50 pts on 4 of 6 cases, "
+        "tuned 75% vs base 25%",
         f"{'':<21}{'base':<11}{'tuned':<11}tuned - base",
-        f"{'judge agreement':<21}{'50%':<11}{'100%':<11}+50 pts (95% CI 0 to +100)",
-        "paired on 4 of 6 cases: 2 wins, 0 regressions, 2 ties, 2 errors",
+        f"{'judge agreement':<21}{'50% of 4':<11}{'67% of 6':<11}+50 pts (95% CI 0 to +100)",
+        "paired on 4 of 6 cases, tuned 100% vs base 50%: 2 wins, 0 regressions, 2 ties, 2 errors",
     )
-    assert "judge agreement: base 50%, tuned 100%, tuned - base +50 pts" in found.line
+    assert (
+        "judge agreement: base 50% of 4, tuned 67% of 6, tuned - base +50 pts (95% CI 0 to +100) "
+        "on 4 of 6 cases, tuned 100% vs base 50%; 2 wins"
+    ) in found.line
 
 
 def test_with_a_compare_target_each_delta_names_the_rates_of_the_cases_it_pairs() -> None:
