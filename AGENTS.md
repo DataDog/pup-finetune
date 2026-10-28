@@ -939,7 +939,10 @@ Source lives under `src/pup_finetune/`.
   with spans being published, and one added after is a warning.
 - `providers/` - the provider seam. `base.py` has the neutral types (`ModelProfile`,
   `TrainSpec`, `CheckpointRef`, `StepMetrics`, ...), the `Provider`, `TrainingBackend`,
-  `TrainingSession` and `Sampler` protocols, and `run_smoke_test`, the deploy smoke test every
+  `TrainingSession` and `Sampler` protocols, `raise_session_failure`, what every backend's
+  `open_session` raises once its session is closed (the first interrupt, from the body or a
+  close step, else the body's error, else the first close failure; the others as notes),
+  and `run_smoke_test`, the deploy smoke test every
   provider's `smoke_test` runs on its chat client; `__init__.py` is the lazy registry
   (`register_provider`, `get_provider`, `known_providers`), which imports a provider only on
   first use; each entry names its `--provider-option` keys (`registered_option_keys`, which

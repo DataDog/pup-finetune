@@ -269,8 +269,9 @@ Baseten Loops through `providers/baseten/client.py`, the only module that loads 
 - **Sessions.** `open_session` opens a Loops session and a dedicated LoRA trainer whose
   context is the next power of two over the session's longest example (at least 1024 tokens,
   at most the profile's). Leaving the context always deactivates the run and every sampler
-  the session started; a deactivation that fails names what to deactivate by hand, as a note
-  on the interrupt when a Ctrl-C cut the close. With no capacity, nothing is left running.
+  the session started; a deactivation that fails names what to deactivate by hand, and what
+  the session raises is picked as on every provider (see How a new provider plugs in). With
+  no capacity, nothing is left running.
 - **Checkpoints.** `bt://loops:` paths that outlive the run; a resume loads a training
   checkpoint with its optimizer state into a new run. There is no promotion: the best sampler
   checkpoint is the run's deployable checkpoint, which `deploy` serves (see Deploying).
@@ -289,10 +290,10 @@ Baseten Loops through `providers/baseten/client.py`, the only module that loads 
   run on it (rank, alpha and seed from the run), or continues a training checkpoint with
   `create_training_client_from_state_with_optimizer`. Leaving the context always ends the
   session: results still in flight are waited for briefly after a normal exit and abandoned
-  after an error or Ctrl-C, then the samplers, the session and the client are closed. A
-  failure to close never hides the error that ended the body. After a normal exit a Ctrl-C
-  while closing is the one raised, else a failure to close the session (which may leave it
-  billing), any other as a note. With no capacity, nothing is left running. The
+  after an error or Ctrl-C, then the samplers, the session and the client are closed. What
+  the session raises is picked as on every provider (see How a new provider plugs in); of
+  two failures to close, a failure to close the session (which may leave it billing) comes
+  first. With no capacity, nothing is left running. The
   `max_seq_len` provider option cuts the profile's context (`training_profile`), so longer
   rows are left out when the rows are rendered; the session also refuses a longer sequence
   length, as a backstop.
@@ -677,7 +678,11 @@ Using Baseten as the example:
    the fakes simple.
 2. **Backend.** Implement `TrainingBackend` with the Baseten Loops SDK. `open_session` returns
    a context manager that deactivates the session on exit, whether training finished,
-   stopped early or failed. Convert each `TokenizedExample` to the SDK's datum type, map
+   stopped early or failed, attempting every close step, and then raises what
+   `raise_session_failure` in `providers/base.py` picks: the first Ctrl-C, from the body or
+   from closing, so the command reports it as interrupted; else the body's error; else the
+   first failure to close; every other failure is a note on it, which the error line prints
+   as a `warning:`. Convert each `TokenizedExample` to the SDK's datum type, map
    `AdamConfig` onto its optimizer parameters on every step, size the trainer from the
    `seed` and `max_seq_len` passed to `open_session`, set `max_checkpoint_name_len` to the
    provider's limit, and declare `supports_resume` and `supports_promotion`. Map SDK

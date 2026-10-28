@@ -372,7 +372,7 @@ def test_a_failure_to_close_never_hides_the_body_error(
         session.sampler(None)
         raise RuntimeError("boom")
     notes = caught.value.__notes__
-    assert [note for note in notes if "ending the Fireworks session also failed" in note]
+    assert [note for note in notes if "ending the session also failed" in note]
     assert fw.closed
 
 
@@ -404,7 +404,7 @@ def test_an_interrupted_client_close_is_raised_ahead_of_a_failed_service_close(
     ):
         pass
     [note] = caught.value.__notes__
-    assert "ending the Fireworks session also failed" in note
+    assert "ending the session also failed" in note
     assert "ending a training session" in note
 
 
@@ -420,7 +420,7 @@ def test_a_failed_service_close_is_raised_ahead_of_a_failed_sampler_close(
         session.sampler(None)
     notes = caught.value.__notes__
     assert len(notes) == 1
-    assert "ending the Fireworks session also failed" in notes[0]
+    assert "ending the session also failed" in notes[0]
     assert "closing a sampler" in notes[0]
     assert fw.closed
 

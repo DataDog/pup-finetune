@@ -348,17 +348,26 @@ def test_a_failed_deactivation_names_the_manual_step(
 ) -> None:
     setup = Setup(loops, renderer, {RUN_DEACTIVATE: (500, {})})
     with pytest.raises(ExternalError) as caught, setup.session():
-        raise RuntimeError("boom")
+        pass
     url = "https://api.baseten.co/v1/loops/runs/run1/deactivate"
     assert "could not deactivate Baseten run run1" in caught.value.message
     assert f"POST {url}" in caught.value.message
     assert caught.value.hint == f'curl -X POST {url} -H "Authorization: Bearer $BASETEN_API_KEY"'
-    assert isinstance(caught.value.__context__, RuntimeError)
     assert setup.transport.calls.count(RUN_DEACTIVATE) == 3
     assert setup.sleeps == [1.0, 2.0]
 
 
-def test_failed_deactivations_are_reported_together(
+def test_a_failed_deactivation_never_hides_the_body_error(
+    loops: FakeLoops, renderer: HFChatTemplateRenderer
+) -> None:
+    setup = Setup(loops, renderer, {RUN_DEACTIVATE: (500, {})})
+    with pytest.raises(RuntimeError, match="boom") as caught, setup.session():
+        raise RuntimeError("boom")
+    [note] = caught.value.__notes__
+    assert "could not deactivate Baseten run run1" in note
+
+
+def test_every_failed_deactivation_is_reported(
     loops: FakeLoops, renderer: HFChatTemplateRenderer
 ) -> None:
     routes: dict[str, Answer | list[Answer]] = {
@@ -368,10 +377,10 @@ def test_failed_deactivations_are_reported_together(
     setup = Setup(loops, renderer, routes)
     with pytest.raises(ExternalError) as caught, setup.session() as session:
         session.sampler(None)
-    message = caught.value.message
-    assert "the Baseten sampler deployment model1/dep1" in message
-    assert "Baseten run run1" in message
+    assert "the Baseten sampler deployment model1/dep1" in caught.value.message
     assert "/v1/models/model1/deployments/dep1/deactivate" in (caught.value.hint or "")
+    [note] = caught.value.__notes__
+    assert "could not deactivate Baseten run run1" in note
 
 
 def test_deactivation_waits_until_the_run_is_inactive(

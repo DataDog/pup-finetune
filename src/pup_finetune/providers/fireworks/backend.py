@@ -69,6 +69,7 @@ from pup_finetune.providers.base import (
     StepMetrics,
     TransientError,
     is_transient,
+    raise_session_failure,
 )
 from pup_finetune.providers.fireworks import PROVIDER_NAME
 from pup_finetune.providers.fireworks.client import (
@@ -789,16 +790,9 @@ class FireworksBackend:
             failure = exc
             raise
         finally:
-            errors = self._end(client, service, session, abandon=failure is not None)
-            if errors:
-                # After a normal exit the first failure (an interrupt, else closing the service,
-                # if that failed: a session that may still be open) is raised; every other one
-                # is a note.
-                raised = failure if failure is not None else errors[0]
-                for error in errors if failure is not None else errors[1:]:
-                    raised.add_note(f"ending the Fireworks session also failed: {_text(error)}")
-                if failure is None:
-                    raise raised
+            raise_session_failure(
+                failure, self._end(client, service, session, abandon=failure is not None)
+            )
 
     def live_session_name(self, session_id: str) -> str | None:
         """The resource name of the session ``session_id`` while it is open here, else ``None``."""
@@ -845,30 +839,28 @@ class FireworksBackend:
         *,
         abandon: bool,
     ) -> list[BaseException]:
-        """End ``session``, then close ``service`` and ``client``; every failure.
+        """End ``session``, then close ``service`` and ``client``; every failure, most
+        important first.
 
-        An interrupt comes first, so the session is recorded as interrupted; then failures to
-        close the service or the client, since a service that failed to close may leave a
-        billed session open; then those of closing the samplers.
+        Failures to close the service or the client come first, since a service that failed
+        to close may leave a billed session open; then those of ending the session.
         """
-        closing: list[BaseException] = []
         ending: list[BaseException] = []
-        interrupts: list[BaseException] = []
-        try:
-            if session is not None:
-                self._live.pop(session.session_id, None)
+        if session is not None:
+            self._live.pop(session.session_id, None)
+            try:
                 ending = session.end(abandon=abandon)
-        finally:
-            for close in (service.close if service is not None else None, client.close):
-                if close is None:
-                    continue
-                try:
-                    close()
-                except Exception as exc:
-                    closing.append(exc)
-                except BaseException as exc:
-                    interrupts.append(exc)
-        return [*interrupts, *closing, *ending]
+            except BaseException as exc:  # e.g. Ctrl-C while results in flight are awaited
+                ending = [exc]
+        closing: list[BaseException] = []
+        for close in (service.close if service is not None else None, client.close):
+            if close is None:
+                continue
+            try:
+                close()
+            except BaseException as exc:
+                closing.append(exc)
+        return [*closing, *ending]
 
 
 def _text(error: BaseException) -> str:

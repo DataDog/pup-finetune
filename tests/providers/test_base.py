@@ -12,13 +12,14 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from pup_finetune.errors import UsageError
+from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.providers.base import (
     AdamConfig,
     LoraConfig,
     ModelProfile,
     StepMetrics,
     TrainSpec,
+    raise_session_failure,
 )
 
 
@@ -316,3 +317,61 @@ def test_step_metrics_mean_loss() -> None:
 @pytest.mark.parametrize("weight", [0.0, -1.0, math.nan])
 def test_step_metrics_mean_loss_is_nan_without_weight(weight: float) -> None:
     assert math.isnan(StepMetrics(loss_sum=3.0, weight=weight, tokens=5).mean_loss)
+
+
+# --- raise_session_failure -------------------------------------------------------------------
+
+
+def _failure(name: str) -> BaseException:
+    """``ctrl-c...`` is an interrupt, anything else an error named ``name``."""
+    return KeyboardInterrupt() if name.startswith("ctrl-c") else ExternalError(name, source="x")
+
+
+@pytest.mark.parametrize(
+    ("body", "closing", "raised", "noted"),
+    [
+        ("body failed", [], "body failed", []),
+        (None, ["close 1 failed", "close 2 failed"], "close 1 failed", ["close 2 failed"]),
+        ("body failed", ["close 1 failed"], "body failed", ["close 1 failed"]),
+        ("ctrl-c in body", ["close 1 failed"], "ctrl-c in body", ["close 1 failed"]),
+        (
+            "body failed",
+            ["close 1 failed", "ctrl-c in close"],
+            "ctrl-c in close",
+            ["body failed", "close 1 failed"],
+        ),
+        ("ctrl-c in body", ["ctrl-c in close"], "ctrl-c in body", ["ctrl-c in close"]),
+        (None, ["close 1 failed", "ctrl-c in close"], "ctrl-c in close", ["close 1 failed"]),
+    ],
+)
+def test_a_session_ends_with_the_first_interrupt_else_the_body_error_else_a_close_failure(
+    body: str | None, closing: list[str], raised: str, noted: list[str]
+) -> None:
+    failures = {name: _failure(name) for name in [*([body] if body else []), *closing]}
+    with pytest.raises(BaseException) as caught:
+        raise_session_failure(
+            failures[body] if body else None, [failures[name] for name in closing]
+        )
+    assert caught.value is failures[raised]
+    notes = getattr(caught.value, "__notes__", [])
+    expected = [
+        "KeyboardInterrupt" if name.startswith("ctrl-c") else f"x: {name}" for name in noted
+    ]
+    assert len(notes) == len(expected)
+    assert all(text in note for text, note in zip(expected, notes, strict=True))
+
+
+def test_a_session_that_ended_cleanly_raises_nothing() -> None:
+    raise_session_failure(None, [])
+
+
+def test_a_noted_failure_keeps_its_hint_and_its_own_notes() -> None:
+    body = ExternalError("sampler create failed", source="x", hint="check the console")
+    body.add_note("a sampler may remain")
+    interrupt = KeyboardInterrupt()
+    with pytest.raises(KeyboardInterrupt) as caught:
+        raise_session_failure(body, [interrupt])
+    first, carried = caught.value.__notes__
+    assert "x: sampler create failed" in first
+    assert "check the console" in first
+    assert carried == "a sampler may remain"
