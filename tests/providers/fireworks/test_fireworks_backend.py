@@ -376,6 +376,20 @@ def test_a_failure_to_close_never_hides_the_body_error(
     assert fw.closed
 
 
+def test_an_interrupted_service_close_still_closes_the_client(
+    fw: FakeFireworksTrainingClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def interrupted() -> None:
+        raise KeyboardInterrupt  # Ctrl-C while the SDK ends the session
+
+    with (
+        pytest.raises(KeyboardInterrupt),
+        backend_for(fw).open_session(PROFILE, LORA, **SESSION),
+    ):
+        monkeypatch.setattr(fw.services[0], "close", interrupted)
+    assert fw.closed
+
+
 def test_a_failed_service_close_is_raised_ahead_of_a_failed_sampler_close(
     fw: FakeFireworksTrainingClient,
 ) -> None:
