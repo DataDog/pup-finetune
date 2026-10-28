@@ -461,10 +461,13 @@ Source lives under `src/pup_finetune/`.
   `warnings`.
 - `errors.py` - expected failures, their exit codes and their stable `error_code`s
   (`ERROR_CODES`, each with its exit code and meaning, which `docs/commands.md` lists; the
-  error line reads `Error [<code>]: ...`). `DirectoryUsageError` and its subclasses
+  error line reads `Error [<code>]: ...`, and each of the error's notes follows it as a
+  `warning:`). `DirectoryUsageError` and its subclasses
   (`NotADatasetDir`, `NotARunDir`, `RunDirNotEmpty`, `SettingsConflict`, `WrongPhase`) are
   both a `UsageError` and a `StateError`, so code that caught either still does, and exit 2;
-  `Interrupted` is a Ctrl-C or SIGTERM. The `--confirm` and read-only guards
+  `Interrupted` is a Ctrl-C or SIGTERM, and every conversion of a `KeyboardInterrupt` into it
+  passes `interrupt=` so it keeps the interrupt's notes (e.g. a Loops sampler a Ctrl-C cut
+  while it was created may remain). The `--confirm` and read-only guards
   (`require_confirm(..., read_only=...)` adds `read_only` to a preview and offers no
   `--confirm`), `READ_ONLY_HINT`, and `install_hint` / `reinstall_hint`, the one wording of
   how to install an extra (`uv sync --all-extras`, never a bare `uv sync --extra X`).

@@ -158,9 +158,17 @@ class WrongPhase(DirectoryUsageError):
 
 class Interrupted(FinetuneError):
     """Ctrl-C or SIGTERM stopped the command; what finished is kept, and rerunning (or
-    resuming) continues it."""
+    resuming) continues it. It keeps the notes of the ``interrupt`` it reports, such as a
+    resource being created that may remain, so the error line's warnings show them."""
 
     error_code: ClassVar[str] = "interrupted"
+
+    def __init__(
+        self, message: str, *, hint: str | None = None, interrupt: BaseException | None = None
+    ) -> None:
+        super().__init__(message, hint=hint)
+        for note in getattr(interrupt, "__notes__", ()):
+            self.add_note(note)
 
 
 ERROR_CODES: Final[dict[str, tuple[int, str]]] = {

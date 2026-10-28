@@ -260,7 +260,8 @@ def emit_error(
     command: str | None = None,
     card: Sequence[str] = (),
 ) -> None:
-    """Report an expected failure: ``Error [<error_code>]: <message>`` and its hint on stderr.
+    """Report an expected failure: ``Error [<error_code>]: <message>`` and its hint on stderr,
+    then ``warning: <note>`` for each of its notes (e.g. a resource that may remain).
 
     A :class:`ConfirmRequired` emits its preview as the stdout result (:func:`emit_preview`)
     and then ``card`` and the rest on stderr (:func:`echo_preview`).
@@ -272,6 +273,8 @@ def emit_error(
         echo_preview(err, runtime=runtime, card=card)
     else:
         error_line(str(err), err.error_code, err.hint)
+        for note in getattr(err, "__notes__", ()):
+            warn(redact(note))
 
 
 def error_line(message: str, code: str, hint: str | None = None) -> None:

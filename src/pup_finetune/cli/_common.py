@@ -217,10 +217,12 @@ INTERRUPTED_MESSAGE = "stopped by Ctrl-C"
 INTERRUPTED_HINT = "what finished is kept; check where it stands before running it again"
 
 
-def interrupted_exit(runtime: Runtime, *, command: str | None = None) -> int:
+def interrupted_exit(
+    interrupt: BaseException, runtime: Runtime, *, command: str | None = None
+) -> int:
     """Report a Ctrl-C no command turned into a result of its own: ``Error [interrupted]``,
-    exit 1, as :class:`~pup_finetune.errors.Interrupted` reads."""
-    err = Interrupted(INTERRUPTED_MESSAGE, hint=INTERRUPTED_HINT)
+    exit 1, as :class:`~pup_finetune.errors.Interrupted` reads, with the interrupt's notes."""
+    err = Interrupted(INTERRUPTED_MESSAGE, hint=INTERRUPTED_HINT, interrupt=interrupt)
     emit_error(err, runtime=runtime, command=command)
     return err.exit_code
 
@@ -249,7 +251,7 @@ def handle_exception(
             _debug_traceback(echo_error, runtime)
         return exc.exit_code
     if isinstance(exc, KeyboardInterrupt):
-        return interrupted_exit(runtime, command=command)
+        return interrupted_exit(exc, runtime, command=command)
     if isinstance(exc, FinetuneError):
         emit_error(exc, runtime=runtime, command=command)
         return exc.exit_code
@@ -300,7 +302,7 @@ def run_command[**P](
         try:
             result = fn(*args, **kwargs)
         except KeyboardInterrupt as exc:
-            raise typer.Exit(interrupted_exit(runtime, command=command)) from exc
+            raise typer.Exit(interrupted_exit(exc, runtime, command=command)) from exc
         except Exception as exc:
             if _is_cli_framework_exception(exc):
                 # Typer's own signals and usage errors (e.g. BadParameter, exit 2) keep their
@@ -332,8 +334,8 @@ def run_app(app: typer.Typer, args: Sequence[str] | None = None) -> NoReturn:
     install_log_redaction()
     try:
         app(args=list(args) if args is not None else None, prog_name=prog_name())
-    except KeyboardInterrupt:
-        sys.exit(interrupted_exit(get_runtime()))
+    except KeyboardInterrupt as exc:
+        sys.exit(interrupted_exit(exc, get_runtime()))
     except Exception as exc:
         sys.exit(handle_exception(exc, get_runtime()))
     sys.exit(0)

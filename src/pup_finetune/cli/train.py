@@ -545,7 +545,7 @@ def _in_foreground(
             on_event=TrainingProgress(),
             after_finalize=after_finalize,
         )
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
         # A second Ctrl-C stops at once; the run recorded where it stopped.
         try:
             phase = run.load_state().phase
@@ -554,6 +554,7 @@ def _in_foreground(
         raise Interrupted(
             f"training stopped at once (Ctrl-C): the run in {run.path} is {phase}",
             hint=resume_hint(run.path),
+            interrupt=exc,
         ) from None
     return dict(result)
 
