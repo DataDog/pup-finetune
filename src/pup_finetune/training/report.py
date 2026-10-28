@@ -41,7 +41,7 @@ from pup_finetune.storage import (
     loads_finite,
     read_json,
 )
-from pup_finetune.training.records import TrainResult
+from pup_finetune.training.records import EpochMetrics, TrainResult
 
 __all__ = [
     "CHECK_S",
@@ -301,10 +301,10 @@ def apply_snapshot(run: RunDir, snapshot: Snapshot) -> None:
             TrainResult.from_json(result)
     if not isinstance(epochs, list) or not all(isinstance(epoch, dict) for epoch in epochs):
         raise StateError("the state report's epochs.json is not a list of objects")
-    if point is not None and not point.follows(len(epochs)):
+    if point is not None and not point.follows([EpochMetrics.from_json(e) for e in epochs]):
         raise StateError(
-            f"the state report's last training checkpoint (epoch {point.epoch}) does not "
-            f"follow its {len(epochs)} finished epoch(s)"
+            f"the state report's last training checkpoint (epoch {point.epoch}, step "
+            f"{point.step}) does not follow its {len(epochs)} finished epoch(s)"
         )
     run.write_epochs(epochs)
     if result is not None:

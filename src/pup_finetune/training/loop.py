@@ -464,10 +464,10 @@ class _Loop:
         finished = self._epochs[-1].epoch if self._epochs else 0
         if [record.epoch for record in self._epochs] != list(range(1, finished + 1)):
             raise StateError("the finished epochs are not numbered 1, 2, ...")
-        if not point.follows(finished) or point.epoch > self._spec.max_epochs:
+        if not point.follows(self._epochs) or point.epoch > self._spec.max_epochs:
             raise StateError(
-                f"the last training checkpoint (epoch {point.epoch}) does not follow the "
-                f"{finished} finished epoch(s)"
+                f"the last training checkpoint (epoch {point.epoch}, step {point.step}) does "
+                f"not follow the {finished} finished epoch(s)"
             )
         self._step = self._checkpoint_step = point.step
         self._last_training = point.checkpoint
