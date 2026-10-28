@@ -102,6 +102,7 @@ from pup_finetune.storage import (
     append_jsonl,
     atomic_write_json,
     canonical_json,
+    identity_changes,
     parse_jsonl_line,
     read_json,
 )
@@ -1102,15 +1103,15 @@ def _check_frozen(dataset: DatasetDir, settings: Mapping[str, Any], votes: int) 
     if not votes or not settings_path.exists():
         return
     stored = read_json(settings_path)
-    if isinstance(stored, dict):
-        stored.pop(CHECKS_FILE_KEY, None)
-    if canonical_json(stored) == canonical_json(settings):
+    if not isinstance(stored, dict):
+        raise StateError(
+            f"{settings_path}: expected a JSON object",
+            hint="fix or remove the file, or pass --reset-triage to discard the votes",
+        )
+    stored.pop(CHECKS_FILE_KEY, None)
+    changed = identity_changes(stored, settings)
+    if not changed:
         return
-    changed = sorted(
-        key
-        for key in set(stored) | set(settings)
-        if canonical_json(stored.get(key)) != canonical_json(settings.get(key))
-    )
     raise SettingsConflict(
         f"{dataset.path} holds {votes} triage votes cast under other settings "
         f"({', '.join(changed)} changed)",
