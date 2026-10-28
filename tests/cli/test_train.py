@@ -588,6 +588,26 @@ def test_status_reports_a_run_its_worker_finished_in_the_second_it_started(
     assert "starting" not in result.stderr
 
 
+@pytest.mark.parametrize("phase", ["training", "completed"])
+def test_status_does_not_report_a_hung_worker_a_foreground_resume_replaced(
+    trained: Path, phase: str
+) -> None:
+    # `resume --detach` started a worker that hangs before it begins; a foreground `resume`
+    # (this process) took the run over after it.
+    hung = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        atomic_write_json(
+            trained / "worker.json", {"pid": hung.pid, "mode": "resume", "started_at": _ago(300)}
+        )
+        _set_state(trained, phase=phase, pid=os.getpid(), heartbeat_at=_ago(5))
+        data = output(invoke("status", str(trained)))
+    finally:
+        hung.kill()
+        hung.wait()
+    assert data["warnings"] == []
+    assert data["worker"]["state"] != "stale"
+
+
 def test_status_shows_how_a_run_ended_when_its_worker_ends_while_status_reads(
     trained: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
