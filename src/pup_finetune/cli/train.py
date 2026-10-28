@@ -147,6 +147,7 @@ from pup_finetune.training.worker import (
     lock_held,
     record_worker_exit,
     require_detach_supported,
+    require_no_worker_starting,
     run_in_dir,
     spawn_worker,
     worker_status,
@@ -1223,12 +1224,7 @@ def _with_source(result: Mapping[str, Any], source: str) -> dict[str, Any]:
 
 def _resume_mode(run: RunDir, state: RunState) -> WorkerMode:
     """What resuming ``run`` does; raises when it cannot be resumed now."""
-    worker = worker_status(run, phase=state.phase, pid=state.pid, heartbeat_at=state.heartbeat_at)
-    if worker.starting:
-        raise WrongPhase(
-            f"a worker for the run in {run.path} is starting (process {worker.pid})",
-            hint=f"follow it with `pup finetune status {_q(run.path)} --watch`",
-        )
+    require_no_worker_starting(run, state)
     if state.phase == "created":
         return "train"  # it never started (e.g. its worker failed to start): start it
     if state.phase == "training":

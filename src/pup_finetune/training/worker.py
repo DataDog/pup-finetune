@@ -18,9 +18,10 @@ worker inherits this process's environment and nothing else: no secret is passed
 its arguments, extra environment variables or files; it resolves the provider's credentials
 again itself. When it ends, it notes that in ``worker.json`` (:func:`record_worker_exit`),
 with the error it ended with, so ``status`` can tell a worker that failed before training.
-Both updates of ``worker.json`` happen under a lock on ``.worker.lock`` and merge into the
-record of the same pid, so a worker that ends before its launcher has recorded it keeps its
-exit record.
+Both updates of ``worker.json`` happen under a lock on ``.worker.lock``: the launcher holds
+it from its check that no other worker is starting until it has recorded the new one, and a
+worker's exit merges into its own record and never replaces the record of another live
+worker.
 
 :func:`worker_status` tells whether a run's training process is alive (its pid, and how old
 the heartbeat is); :func:`cancel_training` sends SIGTERM to it after checking that the
@@ -45,7 +46,7 @@ from pup_finetune.display import ABSOLUTE_PATHS_ENV, display_path
 from pup_finetune.errors import StateError, UsageError, WrongPhase
 from pup_finetune.next_steps import command
 from pup_finetune.providers.base import Provider
-from pup_finetune.runs import Clock, RunDir, error_json, utcnow
+from pup_finetune.runs import Clock, RunDir, RunState, error_json, utcnow
 from pup_finetune.storage import atomic_write_json, read_json
 from pup_finetune.training.inputs import RunInputs
 from pup_finetune.training.loop import EventSink
@@ -65,6 +66,7 @@ __all__ = [
     "probe_pid",
     "record_worker_exit",
     "require_detach_supported",
+    "require_no_worker_starting",
     "run_in_dir",
     "spawn_worker",
     "worker_status",
@@ -145,33 +147,34 @@ def spawn_worker(run_dir: RunDir, mode: WorkerMode, *, now: Clock = utcnow) -> i
     directory, reads nothing from stdin, and writes its output to ``worker.log``; it shows
     every path absolute (:data:`~pup_finetune.display.ABSOLUTE_PATHS_ENV`), since a path
     relative to the run directory would not name the run for whoever reads the log. Its pid,
-    mode and start time go to ``worker.json``. Raises :class:`StateError` when ``worker.log``
-    is not a regular file of this user's (e.g. a symlink).
+    mode and start time go to ``worker.json``. Raises :class:`WrongPhase` while an earlier
+    worker is starting (:func:`require_no_worker_starting`); that check, the start and the
+    record are made under the lock on ``worker.json``, so of two launches at once the second
+    sees the first. Raises :class:`StateError` when ``worker.log`` is not a regular file of
+    this user's (e.g. a symlink).
     """
     require_detach_supported()
     if mode not in WORKER_MODES:
         raise ValueError(f"unknown worker mode {mode!r}")
     path = run_dir.path.resolve()
-    log_fd = _open_log(run_dir)
-    try:
-        process = subprocess.Popen(  # noqa: S603 - our own interpreter and module, no shell
-            [sys.executable, "-P", "-m", "pup_finetune", "_worker", str(path), "--mode", mode],
-            cwd=path,
-            env={**os.environ, ABSOLUTE_PATHS_ENV: "1"},
-            stdin=subprocess.DEVNULL,
-            stdout=log_fd,
-            stderr=log_fd,
-            start_new_session=True,
-            close_fds=True,
-        )
-    finally:
-        os.close(log_fd)
-    started_at = now().isoformat(timespec="seconds")
-    launch = {"pid": process.pid, "mode": mode, "started_at": started_at}
     with _worker_record_lock(run_dir):
-        recorded = _launched(run_dir) or {}
-        if recorded.get("pid") == process.pid:  # the worker already ended: keep its exit
-            launch = {**recorded, **launch}
+        require_no_worker_starting(run_dir, run_dir.load_state())
+        log_fd = _open_log(run_dir)
+        try:
+            process = subprocess.Popen(  # noqa: S603 - our own interpreter and module, no shell
+                [sys.executable, "-P", "-m", "pup_finetune", "_worker", str(path), "--mode", mode],
+                cwd=path,
+                env={**os.environ, ABSOLUTE_PATHS_ENV: "1"},
+                stdin=subprocess.DEVNULL,
+                stdout=log_fd,
+                stderr=log_fd,
+                start_new_session=True,
+                close_fds=True,
+            )
+        finally:
+            os.close(log_fd)
+        started_at = now().isoformat(timespec="seconds")
+        launch = {"pid": process.pid, "mode": mode, "started_at": started_at}
         atomic_write_json(run_dir.worker_path, launch)
     return process.pid
 
@@ -230,14 +233,19 @@ def record_worker_exit(
 ) -> None:
     """Note in ``worker.json`` that this worker ended, and the error it ended with (redacted).
 
-    Writes nothing outside a run directory. Never raises: it runs as the worker exits.
+    Leaves alone the record of another worker that is still alive (e.g. one that took the
+    run while this one hung). Writes nothing outside a run directory. Never raises: it runs
+    as the worker exits.
     """
     with contextlib.suppress(Exception):
         if not run_dir.run_path.is_file():
             return
         with _worker_record_lock(run_dir):
             launched = _launched(run_dir) or {}
-            if launched.get("pid") != os.getpid():  # run by hand, or not yet recorded
+            pid = launched.get("pid")
+            if pid != os.getpid():  # run by hand, or another worker's record
+                if isinstance(pid, int) and pid_alive(pid):
+                    return
                 launched = {"pid": os.getpid(), "mode": mode, "started_at": None}
             atomic_write_json(
                 run_dir.worker_path,
@@ -452,6 +460,19 @@ def worker_status(
         return WorkerStatus(pid, pid_alive(pid), age, False, False, False, **about_launch)
     hanging = waiting is not None and not starting
     return WorkerStatus(launch.pid, launch.alive, age, hanging, starting, starting, **about_launch)
+
+
+def require_no_worker_starting(run_dir: RunDir, state: RunState) -> None:
+    """Raise :class:`WrongPhase` while a worker started for ``run_dir`` is starting (see
+    :class:`WorkerStatus`): nothing else may take the run from it."""
+    worker = worker_status(
+        run_dir, phase=state.phase, pid=state.pid, heartbeat_at=state.heartbeat_at
+    )
+    if worker.starting:
+        raise WrongPhase(
+            f"a worker for the run in {run_dir.path} is starting (process {worker.pid})",
+            hint=f"follow it with `{command('status', run_dir.path, '--watch')}`",
+        )
 
 
 # --- Stopping ----------------------------------------------------------------------------

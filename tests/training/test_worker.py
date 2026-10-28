@@ -270,16 +270,25 @@ def test_a_worker_that_ends_before_its_launch_is_recorded_keeps_its_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run_dir = new_run(tmp_path / "run")
+    workers: list[threading.Thread] = []
 
     class EndsAtOnce:
-        """Starts a "worker" (this process) that fails and records its exit at once."""
+        """Starts a "worker" (this process, on a thread) that fails and records its exit at
+        once, given time to try before its launch is recorded."""
 
         def __init__(self, args: list[str], **kwargs: Any) -> None:
             self.pid = os.getpid()
-            record_worker_exit(run_dir, "train", StateError("no credentials"), now=lambda: NOW)
+            error = StateError("no credentials")
+            worker = threading.Thread(
+                target=lambda: record_worker_exit(run_dir, "train", error, now=lambda: NOW)
+            )
+            worker.start()
+            workers.append(worker)
+            worker.join(timeout=0.2)
 
     monkeypatch.setattr(subprocess, "Popen", EndsAtOnce)
     assert spawn_worker(run_dir, "train", now=lambda: NOW) == os.getpid()
+    workers[0].join(timeout=10)
     launched = read_json(run_dir.worker_path)
     assert launched["pid"] == os.getpid()
     assert launched["started_at"] == NOW.isoformat(timespec="seconds")
