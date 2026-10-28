@@ -987,6 +987,47 @@ def test_a_person_s_keep_along_retirements_refuses_the_drop_and_is_reported(
     assert [(r.row_id, r.keep, r.drop) for r in added.not_carried] == [(REPEATED_A, keep, drop)]
 
 
+def test_a_person_s_drop_on_the_row_that_survives_retirements_wins_over_a_keep_along_them(
+    tmp_path: Path,
+) -> None:
+    pages = retirement_chain_pages()
+    dataset = DatasetDir(tmp_path / "ds")
+    pull_repeats(dataset, pages, target_count=3)
+    dataset.append_labels(
+        [
+            Label(id=CHAIN_PREFIX, keep=False, reason="A1 is wrong"),
+            Label(id=REPEAT_B, keep=True, reason="B is right"),
+            Label(id=REPEATED_A, keep=False, reason="A is wrong"),
+        ]
+    )
+
+    _, added = pull_repeats(dataset, pages)
+    assert added.retired == 2
+    assert dataset.kept_rows() == []
+    assert added.carried == {}
+    assert added.not_carried == []
+
+
+def test_a_person_s_keep_on_the_row_that_survives_reports_every_drop_it_refuses(
+    tmp_path: Path,
+) -> None:
+    pages = retirement_chain_pages()
+    dataset = DatasetDir(tmp_path / "ds")
+    pull_repeats(dataset, pages, target_count=3)
+    prefix_drop = Label(id=CHAIN_PREFIX, keep=False, reason="A1 is wrong")
+    middle_drop = Label(id=REPEAT_B, keep=False, reason="B is wrong")
+    keep = Label(id=REPEATED_A, keep=True, reason="A is right")
+    dataset.append_labels([prefix_drop, middle_drop, keep])
+
+    _, added = pull_repeats(dataset, pages)
+    assert added.retired == 2
+    assert [row.id for row in dataset.kept_rows()] == [REPEATED_A]
+    assert added.carried == {}
+    refused = {r.drop.id: (r.row_id, r.keep) for r in added.not_carried}
+    assert len(added.not_carried) == 2
+    assert refused == {CHAIN_PREFIX: (REPEATED_A, keep), REPEAT_B: (REPEATED_A, keep)}
+
+
 def test_a_re_run_reading_less_reasoning_keeps_two_stored_rows_that_still_differ(
     tmp_path: Path,
 ) -> None:
