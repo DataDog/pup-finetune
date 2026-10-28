@@ -1612,9 +1612,7 @@ def _stopped_watching(data: Mapping[str, Any], why: str, again: str) -> tuple[st
         return f"{why}; the run keeps training in {job_name(remote)}. Watch again: {again}", again
     if worker.running:
         pid = f" (pid {worker.pid})" if worker.pid is not None else ""
-        what = (
-            "the run keeps training" if data["phase"] == "training" else "its worker keeps starting"
-        )
+        what = "its worker is still starting" if worker.starting else "the run keeps training"
         return f"{why}; {what}{pid}. Watch again: {again}", again
     next_command = str(data["next_command"])
     return (
