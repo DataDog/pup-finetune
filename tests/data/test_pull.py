@@ -916,6 +916,27 @@ def test_a_drop_carries_to_the_stored_row_a_dropped_repeat_is_retired_into(
     assert added.carried == {REPEATED_A: REPEAT_B}
 
 
+@pytest.mark.parametrize(
+    "pages",
+    [repeat_once_a_reads_its_reasoning, repeat_once_b_takes_a_s_reasoning],
+    ids=["flagged-by-conversion", "made-by-filling-in"],
+)
+def test_a_person_s_keep_on_the_row_a_dropped_repeat_is_retired_into_is_reported(
+    tmp_path: Path, pages: Any
+) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    pull_repeats(dataset, pages(), target_count=2)
+    keep = Label(id=REPEATED_A, keep=True, reason="A is right")
+    drop = Label(id=REPEAT_B, keep=False, reason="B is wrong")
+    dataset.append_labels([keep, drop])
+
+    _, added = pull_repeats(dataset, pages())
+    assert added.retired == 1
+    assert [row.id for row in dataset.kept_rows()] == [REPEATED_A]
+    assert added.carried == {}
+    assert added.not_carried == [(keep, drop)]
+
+
 def test_a_drop_carries_along_retirements_to_the_row_that_survives_them(tmp_path: Path) -> None:
     # Trace P's prefix continues on page 2 into a repeat of B, so the prefix is retired into
     # B; the same pull fills in B's reasoning, which retires B into A.

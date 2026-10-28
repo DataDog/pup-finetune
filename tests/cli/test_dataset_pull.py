@@ -508,6 +508,41 @@ def test_a_kept_row_s_label_does_not_carry_to_the_longer_row_that_retires_it(
     assert data["pull"]["carried_drops"] == []
 
 
+def test_a_person_s_keep_on_the_row_a_dropped_row_retires_into_stands_with_a_warning(
+    use_pup: UsePup, tmp_path: Path
+) -> None:
+    # A1 continues on page 2 into the conversation B already holds.
+    pages = [
+        page(
+            [conversation("b1", "B", "Q1", "A1", "Q2", "A2"), conversation("a1", "A", "Q1", "A1")],
+            after="cursor-2",
+        ),
+        page([conversation("a2", "A", "Q1", "A1", "Q2", "A2")]),
+    ]
+    serve(use_pup, pages)
+    target = tmp_path / "ds"
+    output_json(pull(target, "--target-count", "2"))
+    labels = tmp_path / "labels.jsonl"
+    lines = [
+        {"id": "B:b1", "keep": True, "reason": "complete answer"},
+        {"id": "A:a1", "keep": False, "reason": "A1 is wrong"},
+    ]
+    labels.write_text("".join(json.dumps(line) + "\n" for line in lines))
+    assert invoke("label", str(target), "--file", str(labels)).exit_code == 0
+
+    result = pull(target, "--target-count", "200")
+    assert result.exit_code == 0, result.stderr
+    data = output_json(result)
+    assert data["pipeline"]["rows"] == {"accepted": 1, "kept": 1, "dropped": 0, "unlabeled": 0}
+    assert data["pull"]["carried_drops"] == []
+    assert data["pull"]["drops_not_carried"] == [
+        {"row_id": "B:b1", "kept": "complete answer", "from": "A:a1", "dropped": "A1 is wrong"}
+    ]
+    [warning] = [text for text in data["warnings"] if "A:a1" in text]
+    assert all(part in warning for part in ("B:b1", "complete answer", "A1 is wrong"))
+    assert f"warning: {warning}" in result.stderr
+
+
 @pytest.mark.parametrize(
     "changed",
     [
