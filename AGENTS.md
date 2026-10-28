@@ -513,9 +513,13 @@ Source lives under `src/pup_finetune/`.
 - `credentials.py` - provider API keys (never Datadog's): a `CredentialSpec` registry, resolution
   from the environment variable, then the OS keychain (`keyring`), as `SecretStr`; `store` refuses
   when there is no OS keychain rather than writing a file. `auth login/status/logout` use it.
-  `key_source` is where a key would come from without reading it out, or a `KeyUnreadable`
-  when the lookup raised anything; `doctor`'s key checks and the default judges both use it.
-- `redaction.py` - masks resolved secrets and `Bearer` tokens in error output and logs.
+  `key_source` is where a key would come from without reading it out, a `KeyMalformed` when
+  the key found is not `KEY_SHAPE` (`well_formed`: one word of printable ASCII of at least 16
+  characters), or a `KeyUnreadable` when the lookup raised anything; `doctor`'s key checks,
+  `auth status` and the default judges use it, and a malformed key counts as none for them.
+- `redaction.py` - masks resolved secrets and `Bearer` tokens in error output and logs. A value
+  shorter than `MIN_SECRET_LENGTH` (16) is never registered, so a placeholder key cannot
+  rewrite ordinary words in a result.
 - `user_checks.py` - the user's Python checks, shared by `evaluate --evaluators` and `dataset
   triage --checks`:
   `load_checks` runs a file as a module named by its sha256 (`CheckModule`: its public
@@ -525,7 +529,8 @@ Source lives under `src/pup_finetune/`.
 - `concurrency.py` - `DaemonPool`, worker threads for parallel remote calls that never hold
   up the process's exit, so Ctrl-C stops at once instead of waiting for a call in flight.
 - `http_common.py` - what the `httpx` clients that send a provider key share: `bearer_key`
-  (refuses an empty or malformed key and registers it for redaction), `CLIENT_SOURCE`
+  (refuses an empty or malformed key, by `credentials.well_formed`, and registers it for
+  redaction), `CLIENT_SOURCE`
   (`pup-finetune/<version>`) and short, redacted failure text.
 - `inference.py` - `ChatClient`, an OpenAI-compatible `POST {base_url}/chat/completions` client
   over `httpx` (no SDK): bounded retries with backoff and jitter on 408, 429, 5xx and connection

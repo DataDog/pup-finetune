@@ -498,9 +498,9 @@ def test_redact_masks_registered_secrets_and_bearer_tokens() -> None:
 
 
 def test_redact_masks_the_longest_secret_whole() -> None:
-    credentials.register_secret("synthetic-key")
-    credentials.register_secret("synthetic-key-extended")
-    assert credentials.redact("v=synthetic-key-extended") == "v=***"
+    credentials.register_secret("synthetic-key-0000")
+    credentials.register_secret("synthetic-key-0000-extended")
+    assert credentials.redact("v=synthetic-key-0000-extended") == "v=***"
 
 
 def test_redact_never_masks_a_value_too_short_to_be_a_key() -> None:

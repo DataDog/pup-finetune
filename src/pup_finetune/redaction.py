@@ -8,7 +8,8 @@
 
 Kept free of heavy imports so the output and error paths can always use it. Credential
 resolution registers every secret it hands out; :func:`redact` then replaces those values,
-and anything shaped like ``Bearer <token>``, with ``***``.
+and anything shaped like ``Bearer <token>``, with ``***``. A value shorter than
+:data:`MIN_SECRET_LENGTH` is never registered.
 """
 
 from __future__ import annotations
@@ -17,9 +18,12 @@ import functools
 import logging
 import re
 import threading
-from typing import Any, Protocol
+from typing import Any, Final, Protocol
 
 MASK = "***"
+MIN_SECRET_LENGTH: Final = 16
+"""The shortest value :func:`register_secret` masks. No API key or Datadog secret is shorter,
+and masking a shorter value would rewrite ordinary words in every result and command line."""
 
 _BEARER = re.compile(r"(\bBearer\s+)[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
 
@@ -34,9 +38,10 @@ class _Secret(Protocol):
 
 
 def register_secret(value: str | _Secret) -> None:
-    """Remember ``value`` so :func:`redact` masks it from now on (for this process)."""
+    """Remember ``value`` so :func:`redact` masks it from now on (for this process), unless it
+    is shorter than :data:`MIN_SECRET_LENGTH`."""
     text = value if isinstance(value, str) else value.get_secret_value()
-    if text:
+    if len(text) >= MIN_SECRET_LENGTH:
         with _lock:
             _secrets.add(text)
 

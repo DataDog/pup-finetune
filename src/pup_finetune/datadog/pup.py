@@ -24,6 +24,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol
 
 from pup_finetune.errors import ExternalError
+from pup_finetune.redaction import redact, register_secret
 
 # The oldest pup release verified to have every command we use (`llm-obs` spans, datasets and
 # experiments, `api`, `auth status` and `format`).
@@ -54,11 +55,9 @@ _TOKEN_ENV = "DD_ACCESS_TOKEN"  # noqa: S105 - an env var name, not a secret
 SECRET_ENV: tuple[str, ...] = ("DD_ACCESS_TOKEN", "DD_API_KEY", "DD_APP_KEY", "DD_APPLICATION_KEY")
 """Datadog secrets pup may hold in the environment: redacted from any pup stderr we repeat,
 and removed from the environment of any process that is not pup."""
-_MIN_REDACT_LENGTH = 8
 _MAX_DETAIL_LINES = 3
 _MAX_DETAIL_CHARS = 300
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-_BEARER = re.compile(r"(?i)(bearer\s+)\S+")
 _AUTH_FAILURE = re.compile(
     r"(?i)\b(401|403)\b|unauthori[sz]ed|forbidden|not authenticated|not logged in|auth login"
 )
@@ -390,12 +389,9 @@ class Pup:
 
     def _error_detail(self, output: bytes) -> str:
         """The first few non-empty output lines, without styling, secrets or bearer tokens."""
-        text = _ANSI.sub("", _decode(output))
         for name in SECRET_ENV:
-            value = self.environ.get(name)
-            if value and len(value) >= _MIN_REDACT_LENGTH:
-                text = text.replace(value, "[redacted]")
-        text = _BEARER.sub(r"\1[redacted]", text)
+            register_secret(self.environ.get(name, ""))
+        text = redact(_ANSI.sub("", _decode(output)))
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         detail = "; ".join(lines[:_MAX_DETAIL_LINES])
         if len(detail) > _MAX_DETAIL_CHARS:

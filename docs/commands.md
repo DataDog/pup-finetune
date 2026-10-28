@@ -147,7 +147,7 @@ Safety: Free · writes the OS keychain; may check the key with the provider · P
 
 ## `pup finetune auth status`
 
-Report, per provider, whether an API key is configured and where it comes from: env, keychain, provider-config, or anthropic-sdk when the Anthropic SDK can sign in on its own, and what the key is needed for. Never prints the key.
+Report, per provider, whether an API key is configured and where it comes from: env, keychain, provider-config, or anthropic-sdk when the Anthropic SDK can sign in on its own, and what the key is needed for. A malformed key is not configured, and its error says why. Never prints the key.
 
 ```
 pup finetune auth status [PROVIDER]

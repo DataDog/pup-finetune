@@ -127,8 +127,8 @@ def default_judges(
 
     Resolving makes no network call: the environment variable, the OS keychain, or the
     Anthropic SDK's own login (:func:`~pup_finetune.credentials.key_source`), and the
-    package found, never imported. A keychain that cannot be read counts as no credential,
-    so the default falls to the next row.
+    package found, never imported. A keychain that cannot be read, or a malformed key, counts
+    as no credential, so the default falls to the next row, as ``doctor``'s readiness does.
     """
     from pup_finetune import credentials
 

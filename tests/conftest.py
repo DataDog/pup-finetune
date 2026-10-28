@@ -132,9 +132,9 @@ def _no_provider_keys(request: pytest.FixtureRequest, monkeypatch: pytest.Monkey
 
 
 JUDGE_KEYS: dict[str, str] = {
-    "FIREWORKS_API_KEY": "fw-test-key",
-    "ANTHROPIC_API_KEY": "sk-ant-test-key",
-    "OPENAI_API_KEY": "sk-test-key",
+    "FIREWORKS_API_KEY": "fw-synthetic-test-key",
+    "ANTHROPIC_API_KEY": "sk-ant-synthetic-test-key",
+    "OPENAI_API_KEY": "sk-synthetic-test-key",
 }
 
 

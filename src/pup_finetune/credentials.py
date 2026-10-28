@@ -14,7 +14,8 @@ order: the environment variable, the OS keychain (through ``keyring``: service
 ``pup-finetune``, account ``<provider>``), and finally the provider CLI's own config, read
 only. Keys are returned as :class:`pydantic.SecretStr`, passed explicitly to whatever needs
 them, and never copied into ``os.environ``. Every resolved or stored key is registered for
-redaction, so it is masked if it ever reaches an error message or a log.
+redaction, so it is masked if it ever reaches an error message or a log. A key that is not
+:data:`KEY_SHAPE` is malformed: clients refuse it, and ``doctor`` and ``auth status`` report it.
 
 A spec may also say that the provider's own SDK can sign in without a key from us
 (``sdk_login``, e.g. an Anthropic CLI login): :func:`sdk_login_source` reports it, as the
@@ -32,14 +33,22 @@ from typing import TYPE_CHECKING, Final, Literal
 from pydantic import SecretStr
 
 from pup_finetune.errors import ExternalError, FinetuneError, UsageError
-from pup_finetune.redaction import RedactingFilter, install_log_redaction, redact, register_secret
+from pup_finetune.redaction import (
+    MIN_SECRET_LENGTH,
+    RedactingFilter,
+    install_log_redaction,
+    redact,
+    register_secret,
+)
 
 if TYPE_CHECKING:
     from keyring.backend import KeyringBackend
 
 __all__ = [
     "KEYCHAIN_SERVICE",
+    "KEY_SHAPE",
     "CredentialSpec",
+    "KeyMalformed",
     "KeyUnreadable",
     "RedactingFilter",
     "ResolvedCredential",
@@ -61,11 +70,30 @@ __all__ = [
     "sdk_login_source",
     "shown_source",
     "store",
+    "well_formed",
 ]
 
 KEYCHAIN_SERVICE = "pup-finetune"
 
 Source = Literal["env", "keychain", "provider-config"]
+
+KEY_SHAPE: Final = (
+    f"one word of printable ASCII, at least {MIN_SECRET_LENGTH} characters long, "
+    "with no spaces or line breaks"
+)
+"""What an API key must be (:func:`well_formed`)."""
+
+
+def well_formed(secret: str) -> bool:
+    """Whether ``secret`` is :data:`KEY_SHAPE`: safe to send in a header, and long enough for
+    redaction to mask it and nothing else."""
+    return (
+        len(secret) >= MIN_SECRET_LENGTH
+        and secret.isascii()
+        and secret.isprintable()
+        and not any(c.isspace() for c in secret)
+    )
+
 
 _SHOWN: Final[dict[str, str]] = {"keychain": "keychain", "provider-config": "provider config"}
 
@@ -432,15 +460,29 @@ class KeyUnreadable:
     fix: str
 
 
-def key_source(provider: str, *, env: Mapping[str, str] = os.environ) -> str | KeyUnreadable | None:
+@dataclass(frozen=True, slots=True)
+class KeyMalformed:
+    """A key found at ``source`` that is not :data:`KEY_SHAPE`: why, never the key, and what
+    to do about it."""
+
+    source: Source
+    detail: str
+    fix: str
+
+
+def key_source(
+    provider: str, *, env: Mapping[str, str] = os.environ
+) -> str | KeyUnreadable | KeyMalformed | None:
     """Where ``provider``'s key would come from (:data:`Source`), ``<provider>-sdk`` when only
-    its SDK can sign in on its own, ``None`` when nothing would, or :class:`KeyUnreadable`
-    when looking failed. Never returns the key and never raises.
+    its SDK can sign in on its own, ``None`` when nothing would, :class:`KeyMalformed` when the
+    key found is not :data:`KEY_SHAPE`, or :class:`KeyUnreadable` when looking failed. Never
+    returns the key and never raises.
     """
     spec = get_spec(provider)
     try:
         found = lookup(provider, env=env)
-        return found.source if found is not None else sdk_login_source(provider, env=env)
+        if found is None:
+            return sdk_login_source(provider, env=env)
     except FinetuneError as exc:
         fix = exc.hint or f"unlock the OS keychain and retry, or set {spec.env_var}"
         return KeyUnreadable(redact(exc.message), redact(fix))
@@ -450,3 +492,11 @@ def key_source(provider: str, *, env: Mapping[str, str] = os.environ) -> str | K
             f"could not read the {spec.provider} key from the OS keychain ({type(exc).__name__})",
             f"check that the OS keychain works and retry, or set {spec.env_var}",
         )
+    if not well_formed(found.value.get_secret_value()):
+        return KeyMalformed(
+            found.source,
+            f"the {spec.provider} API key (source: {found.source}) is malformed: "
+            f"it must be {KEY_SHAPE}",
+            login_hint(spec),
+        )
+    return found.source

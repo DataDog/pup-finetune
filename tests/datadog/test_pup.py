@@ -199,7 +199,7 @@ def test_error_detail_falls_back_to_stdout_when_stderr_is_empty() -> None:
         fake.client(USER_ENV).api("GET", "v2/thing")
     err = info.value
     assert err.message == (
-        "`pup api v2/thing` failed (exit 1): Error: 401 Unauthorized: not logged in token=[redacted]"
+        "`pup api v2/thing` failed (exit 1): Error: 401 Unauthorized: not logged in token=***"
     )
     assert err.hint is not None
     assert "pup auth login" in err.hint
@@ -220,7 +220,7 @@ def test_error_message_never_echoes_secrets() -> None:
     err = info.value
     assert FAKE_TOKEN not in err.message
     assert "abc.def.ghi" not in err.message
-    assert "[redacted]" in err.message
+    assert "***" in err.message
     assert err.hint is not None
     assert "pup auth login" in err.hint
     assert ".data[0]" not in err.message  # no env values

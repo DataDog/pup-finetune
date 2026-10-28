@@ -83,18 +83,20 @@ def key_check(spec: credentials.CredentialSpec, *, required: bool) -> CheckResul
     """Whether ``spec``'s key is configured, and where it comes from (never the key).
 
     A key that cannot be read (a locked keychain, a failing keychain backend) does not pass,
-    with what to do about the keychain as its fix: signing in again would not help.
+    with what to do about the keychain as its fix: signing in again would not help. Nor does
+    a malformed key (not :data:`~pup_finetune.credentials.KEY_SHAPE`).
     """
     name = f"{spec.provider}:key"
     fix = credentials.login_hint(spec)
     needed_for = spec.needed_for or None
     source = credentials.key_source(spec.provider)
-    if isinstance(source, credentials.KeyUnreadable):
+    if isinstance(source, credentials.KeyUnreadable | credentials.KeyMalformed):
+        problem = "malformed" if isinstance(source, credentials.KeyMalformed) else "unreadable"
         return CheckResult(
             name=name,
             status=status_of(False, required=required),
             detail=source.detail,
-            label=f"{spec.label} key unreadable",
+            label=f"{spec.label} key {problem}",
             needed_for=needed_for,
             fix=source.fix,
             required=required,

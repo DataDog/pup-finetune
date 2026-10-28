@@ -305,7 +305,7 @@ def test_the_probe_runs_once_when_the_compare_model_is_attached(
     cases = len(lines(eval_dir / "results.jsonl")) // 2
     model = CompareModel()
     serve_compare(monkeypatch, model)
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-synthetic")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-synthetic-test-key")
     args = ("evaluate", str(evaluated), "--compare-model", "openai/gpt-5.5", "--no-publish")
     attached = invoke(*args, "--confirm")
     assert attached.exit_code == 0, attached.stderr
@@ -359,7 +359,7 @@ def test_the_probe_sends_no_tool_when_no_test_case_has_tools(
     assert trained.exit_code == 0, trained.stderr
     model = CompareModel()
     serve_compare(monkeypatch, model)
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-synthetic")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-synthetic-test-key")
     result = invoke(
         "evaluate", str(run), "--compare-model", "openai/gpt-5.5", "--no-publish", "--confirm"
     )
@@ -371,7 +371,7 @@ def test_the_probe_sends_no_tool_when_no_test_case_has_tools(
 def test_a_compare_model_attached_again_under_a_new_identity_is_probed_first(
     run_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-synthetic")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-synthetic-test-key")
     serve_compare(monkeypatch, CompareModel())
 
     def no_capacity(*args: Any, **kwargs: Any) -> Any:
@@ -418,7 +418,7 @@ def test_a_stored_compare_target_that_resolves_otherwise_now_is_refused(
 ) -> None:
     model = CompareModel()
     serve_compare(monkeypatch, model)
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-synthetic")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-synthetic-test-key")
     attached = invoke(
         "evaluate", str(evaluated), "--compare-model", "openai/gpt-5.5", "--no-publish", "--confirm"
     )
@@ -441,7 +441,7 @@ def test_cases_too_long_for_the_compare_model_point_to_another_compare_model(
 ) -> None:
     too_long = ContextLimitError("the request is longer than the context window", source="openai")
     serve_compare(monkeypatch, CompareModel(too_long, fail_from=2))
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-synthetic")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-synthetic-test-key")
     result = invoke(
         "evaluate", str(evaluated), "--compare-model", "openai/gpt-5.5", "--no-publish", "--confirm"
     )
