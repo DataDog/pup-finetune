@@ -282,12 +282,16 @@ class StateReporter:
             return True
 
 
+class StaleReport(StateError):
+    """A state report whose last training checkpoint does not follow its finished epochs:
+    read while training wrote them, so out of date rather than damaged."""
+
+
 def apply_snapshot(run: RunDir, snapshot: Snapshot) -> None:
     """Write ``snapshot``'s files into ``run``: ``epochs.json``, ``result.json`` when it has
     one, then ``state.json`` without the job's process id (its heartbeat kept). Raises
-    :class:`StateError`, writing nothing, when they are not a run's files or a resume could
-    not continue from them (the last training checkpoint does not follow the finished
-    epochs)."""
+    :class:`StateError`, writing nothing, when they are not a run's files, and
+    :class:`StaleReport` when a resume could not continue from them."""
     state, epochs, result = (
         snapshot.files.get(name) for name in ("state.json", "epochs.json", "result.json")
     )
@@ -302,7 +306,7 @@ def apply_snapshot(run: RunDir, snapshot: Snapshot) -> None:
     if not isinstance(epochs, list) or not all(isinstance(epoch, dict) for epoch in epochs):
         raise StateError("the state report's epochs.json is not a list of objects")
     if point is not None and not point.follows([EpochMetrics.from_json(e) for e in epochs]):
-        raise StateError(
+        raise StaleReport(
             f"the state report's last training checkpoint (epoch {point.epoch}, step "
             f"{point.step}) does not follow its {len(epochs)} finished epoch(s)"
         )

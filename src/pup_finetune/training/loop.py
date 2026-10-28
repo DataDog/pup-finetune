@@ -34,9 +34,11 @@ checkpoint of the steps since the last one. The spend guard is also asked before
 paid call: each ``forward_backward`` and ``optim_step`` (a step refused part-way is never
 applied or counted), each validation microbatch and each checkpoint save. A budget stop
 during an epoch's validation or checkpoints leaves that epoch unrecorded, so it never
-becomes the best on a partial validation, while a cancel lets the epoch finish and stops
-training ``cancelled`` right after it, the last epoch included. Only the checkpoint saved at
-a stop may use the budget's spend reserve. ``finalize`` runs last, while the session is still
+becomes the best on a partial validation. A cancel does not cut an epoch's end short: one
+asked for once the epoch's last step is trained still waits for its validation and
+checkpoints, which are paid for, so that the cancelled run can keep the epoch as its best;
+training then stops ``cancelled``, the last epoch included. Only the checkpoint saved at a
+stop may use the budget's spend reserve. ``finalize`` runs last, while the session is still
 open (the place to promote the best checkpoint before the session ends); if it fails,
 :class:`FinalizeFailed` carries the training result so it is not lost.
 """

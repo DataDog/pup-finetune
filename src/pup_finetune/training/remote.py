@@ -73,7 +73,7 @@ from pup_finetune.storage import (
     read_json,
 )
 from pup_finetune.training.inputs import NEW_RUN_HINT
-from pup_finetune.training.report import Snapshot, apply_snapshot, newest_snapshot
+from pup_finetune.training.report import Snapshot, StaleReport, apply_snapshot, newest_snapshot
 from pup_finetune.training.worker import WorkerMode, WorkerStatus
 
 __all__ = [
@@ -641,6 +641,11 @@ def sync_remote(run: RunDir, jobs: RemoteJobs, *, now: Clock = utcnow) -> Remote
         }
         try:
             busy = not _apply(run, snapshot, fresh)
+        except StaleReport as exc:
+            warnings.append(
+                f"the state report of {name} is out of date ({exc.message}); the next one "
+                "replaces it"
+            )
         except StateError as exc:
             warnings.append(f"the state report of {name} is not a run's ({exc.message})")
         else:
