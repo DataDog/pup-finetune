@@ -5,7 +5,8 @@
 # This product includes software developed at Datadog (https://www.datadoghq.com/).
 # Copyright 2026-present Datadog, Inc.
 """`train --provider baseten` end to end on the Loops fake: the preview, a confirmed run, then
-`deploy` and `undeploy` of the checkpoint it records, and their receipt's failures.
+`deploy` and `undeploy` of the checkpoint it records, and their receipt's failures; and what a
+Ctrl-C while a command creates a Loops trainer or sampler says may remain.
 
 The provider is the real :class:`BasetenProvider` with the Loops fake, its HTTP routes, the
 fake tokenizer and a fake clock injected. Each command builds a new provider, as a new process
@@ -30,6 +31,8 @@ from pup_finetune import providers, redaction
 from pup_finetune.cli import app
 from pup_finetune.cli import deploy as deploy_module
 from pup_finetune.cli import train as train_module
+from pup_finetune.evaluation import benchmark as benchmark_module
+from pup_finetune.evaluation import runner as eval_module
 from pup_finetune.providers.base import Provider
 from pup_finetune.providers.baseten import client
 from pup_finetune.runs import RunDir, model_id_for_run
@@ -68,6 +71,8 @@ def _baseten(monkeypatch: pytest.MonkeyPatch, loops: FakeLoops, clock: FakeClock
     monkeypatch.setattr(train_module, "get_provider", get_provider)
     monkeypatch.setattr(inputs_module, "get_provider", get_provider)
     monkeypatch.setattr(deploy_module, "get_provider", get_provider)
+    monkeypatch.setattr(eval_module, "get_provider", get_provider)
+    monkeypatch.setattr(benchmark_module, "get_provider", get_provider)
     yield
     redaction.clear_secrets()
 
@@ -261,6 +266,62 @@ def test_a_ctrl_c_while_creating_leaves_a_requested_receipt(
     assert removed.exit_code == 0, removed.stderr
     assert output(removed)["already_deleted"] is False
     assert loops.deleted == ["dmodel1"]
+
+
+def left(what: str, session: str) -> str:
+    return (
+        f"warning: a {what} may remain in Loops session {session}; deactivate it in the Baseten UI"
+    )
+
+
+def test_a_ctrl_c_while_training_creates_its_trainer_says_the_run_may_remain(
+    loops: FakeLoops, dataset: Path, tmp_path: Path
+) -> None:
+    loops.lost["trainer"] = KeyboardInterrupt()
+    result = train(dataset, tmp_path / "run", "--confirm")
+    assert result.exit_code == 1, result.stderr
+    assert "Error [interrupted]: training stopped at once" in result.stderr
+    assert left("run", "session1") in result.stderr
+
+
+def test_a_ctrl_c_while_evaluate_creates_a_sampler_says_it_may_remain(
+    loops: FakeLoops, run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PUP_FINETUNE_DEV", "1")
+    loops.lost["sampler"] = KeyboardInterrupt()
+    result = invoke(
+        "evaluate",
+        str(run_dir),
+        "--judge-model",
+        "fake-judge",
+        "--no-publish",
+        "--skip-calibration",
+        "--confirm",
+    )
+    assert result.exit_code == 1, result.stderr
+    assert "Error [interrupted]: evaluation stopped at once" in result.stderr
+    assert left("sampler", "session2") in result.stderr
+
+
+def test_a_ctrl_c_while_benchmark_creates_a_sampler_says_it_may_remain(
+    loops: FakeLoops, dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PUP_FINETUNE_DEV", "1")
+    monkeypatch.setenv("BASETEN_API_KEY", KEY.get_secret_value())
+    loops.lost["sampler"] = KeyboardInterrupt()
+    result = invoke(
+        "benchmark",
+        str(dataset),
+        "--models",
+        "qwen3p5-9b",
+        "--judge-model",
+        "fake-judge",
+        "--skip-calibration",
+        "--confirm",
+    )
+    assert result.exit_code == 1, result.stderr
+    assert "Error [interrupted]: stopped by Ctrl-C" in result.stderr
+    assert left("sampler", "session1") in result.stderr
 
 
 def test_a_refused_create_leaves_no_receipt(loops: FakeLoops, run_dir: Path) -> None:
