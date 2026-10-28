@@ -539,7 +539,7 @@ def test_a_worker_starting_for_too_long_is_stale(trained: Path) -> None:
 def test_status_says_a_worker_is_starting_to_resume_a_stopped_run(trained: Path) -> None:
     # Right after `resume --detach`, until the worker begins: the state is still the crash's.
     crash = {"type": "FakeCrash", "code": "external", "message": "simulated crash", "notes": []}
-    _set_state(trained, phase="interrupted", heartbeat_at=_ago(30), error=crash)
+    _set_state(trained, phase="interrupted", pid=_dead_pid(), heartbeat_at=_ago(30), error=crash)
     atomic_write_json(
         trained / "worker.json", {"pid": os.getpid(), "mode": "resume", "started_at": _ago(1)}
     )
@@ -548,6 +548,44 @@ def test_status_says_a_worker_is_starting_to_resume_a_stopped_run(trained: Path)
     headline = result.stderr.splitlines()[-1].split("; ")[0]
     assert headline.startswith("interrupted (external): epoch 2/2 after step 2/2 "), headline
     assert headline.endswith(f" (worker pid {os.getpid()} starting)"), headline
+
+
+def test_status_says_a_worker_is_starting_to_resume_a_killed_run(trained: Path) -> None:
+    # A SIGKILL leaves the run training under a dead process; `resume --detach` has just
+    # started a worker, which has not taken the run over yet.
+    _set_state(trained, phase="training", pid=_dead_pid(), heartbeat_at=_ago(120))
+    atomic_write_json(
+        trained / "worker.json", {"pid": os.getpid(), "mode": "resume", "started_at": _ago(1)}
+    )
+    trained_s = json.loads((trained / "state.json").read_text())["elapsed_seconds"]
+    result = invoke("status", str(trained))
+    data = output(result)
+    assert (data["worker"]["pid"], data["worker"]["state"]) == (os.getpid(), "starting")
+    assert data["next_command"] == f"pup finetune status {trained} --watch"
+    assert data["elapsed_seconds"] == round(trained_s)  # nothing trained since the kill
+    headline = result.stderr.splitlines()[-1].split(". Next: ")[0]
+    assert headline.endswith(f" (worker pid {os.getpid()} starting)"), headline
+    # A second worker would race the first for the run.
+    resumed = invoke("resume", str(trained), "--confirm")
+    assert resumed.exit_code == 2
+    assert "is starting" in resumed.stderr
+
+
+def test_status_reports_a_run_its_worker_finished_in_the_second_it_started(
+    trained: Path,
+) -> None:
+    # The worker saved the run's last state in the second it was started, and has not yet
+    # recorded that it ended.
+    now = _ago(0)
+    _set_state(trained, pid=os.getpid(), heartbeat_at=now)
+    atomic_write_json(
+        trained / "worker.json", {"pid": os.getpid(), "mode": "train", "started_at": now}
+    )
+    result = invoke("status", str(trained))
+    data = output(result)
+    assert (data["phase"], data["worker"]["state"]) == ("completed", "exited")
+    assert data["next_command"] == f"pup finetune evaluate {trained}"
+    assert "starting" not in result.stderr
 
 
 def test_status_shows_how_a_run_ended_when_its_worker_ends_while_status_reads(
@@ -988,7 +1026,7 @@ def test_resume_refuses_a_run_that_is_still_training(trained: Path) -> None:
 
 
 def test_resume_refuses_while_a_worker_is_starting(trained: Path) -> None:
-    _set_state(trained, phase="interrupted", heartbeat_at=_ago(30))
+    _set_state(trained, phase="interrupted", pid=_dead_pid(), heartbeat_at=_ago(30))
     atomic_write_json(
         trained / "worker.json", {"pid": os.getpid(), "mode": "resume", "started_at": _ago(1)}
     )
