@@ -272,13 +272,12 @@ def emit_error(
         emit_preview(err, runtime=runtime, runner=runner, command=command)
         echo_preview(err, runtime=runtime, card=card)
     else:
-        error_line(str(err), err.error_code, err.hint)
-        for note in getattr(err, "__notes__", ()):
-            warn(redact(note))
+        error_line(str(err), err.error_code, err.hint, getattr(err, "__notes__", ()))
 
 
-def error_line(message: str, code: str, hint: str | None = None) -> None:
-    """Print ``Error [code]: message`` and, with a ``hint``, ``Hint: hint`` on stderr, redacted.
+def error_line(message: str, code: str, hint: str | None = None, notes: Sequence[str] = ()) -> None:
+    """Print ``Error [code]: message``, with a ``hint`` ``Hint: hint``, then ``warning: note``
+    for each of ``notes`` on stderr, redacted.
 
     The one format of every error: ours, Click's usage errors and unexpected exceptions.
     """
@@ -286,6 +285,8 @@ def error_line(message: str, code: str, hint: str | None = None) -> None:
     if hint:
         print(redact(f"Hint: {hint}"), file=sys.stderr)
     sys.stderr.flush()
+    for note in notes:
+        warn(redact(note))
 
 
 WARNING_PATHS: tuple[tuple[str, ...], ...] = (

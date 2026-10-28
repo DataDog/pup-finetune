@@ -260,7 +260,7 @@ def handle_exception(
     detail = str(exc).strip().splitlines()
     message = f"{type(exc).__name__}: {detail[0]}" if detail else type(exc).__name__
     suffix = "" if runtime.debug else " (set PUP_FINETUNE_DEBUG=1 for a traceback)"
-    error_line(f"{message}{suffix}", FinetuneError.error_code)
+    error_line(f"{message}{suffix}", FinetuneError.error_code, notes=getattr(exc, "__notes__", ()))
     return 1
 
 
