@@ -432,7 +432,7 @@ Source lives under `src/pup_finetune/`.
   never in Typer's box);
   `default_note` writes a default the option itself cannot hold. `tests/cli/test_help_layout.py`
   holds every `--help` to 80 columns with nothing cut off and at most 60 lines (`train`, with
-  37 options in six panels, 65), and parses every example against the app.
+  37 options in six panels, 66), and parses every example against the app.
 - `skill.py` - the bundled agent skill: `bundled_skills_dir` (the package's `_skills/`, else
   the repository's `skills/`), `npx_argv`, `npx_env` (the environment without
   `datadog/pup.py`'s `SECRET_ENV` and every registered provider key variable) and

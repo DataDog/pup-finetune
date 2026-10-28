@@ -594,7 +594,7 @@ pup finetune train [OPTIONS]
 | `--dataset` | `DIR` | required | The dataset directory to train on. |
 | `--model` | `MODEL` | required | Model, e.g. glm-5p3-flash; see models list. |
 | **Run** | | | |
-| `--provider` | `NAME` | from --model | Provider: baseten or fireworks. |
+| `--provider` | `NAME` | from --model when only one provider offers it | Provider: baseten or fireworks. |
 | `--run-dir` | `DIR` | runs/RUN_ID | A new or empty run directory. |
 | `--run-id` | `ID` | generated | Run and model id. |
 | `--detach` |  |  | Train in a background worker; see status. |

@@ -705,7 +705,7 @@ def train(
         typer.Option(
             "--provider",
             metavar="NAME",
-            help=f"Provider: {provider_choices()}. {default_note('from --model')}",
+            help=f"Provider: {provider_choices()}. {default_note('from --model when only one provider offers it')}",
             show_default=False,
             rich_help_panel=RUN,
         ),
