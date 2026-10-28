@@ -212,12 +212,13 @@ def test_cancel_stops_a_slow_worker_gracefully_and_promotes(dataset: Path, tmp_p
     assert "finished: the run is cancelled" in (run_dir / "worker.log").read_text()
 
 
-def _progress_line(stream: Any) -> str:
-    """The first progress line ``stream`` (a watch's stderr) prints, skipping anything else."""
+def _first_line(stream: Any, pattern: str) -> str:
+    """The first line ``stream`` (a process's stderr) prints that ``pattern`` matches at its
+    start, skipping anything else."""
     while line := stream.readline():
-        if re.match(r"\d\d:\d\d:\d\d training: epoch ", line):
+        if re.match(pattern, line):
             return str(line)
-    raise AssertionError("the watch ended before printing a progress line")
+    raise AssertionError(f"the process ended before printing a line matching {pattern!r}")
 
 
 def _ignore_sigint() -> None:
@@ -265,7 +266,7 @@ def test_ctrl_c_stops_watching_a_detached_run_but_never_its_training(
     )
     try:
         assert watcher.stderr is not None
-        first = _progress_line(watcher.stderr)  # the watch is under way
+        first = _first_line(watcher.stderr, r"\d\d:\d\d:\d\d training: epoch ")  # under way
         watcher.send_signal(signal.SIGINT)
         stdout, rest = watcher.communicate(timeout=TIMEOUT_S)
         stderr = first + rest
@@ -313,7 +314,17 @@ def test_ctrl_c_cancels_a_foreground_run_gracefully(dataset: Path, tmp_path: Pat
 
 def test_a_second_ctrl_c_stops_at_once_with_a_resume_hint(dataset: Path, tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
-    args = train_args(dataset, run_dir, "--batch-size", "1", "--provider-option", "step_delay_s=2")
+    hold = tmp_path / "hold"
+    args = train_args(
+        dataset,
+        run_dir,
+        "--batch-size",
+        "1",
+        "--provider-option",
+        "step_delay_s=2",
+        "--provider-option",
+        f"hold_file={json.dumps(str(hold))}",
+    )
     process = subprocess.Popen(  # noqa: S603 - our own interpreter and module, list args
         [sys.executable, "-m", "pup_finetune", *args, "--confirm"],
         stdout=subprocess.PIPE,
@@ -323,12 +334,17 @@ def test_a_second_ctrl_c_stops_at_once_with_a_resume_hint(dataset: Path, tmp_pat
     )
     try:
         # After the first step, not when training starts: a cancel asked for before the first
-        # step stops at once, so the second Ctrl-C would come too late on a busy machine. The
-        # second step has just begun, and the cancel waits for its 2s to end.
+        # step stops at once. Then every step is held, so the cancel cannot finish before the
+        # second Ctrl-C; with 2s steps, the hold comes long before the epoch's last one.
         wait_until(lambda: state(run_dir).get("step", 0) >= 1, "the first step")
+        hold.touch()
         process.send_signal(signal.SIGINT)
-        time.sleep(0.3)  # well within the 2s step it waits for
+        # Two Ctrl-Cs sent before the process next runs arrive as one: send the second only
+        # once the first is handled.
+        assert process.stderr is not None
+        _first_line(process.stderr, "cancel requested")
         process.send_signal(signal.SIGINT)
+        hold.unlink()
         stdout, stderr = process.communicate(timeout=TIMEOUT_S)
     finally:
         if process.poll() is None:
