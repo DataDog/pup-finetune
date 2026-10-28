@@ -269,9 +269,11 @@ def test_a_ctrl_c_while_creating_leaves_a_requested_receipt(
 
 
 def left(what: str, session: str) -> str:
-    return (
-        f"warning: a {what} may remain in Loops session {session}; deactivate it in the Baseten UI"
-    )
+    return f"a {what} may remain in Loops session {session}; deactivate it in the Baseten UI"
+
+
+def warned(result: Result, text: str) -> bool:
+    return any(line.startswith("warning: ") and text in line for line in result.stderr.splitlines())
 
 
 def test_a_ctrl_c_while_training_creates_its_trainer_says_the_run_may_remain(
@@ -281,7 +283,26 @@ def test_a_ctrl_c_while_training_creates_its_trainer_says_the_run_may_remain(
     result = train(dataset, tmp_path / "run", "--confirm")
     assert result.exit_code == 1, result.stderr
     assert "Error [interrupted]: training stopped at once" in result.stderr
-    assert left("run", "session1") in result.stderr
+    assert warned(result, left("run", "session1"))
+
+
+def test_a_ctrl_c_while_train_evaluate_creates_a_sampler_says_it_may_remain(
+    loops: FakeLoops, dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PUP_FINETUNE_DEV", "1")
+    loops.lost["sampler"] = KeyboardInterrupt()
+    result = train(
+        dataset,
+        tmp_path / "run",
+        "--evaluate",
+        "--eval-judge-model",
+        "fake-judge",
+        "--eval-skip-calibration",
+        "--confirm",
+    )
+    assert result.exit_code == 1, result.stderr
+    assert output(result)["status"] == "completed"
+    assert warned(result, left("sampler", "session1"))
 
 
 def test_a_ctrl_c_while_evaluate_creates_a_sampler_says_it_may_remain(
@@ -300,7 +321,7 @@ def test_a_ctrl_c_while_evaluate_creates_a_sampler_says_it_may_remain(
     )
     assert result.exit_code == 1, result.stderr
     assert "Error [interrupted]: evaluation stopped at once" in result.stderr
-    assert left("sampler", "session2") in result.stderr
+    assert warned(result, left("sampler", "session2"))
 
 
 def test_a_ctrl_c_while_benchmark_creates_a_sampler_says_it_may_remain(
@@ -321,7 +342,7 @@ def test_a_ctrl_c_while_benchmark_creates_a_sampler_says_it_may_remain(
     )
     assert result.exit_code == 1, result.stderr
     assert "Error [interrupted]: stopped by Ctrl-C" in result.stderr
-    assert left("sampler", "session1") in result.stderr
+    assert warned(result, left("sampler", "session1"))
 
 
 def test_a_refused_create_leaves_no_receipt(loops: FakeLoops, run_dir: Path) -> None:
