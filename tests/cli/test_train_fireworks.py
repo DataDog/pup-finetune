@@ -279,6 +279,22 @@ def test_a_run_whose_model_id_another_run_took_offers_no_resume_that_fails_again
     assert resume_command(second) in commands
 
 
+def test_a_resume_preview_of_a_run_whose_model_id_another_run_took_warns_it_may_be_refused(
+    dataset: Path, tmp_path: Path
+) -> None:
+    assert train(dataset, tmp_path / "first", "--confirm").exit_code == 0
+    second = tmp_path / "second"
+    assert train(dataset, second, "--confirm").exit_code == 1
+    preview = invoke("resume", str(second))
+    assert preview.exit_code == 2, preview.stderr
+    data = output(preview)
+    # The model may have been deleted since, so the resume is still offered.
+    assert data["next_command"] == f"{resume_command(second)} --confirm"
+    model_id = model_id_for_run(RUN_ID)
+    warnings = data["preview"]["warnings"]
+    assert any(model_id in w and "refused again" in w for w in warnings), warnings
+
+
 def test_a_max_seq_len_option_shorter_than_every_row_is_refused_in_the_preview(
     dataset: Path, tmp_path: Path, fw: CrashingFireworks
 ) -> None:
