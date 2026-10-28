@@ -128,6 +128,9 @@ class AddResult:
     """Stored rows taken out and recorded as excluded."""
     updated: int = 0
     """Stored rows replaced by a version with more reasoning."""
+    carried: dict[str, str] = field(default_factory=dict)
+    """The rows labeled drop because they hold the conversation of a dropped row this add
+    retired, each with that row's id."""
 
 
 class DatasetDir:
@@ -323,14 +326,17 @@ class DatasetDir:
         :func:`~pup_finetune.curation.labels.apply_labels`). The file is rewritten as its
         current content plus ``labels`` in one atomic replace; ``rows.jsonl`` is untouched.
         """
-        if labels:
+        self._append_labels(labels)
+        return self._write_summary()
+
+    def _append_labels(self, labels: Iterable[Label]) -> None:
+        lines = "".join(canonical_json(label.to_json()) + "\n" for label in labels)
+        if lines:
             path = self.labels_path
             text = path.read_text(encoding="utf-8") if path.exists() else ""
             if text and not text.endswith("\n"):
                 text += "\n"
-            text += "".join(canonical_json(label.to_json()) + "\n" for label in labels)
-            atomic_write_text(path, text)
-        return self._write_summary()
+            atomic_write_text(path, text + lines)
 
     def _write_summary(self) -> dict[str, Any]:
         summary, conflicts = self._summary()
@@ -403,14 +409,21 @@ class DatasetDir:
         also holds, a change to anything but reasoning, or an update that leaves the row
         holding the same conversation as another stored row raises :class:`ValueError`.
 
+        A drop label in force on a ``retired`` row carries to the stored row that holds its
+        conversation now (the exclusion's ``into``), as a new drop label naming it, so the
+        turns the reviewer dropped stay out of training. A keep does not carry, as that row
+        has turns nobody reviewed, and a drop does not replace a person's label on that row
+        (``by: manual``), which was a decision on the whole row.
+
         ``split_overrides`` assigns split keys to the splits a source already gave them (the
         splits recorded on a fetched dataset's records) before new keys are assigned; a key
         assigned to another split already raises :class:`StateError`.
 
         A validation error (a conflicting id, changed settings) leaves existing dataset files
         unchanged. If writing fails part-way, re-running the same add repairs the directory;
-        the exclusions of ``retired`` are written before the rows are, so a retired row is
-        never gone from ``rows.jsonl`` without its record in ``excluded.jsonl``.
+        the exclusions of ``retired`` and the drops they carry are written before the rows
+        are, so a retired row is never gone from ``rows.jsonl`` without its record in
+        ``excluded.jsonl`` or the drop it carries.
         """
         self._prepare()
         with DirectoryLock(self.path):
@@ -439,8 +452,10 @@ class DatasetDir:
                         f"{self.splits_path} assigns {key!r} to {splits.get(key)}, not {split}"
                     )
                 splits.assignments[key] = split
-            dropped = {row_id for row_id, label in self.labels().items() if not label.keep}
-            assign_splits(all_rows, splits, dropped=dropped)
+            labels = self.labels()
+            carried = _carried_drops(retiring, labels, {row.id for row in all_rows})
+            dropped = {row_id for row_id, label in labels.items() if not label.keep}
+            assign_splits(all_rows, splits, dropped=dropped | {c.id for c in carried.values()})
             repair = SOURCE_COMMANDS[settings.source]
             check_isolation(
                 _group_by_split(all_rows, splits, where=self.splits_path, repair=repair)
@@ -462,11 +477,20 @@ class DatasetDir:
                     self.excluded(), retiring, accepted_ids={row.id for row in existing}
                 )
                 self._write_excluded(staged)
+            self._append_labels(carried.values())
             write_rows(self.rows_path, all_rows)
             self._write_excluded(records)
             summary = self._write_summary()
         retired_rows = len(stored) - len(existing)
-        return AddResult(len(new_rows), unchanged, len(excluded), summary, retired_rows, changed)
+        return AddResult(
+            len(new_rows),
+            unchanged,
+            len(excluded),
+            summary,
+            retired_rows,
+            changed,
+            {label.id: row_id for row_id, label in carried.items()},
+        )
 
     def _write_excluded(self, records: Iterable[dict[str, Any]]) -> None:
         lines = "".join(canonical_json(record) + "\n" for record in records)
@@ -574,6 +598,34 @@ def _merge(
         by_hash[digest] = row.id
         new_rows.append(row)
     return new_rows, unchanged
+
+
+def _carried_drops(
+    retired: Iterable[Exclusion], labels: Mapping[str, Label], stored: Collection[str]
+) -> dict[str, Label]:
+    """The drop label each ``retired`` row with a drop in force passes to the ``stored`` row
+    that holds its conversation (its exclusion's ``into``), by the retired row's id.
+
+    None passes to a row that is dropped already or that a person labeled, so a rerun after
+    a crash, which finds the drop it carried in force, carries nothing twice.
+    """
+    current = dict(labels)
+    carried: dict[str, Label] = {}
+    for exclusion in retired:
+        row_id, into = exclusion.row_id, exclusion.into
+        if row_id is None or into is None or into not in stored:
+            continue
+        label, own = current.get(row_id), current.get(into)
+        decided = own is not None and (not own.keep or own.by == "manual")
+        if label is None or label.keep or decided:
+            continue
+        current[into] = carried[row_id] = Label(
+            id=into,
+            keep=False,
+            reason=f"carried from row {row_id!r}, which this row absorbed: {label.reason}",
+            by=label.by,
+        )
+    return carried
 
 
 def _apply_updates(

@@ -1025,7 +1025,7 @@ def pull_rows(
         "splits": summary["splits"],
         "split_groups": summary["split_groups"],
         "split_conflicts": summary["split_conflicts"],
-        "notes": notes.notes,
+        "notes": [*notes.notes, *_carried_notes(added.carried)],
         "warnings": [
             *notes.warnings,
             *_collection_warnings(collection, options),
@@ -1044,6 +1044,9 @@ def pull_rows(
             "excluded": added.excluded,
             "retired": added.retired,
             "updated": added.updated,
+            "carried_drops": [
+                {"row_id": row_id, "from": retired} for row_id, retired in added.carried.items()
+            ],
             **collection.stats(),
         },
         **following,
@@ -1054,6 +1057,19 @@ def pull_rows(
             "dataset label`"
         ),
     }
+
+
+def _carried_notes(carried: Mapping[str, str]) -> list[str]:
+    """The note that rows took the drop label of a dropped row this pull retired into them."""
+    if not carried:
+        return []
+    row_id, retired = next(iter(carried.items()))
+    one = len(carried) == 1
+    return [
+        f"{counted(len(carried), 'row')} now {'holds' if one else 'hold'} the conversation of "
+        f"a dropped row this pull retired, so {'it takes' if one else 'they take'} its drop "
+        f"label (e.g. {row_id!r} from {retired!r}; see pull.carried_drops)"
+    ]
 
 
 def _with_frozen(dataset: DatasetDir, directory: Path, values: Mapping[str, Any]) -> dict[str, Any]:

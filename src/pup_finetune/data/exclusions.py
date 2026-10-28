@@ -134,10 +134,15 @@ class Exclusion:
     trace_id: str | None = None
     span_id: str | None = None
     line_sha256: str | None = None
+    into: str | None = None
+    """For a stored row retired because another row holds its conversation, that row's id.
+    Not recorded in ``excluded.jsonl``."""
 
     @classmethod
-    def for_row(cls, row: TrainingRow, code: ExclusionCode, detail: str) -> Exclusion:
-        return cls(code, detail, row.id, row.source.trace_id, row.source.span_id)
+    def for_row(
+        cls, row: TrainingRow, code: ExclusionCode, detail: str, *, into: str | None = None
+    ) -> Exclusion:
+        return cls(code, detail, row.id, row.source.trace_id, row.source.span_id, into=into)
 
     @classmethod
     def for_source(
