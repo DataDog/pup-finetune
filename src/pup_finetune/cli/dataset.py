@@ -468,7 +468,7 @@ def dataset_next(
     judge council, are the steps (labels a check wrote count as none while rows are
     unlabeled: no review decided them); a fetched dataset (``dataset fetch``) was curated in
     Datadog, so its rows go straight to training. A triage that is not complete gets a step
-    to finish it. Once rows are labeled, the push is a step
+    to finish it. Once rows are labeled, the push is a step, before ``models list``
     (:meth:`~pup_finetune.curation.pipeline.Pipeline.push_gap`). Training (and
     benchmarking) is a step only once every kept row is pushed as it is now. Kept copies of
     a request outside their group's split come first: a ``dataset label`` step with the drop
@@ -573,6 +573,8 @@ def _next_by_state(
     steps += triage_steps
     if not state.kept:
         return {"next_command": None, "next_steps": steps}
+    if push_step is not None:
+        steps.append(push_step)
     steps.append(step(command("models", "list"), "see the models a provider can fine-tune"))
     if push_step is None:
         steps += [
@@ -595,8 +597,6 @@ def _next_by_state(
                 "provider with the user (`models list` shows them; the run goes in runs/RUN_ID)",
             ),
         ]
-    else:
-        steps.append(push_step)
     return {"next_command": None, "next_steps": steps}
 
 
