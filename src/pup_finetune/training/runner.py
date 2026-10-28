@@ -375,8 +375,10 @@ class _Run:
 
 
 def _describe(error: BaseException) -> str:
+    """``error``'s type and message, then its notes (e.g. a resource that may remain)."""
     detail = redact(str(error))
-    return f"{type(error).__name__}{': ' + detail if detail else ''}"
+    notes = (redact(note) for note in getattr(error, "__notes__", ()))
+    return "; ".join((f"{type(error).__name__}{': ' + detail if detail else ''}", *notes))
 
 
 def _longest_example(rows: Iterable[RowExamples]) -> int | None:
