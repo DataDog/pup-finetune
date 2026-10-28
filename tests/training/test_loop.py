@@ -1360,6 +1360,27 @@ def test_a_resume_point_that_does_not_follow_the_epochs_is_refused() -> None:
         train(session, spec, rows=row_examples(2), resume=Resume(point=early, epochs=state.epochs))
 
 
+def test_a_checkpoint_from_within_the_last_finished_epoch_is_refused() -> None:
+    # A timed checkpoint partway through epoch 2 does not hold epoch 2's last steps.
+    spec = make_spec(max_epochs=3, batch_size=1, pipeline_depth=1, checkpoint_every_minutes=10)
+    clock = Clock()
+    state = MemoryState()
+    with recording() as session:
+        train(
+            session,
+            spec,
+            rows=row_examples(4),
+            state=state,
+            clock=clock,
+            on_event=ticking(clock, 4),
+        )
+    within = next(p for p in state.resume_points if p.epoch == 2 and p.steps_in_epoch < 4)
+    resume = Resume(point=within, epochs=state.epochs[:2])
+    with recording() as session, pytest.raises(StateError, match="does not follow"):
+        train(session, spec, rows=row_examples(4), resume=resume)
+    assert session.calls == []
+
+
 def test_warnings_are_not_repeated_on_resume() -> None:
     spec = make_spec(max_epochs=2, batch_size=1, pipeline_depth=1)
     state = MemoryState(cancel_after_steps=1)

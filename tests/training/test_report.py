@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 from datetime import UTC, datetime
@@ -235,6 +236,21 @@ def end_of(epoch: int) -> ResumePoint:
     )
 
 
+def within(epoch: int) -> ResumePoint:
+    """A timed checkpoint one step into epoch ``epoch``."""
+    return ResumePoint(
+        checkpoint=dataclasses.replace(checkpoint("training", epoch), step=2 * epoch - 1),
+        epoch=epoch,
+        step=2 * epoch - 1,
+        steps_in_epoch=1,
+        epoch_loss_sum=1.0,
+        epoch_weight=1.0,
+        epoch_tokens=4,
+        train_tokens=8 * epoch - 4,
+        elapsed_seconds=60.0 * epoch - 30.0,
+    )
+
+
 def finished(epoch: int) -> EpochMetrics:
     return EpochMetrics(
         epoch=epoch,
@@ -295,15 +311,22 @@ def test_a_snapshot_taken_while_an_epoch_is_recorded_can_be_resumed_from(
 ) -> None:
     run = training_run(tmp_path)
     taken = read_snapshot(TrainsDuringRead(run.path, file), seq=1, final=False)
-    finished_epochs = len(taken.files["epochs.json"])
-    point = taken.files["state.json"]["resume_point"]["epoch"]
-    assert finished_epochs <= point <= finished_epochs + 1
+    epochs = taken.files["epochs.json"]
+    point = taken.files["state.json"]["resume_point"]
+    # Saved at the last finished epoch's end, or during the next epoch.
+    at_end = point["epoch"] == len(epochs) and point["step"] == sum(e["steps"] for e in epochs)
+    assert at_end or point["epoch"] == len(epochs) + 1
 
 
-def test_apply_refuses_a_checkpoint_older_than_the_finished_epochs(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "point", [end_of(1), within(2)], ids=["an_earlier_epoch", "within_the_last_epoch"]
+)
+def test_apply_refuses_a_checkpoint_older_than_the_finished_epochs(
+    tmp_path: Path, point: ResumePoint
+) -> None:
     run = training_run(tmp_path)
     before = {path: path.read_bytes() for path in (run.state_path, run.epochs_path)}
-    state = RunState(run, phase="training", epochs=1, resume_point=end_of(1).to_json())
+    state = RunState(run, phase="training", epochs=1, resume_point=point.to_json())
     stale = Snapshot(
         run_id=RUN_ID,
         seq=5,
