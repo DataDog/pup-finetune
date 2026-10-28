@@ -1473,6 +1473,16 @@ def _timing(summary: Mapping[str, Any], *, live_s: float) -> dict[str, Any]:
     return timing
 
 
+def _observed(run: RunDir, sync: RemoteSync | None) -> tuple[dict[str, Any], WorkerStatus]:
+    """``run.status()``, then the process training the run."""
+    summary = run.status()
+    if sync is not None and sync.worker is not None:
+        return summary, sync.worker
+    return summary, worker_status(
+        run, phase=summary["phase"], pid=summary["pid"], heartbeat_at=summary["heartbeat_at"]
+    )
+
+
 def run_status(run: RunDir, *, source: str = "given") -> dict[str, Any]:
     """What `status` measures for ``run``; every number finite or ``None``.
 
@@ -1480,19 +1490,14 @@ def run_status(run: RunDir, *, source: str = "given") -> dict[str, Any]:
     prints is :func:`~pup_finetune.cli._views.status_view` of this. ``source`` is how the
     command found the run (``run_dir_source``: ``given``, ``run id`` or ``newest under
     ./runs``). ``evaluation`` is the run's recorded evaluation
-    (:func:`~pup_finetune.evaluation.runner.recorded_evaluation`), or ``None``.
+    (:func:`~pup_finetune.evaluation.runner.recorded_evaluation`), or ``None``. A process
+    that ends while the state and then the process are read saved its last state before it
+    ended, so when the process is gone and the state changed meanwhile, both are read again.
     """
     sync = _remote_sync(run)
-    summary = run.status()
-    if sync is not None and sync.worker is not None:
-        worker = sync.worker
-    else:
-        worker = worker_status(
-            run,
-            phase=summary["phase"],
-            pid=summary["pid"],
-            heartbeat_at=summary["heartbeat_at"],
-        )
+    summary, worker = _observed(run, sync)
+    if not worker.running and run.status() != summary:
+        summary, worker = _observed(run, sync)
     best = summary["best"] or {}
     stale_alive = worker.stale and worker.alive
     warnings = list(summary["warnings"])
