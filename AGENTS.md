@@ -751,7 +751,11 @@ Source lives under `src/pup_finetune/`.
   `interrupted`, resumable from its last training checkpoint; a failed promotion leaves it
   `failed` with `resume_mode` `finalize_only`, so a resume only retries the promotion. Every
   error that leaves the run `interrupted` or `failed`, a `FinetuneError` included, ends its
-  hint with `Next: pup finetune resume RUN_DIR` (`resume_hint`).
+  hint with `Next: pup finetune resume RUN_DIR` (`resume_hint`), except a promotion that
+  found the run's model id held by another model (`ModelIdTaken`): a resume alone fails the
+  same way, so its hint names a new run under another run id, or deleting that model and
+  then resuming, and `status` gives such a run (`RunState.contested_promotion`) no
+  `next_command`, with those two as `next_steps`.
   `result.json` records `promoted_model`, `deployable_checkpoint` and `finalize_error`. With
   `signals="cancel"` (what the CLI uses), SIGTERM and the first Ctrl-C cancel gracefully
   instead: stop at a step boundary, checkpoint, promote the best epoch, end `cancelled`; with

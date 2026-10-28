@@ -83,7 +83,7 @@ row-weather-002 (train, 2 turns, tools: get_weather)
 | `phase` `training`, `worker.state` `stale` or `exited` | The worker died or hangs. Read `worker.log`, then see Debugging. |
 | `phase` `completed` | Go to step 6. |
 | `phase` `cancelled` with a `best_epoch` | Evaluate or deploy it as is. Resume only to train further, with a yes. |
-| `phase` `interrupted` or `failed` | Preview `resume` (step 5); `resume_mode` `finalize_only` retries only keeping the best epoch. |
+| `phase` `interrupted` or `failed` | Preview `resume` (step 5); `resume_mode` `finalize_only` retries only keeping the best epoch. With `next_command` null, another model holds the run's model id: offer the user its `next_steps`. |
 | evaluate `status` `complete` | Report the headline (step 6). |
 | evaluate `status` `complete_with_errors` | Its `next_command` retries the errors; it is paid, so ask first. A check that raised is not retried: its `hint` says how to fix it. |
 | evaluate `status` `partial` | Rerun the same command to continue. |

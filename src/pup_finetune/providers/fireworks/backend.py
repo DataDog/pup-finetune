@@ -567,30 +567,24 @@ class FireworksSession:
             f"the Fireworks model {name} already exists, so the best checkpoint cannot be "
             f"promoted to the model id {model_id!r}"
         )
-        hint = (
-            "train a new run under another run id, or delete that model in Fireworks and then "
-            "resume this run"
-        )
         base = _record_base_model(record)
         if base is not None and base != self._profile.base_model:
             raise ModelIdTaken(
-                f"{taken}: it is a model of {base}, not of {self._profile.base_model}", hint=hint
+                f"{taken}: it is a model of {base}, not of {self._profile.base_model}"
             )
         if not checked:
             if since is None:
-                raise ModelIdTaken(taken, hint=hint)
+                raise ModelIdTaken(taken)
             created = _record_time(record)
             if created is None:
                 raise ModelIdTaken(
                     f"{taken}, and Fireworks does not say when it was created, so it cannot "
-                    "be told apart from another run's",
-                    hint=hint,
+                    "be told apart from another run's"
                 )
             if created < since:
                 raise ModelIdTaken(
                     f"{taken}: it was created at {created.isoformat()}, before this run "
-                    f"first asked to promote it (allowing for clock skew, {since.isoformat()})",
-                    hint=hint,
+                    f"first asked to promote it (allowing for clock skew, {since.isoformat()})"
                 )
         _warn(f"adopting the Fireworks model {name}, which this run already promoted")
         return ModelRef(provider=PROVIDER_NAME, model_id=model_id, uri=name)

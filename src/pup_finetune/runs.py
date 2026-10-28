@@ -83,6 +83,7 @@ from pup_finetune.providers.base import (
     MAX_SEQ_LEN_FLAG,
     MODEL_ID_PATTERN,
     CheckpointRef,
+    ModelIdTaken,
     ModelProfile,
     TrainSpec,
 )
@@ -507,12 +508,15 @@ class RunDir:
         always agree. ``steps_per_epoch`` and ``max_steps`` are ``None`` until training
         started (a state saved before they were recorded takes them from the first finished
         epoch). ``elapsed_seconds`` is the spend guard's time over every attempt, as of the
-        snapshot, and ``hourly_rate_usd`` the rate the run prices it at, if any. While the run
-        is ``created`` or ``training`` (e.g. resumed), nothing is reported from
+        snapshot, and ``hourly_rate_usd`` the rate the run prices it at, if any.
+        ``contested_model_id`` is the model id of the promotion a resume would retry when a
+        model the provider did not adopt holds it (:meth:`RunState.contested_promotion`).
+        While the run is ``created`` or ``training`` (e.g. resumed), nothing is reported from
         ``result.json``, which then describes an earlier attempt.
         """
         manifest = self.manifest()
         state = self.load_state()
+        contested = state.contested_promotion()
         result = None if state.phase in ("created", "training") else self.read_result()
         epochs = self.read_epochs()
         if state.phase == "training":
@@ -546,6 +550,7 @@ class RunDir:
             "pid": state.pid,
             "error": state.error,
             "resume_mode": state.resume_mode,
+            "contested_model_id": None if contested is None else contested.model_id,
             "stopped_reason": result.get("stopped_reason") if result else None,
             "promoted_model": result.get("promoted_model") if result else None,
             "deployable_checkpoint": result.get("deployable_checkpoint") if result else None,
@@ -907,6 +912,19 @@ class RunState:
     def any_promotion_requested(self) -> bool:
         """Whether the run recorded a request to promote any checkpoint."""
         return bool(self.promotions)
+
+    def contested_promotion(self) -> PromotionRequest | None:
+        """The promotion a resume retries, when its model id is held by a model the provider
+        did not adopt: the best epoch's request, contested, while a resume only retries the
+        promotion."""
+        best = self.best or {}
+        ckpt = best.get("sampler_ckpt") or best.get("training_ckpt")
+        if self.resume_mode != "finalize_only" or not isinstance(ckpt, dict):
+            return None
+        request = self.promotion_request(_int(ckpt.get("epoch")), _int(ckpt.get("step")))
+        if request is None or request.status is not PromotionStatus.CONTESTED:
+            return None
+        return request
 
     def record_promotion_request(
         self, model_id: str, *, epoch: int, step: int, status: PromotionStatus
@@ -1270,10 +1288,12 @@ def _for_cli(error: BaseException, resumable: Path | None) -> BaseException:
 
     ``resumable`` is the run directory when the error left the run ``interrupted`` or
     ``failed``: every :class:`FinetuneError` returned then ends its hint with the resume
-    command (:func:`resume_hint`).
+    command (:func:`resume_hint`), except when a promotion found the run's model id taken
+    (:class:`~pup_finetune.providers.base.ModelIdTaken`), which a resume alone repeats.
     """
     converted = _converted(error)
-    if resumable is not None and isinstance(converted, FinetuneError):
+    taken = isinstance(error, FinalizeFailed) and isinstance(error.cause, ModelIdTaken)
+    if resumable is not None and isinstance(converted, FinetuneError) and not taken:
         converted.hint = resume_hint(resumable, converted.hint)
     return converted
 
