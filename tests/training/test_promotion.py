@@ -280,6 +280,17 @@ def test_a_retry_adopts_only_models_created_since_the_run_asked_for_that_checkpo
     assert promote_with(promotion()) == ("ft-run-1", [None])
 
 
+def test_every_retry_adopts_models_created_since_the_first_promotion_was_sent() -> None:
+    asked = datetime(2026, 10, 6, 12, 0, tzinfo=UTC)
+    requests = Requests(asked)
+    finalize = dataclasses.replace(promotion(), requests=requests)
+    promote_with(finalize)
+    # A retry sends the promotion again; the model the first send created stays the run's.
+    for hours in (1, 2):
+        requests.now = asked + timedelta(hours=hours)
+        assert promote_with(finalize) == ("ft-run-1", [asked - ADOPT_CLOCK_ALLOWANCE])
+
+
 def test_a_new_best_after_a_promotion_gets_its_own_model_id() -> None:
     # The run's model id holds epoch 1: epoch 3, a later best, must not be adopted as it.
     asked = datetime(2026, 10, 6, 12, 0, tzinfo=UTC)
