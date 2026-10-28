@@ -84,8 +84,8 @@ def test_label_applies_labels_and_emits_the_report(dataset: Path, tmp_path: Path
     quoted = shlex.quote(str(dataset))
     assert data["next_command"] is None
     assert [step["command"] for step in data["next_steps"]] == [
-        "pup finetune models list",
         f"pup finetune dataset push {quoted} --name <NAME>",
+        "pup finetune models list",
     ]
     assert FIXTURE_IDS[0] not in {row.id for row in DatasetDir(dataset).kept_rows()}
     show = output_json(invoke("show", str(dataset)))

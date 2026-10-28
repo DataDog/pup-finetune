@@ -212,8 +212,8 @@ def test_triage_labels_rows_and_is_allowed_read_only(
     assert data["calls_made"] == rows * 3
     assert data["next_command"] is None
     assert [step["command"] for step in data["next_steps"]] == [
-        "pup finetune models list",
         f"pup finetune dataset push {dataset} --name <NAME>",
+        "pup finetune models list",
     ]
     assert data["stale_judge_labels"] == 0
     assert data["dataset"]["dropped"] == data["dropped"]
