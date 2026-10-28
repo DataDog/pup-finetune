@@ -900,8 +900,8 @@ Source lives under `src/pup_finetune/`.
   `--target-pass-rate` and its `headline_cases` cover `TARGET_COVERAGE`, 90% of the test cases
   with a prompt; or `no_result`; the reason quotes that count and says when results are
   partial, and models within noise of the best are named).
-  The package exports its names lazily, so importing the runner (the CLI does, for every
-  command) loads no judge client. `targets.py` makes the two samplers from a session: the live training
+  The package's `__init__` imports nothing, so importing the runner (the CLI does, for
+  every command) loads no judge client. `targets.py` makes the two samplers from a session: the live training
   session's best sampler checkpoint, or the best training checkpoint loaded and saved again
   as an `ev...` sampler checkpoint in a new session (`run_samplers`), only for the targets
   with a case left to generate (`targets`). `reuse.py` is the dataset's store of base

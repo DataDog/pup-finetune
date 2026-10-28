@@ -460,8 +460,8 @@ provider, and talks to models only through the `Sampler` protocol.
 - **Runner** ([`runner.py`](../src/pup_finetune/evaluation/runner.py)). What `evaluate` and
   `train --evaluate` run, so the CLI only parses flags and emits: an `EvalPlan` (cases,
   judge, settings, and whether the evaluation can be published), calibration, the replay
-  with the plan's publisher, and the result and exit code. The package exports its names
-  lazily, so the CLI loads the runner for every command without loading the judge's client.
+  with the plan's publisher, and the result and exit code. The package's `__init__` imports
+  nothing, so the CLI loads the runner for every command without loading the judge's client.
 - **Publishing** ([`datadog/experiments.py`](../src/pup_finetune/datadog/experiments.py)).
   `Publisher` receives a complete evaluation and returns what it reports. Datadog is the
   system of record: `ExperimentsPublisher` publishes the evaluation, through pup's OAuth, as
