@@ -45,6 +45,7 @@ from pup_finetune.providers.base import (
     Endpoint,
     Generation,
     LoraConfig,
+    ModelIdTaken,
     ModelProfile,
     ModelRef,
     Provider,
@@ -617,7 +618,7 @@ class BackendContract:
         self._train_one_step(session, batch)
         second = session.save_sampler_checkpoint("second", epoch=2, step=2)
         assert session.promote(first, model_id).model_id == model_id
-        with pytest.raises(FinetuneError):
+        with pytest.raises(ModelIdTaken):
             session.promote(second, model_id)
 
     def test_a_sampler_checkpoint_from_a_closed_session_works_or_fails_cleanly(

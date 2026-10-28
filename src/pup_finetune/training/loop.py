@@ -54,6 +54,7 @@ from typing import Any, Literal, Protocol, get_args
 from pup_finetune.errors import ExternalError, StateError, UsageError
 from pup_finetune.providers.base import (
     CheckpointRef,
+    ModelIdTaken,
     PendingResult,
     StepMetrics,
     TrainingSession,
@@ -151,16 +152,21 @@ class FinalizeFailed(ExternalError):
     :attr:`result` is the training result, so it is not lost; :attr:`cause` is the error that
     stopped ``finalize`` (also chained as the ``__cause__`` when raised ``from`` it).
     :attr:`interrupted` is true when that was an interrupt (Ctrl-C or SIGTERM) rather than an
-    error.
+    error. The hint offers a resume that retries only the promotion, except after a
+    :class:`~pup_finetune.providers.base.ModelIdTaken`, whose own hint says what has to change
+    first.
     """
 
     def __init__(self, result: TrainResult, cause: BaseException) -> None:
         detail = redact(str(cause))
+        retry = "resume the run to retry only the promotion"
+        if isinstance(cause, ModelIdTaken) and cause.hint:
+            retry = cause.hint
         super().__init__(
             f"training ended ({result.stopped_reason}), but finalizing the run failed: "
             f"{type(cause).__name__}{': ' + detail if detail else ''}",
             source="finalize",
-            hint="the training result is kept; resume the run to retry only the promotion",
+            hint=f"the training result is kept; {retry}",
         )
         self.result = result
         self.cause = cause

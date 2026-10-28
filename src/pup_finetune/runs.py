@@ -644,9 +644,10 @@ class RunState:
     provider to promote: the model id, the checkpoint's epoch and step, and when it first
     asked (:meth:`record_promotion_request`), saved before that request and kept across
     resumes, so a model created since under that id can be told to be this run's, holding
-    that checkpoint (see :class:`~pup_finetune.training.promotion.Promotion`). A state saved
-    before these were recorded holds only ``promotion_requested_at``, the time of the run's
-    first request; it is read as a request for an unknown checkpoint.
+    that checkpoint (see :class:`~pup_finetune.training.promotion.Promotion`). A request whose
+    first attempt found the id taken is ``contested`` (:meth:`contest_promotion_request`). A
+    state saved before these were recorded holds only ``promotion_requested_at``, the time of
+    the run's first request; it is read as a request for an unknown checkpoint.
     """
 
     def __init__(
@@ -889,7 +890,11 @@ class RunState:
             )
             if isinstance(model_id, str) and requested_at is not None:
                 return PromotionRequest(
-                    model_id=model_id, epoch=epoch, step=step, requested_at=requested_at
+                    model_id=model_id,
+                    epoch=epoch,
+                    step=step,
+                    requested_at=requested_at,
+                    contested=record.get("contested") is True,
                 )
         return None
 
@@ -899,14 +904,24 @@ class RunState:
 
     def record_promotion_request(self, model_id: str, *, epoch: int, step: int) -> PromotionRequest:
         """Record a request to promote the checkpoint at ``epoch`` and ``step`` to
-        ``model_id``, made now, and save it before returning it, so a request made after the
-        call is always covered. Its time is truncated to the second, as a resume reads it back.
+        ``model_id``, made now, in place of any earlier one for it, and save it before
+        returning it, so a request made after the call is always covered. Its time is
+        truncated to the second, as a resume reads it back.
         """
         moment = self._now().replace(microsecond=0)
         record = {"model_id": model_id, "epoch": epoch, "step": step, "requested_at": _iso(moment)}
-        self.promotions.append(record)
+        kept = [r for r in self.promotions if (r.get("epoch"), r.get("step")) != (epoch, step)]
+        self.promotions = [*kept, record]
         self.save()
         return PromotionRequest(model_id=model_id, epoch=epoch, step=step, requested_at=moment)
+
+    def contest_promotion_request(self, epoch: int, step: int) -> None:
+        """Mark the request to promote the checkpoint at ``epoch`` and ``step`` contested, and
+        save it: its model id was taken before the run could have promoted it."""
+        for record in self.promotions:
+            if (record.get("epoch"), record.get("step")) == (epoch, step):
+                record["contested"] = True
+        self.save()
 
     def record_warning(self, message: str) -> None:
         self.warnings.append(message)

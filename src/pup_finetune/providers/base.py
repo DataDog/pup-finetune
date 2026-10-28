@@ -34,7 +34,7 @@ from pydantic import (
     model_validator,
 )
 
-from pup_finetune.errors import ExternalError, UsageError
+from pup_finetune.errors import ExternalError, StateError, UsageError
 from pup_finetune.rendering.base import ChatMessage, Renderer, ToolSpec
 from pup_finetune.rendering.hf import COMMIT_SHA
 from pup_finetune.rendering.tokens import TokenizedExample
@@ -464,6 +464,11 @@ class ProviderAuthError(ExternalError):
     error_code: ClassVar[str] = "provider_auth"
 
 
+class ModelIdTaken(StateError):
+    """:meth:`TrainingSession.promote` found its model id taken by a model it does not adopt:
+    another run's, or one it cannot tell is this run's. ``hint`` names the ways out."""
+
+
 # --- Results the seam returns ------------------------------------------------------------
 
 
@@ -865,7 +870,8 @@ class TrainingSession(Protocol):
         promotion) lets a provider that can look models up return such a model instead: one
         named ``model_id``, of the same base model, created no earlier than ``adopt_since``, so
         it is this run's and not another run's that used the same id. A provider that cannot
-        tell ignores it.
+        tell ignores it. A model it finds under ``model_id`` and does not adopt raises
+        :class:`ModelIdTaken`.
         """
         ...
 

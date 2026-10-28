@@ -704,9 +704,11 @@ Source lives under `src/pup_finetune/`.
   before the session ends (re-creating its sampler checkpoint when that session expired) or
   records it as the deployable checkpoint, recording each promotion request per checkpoint
   first (a new best after an earlier promotion gets its own model id,
-  `model_id_for_checkpoint`, so a model id never holds two checkpoints; only a later attempt
-  at a recorded request passes `adopt_since`, so the attempt that records it refuses a model
-  id another run took, however recently); `runner.py` has
+  `model_id_for_checkpoint`, so a model id never holds two checkpoints; the attempt that
+  records a request passes no `adopt_since`, so it refuses a model id another run took,
+  however recently (`ModelIdTaken`), and marks the request contested; the next attempt
+  records a contested request afresh and again passes none, so only a retry after an
+  attempt whose outcome is unknown passes it); `runner.py` has
   `start_training` and `resume_training`, which open a session for a run directory and train
   or resume in it (`start_training` takes an `after_finalize` hook, run in the session after
   a successful promotion with the run's spend guard; its failure only adds a warning);

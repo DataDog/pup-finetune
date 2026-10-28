@@ -1220,6 +1220,53 @@ def test_a_model_another_run_directory_promoted_just_before_under_the_run_id_is_
     assert _live(fw) == []
 
 
+def test_a_promotion_lost_after_a_refused_one_is_adopted_on_resume(
+    fw: FakeFireworksTrainingClient, renderer: Renderer, tmp_path: Path
+) -> None:
+    train_rows, validation_rows = _rows(renderer, 4, "train"), _rows(renderer, 2, "val")
+    first = _new_run(tmp_path / "a" / "run", renderer, created_at=SINCE)
+    second = _new_run(tmp_path / "b" / "run", renderer, created_at=SINCE)
+    fw.now = lambda: SINCE + timedelta(minutes=10)
+    start_training(
+        _provider(fw), first, train_rows=train_rows, validation_rows=validation_rows, now=fw.now
+    )
+    with pytest.raises(FinalizeFailed):
+        start_training(
+            _provider(fw),
+            second,
+            train_rows=train_rows,
+            validation_rows=validation_rows,
+            now=lambda: SINCE + timedelta(minutes=10, seconds=30),
+        )
+    model_id = model_id_for_run(RUN_ID)
+    del fw.promoted[model_id]
+    # The resume's promotion takes place, but its response and the lookup after it are lost.
+    fw.lost_responses.append("connection")
+    fw.fail("get_model", "connection", after=1)
+    fw.now = lambda: SINCE + timedelta(minutes=20)
+    with pytest.raises(FinalizeFailed):
+        resume_training(
+            _provider(fw),
+            second,
+            train_rows=train_rows,
+            validation_rows=validation_rows,
+            now=fw.now,
+        )
+    assert model_id in fw.promoted
+
+    fw.calls.clear()
+    result = resume_training(
+        _provider(fw),
+        second,
+        train_rows=train_rows,
+        validation_rows=validation_rows,
+        now=lambda: SINCE + timedelta(hours=1),
+    )
+    assert result["promoted_model"]["uri"] == f"accounts/{ACCOUNT}/models/{model_id}"
+    assert not any(call[0] == "promote_session_checkpoint" for call in fw.calls)
+    assert _live(fw) == []
+
+
 def test_a_failed_promotion_is_retried_from_the_best_training_checkpoint(
     fw: FakeFireworksTrainingClient, renderer: Renderer, tmp_path: Path
 ) -> None:

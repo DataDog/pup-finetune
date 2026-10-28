@@ -236,8 +236,15 @@ class Requests:
 
     def record_promotion_request(self, model_id: str, *, epoch: int, step: int) -> PromotionRequest:
         request = PromotionRequest(model_id=model_id, epoch=epoch, step=step, requested_at=self.now)
+        self.recorded = [r for r in self.recorded if (r.epoch, r.step) != (epoch, step)]
         self.recorded.append(request)
         return request
+
+    def contest_promotion_request(self, epoch: int, step: int) -> None:
+        self.recorded = [
+            dataclasses.replace(r, contested=True) if (r.epoch, r.step) == (epoch, step) else r
+            for r in self.recorded
+        ]
 
 
 def promote_with(finalize: Promotion, *, epochs: int = 1) -> tuple[str, list[datetime | None]]:

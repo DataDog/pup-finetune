@@ -29,9 +29,10 @@ leaves nothing running.
   run's (the same base model, created since ``adopt_since``, shortly before the run first
   asked for a promotion), because an
   earlier attempt's promotion succeeded but its response was lost; any other is refused
-  with a :class:`~pup_finetune.errors.StateError` rather than promoted into a conflict. A
-  promotion that fails in a way that can hide a success (a timeout, a dropped connection, a
-  server error, a conflict) looks the model up again and adopts it when it is there now.
+  with a :class:`~pup_finetune.providers.base.ModelIdTaken` rather than promoted into a
+  conflict. A promotion that fails in a way that can hide a success (a timeout, a dropped
+  connection, a server error, a conflict) looks the model up again and adopts it when it is
+  there now.
 
 :class:`FireworksSampler` renders the prompt with the profile's renderer, samples greedily up
 to the renderer's stop tokens and parses the completion back into an OpenAI message; one cut
@@ -61,6 +62,7 @@ from pup_finetune.providers.base import (
     CheckpointRef,
     Generation,
     LoraConfig,
+    ModelIdTaken,
     ModelProfile,
     ModelRef,
     PendingResult,
@@ -546,7 +548,7 @@ class FireworksSession:
         checked: bool,
     ) -> ModelRef:
         """The :class:`ModelRef` of ``record``, the existing model ``expected``, once it can
-        only be this run's; :class:`StateError` otherwise.
+        only be this run's; :class:`ModelIdTaken` otherwise.
 
         ``checked`` says the model was absent when this promotion started, so only its base
         model is compared; otherwise it must also have been created no earlier than
@@ -558,24 +560,27 @@ class FireworksSession:
             f"the Fireworks model {name} already exists, so the best checkpoint cannot be "
             f"promoted to the model id {model_id!r}"
         )
-        hint = "train a new run under another run id, or delete that model in Fireworks"
+        hint = (
+            "train a new run under another run id, or delete that model in Fireworks and then "
+            "resume this run"
+        )
         base = _record_base_model(record)
         if base is not None and base != self._profile.base_model:
-            raise StateError(
+            raise ModelIdTaken(
                 f"{taken}: it is a model of {base}, not of {self._profile.base_model}", hint=hint
             )
         if not checked:
             if since is None:
-                raise StateError(taken, hint=hint)
+                raise ModelIdTaken(taken, hint=hint)
             created = _record_time(record)
             if created is None:
-                raise StateError(
+                raise ModelIdTaken(
                     f"{taken}, and Fireworks does not say when it was created, so it cannot "
                     "be told apart from another run's",
                     hint=hint,
                 )
             if created < since:
-                raise StateError(
+                raise ModelIdTaken(
                     f"{taken}: it was created at {created.isoformat()}, before this run "
                     f"first asked to promote it (allowing for clock skew, {since.isoformat()})",
                     hint=hint,

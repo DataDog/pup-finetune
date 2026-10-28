@@ -53,7 +53,7 @@ from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt
 
-from pup_finetune.errors import FinetuneError, StateError, UsageError
+from pup_finetune.errors import FinetuneError, UsageError
 from pup_finetune.providers.base import (
     MODEL_ID_PATTERN,
     OFFLINE_BILLING,
@@ -64,6 +64,7 @@ from pup_finetune.providers.base import (
     Endpoint,
     Generation,
     LoraConfig,
+    ModelIdTaken,
     ModelProfile,
     ModelRef,
     SamplingUsage,
@@ -841,7 +842,7 @@ class FakeSession:
             raise error or FakeCrash(f"simulated failure promoting {ckpt.name!r} (fail_promotions)")
         held = self._backend.models.setdefault(model_id, weights)
         if held != weights:
-            raise StateError(
+            raise ModelIdTaken(
                 f"the fake model {model_id!r} already holds other weights, so "
                 f"{ckpt.name!r} cannot be promoted to it"
             )
