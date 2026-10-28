@@ -92,15 +92,11 @@ class Runtime:
     read_only: bool = False
     """``PUP_READ_ONLY`` set to anything but an off value (``0``, ``false``, ``no``, ``off``,
     any case, or empty): reject every remote write. pup sets it for ``pup --read-only``."""
-    auto_approve: bool = False
-    """``PUP_AUTO_APPROVE=true``. Never satisfies ``--confirm`` for paid or remote actions."""
     agent_mode: bool = False
     """``PUP_AGENT_MODE=true``: a coding agent is driving pup."""
     agent_env: bool = False
     """``AI_AGENT`` or ``CLAUDECODE`` set (non-empty): a coding agent started this process,
     through pup or not."""
-    dd_site: str | None = None
-    """``DD_SITE``: the Datadog site, e.g. ``datadoghq.com``."""
     dev_mode: bool = False
     """``PUP_FINETUNE_DEV`` set to an on value (``1``, ``true``, ``yes``, ``on``, any case):
     running from a development checkout."""
@@ -129,10 +125,8 @@ class Runtime:
             output_format=_text(source, "PUP_OUTPUT"),
             jq_filter=_text(source, "PUP_FILTER"),
             read_only=read_only,
-            auto_approve=source.get("PUP_AUTO_APPROVE") == "true",
             agent_mode=source.get("PUP_AGENT_MODE") == "true",
             agent_env=any(source.get(name) for name in AGENT_ENV_VARS),
-            dd_site=_text(source, "DD_SITE"),
             dev_mode=dev_mode,
             debug=source.get("PUP_FINETUNE_DEBUG") == "1",
             quiet=quiet,
