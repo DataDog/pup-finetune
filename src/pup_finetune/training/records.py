@@ -75,6 +75,11 @@ class ResumePoint:
     train_tokens: int
     elapsed_seconds: float
 
+    def follows(self, finished: int) -> bool:
+        """Whether a run can continue from here after ``finished`` finished epochs: the
+        checkpoint was saved at the last one's end or during the next one."""
+        return finished <= self.epoch <= finished + 1
+
     def to_json(self) -> dict[str, Any]:
         return finite_json(dataclasses.asdict(self))
 

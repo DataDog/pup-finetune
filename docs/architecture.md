@@ -339,7 +339,10 @@ that runs the `baseten` CLI.
   `state.json`, `epochs.json` and `result.json` to stdout as checksummed `PUPFT1` lines, on a
   change, every minute and at exit with the worker's error. `status` reads them back from the
   job's logs, newest first, and copies the newest complete one into the run directory (the
-  pid cleared), skipping the write while another process holds the run's lock.
+  pid cleared), skipping the write while another process holds the run's lock. A snapshot
+  is read `epochs.json` first and `result.json` last, so its training checkpoint is never
+  older than its finished epochs; one that pairs them so anyway is refused with a warning,
+  keeping the last copy, since a resume could not continue from it.
 - **The key.** The job reads a Baseten API key from the team secret `pup_finetune_api_key`;
   the local key goes only into the CLI's environment, never on its command line or in a file.
   Both keys must belong to the same workspace, since `deploy` and a local `resume` load the
