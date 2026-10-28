@@ -410,10 +410,11 @@ class DatasetDir:
         holding the same conversation as another stored row raises :class:`ValueError`.
 
         A drop label in force on a ``retired`` row carries to the stored row that holds its
-        conversation now (the exclusion's ``into``), as a new drop label naming it, so the
-        turns the reviewer dropped stay out of training. A keep does not carry, as that row
-        has turns nobody reviewed, and a drop does not replace a person's label on that row
-        (``by: manual``), which was a decision on the whole row.
+        conversation now (the exclusion's ``into``, followed through the rows this add
+        retires), as a new drop label naming it, so the turns the reviewer dropped stay out
+        of training. A keep does not carry, as that row has turns nobody reviewed, and a
+        drop does not replace a person's label on that row (``by: manual``), which was a
+        decision on the whole row.
 
         ``split_overrides`` assigns split keys to the splits a source already gave them (the
         splits recorded on a fetched dataset's records) before new keys are assigned; a key
@@ -606,14 +607,19 @@ def _carried_drops(
     """The drop label each ``retired`` row with a drop in force passes to the ``stored`` row
     that holds its conversation (its exclusion's ``into``), by the retired row's id.
 
-    None passes to a row that is dropped already or that a person labeled, so a rerun after
-    a crash, which finds the drop it carried in force, carries nothing twice.
+    That row can be retired too, as when a prefix's longer row repeats another stored row:
+    the drop passes to the row its retirements end at, or to none when that row is not
+    stored, since nothing trains it. None passes to a row that is dropped already or that a
+    person labeled, so a rerun after a crash, which finds the drop it carried in force,
+    carries nothing twice.
     """
+    targets = {e.row_id: e.into for e in retired if e.row_id is not None}
     current = dict(labels)
     carried: dict[str, Label] = {}
-    for exclusion in retired:
-        row_id, into = exclusion.row_id, exclusion.into
-        if row_id is None or into is None or into not in stored:
+    for row_id, into in targets.items():
+        while into is not None and into in targets:
+            into = targets[into]
+        if into is None or into not in stored:
             continue
         label, own = current.get(row_id), current.get(into)
         decided = own is not None and (not own.keep or own.by == "manual")
