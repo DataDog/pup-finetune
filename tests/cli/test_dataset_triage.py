@@ -290,6 +290,21 @@ def test_a_changed_rubric_needs_a_reset(dataset: Path, chat: FakeChatApi) -> Non
     assert output(reset)["rows_reviewed"] == 2
 
 
+def test_triage_settings_that_are_not_an_object_are_a_state_error_a_reset_recovers(
+    dataset: Path, chat: FakeChatApi
+) -> None:
+    base = ["dataset", "triage", str(dataset), "--max-rows", "2", "--judges", "fireworks/j1"]
+    assert invoke(*base, "--rule", "first", "--confirm").exit_code == 0
+    (dataset / "triage.json").write_text("[]\n", encoding="utf-8")
+    broken = invoke(*base, "--rule", "first")
+    assert broken.exit_code == 1
+    assert "Error [state]: " in broken.stderr
+    assert "--reset-triage" in broken.stderr
+    preview = invoke(*base, "--rule", "first", "--reset-triage")
+    assert preview.exit_code == 2, preview.stderr
+    assert output(preview)["preview"]["reset"]["votes_discarded"] == 2
+
+
 JUDGE_J1 = ["--judges", "fireworks/j1", "--confirm"]
 
 
