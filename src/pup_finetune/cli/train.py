@@ -1416,8 +1416,8 @@ def run_next(
     epoch) has no next command: the step trains a new run. Anything else (interrupted,
     failed, or cancelled before any epoch) is resumed, except a run whose promotion found its
     model id (``contested_model_id``) held by another model: a resume alone fails again, so
-    it has no next command, and the steps train a new run under another run id or, once that
-    model is deleted, resume.
+    it has no next command, and the steps train a new run of the same model on the same
+    dataset (under a new run id) or, once that model is deleted, resume.
     """
     steps: list[dict[str, str]] = []
     next_command: str | None
@@ -1448,21 +1448,20 @@ def run_next(
         next_command = command("cancel", path)
     elif contested_model_id is not None:
         next_command = None
+        manifest = RunDir(path).manifest()
         steps.append(
             step(
-                template(
+                command(
                     "train",
                     "--provider",
-                    "<PROVIDER>",
+                    str(manifest["provider"]),
                     "--dataset",
-                    "<DIR>",
+                    Path(manifest["dataset_dir"]),
                     "--model",
-                    "<MODEL>",
-                    "--run-id",
-                    "<NEW_RUN_ID>",
+                    str(manifest["profile"]["alias"]),
                 ),
                 f"another model holds this run's model id {contested_model_id}: train a new "
-                "run under another run id (paid; it previews first)",
+                "run, under a new run id (paid; it previews first)",
             )
         )
         steps.append(

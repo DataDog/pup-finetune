@@ -755,7 +755,9 @@ Source lives under `src/pup_finetune/`.
   found the run's model id held by another model (`ModelIdTaken`): a resume alone fails the
   same way, so its hint names a new run under another run id, or deleting that model and
   then resuming, and `status` gives such a run (`RunState.contested_promotion`) no
-  `next_command`, with those two as `next_steps`.
+  `next_command`, with those two as `next_steps` (the new run's `train` filled in from
+  `run.json`); its `resume` preview warns that it is refused again unless that model was
+  deleted.
   `result.json` records `promoted_model`, `deployable_checkpoint` and `finalize_error`. With
   `signals="cancel"` (what the CLI uses), SIGTERM and the first Ctrl-C cancel gracefully
   instead: stop at a step boundary, checkpoint, promote the best epoch, end `cancelled`; with
