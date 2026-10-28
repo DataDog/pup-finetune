@@ -335,15 +335,21 @@ def require_key(
     warnings.append(f"{error.message}: {error.hint}")
 
 
-def require_supported_flags(name: str, runtime: Runtime, values: Mapping[str, Any]) -> None:
+def require_supported_flags(
+    name: str,
+    runtime: Runtime,
+    values: Mapping[str, Any],
+    *,
+    hint: Callable[[str], str] = lambda flag: f"drop {flag}",
+) -> None:
     """Raise :class:`UsageError` when ``values`` (``TrainSpec`` fields) set a flag provider
     ``name`` refuses, e.g. ``--lora-alpha is not supported on baseten: Baseten sets the LoRA
-    alpha itself``."""
+    alpha itself``, with ``hint`` of the refused flag as its hint."""
     for refused in provider_info(name, runtime).refuses:
         if values.get(refused.field) is not None:
             raise UsageError(
                 f"{refused.flag} is not supported on {name}: {refused.reason}",
-                hint=f"drop {refused.flag}",
+                hint=hint(refused.flag),
             )
 
 
