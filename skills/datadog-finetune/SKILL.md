@@ -79,7 +79,7 @@ row-weather-002 (train, 2 turns, tools: get_weather)
 
 | You see | Do this |
 | --- | --- |
-| `phase` `created` or `training`, `worker.state` `starting` in any phase (or `watch_timed_out: true`) | Still training, or a worker is starting. Later, run `next_command` (the watch) again. |
+| `phase` `created` or `training`; or `worker.state` `starting` (any phase); or `watch_timed_out: true` | Still training, or a worker is starting. Later, run `next_command` (the watch) again. |
 | `phase` `training`, `worker.state` `stale` or `exited` | The worker died or hangs. Read `worker.log`, then see Debugging. |
 | `phase` `completed` | Go to step 6. |
 | `phase` `cancelled` with a `best_epoch` | Evaluate or deploy it as is. Resume only to train further, with a yes. |

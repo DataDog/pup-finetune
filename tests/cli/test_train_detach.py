@@ -235,7 +235,8 @@ def _first_line(stream: Any, pattern: str) -> str:
     """The first line ``stream`` (a process's stderr) prints that ``pattern`` matches at its
     start, skipping anything else, within :data:`TIMEOUT_S`.
 
-    A thread reads up to that line and no further, so the rest is left to ``communicate``.
+    A thread reads up to that line. ``communicate`` then reads the pipe itself, not the
+    stream's buffer, so lines ``readline`` read ahead past the match are lost to it.
     """
     lines: queue.Queue[str] = queue.Queue()
 
