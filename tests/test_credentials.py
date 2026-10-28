@@ -522,6 +522,14 @@ def test_redact_masks_a_bearer_token_whole_up_to_the_next_space() -> None:
     assert credentials.redact(text) == "Authorization: Bearer *** next"
 
 
+def test_redact_masks_a_quoted_bearer_token_and_keeps_a_variable_reference() -> None:
+    assert credentials.redact('-H "Authorization: Bearer abc,def"') == (
+        '-H "Authorization: Bearer ***"'
+    )
+    example = "-H \"Authorization: Bearer $FIREWORKS_API_KEY\" -H 'Authorization: Bearer ${KEY}'"
+    assert credentials.redact(example) == example
+
+
 def test_redact_masks_the_longest_secret_whole() -> None:
     credentials.register_secret("synthetic-key-0000")
     credentials.register_secret("synthetic-key-0000-extended")

@@ -25,7 +25,10 @@ MIN_SECRET_LENGTH: Final = 16
 """The shortest value :func:`register_secret` masks. No API key or Datadog secret is shorter,
 and masking a shorter value would rewrite ordinary words in every result and command line."""
 
-_BEARER = re.compile(r"(\bBearer\s+)[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
+_BEARER = re.compile(r"(\bBearer\s+)([^\s\"']+)", re.IGNORECASE)
+"""A ``Bearer`` token: everything after it up to whitespace or a quote."""
+_VARIABLE = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?")
+"""A shell variable reference, such as a usage example's ``$FIREWORKS_API_KEY``: no token."""
 
 _lock = threading.Lock()
 _secrets: set[str] = set()
@@ -60,7 +63,11 @@ def redact(text: str) -> str:
     for secret in secrets:
         if secret in text:
             text = text.replace(secret, MASK)
-    return _BEARER.sub(rf"\g<1>{MASK}", text)
+    return _BEARER.sub(_mask_bearer, text)
+
+
+def _mask_bearer(match: re.Match[str]) -> str:
+    return match[0] if _VARIABLE.fullmatch(match[2]) else f"{match[1]}{MASK}"
 
 
 _STANDARD_RECORD_ATTRIBUTES = frozenset(vars(logging.LogRecord("", 0, "", 0, "", None, None)))
