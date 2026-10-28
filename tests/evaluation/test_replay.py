@@ -711,6 +711,32 @@ def test_one_trajectory_is_too_few_for_an_interval() -> None:
     assert summary["tuned_minus_base"]["ci95"] is None
 
 
+def test_each_comparison_carries_both_rates_on_the_cases_it_pairs() -> None:
+    verdicts = {
+        "row-a:1": (True, True),
+        "row-a:3": (True, True),
+        "row-b:1": (False, True),
+        "row-b:3": (False, True),
+        "row-c:1": (None, False),
+        "row-c:3": (None, False),
+    }
+    results = results_for(verdicts, CASES)
+    sent = CASES[:4]
+    for case, passed in zip(sent, (True, True, True, False), strict=True):
+        results[("compare", case.id)] = ok("compare", case, passed)
+    replays = {"base": CASES, "tuned": CASES, "compare": sent}
+    summary = summarize(CASES, results, {}, seed=0, replays=replays)
+    # On its own cases tuned passes 4/6 and compare 3/4; both pass more on the cases paired.
+    assert summary["targets"]["tuned"]["judge_pass"]["rate"] == pytest.approx(4 / 6)
+    assert summary["targets"]["compare"]["judge_pass"]["rate"] == 0.75
+    versus_base = summary["tuned_minus_base"]
+    assert versus_base["common_pass_rate"] == {"tuned": 1.0, "base": 0.5}
+    assert (versus_base["judge_pass_rate"], versus_base["n_cases"]) == (0.5, 4)
+    versus_compare = summary["tuned_minus_compare"]
+    assert versus_compare["common_pass_rate"] == {"tuned": 1.0, "compare": 0.75}
+    assert (versus_compare["judge_pass_rate"], versus_compare["n_cases"]) == (0.25, 4)
+
+
 def test_the_summary_counts_generated_tokens() -> None:
     generations = {
         ("base", CASES[0].id): {"prompt_tokens": 10, "completion_tokens": 2},
@@ -1210,6 +1236,7 @@ def test_the_summary_counts_not_applicable_apart_and_the_composite_by_hand(
     deltas = block["tuned_minus_base"]
     assert (deltas["all"]["delta"], deltas["all"]["wins"], deltas["all"]["ties"]) == (0.5, 3, 3)
     assert deltas["no_three"]["delta"] == -0.5
+    assert deltas["no_three"]["common_pass_rate"] == {"tuned": 0.5, "base": 1.0}
     assert deltas["no_three"]["ci95"] == list(paired_bootstrap_ci([[0.0, -1.0]] * 3, seed=0))
     assert (deltas["row_a_only"]["n_cases"], deltas["row_a_only"]["not_applicable"]) == (2, 4)
     assert "tuned_minus_compare" not in block

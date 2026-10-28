@@ -167,6 +167,8 @@ def test_attaching_a_compare_model_redoes_neither_base_nor_tuned(
     assert data["errors"] == {"base": 0, "tuned": 0, "compare": 0}
     assert data["headline"]["judge_pass_rate"]["compare"] is not None
     assert set(data["headline"]["tuned_minus_compare"]) == {
+        "common_pass_rate",
+        "common_cases",
         "delta",
         "ci95",
         "wins",
@@ -563,6 +565,21 @@ def test_cases_the_compare_model_s_api_refuses_are_skipped(
     assert data["errors"] == {"base": 0, "tuned": 0, "compare": 0}
     assert len(model.calls) == len(cases) - skipped + 1
     assert data["headline"]["tuned_minus_compare"]["skipped"] == skipped
+    # Each delta sits beside both rates on the cases it pairs; each target's own rate keeps
+    # its own count.
+    rates = data["headline"]["judge_pass_rate"]
+    assert rates["judged_cases"] == {
+        "base": len(cases),
+        "tuned": len(cases),
+        "compare": len(cases) - skipped,
+    }
+    for found, sides, paired in (
+        (rates, ("tuned", "base"), len(cases)),
+        (data["headline"]["tuned_minus_compare"], ("tuned", "compare"), len(cases) - skipped),
+    ):
+        assert found["common_cases"] == paired
+        first, second = (found["common_pass_rate"][side] for side in sides)
+        assert first - second == pytest.approx(found["delta"], abs=1e-3)
     assert any(text.startswith(warning) for text in data["warnings"])
     summary = json.loads((run / "eval" / "summary.json").read_text())
     assert summary["targets"]["compare"]["skipped"] == skipped

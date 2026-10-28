@@ -492,6 +492,91 @@ def test_each_comparison_counts_the_errors_of_its_own_two_targets() -> None:
     assert compare_line.endswith("3 ties, 6 errors")
 
 
+PAIRED_ON_FOUR = {
+    "base": 0.5,
+    "tuned": 0.6667,
+    "judged_cases": {"base": 4, "tuned": 6},
+    "common_pass_rate": {"tuned": 1.0, "base": 0.5},
+    "common_cases": 4,
+    "delta": 0.5,
+    "ci95": [0.0, 1.0],
+}
+"""Base ended in an error on 2 of 6 cases: tuned passes 4 of its 6 but every case paired."""
+
+
+def test_a_delta_is_shown_beside_the_rates_of_the_cases_it_pairs() -> None:
+    polite = {
+        "base": 0.25,
+        "tuned": 0.5,
+        "scored_cases": {"base": 4, "tuned": 6},
+        "common_pass_rate": {"tuned": 0.75, "base": 0.25},
+        "delta": 0.5,
+        "ci95": None,
+        "n": 4,
+    }
+    result = {
+        "status": "complete_with_errors",
+        "judge_model": "j",
+        "calibration": {"ok": True},
+        "errors": {"base": 2, "tuned": 0},
+        "headline": {
+            "judge_pass_rate": PAIRED_ON_FOUR,
+            "paired": {"wins": 2, "regressions": 0, "ties": 2},
+            "evaluator": "polite",
+            "evaluators": {"polite": polite},
+            "cases": 6,
+            "trajectories": 3,
+        },
+    }
+    found = summarize("evaluate", result)
+    assert found is not None
+    assert found.lines[1:5] == (
+        "headline polite: base 25%, tuned 75%, tuned - base +50 pts on 4 of 6 cases",
+        f"{'':<21}{'base':<11}{'tuned':<11}tuned - base",
+        f"{'judge agreement':<21}{'50%':<11}{'100%':<11}+50 pts (95% CI 0 to +100)",
+        "paired on 4 of 6 cases: 2 wins, 0 regressions, 2 ties, 2 errors",
+    )
+    assert "judge agreement: base 50%, tuned 100%, tuned - base +50 pts" in found.line
+
+
+def test_with_a_compare_target_each_delta_names_the_rates_of_the_cases_it_pairs() -> None:
+    result = {
+        "status": "complete_with_errors",
+        "judge_model": "j",
+        "calibration": {"ok": True},
+        "errors": {"base": 2, "tuned": 0, "compare": 0},
+        "headline": {
+            "judge_pass_rate": {
+                **PAIRED_ON_FOUR,
+                "compare": 0.75,
+                "judged_cases": {"base": 4, "tuned": 6, "compare": 4},
+            },
+            "paired": {"wins": 2, "regressions": 0, "ties": 2},
+            "tuned_minus_compare": {
+                "common_pass_rate": {"tuned": 1.0, "compare": 0.75},
+                "common_cases": 4,
+                "delta": 0.25,
+                "ci95": None,
+                "wins": 1,
+                "regressions": 0,
+                "ties": 3,
+                "skipped": 2,
+            },
+            "cases": 6,
+            "trajectories": 3,
+        },
+    }
+    found = summarize("evaluate", result)
+    assert found is not None
+    assert found.lines[1:4] == (
+        "judge agreement: base 50% of 4, tuned 67% of 6, compare 75% of 4",
+        "tuned - base: +50 pts (95% CI 0 to +100) on 4 of 6 cases, tuned 100% vs base 50%; "
+        "2 wins, 0 regressions, 2 ties, 2 errors",
+        "tuned - compare: +25 pts on 4 of 6 cases, tuned 100% vs compare 75%; 1 win, "
+        "0 regressions, 3 ties, 0 errors",
+    )
+
+
 def test_a_published_comparison_lists_its_three_experiments_as_a_sentence() -> None:
     result = {
         "status": "complete",
