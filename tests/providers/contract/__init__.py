@@ -622,8 +622,10 @@ class BackendContract:
         self._train_one_step(session, batch)
         second = session.save_sampler_checkpoint("second", epoch=2, step=2)
         assert session.promote(first, model_id).model_id == model_id
-        with pytest.raises(ModelIdTaken):
+        with pytest.raises(ModelIdTaken) as taken:
             session.promote(second, model_id)
+        # A resume cannot promote to the id while that model holds it: the hint says what can.
+        assert taken.value.hint
 
     def test_a_sampler_checkpoint_from_a_closed_session_works_or_fails_cleanly(
         self,
