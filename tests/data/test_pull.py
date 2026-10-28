@@ -381,7 +381,7 @@ def test_a_drop_carries_to_the_accepted_row_a_prefix_retires_into_unless_a_perso
     assert [row.id for row in dataset.kept_rows()] == ([] if carried else [ACCEPTED_B1])
     label = dataset.labels()[ACCEPTED_B1]
     if carried:
-        assert (label.keep, label.by) == (False, "manual")
+        assert (label.keep, label.by, label.carried_from) == (False, "manual", PREFIX_A1)
         assert PREFIX_A1 in label.reason and "A1 is wrong" in label.reason
     else:
         assert label == own

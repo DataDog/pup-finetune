@@ -1241,6 +1241,9 @@ def _helper(row):
 """
 
 
+ALL_FINE = "def fine(row):\n    return True\n"
+
+
 def checks_file(tmp_path: Path, text: str = CHECKS, name: str = "checks.py") -> CheckModule:
     path = tmp_path / name
     path.write_text(text)
@@ -1441,3 +1444,37 @@ def test_a_check_file_needs_public_functions_of_one_row(
 ) -> None:
     with pytest.raises(UsageError, match=problem):
         plan_triage(make_dataset(tmp_path), None, (), checks=checks_file(tmp_path, text))
+
+
+# --- drops a pull carried --------------------------------------------------------------------
+
+
+def carry_a_drop(dataset: DatasetDir, into: str, by: LabelSource = "manual") -> None:
+    """Retire a dropped row into ``into``, as a later pull does, which carries its drop there."""
+    short = make_row("short")
+    dataset.add([short], settings=SETTINGS)
+    apply_labels(dataset, [Label(id="short", keep=False, reason="short is wrong", by=by, at=AT)])
+    code = ExclusionCode.CONTAINED_CONVERSATION
+    retired = Exclusion.for_row(short, code, f"a prefix of row {into!r}", into=into)
+    dataset.add([], settings=SETTINGS, retired=[retired])
+
+
+@pytest.mark.parametrize("by", ["manual", "judge", "check"])
+def test_triage_keeps_a_drop_a_pull_carried_whoever_dropped_the_retired_row(
+    tmp_path: Path, by: LabelSource
+) -> None:
+    dataset = make_dataset(tmp_path)
+    carry_a_drop(dataset, "row-1", by)
+    plan = plan_triage(dataset, RUBRIC, (J1,), checks=checks_file(tmp_path, ALL_FINE))
+    assert sorted(row.id for row in plan.rows) == ["row-0", "row-2", "row-3"]
+    assert plan.stale_check_labels == []
+    run_triage(plan, FakeCouncil(keep_all))
+    assert sorted(row.id for row in dataset.kept_rows()) == ["row-0", "row-2", "row-3"]
+
+
+def test_a_drop_a_pull_carried_is_not_a_label_agreement_compares_with(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path)
+    label_rows(dataset, {"row-0": True})
+    carry_a_drop(dataset, "row-1")
+    plan = plan_triage(dataset, RUBRIC, (J1,), agreement=True)
+    assert [row.id for row in plan.rows] == ["row-0"]

@@ -478,6 +478,7 @@ def test_a_dropped_row_s_drop_carries_to_the_longer_row_a_rerun_retires_it_into(
     assert data["pipeline"]["rows"] == {"accepted": 1, "kept": 0, "dropped": 1, "unlabeled": 0}
     carried = json.loads((target / "labels.jsonl").read_text().splitlines()[-1])
     assert (carried["id"], carried["keep"], carried["by"]) == ("T:s2", False, "manual")
+    assert carried["carried_from"] == "T:s1"
     assert "T:s1" in carried["reason"] and "A1 is wrong" in carried["reason"]
     assert data["pull"]["carried_drops"] == [{"row_id": "T:s2", "from": "T:s1"}]
     assert any("T:s2" in note for note in data["notes"])
