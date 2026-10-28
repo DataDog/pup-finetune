@@ -135,7 +135,9 @@ class LoopState(Protocol):
         ...
 
     def record_epoch(self, metrics: EpochMetrics, *, best: EpochMetrics | None) -> None:
-        """Epoch ``metrics.epoch`` has finished; ``best`` is the best epoch so far."""
+        """Epoch ``metrics.epoch`` has finished; ``best`` is the best epoch so far.
+
+        A resume from the epoch's end records it again, so recording it twice keeps one."""
         ...
 
 
@@ -485,6 +487,9 @@ class _Loop:
                 hint="resume with the same training rows and settings as the run",
             )
         self._state.record_plan(steps_per_epoch=steps_per_epoch, max_steps=self._max_steps)
+        if self._epochs and not self._skip_steps:
+            # Resumed at the last finished epoch's end: a crash may have kept it from the state.
+            self._state.record_epoch(self._epochs[-1], best=self._best)
         self._emit(
             {
                 "type": "plan",
