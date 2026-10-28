@@ -37,6 +37,18 @@ USER_ENV = {
     "DD_ACCESS_TOKEN": FAKE_TOKEN,
     "DD_SITE": "datadoghq.com",
 }
+PROVIDER_SECRETS = {
+    "FIREWORKS_API_KEY": "fw-synthetic-0000-test-key",
+    "BASETEN_API_KEY": "bt-synthetic-0000-test-key",
+    "ANTHROPIC_API_KEY": "sk-ant-synthetic-0000-test-key",
+    "ANTHROPIC_AUTH_TOKEN": "sk-ant-synthetic-0000-auth-token",
+    "ANTHROPIC_IDENTITY_TOKEN": "synthetic-identity-token-0000",
+    "OPENAI_API_KEY": "sk-synthetic-0000-openai-key",
+}
+DATADOG_KEYS = {
+    "DD_API_KEY": "synthetic-dd-api-key-0000",
+    "DD_APP_KEY": "synthetic-dd-app-key-0000",
+}
 
 
 # --- argv and stdin -------------------------------------------------------------------------
@@ -143,6 +155,14 @@ def test_child_env_drops_output_settings_and_the_access_token() -> None:
     assert env["DD_SITE"] == "datadoghq.com"
     assert env["PATH"] == "/usr/bin"
     assert env["HOME"] == "/home/someone"
+
+
+def test_child_env_drops_every_provider_secret_and_keeps_datadog_s_keys() -> None:
+    fake = FakePup().on("auth", "status", json={"authenticated": True})
+    fake.client({**USER_ENV, **PROVIDER_SECRETS, **DATADOG_KEYS}).run_json(["auth", "status"])
+    env = fake.last.env
+    assert not PROVIDER_SECRETS.keys() & env.keys()
+    assert {name: env[name] for name in DATADOG_KEYS} == DATADOG_KEYS
 
 
 def test_keep_dd_token_override_passes_the_token_through() -> None:
@@ -474,6 +494,19 @@ def test_run_pup_uses_list_args_stdin_and_inherited_env(
     completed = run_pup(["format"], '{"a": 1}')
     assert completed.returncode == 0
     assert completed.stdout == 'format|yaml|{"a": 1}'
+
+
+def test_run_pup_drops_every_provider_secret_and_keeps_the_output_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _executable(tmp_path, script="#!/bin/sh\nenv\n")
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}")
+    for name, value in {**PROVIDER_SECRETS, **DATADOG_KEYS, "PUP_OUTPUT": "yaml"}.items():
+        monkeypatch.setenv(name, value)
+    completed = run_pup(["format"], "{}")
+    names = {line.partition("=")[0] for line in completed.stdout.splitlines()}
+    assert not PROVIDER_SECRETS.keys() & names
+    assert {"PUP_OUTPUT", *DATADOG_KEYS} <= names
 
 
 def test_run_pup_honors_the_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
