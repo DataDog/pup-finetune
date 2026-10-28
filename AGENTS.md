@@ -519,8 +519,9 @@ Source lives under `src/pup_finetune/`.
   the key found is not `KEY_SHAPE` (`well_formed`: one word of printable ASCII of at least 16
   characters), or a `KeyUnreadable` when the lookup raised anything; `doctor`'s key checks,
   `auth status` and the default judges use it, and a malformed key counts as none for them
-  (a default judge passes it over with a warning in the preview). Its `fix` is the login hint,
-  or for a key in the environment, to fix or unset the variable.
+  (a default judge passes it over with a warning in the preview). Its `fix` is `key_fix`: the login
+  hint, or for a key in the environment, to fix or unset the variable; the Fireworks and
+  Baseten clients refuse a malformed key with the same hint.
 - `redaction.py` - masks resolved secrets and `Bearer` tokens in error output and logs. A value
   shorter than `MIN_SECRET_LENGTH` (16) is never registered, so a placeholder key cannot
   rewrite ordinary words in a result.

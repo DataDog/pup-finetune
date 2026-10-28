@@ -58,6 +58,7 @@ __all__ = [
     "ensure_storable",
     "get_spec",
     "install_log_redaction",
+    "key_fix",
     "key_source",
     "login_hint",
     "lookup",
@@ -208,6 +209,14 @@ def login_hint(spec: CredentialSpec) -> str:
     return (
         f"run `pup finetune auth login {spec.provider}` in your own terminal, or set {spec.env_var}"
     )
+
+
+def key_fix(spec: CredentialSpec, *, env: Mapping[str, str] = os.environ) -> str:
+    """How to replace ``spec``'s key: fix or unset its environment variable when that holds
+    one, since signing in cannot override it, else :func:`login_hint`."""
+    if env.get(spec.env_var, "").strip():
+        return f"fix or unset {spec.env_var}, which is read before the OS keychain"
+    return login_hint(spec)
 
 
 def _backend(keyring_backend: KeyringBackend | None) -> KeyringBackend:
@@ -509,8 +518,6 @@ def key_source(
             found.source,
             f"the {spec.provider} API key (source: {found.source}) is malformed: "
             f"it must be {KEY_SHAPE}",
-            f"fix or unset {spec.env_var}, which is read before the OS keychain"
-            if found.source == "env"
-            else login_hint(spec),
+            key_fix(spec, env=env),
         )
     return found.source
