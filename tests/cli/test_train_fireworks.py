@@ -284,6 +284,23 @@ def test_an_unexpected_error_in_training_prints_its_notes(
     )
 
 
+def test_a_ctrl_c_while_a_failed_promotion_ends_its_session_prints_each_failure_once(
+    dataset: Path, tmp_path: Path, fw: CrashingFireworks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def interrupted() -> None:
+        raise KeyboardInterrupt  # Ctrl-C while the client closes
+
+    fw.fail("promote_session_checkpoint", "bad_request")
+    monkeypatch.setattr(fw, "close", interrupted)
+    result = train(dataset, tmp_path / "run", "--confirm")
+    assert result.exit_code == 1, result.stderr
+    assert result.stderr.count("promoting a Fireworks checkpoint") == 1, result.stderr
+    assert any(
+        line.startswith("warning: ending the session also failed: KeyboardInterrupt")
+        for line in result.stderr.splitlines()
+    )
+
+
 def test_a_max_seq_len_option_shorter_than_every_row_is_refused_in_the_preview(
     dataset: Path, tmp_path: Path, fw: CrashingFireworks
 ) -> None:
