@@ -440,6 +440,26 @@ def test_an_add_stopped_before_its_rows_leaves_the_retired_row_in_place(
     assert dataset.excluded() == [retire(short).to_json()]
 
 
+def test_a_drop_whose_retirements_end_at_a_row_the_add_excludes_carries_nowhere(
+    tmp_path: Path,
+) -> None:
+    # Nothing trains a row the dataset does not hold, so the dropped turns are out already.
+    dataset = DatasetDir(tmp_path / "ds")
+    short, middle, long = (make_row(row_id, row_id) for row_id in ("short", "middle", "long"))
+    dataset.add([short, middle], settings=IMPORT)
+    dataset.append_labels([Label(id="short", keep=False, reason="short is wrong")])
+    code = ExclusionCode.CONTAINED_CONVERSATION
+    retired = [
+        Exclusion.for_row(short, code, "a prefix of row 'middle'", into="middle"),
+        Exclusion.for_row(middle, code, "a prefix of row 'long'", into="long"),
+    ]
+    capped = Exclusion.for_row(long, ExclusionCode.TRACE_ROW_CAP, "past the cap")
+    added = dataset.add([], [capped], settings=IMPORT, retired=retired)
+    assert dataset.rows() == []
+    assert added.carried == {}
+    assert list(dataset.labels()) == ["short"]
+
+
 def with_reasoning(row: TrainingRow, text: str) -> TrainingRow:
     """``row`` with ``text`` as the reasoning of its last (assistant) message."""
     *before, last = row.messages

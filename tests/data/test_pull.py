@@ -907,6 +907,31 @@ def test_a_drop_carries_to_the_stored_row_a_dropped_repeat_is_retired_into(
     assert added.carried == {REPEATED_A: REPEAT_B}
 
 
+def test_a_drop_carries_along_retirements_to_the_row_that_survives_them(tmp_path: Path) -> None:
+    # Trace P's prefix continues on page 2 into a repeat of B, so the prefix is retired into
+    # B; the same pull fills in B's reasoning, which retires B into A.
+    prefix = "synthetic-trace-p:synthetic-span-p1"
+    pages = repeat_once_b_takes_a_s_reasoning()
+    pages[0]["data"].append(
+        item("synthetic-span-p1", [SYSTEM, Q1, A1], trace_id="synthetic-trace-p")
+    )
+    pages[1]["data"] += [
+        item("synthetic-span-p2", [SYSTEM, Q1, A1, Q2, A2], trace_id="synthetic-trace-p"),
+        in_trace("synthetic-trace-p", thinking_item("synthetic-span-p0", [SYSTEM, Q1, A1], "One.")),
+    ]
+    dataset = DatasetDir(tmp_path / "ds")
+    pull_repeats(dataset, pages, target_count=3)
+    assert [row.id for row in dataset.rows()] == [REPEATED_A, REPEAT_B, prefix]
+    dataset.append_labels([Label(id=prefix, keep=False, reason="A1 is wrong")])
+
+    _, added = pull_repeats(dataset, pages)
+    assert added.retired == 2
+    assert [row.id for row in dataset.rows()] == [REPEATED_A]
+    assert dataset.kept_rows() == []
+    assert "A1 is wrong" in dataset.labels()[REPEATED_A].reason
+    assert added.carried == {REPEATED_A: prefix}
+
+
 def test_a_re_run_reading_less_reasoning_keeps_two_stored_rows_that_still_differ(
     tmp_path: Path,
 ) -> None:
