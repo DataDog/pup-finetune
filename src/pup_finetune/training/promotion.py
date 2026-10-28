@@ -18,8 +18,9 @@ stopped (completed, early stop, budget, cancel):
 - on a backend without promotion, the best sampler checkpoint is recorded as the run's
   deployable artifact.
 
-Re-creating a sampler checkpoint is a paid save, so when a ``spend_guard`` refuses it the
-promotion fails (and the run stays resumable to retry only the promotion).
+Re-creating a sampler checkpoint pays for a weight load and a save, so a ``spend_guard`` is
+asked before each, and when it refuses the promotion fails (and the run stays resumable to
+retry only the promotion).
 
 Before it first asks to promote a checkpoint a run records the request (:class:`PromotionRequest`:
 the model id, the checkpoint's epoch and step, and when; saved in ``state.json`` and kept
@@ -195,6 +196,13 @@ class Promotion:
             training.step,
             limit=self.max_checkpoint_name_len,
         )
+        self._require_spend(result)
+        session.load_weights(training)
+        self._require_spend(result)
+        return session.save_sampler_checkpoint(name, epoch=training.epoch, step=training.step)
+
+    def _require_spend(self, result: TrainResult) -> None:
+        """Raise unless ``spend_guard`` allows the next paid call of a re-creation."""
         why = None if self.spend_guard is None else self.spend_guard()
         if why is not None:
             raise ExternalError(
@@ -202,8 +210,6 @@ class Promotion:
                 f"promote it: {why}",
                 source="budget",
             )
-        session.load_weights(training)
-        return session.save_sampler_checkpoint(name, epoch=training.epoch, step=training.step)
 
 
 def _train_loss(result: TrainResult) -> float | None:
