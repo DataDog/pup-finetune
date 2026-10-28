@@ -922,10 +922,11 @@ class _Service:
         return _Sampler(sampler)
 
     def close(self) -> None:
-        """End the session, then stop its heartbeat; raises the first failure of the two.
+        """End the session, then stop its heartbeat; raises the first failure of the two, else
+        an interrupt.
 
         Closing is attempted once: the heartbeat stops with the holder even when the SDK's
-        close fails, and the session then expires on its own.
+        close fails or is interrupted, and the session then expires on its own.
         """
         if self._closed:
             return
@@ -938,13 +939,18 @@ class _Service:
         if callable(close_holder):
             steps.append(("stopping the Fireworks training session's heartbeat", close_holder))
         first: FinetuneError | None = None
+        interrupt: BaseException | None = None
         for what, step in steps:
             try:
                 _call(what, step)
             except FinetuneError as exc:
                 first = first or exc
+            except BaseException as exc:
+                interrupt = interrupt or exc
         if first is not None:
             raise first
+        if interrupt is not None:
+            raise interrupt
 
     def _start(self, what: str, create: Callable[[], _SdkTrainingClient]) -> TrainingRun:
         try:

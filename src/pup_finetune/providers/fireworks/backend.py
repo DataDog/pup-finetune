@@ -847,10 +847,12 @@ class FireworksBackend:
         """End ``session``, then close ``service`` and ``client``; every failure.
 
         Failures to close the service or the client come first, since a service that failed
-        to close may leave a billed session open; then those of closing the samplers.
+        to close may leave a billed session open; then those of closing the samplers, and
+        last an interrupt, which cuts only the close it interrupted.
         """
         closing: list[BaseException] = []
         ending: list[BaseException] = []
+        interrupts: list[BaseException] = []
         try:
             if session is not None:
                 self._live.pop(session.session_id, None)
@@ -863,7 +865,9 @@ class FireworksBackend:
                     close()
                 except Exception as exc:
                     closing.append(exc)
-        return [*closing, *ending]
+                except BaseException as exc:
+                    interrupts.append(exc)
+        return [*closing, *ending, *interrupts]
 
 
 def _text(error: BaseException) -> str:
