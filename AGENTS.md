@@ -323,7 +323,8 @@ SIGINT ignored, and never signals the training process. Under a coding agent, th
 result names as `next_command` pins `--timeout 90s`. `--provider-option step_delay_s=0.5
 --batch-size 1` makes the fake slow enough to `cancel /tmp/run --confirm` (or press Ctrl-C in
 the foreground), `--provider-option hold_file='"/tmp/hold"'` holds every step while that file
-exists (tests use it to keep a run training deterministically), and
+exists (tests use it to keep a run training deterministically; `hold_from_step=12` holds
+only from that global step on, so the file can exist before the run starts), and
 `--provider-option fail_at_step=9` simulates a crash to `resume /tmp/run --confirm` from. Use a
 new `--run-dir` for each `train`, or none: without it a run goes in `./runs/<run id>` (a `runs/`
 it creates gets a `.gitignore` holding `*`, and the result says so; `datasets/` gets one the

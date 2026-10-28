@@ -510,6 +510,7 @@ register_provider(
         "prefix_stable",
         "max_seq_len",
         "hold_file",
+        "hold_from_step",
     ),
     models={"fake-model": ("fake-model", "fake/fake-model", "fake/tokenizer")},
     offline=True,
