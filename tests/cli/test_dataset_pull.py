@@ -457,6 +457,56 @@ def test_a_rerun_retires_a_stored_prefix_of_a_conversation_on_a_later_page(
     assert rows == ["T:s2"]
 
 
+def test_a_dropped_row_s_drop_carries_to_the_longer_row_a_rerun_retires_it_into(
+    use_pup: UsePup, tmp_path: Path
+) -> None:
+    pages = [
+        page([conversation("s1", "T", "Q1", "A1")], after="cursor-2"),
+        page([conversation("s2", "T", "Q1", "A1", "Q2", "A2")]),
+    ]
+    serve(use_pup, pages)
+    target = tmp_path / "ds"
+    output_json(pull(target, "--target-count", "1"))
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(json.dumps({"id": "T:s1", "keep": False, "reason": "A1 is wrong"}) + "\n")
+    assert invoke("label", str(target), "--file", str(labels)).exit_code == 0
+
+    result = pull(target, "--target-count", "200")
+    assert result.exit_code == 0, result.stderr
+    data = output_json(result)
+    assert data["pull"]["retired"] == 1
+    assert data["pipeline"]["rows"] == {"accepted": 1, "kept": 0, "dropped": 1, "unlabeled": 0}
+    carried = json.loads((target / "labels.jsonl").read_text().splitlines()[-1])
+    assert (carried["id"], carried["keep"], carried["by"]) == ("T:s2", False, "manual")
+    assert "T:s1" in carried["reason"] and "A1 is wrong" in carried["reason"]
+    assert data["pull"]["carried_drops"] == [{"row_id": "T:s2", "from": "T:s1"}]
+    assert any("T:s2" in note for note in data["notes"])
+
+    again = output_json(pull(target))
+    assert again["pull"]["carried_drops"] == []
+    assert len((target / "labels.jsonl").read_text().splitlines()) == 2
+
+
+def test_a_kept_row_s_label_does_not_carry_to_the_longer_row_that_retires_it(
+    use_pup: UsePup, tmp_path: Path
+) -> None:
+    pages = [
+        page([conversation("s1", "T", "Q1", "A1")], after="cursor-2"),
+        page([conversation("s2", "T", "Q1", "A1", "Q2", "A2")]),
+    ]
+    serve(use_pup, pages)
+    target = tmp_path / "ds"
+    output_json(pull(target, "--target-count", "1"))
+    labels = tmp_path / "labels.jsonl"
+    labels.write_text(json.dumps({"id": "T:s1", "keep": True}) + "\n")
+    assert invoke("label", str(target), "--file", str(labels)).exit_code == 0
+
+    data = output_json(pull(target, "--target-count", "200"))
+    # Its new turns are unreviewed, so the longer row is left to review.
+    assert data["pipeline"]["rows"] == {"accepted": 1, "kept": 1, "dropped": 0, "unlabeled": 1}
+    assert data["pull"]["carried_drops"] == []
+
+
 @pytest.mark.parametrize(
     "changed",
     [
