@@ -446,13 +446,6 @@ class EvalWork:
     def judge_calls(self) -> int:
         return sum(int(counts["judge"]) for counts in self.by_target.values()) + self.calibration
 
-    @property
-    def trained(self) -> int:
-        """The generations base and tuned make, in the training provider's session."""
-        from pup_finetune.evaluation.replay import TARGETS
-
-        return sum(self.by_target[target]["generate"] for target in TARGETS)
-
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class EvalPlan:
