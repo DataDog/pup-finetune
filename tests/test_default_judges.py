@@ -214,3 +214,15 @@ def test_a_triage_preview_says_why_a_malformed_key_s_provider_is_passed_over(
         "as its key (ANTHROPIC_API_KEY) is malformed"
     )
     assert [w for w in preview["warnings"] if "ANTHROPIC_API_KEY" in w and "malformed" in w]
+
+
+def test_a_malformed_key_in_the_environment_is_fixed_there_not_by_signing_in(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    monkeypatch.setenv("OPENAI_API_KEY", OPENAI_KEY)
+    result = invoke("dataset", "triage", str(dataset), "--rule", "stay on topic", "--max-rows", "2")
+    assert result.exit_code == 2, result.stderr
+    (warning,) = [w for w in output(result)["preview"]["warnings"] if "ANTHROPIC_API_KEY" in w]
+    assert warning.endswith("fix or unset ANTHROPIC_API_KEY, which is read before the OS keychain")
+    assert "auth login" not in warning

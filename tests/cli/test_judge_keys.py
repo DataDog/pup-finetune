@@ -270,6 +270,8 @@ def test_a_preview_refuses_a_malformed_judge_key(
         result = invoke(*args)
         assert result.exit_code == 2, result.stderr
         assert "Error [usage]: the openai API key is malformed" in result.stderr
+        assert "fix or unset OPENAI_API_KEY" in result.stderr
+        assert "auth login" not in result.stderr
         assert result.stdout == ""
 
 
