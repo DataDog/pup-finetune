@@ -650,11 +650,12 @@ Source lives under `src/pup_finetune/`.
   re-run reads more reasoning for is updated in place, never losing reasoning it has
   (`reasoning_updates`, `DatasetDir.add(updated=...)`), and a stored row that update makes
   repeat another stored row is retired as `duplicate_conversation` (`repeat_retirements`).
-  A drop label in force on a retired row carries to the stored row that now holds its
-  conversation (`Exclusion.into`): `DatasetDir.add` appends a drop naming the retired id
-  under its lock, before the rows, unless that row is dropped already or a person labeled
-  it, and the pull result lists them in `pull.carried_drops`. A keep does not carry: the
-  longer row has turns nobody reviewed.
+  A stored row read again with other source metadata (evaluations or tags attached since)
+  is kept as stored. A drop label in force on a retired row carries to the stored row that
+  now holds its conversation (`Exclusion.into`): `DatasetDir.add` appends a drop naming the
+  retired id under its lock, before the rows, unless that row is dropped already or a person
+  labeled it, and the pull result lists them in `pull.carried_drops`. A keep does not carry:
+  the longer row has turns nobody reviewed.
   `fetch.py` is `dataset fetch`: an Agent Observability dataset's current records back into
   rows (input messages plus expected output, the split from metadata or tags), frozen per
   dataset version, with the dataset's `push.json` so evaluations publish onto it.

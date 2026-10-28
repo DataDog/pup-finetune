@@ -615,7 +615,8 @@ def reasoning_updates(
     With ``reasoning="preserve"`` a kept row takes the reasoning of the conversations
     collapsed into it (:mod:`pup_finetune.data.trajectories`) and keeps its id, so a re-run
     that reads more or less of its trace can yield a stored id with more or less reasoning.
-    Such a row, equal to the stored one but for reasoning, is reconciled with it: each stored
+    Such a row, equal to the stored one but for reasoning (and its source, whose evaluations
+    and tags can change once the row is stored), is reconciled with it: each stored
     assistant message without reasoning takes the row's, and stored reasoning is never
     replaced. When nothing is filled in the stored row is returned among ``rows``, unchanged;
     otherwise the filled-in row is returned among the updates, for
@@ -680,8 +681,11 @@ def reconciled_repeats(
 
 def _fill_reasoning(stored: TrainingRow, row: TrainingRow) -> TrainingRow | None:
     """``stored`` with the reasoning of ``row`` where it has none, or ``None`` when the two
-    differ in more than reasoning."""
-    if without_reasoning(stored) != without_reasoning(row):
+    differ in more than reasoning and source. ``stored`` keeps its source: a span's
+    evaluations and tags can change after its row is stored, and stored rows do not."""
+    if without_reasoning(stored) != without_reasoning(
+        row.model_copy(update={"source": stored.source})
+    ):
         return None
     messages = [
         mine.model_copy(update={"reasoning_content": theirs.reasoning_content})
