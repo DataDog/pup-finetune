@@ -262,6 +262,28 @@ def test_resume_after_a_crash_finishes_and_promotes(
     assert _no_session_left(fw)
 
 
+def test_an_unexpected_error_in_training_prints_its_notes(
+    dataset: Path, tmp_path: Path, fw: CrashingFireworks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pending = fw._pending_failure
+
+    def buggy(operation: str, what: str) -> Exception | None:
+        if operation == "forward_backward":
+            return RuntimeError("a bug in the step")
+        return pending(operation, what)
+
+    monkeypatch.setattr(fw, "_pending_failure", buggy)
+    fw.fail("close", "server")
+    result = train(dataset, tmp_path / "run", "--confirm")
+    assert result.exit_code == 1, result.stderr
+    assert "training stopped: RuntimeError: a bug in the step" in result.stderr
+    assert any(
+        line.startswith("warning: ending the session also failed: ")
+        and "closing the Fireworks client failed" in line
+        for line in result.stderr.splitlines()
+    )
+
+
 def test_a_max_seq_len_option_shorter_than_every_row_is_refused_in_the_preview(
     dataset: Path, tmp_path: Path, fw: CrashingFireworks
 ) -> None:
