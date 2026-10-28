@@ -656,13 +656,14 @@ Source lives under `src/pup_finetune/`.
   its conversation (`Exclusion.into`, followed through the rows the same pull retires, as
   when the longer row of a prefix repeats a stored row the pull also retires):
   `DatasetDir.add` appends a drop whose `Label.carried_from` names the retired id under its
-  lock, before the rows, unless a person labeled that row (a judge's or a check's label,
-  even a drop, is replaced: triage reviews those again), and the pull result lists them in
-  `pull.carried_drops`. A carried drop says `by: manual` whoever dropped the retired row, so
+  lock, before the rows, unless a person labeled that row or a row the pull retired into it
+  on the way (a judge's or a check's label, even a drop, is replaced: triage reviews those
+  again), and the pull result lists them in `pull.carried_drops`. A carried drop says `by: manual` whoever dropped the retired row, so
   triage never relabels it; `--agreement` does not compare with it, and `dataset label
-  --file` refuses a line naming `carried_from`. A person's keep on that row stands, but the
-  pull result lists the drop it refused in `pull.drops_not_carried` (both ids and both
-  reasons) and warns, as the dropped turns now train. A keep does not carry: the longer row
+  --file` refuses a line naming `carried_from`. A person's keep on such a row stands, but the
+  pull result lists the drop it refused in `pull.drops_not_carried` (the row that now holds
+  the conversation, the kept and the dropped row, and both reasons; `RefusedDrop`) and
+  warns, as the dropped turns now train. A keep does not carry: the longer row
   has turns nobody reviewed.
   `fetch.py` is `dataset fetch`: an Agent Observability dataset's current records back into
   rows (input messages plus expected output, the split from metadata or tags), frozen per

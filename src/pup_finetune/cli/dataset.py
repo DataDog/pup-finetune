@@ -45,6 +45,7 @@ from pup_finetune.data.convert import ReasoningMode
 from pup_finetune.data.dataset_dir import (
     DatasetDir,
     DatasetSettings,
+    RefusedDrop,
     read_import_file,
 )
 from pup_finetune.data.exclusions import explain
@@ -1049,8 +1050,14 @@ def pull_rows(
                 {"row_id": row_id, "from": retired} for row_id, retired in added.carried.items()
             ],
             "drops_not_carried": [
-                {"row_id": keep.id, "kept": keep.reason, "from": drop.id, "dropped": drop.reason}
-                for keep, drop in added.not_carried
+                {
+                    "row_id": refused.row_id,
+                    "kept_on": refused.keep.id,
+                    "kept": refused.keep.reason,
+                    "from": refused.drop.id,
+                    "dropped": refused.drop.reason,
+                }
+                for refused in added.not_carried
             ],
             **collection.stats(),
         },
@@ -1077,20 +1084,25 @@ def _carried_notes(carried: Mapping[str, str]) -> list[str]:
     ]
 
 
-def _not_carried_warnings(not_carried: Sequence[tuple[Label, Label]]) -> list[str]:
-    """The warning that rows a person kept hold the conversation of a dropped row this pull
-    retired, so their keeps stand and the dropped turns train."""
+def _not_carried_warnings(not_carried: Sequence[RefusedDrop]) -> list[str]:
+    """The warning that rows hold the conversation of a dropped row this pull retired, and of a
+    row a person kept, so the keeps stand and the dropped turns train."""
     if not not_carried:
         return []
-    keep, drop = not_carried[0]
+    first = not_carried[0]
+    keep, drop, held = first.keep, first.drop, first.row_id
+    dropped = f"row {drop.id!r} ({_decision(drop)})"
     pair = (
-        f"row {keep.id!r} ({_decision(keep)}) now holds the conversation of row {drop.id!r} "
-        f"({_decision(drop)}), which this pull retired"
+        f"row {held!r} ({_decision(keep)}) now holds the conversation of {dropped}, which "
+        "this pull retired"
+        if keep.id == held
+        else f"row {held!r} now holds the conversation of {dropped} and of row {keep.id!r} "
+        f"({_decision(keep)}), which this pull retired"
     )
     if len(not_carried) == 1:
         return [
             f"{pair}; your keep stands, so the turns dropped on {drop.id!r} train: drop "
-            f"{keep.id!r} with `dataset label` if they should not"
+            f"{held!r} with `dataset label` if they should not"
         ]
     return [
         f"{len(not_carried)} rows you kept hold the conversation of a dropped row this pull "

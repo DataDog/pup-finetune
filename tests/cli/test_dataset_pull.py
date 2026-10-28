@@ -536,7 +536,13 @@ def test_a_person_s_keep_on_the_row_a_dropped_row_retires_into_stands_with_a_war
     assert data["pipeline"]["rows"] == {"accepted": 1, "kept": 1, "dropped": 0, "unlabeled": 0}
     assert data["pull"]["carried_drops"] == []
     assert data["pull"]["drops_not_carried"] == [
-        {"row_id": "B:b1", "kept": "complete answer", "from": "A:a1", "dropped": "A1 is wrong"}
+        {
+            "row_id": "B:b1",
+            "kept_on": "B:b1",
+            "kept": "complete answer",
+            "from": "A:a1",
+            "dropped": "A1 is wrong",
+        }
     ]
     [warning] = [text for text in data["warnings"] if "A:a1" in text]
     assert all(part in warning for part in ("B:b1", "complete answer", "A1 is wrong"))

@@ -117,6 +117,17 @@ class DatasetSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class RefusedDrop:
+    """A drop on a row :meth:`DatasetDir.add` retired that a person's keep refused to carry."""
+
+    row_id: str
+    """The stored row that holds the dropped row's conversation now, and trains its turns."""
+    keep: Label
+    """The person's keep: on :attr:`row_id`, or on a row this add retired into it."""
+    drop: Label
+
+
+@dataclass(frozen=True, slots=True)
 class AddResult:
     """What one :meth:`DatasetDir.add` did, and the dataset summary afterwards."""
 
@@ -131,9 +142,9 @@ class AddResult:
     carried: dict[str, str] = field(default_factory=dict)
     """The rows labeled drop because they hold the conversation of a dropped row this add
     retired, each with that row's id."""
-    not_carried: list[tuple[Label, Label]] = field(default_factory=list)
-    """The drops of rows this add retired that a person's keep on the row holding their
-    conversation now refused, each as that keep and the drop: the dropped turns train."""
+    not_carried: list[RefusedDrop] = field(default_factory=list)
+    """The drops of rows this add retired that a person's keep refused: the dropped turns
+    train."""
 
 
 class DatasetDir:
@@ -417,8 +428,9 @@ class DatasetDir:
         retires), as a new drop label whose ``carried_from`` names it, so the turns the
         reviewer dropped stay out of training: it says ``by: manual``, which triage never
         relabels. A keep does not carry, as that row has turns nobody reviewed, and a drop
-        does not replace a person's label on that row (``by: manual``), which was a
-        decision on the whole row; it replaces a judge's or a check's.
+        does not replace a person's label (``by: manual``) on that row or on a row this add
+        retired into it on the way, which was a decision on a whole row holding the
+        conversation; it replaces a judge's or a check's.
 
         ``split_overrides`` assigns split keys to the splits a source already gave them (the
         splits recorded on a fetched dataset's records) before new keys are assigned; a key
@@ -608,36 +620,42 @@ def _merge(
 
 def _carried_drops(
     retired: Iterable[Exclusion], labels: Mapping[str, Label], stored: Collection[str]
-) -> tuple[dict[str, Label], list[tuple[Label, Label]]]:
+) -> tuple[dict[str, Label], list[RefusedDrop]]:
     """The drop label each ``retired`` row with a drop in force passes to the ``stored`` row
     that holds its conversation (its exclusion's ``into``), by the retired row's id, and each
-    drop a person's keep on that row refuses, with that keep.
+    drop a person's keep refuses.
 
     That row can be retired too, as when a prefix's longer row repeats another stored row:
     the drop passes to the row its retirements end at, or to none when that row is not
-    stored, since nothing trains it. None passes to a row labeled ``manual``: a person's
-    decision on that row, or a drop carried already, so a rerun after a crash, which finds
-    the drop it carried in force, carries nothing twice. A judge's or a check's label is
-    replaced, even a drop, as triage would review it again and could keep the row.
+    stored, since nothing trains it. None passes when a row along the way, or that row, is
+    labeled ``manual``: a person's decision on a row holding the conversation, or a drop
+    carried already, so a rerun after a crash, which finds the drop it carried in force,
+    carries nothing twice. A judge's or a check's label is replaced, even a drop, as triage
+    would review it again and could keep the row.
     """
     targets = {e.row_id: e.into for e in retired if e.row_id is not None}
     current = dict(labels)
     carried: dict[str, Label] = {}
-    refused: list[tuple[Label, Label]] = []
+    refused: list[RefusedDrop] = []
     for row_id, into in targets.items():
-        while into is not None and into in targets:
-            into = targets[into]
-        if into is None or into not in stored:
+        chain: list[str] = []
+        while into is not None:
+            chain.append(into)
+            into = targets.get(into)
+        if not chain or chain[-1] not in stored:
             continue
-        label, own = current.get(row_id), current.get(into)
+        label = current.get(row_id)
         if label is None or label.keep:
             continue
-        if own is not None and own.by == "manual":
+        held = chain[-1]
+        decided = (current.get(hop) for hop in chain)
+        own = next((own for own in decided if own is not None and own.by == "manual"), None)
+        if own is not None:
             if own.keep:
-                refused.append((own, label))
+                refused.append(RefusedDrop(held, own, label))
             continue
-        current[into] = carried[row_id] = Label(
-            id=into,
+        current[held] = carried[row_id] = Label(
+            id=held,
             keep=False,
             reason=f"carried from row {row_id!r}, which this row absorbed: {label.reason}",
             carried_from=row_id,

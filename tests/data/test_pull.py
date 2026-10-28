@@ -934,7 +934,7 @@ def test_a_person_s_keep_on_the_row_a_dropped_repeat_is_retired_into_is_reported
     assert added.retired == 1
     assert [row.id for row in dataset.kept_rows()] == [REPEATED_A]
     assert added.carried == {}
-    assert added.not_carried == [(keep, drop)]
+    assert [(r.row_id, r.keep, r.drop) for r in added.not_carried] == [(REPEATED_A, keep, drop)]
 
 
 CHAIN_PREFIX = "synthetic-trace-p:synthetic-span-p1"
