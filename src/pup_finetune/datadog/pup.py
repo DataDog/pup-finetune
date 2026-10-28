@@ -24,7 +24,6 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol
 
 from pup_finetune import credentials
-from pup_finetune import providers as _providers  # noqa: F401 - registers provider API keys
 from pup_finetune.errors import ExternalError
 from pup_finetune.redaction import redact, register_secret
 

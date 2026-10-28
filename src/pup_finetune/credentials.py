@@ -181,8 +181,11 @@ def all_specs() -> list[CredentialSpec]:
 
 
 def provider_secret_env() -> frozenset[str]:
-    """Every environment variable a registered provider reads a secret from: each spec's
-    ``env_var`` and ``other_secret_env``. Kept from child processes that need none of them."""
+    """Every environment variable a provider reads a secret from: each spec's ``env_var`` and
+    ``other_secret_env``, with every provider's spec registered first. Kept from child
+    processes that need none of them."""
+    import pup_finetune.providers  # noqa: F401 - registers every provider's key
+
     return frozenset(
         name for spec in all_specs() for name in (spec.env_var, *spec.other_secret_env)
     )

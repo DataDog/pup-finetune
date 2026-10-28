@@ -26,7 +26,6 @@ from pathlib import Path
 from typing import Final, Literal
 
 from pup_finetune import credentials
-from pup_finetune import providers as _providers  # noqa: F401 - registers provider API keys
 from pup_finetune.datadog.pup import SECRET_ENV
 from pup_finetune.errors import StateError, UsageError
 from pup_finetune.storage import atomic_write_text
