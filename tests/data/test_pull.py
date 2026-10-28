@@ -937,10 +937,12 @@ def test_a_person_s_keep_on_the_row_a_dropped_repeat_is_retired_into_is_reported
     assert added.not_carried == [(keep, drop)]
 
 
-def test_a_drop_carries_along_retirements_to_the_row_that_survives_them(tmp_path: Path) -> None:
-    # Trace P's prefix continues on page 2 into a repeat of B, so the prefix is retired into
-    # B; the same pull fills in B's reasoning, which retires B into A.
-    prefix = "synthetic-trace-p:synthetic-span-p1"
+CHAIN_PREFIX = "synthetic-trace-p:synthetic-span-p1"
+
+
+def retirement_chain_pages() -> list[dict[str, Any]]:
+    """Trace P's prefix continues on page 2 into a repeat of B, so the prefix is retired into
+    B; the same pull fills in B's reasoning, which retires B into A."""
     pages = repeat_once_b_takes_a_s_reasoning()
     pages[0]["data"].append(
         item("synthetic-span-p1", [SYSTEM, Q1, A1], trace_id="synthetic-trace-p")
@@ -949,6 +951,12 @@ def test_a_drop_carries_along_retirements_to_the_row_that_survives_them(tmp_path
         item("synthetic-span-p2", [SYSTEM, Q1, A1, Q2, A2], trace_id="synthetic-trace-p"),
         in_trace("synthetic-trace-p", thinking_item("synthetic-span-p0", [SYSTEM, Q1, A1], "One.")),
     ]
+    return pages
+
+
+def test_a_drop_carries_along_retirements_to_the_row_that_survives_them(tmp_path: Path) -> None:
+    prefix = CHAIN_PREFIX
+    pages = retirement_chain_pages()
     dataset = DatasetDir(tmp_path / "ds")
     pull_repeats(dataset, pages, target_count=3)
     assert [row.id for row in dataset.rows()] == [REPEATED_A, REPEAT_B, prefix]
@@ -960,6 +968,23 @@ def test_a_drop_carries_along_retirements_to_the_row_that_survives_them(tmp_path
     assert dataset.kept_rows() == []
     assert "A1 is wrong" in dataset.labels()[REPEATED_A].reason
     assert added.carried == {REPEATED_A: prefix}
+
+
+def test_a_person_s_keep_along_retirements_refuses_the_drop_and_is_reported(
+    tmp_path: Path,
+) -> None:
+    pages = retirement_chain_pages()
+    dataset = DatasetDir(tmp_path / "ds")
+    pull_repeats(dataset, pages, target_count=3)
+    keep = Label(id=REPEAT_B, keep=True, reason="B is right")
+    drop = Label(id=CHAIN_PREFIX, keep=False, reason="A1 is wrong")
+    dataset.append_labels([drop, keep])
+
+    _, added = pull_repeats(dataset, pages)
+    assert added.retired == 2
+    assert added.carried == {}
+    assert [row.id for row in dataset.kept_rows()] == [REPEATED_A]
+    assert [(r.row_id, r.keep, r.drop) for r in added.not_carried] == [(REPEATED_A, keep, drop)]
 
 
 def test_a_re_run_reading_less_reasoning_keeps_two_stored_rows_that_still_differ(
