@@ -31,7 +31,9 @@ The messages follow these rules:
   repaired: a row that breaks a rule is excluded with a code.
 
 `source` holds `trace_id`, `span_id`, `ml_app`, `model_name`, `start_ns` (the span's start in
-nanoseconds), `evaluations` (the span's evaluations by name) and `tags`.
+nanoseconds), `evaluations` (the span's evaluations by name) and `tags`. A later pull that
+reads a stored row's span again keeps the stored `source`: the row id fixes the trace and span,
+and the rest (such as evaluations or tags added since) is not updated.
 
 A synthetic example, formatted over several lines here (a file holds one row per line):
 

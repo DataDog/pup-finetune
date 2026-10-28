@@ -615,13 +615,13 @@ def reasoning_updates(
     With ``reasoning="preserve"`` a kept row takes the reasoning of the conversations
     collapsed into it (:mod:`pup_finetune.data.trajectories`) and keeps its id, so a re-run
     that reads more or less of its trace can yield a stored id with more or less reasoning.
-    Such a row, equal to the stored one but for reasoning (and its source, whose evaluations
-    and tags can change once the row is stored), is reconciled with it: each stored
-    assistant message without reasoning takes the row's, and stored reasoning is never
-    replaced. When nothing is filled in the stored row is returned among ``rows``, unchanged;
-    otherwise the filled-in row is returned among the updates, for
-    :meth:`~pup_finetune.data.dataset_dir.DatasetDir.add` to replace the stored one with. Any
-    other difference is left to the dataset, which rejects it.
+    Such a row, equal to the stored one but for reasoning and its source, is reconciled with
+    it: the stored row keeps its whole source, and each stored assistant message without
+    reasoning takes the row's, as stored reasoning is never replaced. When nothing is filled
+    in the stored row is returned among ``rows``, unchanged; otherwise the filled-in row is
+    returned among the updates, for :meth:`~pup_finetune.data.dataset_dir.DatasetDir.add`
+    to replace the stored one with. Any other difference is left to the dataset, which
+    rejects it.
     """
     stored = {row.id: row for row in stored_rows}
     kept: list[TrainingRow] = []
@@ -681,8 +681,9 @@ def reconciled_repeats(
 
 def _fill_reasoning(stored: TrainingRow, row: TrainingRow) -> TrainingRow | None:
     """``stored`` with the reasoning of ``row`` where it has none, or ``None`` when the two
-    differ in more than reasoning and source. ``stored`` keeps its source: a span's
-    evaluations and tags can change after its row is stored, and stored rows do not."""
+    differ in more than reasoning and source. ``stored`` keeps its whole source: the two
+    share an id, which fixes the trace and span, and the rest of a span's source (its
+    evaluations and tags, say) can change after its row is stored, which stored rows do not."""
     if without_reasoning(stored) != without_reasoning(
         row.model_copy(update={"source": stored.source})
     ):

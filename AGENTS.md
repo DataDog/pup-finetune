@@ -650,10 +650,11 @@ Source lives under `src/pup_finetune/`.
   re-run reads more reasoning for is updated in place, never losing reasoning it has
   (`reasoning_updates`, `DatasetDir.add(updated=...)`), and a stored row that update makes
   repeat another stored row is retired as `duplicate_conversation` (`repeat_retirements`).
-  A stored row read again with other source metadata (evaluations or tags attached since)
-  is kept as stored. A drop label in force on a retired row carries to the stored row that
-  now holds its conversation (`Exclusion.into`, followed through the rows the same pull
-  retires, as when the longer row of a prefix repeats a stored row the pull also retires):
+  A stored row read again with another `source` is kept as stored, its source included: the
+  id fixes the trace and span, and the rest (evaluations or tags attached since, say) is not
+  updated. A drop label in force on a retired row carries to the stored row that now holds
+  its conversation (`Exclusion.into`, followed through the rows the same pull retires, as
+  when the longer row of a prefix repeats a stored row the pull also retires):
   `DatasetDir.add` appends a drop whose `Label.carried_from` names the retired id under its
   lock, before the rows, unless a person labeled that row (a judge's or a check's label,
   even a drop, is replaced: triage reviews those again), and the pull result lists them in
