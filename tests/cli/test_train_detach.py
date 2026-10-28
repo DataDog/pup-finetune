@@ -160,7 +160,15 @@ def test_a_detached_run_completes_and_status_watch_follows_it(
 
 def test_cancel_stops_a_slow_worker_gracefully_and_promotes(dataset: Path, tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
-    slow = ("--batch-size", "1", "--provider-option", "step_delay_s=0.2")
+    hold = tmp_path / "hold"
+    slow = (
+        "--batch-size",
+        "1",
+        "--provider-option",
+        "step_delay_s=0.2",
+        "--provider-option",
+        f"hold_file={json.dumps(str(hold))}",
+    )
     # The --detach preview's next_command runs as written: it starts the worker.
     previewed = cli(*train_args(dataset, run_dir, *slow, "--detach"))
     assert previewed.returncode == 2, previewed.stderr
@@ -170,8 +178,11 @@ def test_cancel_stops_a_slow_worker_gracefully_and_promotes(dataset: Path, tmp_p
     started = cli(*detach[2:])
     assert started.returncode == 0, started.stderr
     pid = one_json(started.stdout)["pid"]
-    # Wait until the first epoch's best checkpoint exists, so there is something to promote.
+    # Wait until the first epoch's best checkpoint exists, so there is something to promote,
+    # then hold every step: the run is still training when the cancel arrives, however slowly
+    # the commands below start. The rest of the run takes seconds, so the hold comes first.
     wait_until(lambda: state(run_dir).get("epochs", 0) >= 1, "the first epoch")
+    hold.touch()
     # Its command line carries no secret: exactly our module, the run and the mode.
     command = command_line(pid)
     assert SECRET not in command
@@ -190,6 +201,7 @@ def test_cancel_stops_a_slow_worker_gracefully_and_promotes(dataset: Path, tmp_p
     assert cancelled.returncode == 0, cancelled.stderr
     assert one_json(cancelled.stdout)["status"] == "cancelling"
 
+    hold.unlink()
     final = watch(run_dir)
     assert final["phase"] == "cancelled"
     assert final["stopped_reason"] == "cancelled"
