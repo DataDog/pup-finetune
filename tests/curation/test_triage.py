@@ -1478,3 +1478,13 @@ def test_a_drop_a_pull_carried_is_not_a_label_agreement_compares_with(tmp_path: 
     carry_a_drop(dataset, "row-1")
     plan = plan_triage(dataset, RUBRIC, (J1,), agreement=True)
     assert [row.id for row in plan.rows] == ["row-0"]
+
+
+def test_a_drop_a_pull_carried_is_not_counted_as_a_label_of_yours(tmp_path: Path) -> None:
+    dataset = make_dataset(tmp_path)
+    carry_a_drop(dataset, "row-1")
+    preview = plan_triage(dataset, RUBRIC, (J1,)).preview()
+    assert "agreement_note" not in preview
+    assert preview["rows"] == {"to_review": 3, "skipped_labeled": 0, "skipped_carried": 1}
+    with pytest.raises(UsageError, match="no row"):
+        plan_triage(dataset, RUBRIC, (J1,), agreement=True)

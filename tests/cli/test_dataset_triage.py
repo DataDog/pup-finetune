@@ -29,6 +29,7 @@ from pup_finetune.cli import app
 from pup_finetune.cli import triage as triage_cli
 from pup_finetune.curation.triage import JUDGMENTS_FILE, rubric_template
 from pup_finetune.data.dataset_dir import DatasetDir
+from pup_finetune.data.labels import Label
 from pup_finetune.display import display_path
 from pup_finetune.inference import ChatClient, ChatCompleter
 from pup_finetune.judge_models import FIREWORKS_JUDGES as DEFAULT_JUDGES
@@ -627,6 +628,26 @@ def test_rows_naming_only_rows_you_labeled_offers_no_confirm(
     assert data["preview"]["refused"] == (
         "there is no row to review: every row --rows names is labeled by you or the agent"
     )
+    assert chat.requests == []
+
+
+def test_rows_naming_only_a_row_holding_a_carried_drop_says_so(
+    dataset: Path, chat: FakeChatApi, tmp_path: Path
+) -> None:
+    carried = Label(
+        id="row-weather-001",
+        keep=False,
+        reason="carried from row 'synthetic-gone', which this row absorbed: wrong",
+        carried_from="synthetic-gone",
+    )
+    DatasetDir(dataset).append_labels([carried])
+    subset = row_file(tmp_path, "row-weather-001")
+    result = invoke("dataset", "triage", str(dataset), "--rule", "x", "--rows", str(subset))
+    assert result.exit_code == 2
+    preview = output(result)["preview"]
+    assert preview["rows"] == {"to_review": 0, "skipped_labeled": 0, "skipped_carried": 1}
+    assert "agreement_note" not in preview
+    assert "carried" in preview["refused"]
     assert chat.requests == []
 
 
