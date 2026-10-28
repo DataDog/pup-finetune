@@ -239,10 +239,10 @@ def render_errors() -> list[str]:
         "provider failed, a local file is unreadable or inconsistent, another process holds "
         "the directory's lock, or Ctrl-C or SIGTERM stopped the command.",
         "",
-        "An error leaves stdout empty and prints on stderr `Error [<code>]: <message>`, then "
-        "`Hint: <what to do>` when there is a hint and a `warning: <text>` line for anything "
-        "left to check by hand (a resource a Ctrl-C may have left running), for example "
-        "`Error [run_dir_not_empty]: run1 already holds run ft-... (completed)`. "
+        "An error leaves stdout empty and prints on stderr `Error [<code>]: <message>` (for "
+        "example `Error [run_dir_not_empty]: run1 already holds run ft-... (completed)`), "
+        "then `Hint: <what to do>` when there is a hint. Each of the error's notes follows as "
+        "a `warning: <note>` line, such as a resource a Ctrl-C may have left running. "
         "The code is stable and listed below; the message is for people and may change. "
         "Usage errors that Click finds (an unknown command or option, a missing or malformed "
         "value) print the same way with the code `usage`, name every missing required option "
