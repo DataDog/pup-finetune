@@ -6,7 +6,8 @@
 # Copyright 2026-present Datadog, Inc.
 """`train --provider baseten` end to end on the Loops fake: the preview, a confirmed run, then
 `deploy` and `undeploy` of the checkpoint it records, and their receipt's failures; and what a
-Ctrl-C while a command creates a Loops trainer or sampler says may remain.
+Ctrl-C or an unexpected error while a command creates a Loops trainer or sampler says may
+remain.
 
 The provider is the real :class:`BasetenProvider` with the Loops fake, its HTTP routes, the
 fake tokenizer and a fake clock injected. Each command builds a new provider, as a new process
@@ -353,6 +354,25 @@ def test_a_ctrl_c_while_evaluate_creates_a_sampler_wins_over_a_failed_deactivati
     assert "Error [interrupted]: evaluation stopped at once" in result.stderr
     assert warned(result, left("sampler", "session2"))
     assert warned(result, "could not deactivate Baseten run run2")
+
+
+def test_an_unexpected_error_while_evaluate_creates_a_sampler_says_it_may_remain(
+    loops: FakeLoops, run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PUP_FINETUNE_DEV", "1")
+    loops.lost["sampler"] = RuntimeError("the connection broke")
+    result = invoke(
+        "evaluate",
+        str(run_dir),
+        "--judge-model",
+        "fake-judge",
+        "--no-publish",
+        "--skip-calibration",
+        "--confirm",
+    )
+    assert result.exit_code == 1, result.stderr
+    assert "Error [unexpected]: RuntimeError: the connection broke" in result.stderr
+    assert warned(result, left("sampler", "session2"))
 
 
 def test_a_ctrl_c_while_benchmark_creates_a_sampler_says_it_may_remain(
