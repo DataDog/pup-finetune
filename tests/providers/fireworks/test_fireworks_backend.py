@@ -21,6 +21,7 @@ from pup_finetune.providers.base import (
     AdamConfig,
     CheckpointRef,
     LoraConfig,
+    ModelIdTaken,
     ModelProfile,
     ProviderCapacityError,
     TrainingSession,
@@ -1263,6 +1264,52 @@ def test_a_promotion_lost_after_a_refused_one_is_adopted_on_resume(
         now=lambda: SINCE + timedelta(hours=1),
     )
     assert result["promoted_model"]["uri"] == f"accounts/{ACCOUNT}/models/{model_id}"
+    assert not any(call[0] == "promote_session_checkpoint" for call in fw.calls)
+    assert _live(fw) == []
+
+
+@pytest.mark.parametrize(
+    "lookup_fails",
+    [pytest.param((True,), id="first-attempt"), pytest.param((False, True), id="after-a-refusal")],
+)
+def test_a_resume_after_attempts_that_sent_no_promotion_adopts_no_model(
+    fw: FakeFireworksTrainingClient,
+    renderer: Renderer,
+    tmp_path: Path,
+    lookup_fails: tuple[bool, ...],
+) -> None:
+    train_rows, validation_rows = _rows(renderer, 4, "train"), _rows(renderer, 2, "val")
+    first = _new_run(tmp_path / "a" / "run", renderer, created_at=SINCE)
+    second = _new_run(tmp_path / "b" / "run", renderer, created_at=SINCE)
+    fw.now = lambda: SINCE + timedelta(minutes=10)
+    start_training(
+        _provider(fw), first, train_rows=train_rows, validation_rows=validation_rows, now=fw.now
+    )
+    # Each attempt of the second run stops before sending a promotion: its lookup of the model
+    # id fails, or finds the first run's model there.
+    for attempt, fails in enumerate(lookup_fails):
+        if fails:
+            fw.fail("get_model", "connection")
+        with pytest.raises(FinalizeFailed):
+            (start_training if attempt == 0 else resume_training)(
+                _provider(fw),
+                second,
+                train_rows=train_rows,
+                validation_rows=validation_rows,
+                now=lambda: SINCE + timedelta(minutes=10, seconds=30),
+            )
+
+    fw.calls.clear()
+    with pytest.raises(FinalizeFailed) as caught:
+        resume_training(
+            _provider(fw),
+            second,
+            train_rows=train_rows,
+            validation_rows=validation_rows,
+            now=lambda: SINCE + timedelta(minutes=11),
+        )
+    assert isinstance(caught.value.__cause__, ModelIdTaken)
+    assert (second.read_result() or {})["promoted_model"] is None
     assert not any(call[0] == "promote_session_checkpoint" for call in fw.calls)
     assert _live(fw) == []
 
