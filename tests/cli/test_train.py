@@ -536,6 +536,20 @@ def test_a_worker_starting_for_too_long_is_stale(trained: Path) -> None:
     assert any("has not begun training" in w for w in data["warnings"])
 
 
+def test_status_says_a_worker_is_starting_to_resume_a_stopped_run(trained: Path) -> None:
+    # Right after `resume --detach`, until the worker begins: the state is still the crash's.
+    crash = {"type": "FakeCrash", "code": "external", "message": "simulated crash", "notes": []}
+    _set_state(trained, phase="interrupted", heartbeat_at=_ago(30), error=crash)
+    atomic_write_json(
+        trained / "worker.json", {"pid": os.getpid(), "mode": "resume", "started_at": _ago(1)}
+    )
+    result = invoke("status", str(trained))
+    assert output(result)["worker"]["state"] == "starting"
+    headline = result.stderr.splitlines()[-1].split("; ")[0]
+    assert headline.startswith("interrupted (external): epoch 2/2 after step 2/2 "), headline
+    assert headline.endswith(f" (worker pid {os.getpid()} starting)"), headline
+
+
 # --- status: progress numbers and a bounded watch -------------------------------------
 
 
