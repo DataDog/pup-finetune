@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 import re
 import sys
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,10 @@ from typer.testing import CliRunner, Result
 from pup_finetune import output
 from pup_finetune.cli import app
 from pup_finetune.cli._summary import CAVEAT, MAX_LINES, SUMMARIES, format_duration, summarize
+from pup_finetune.errors import ExternalError
+from pup_finetune.evaluation import runner as runner_module
+from pup_finetune.evaluation.fake_judge import FakeJudge
+from pup_finetune.inference import ChatCompleter, ChatCompletion, JudgeConfig
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
 
@@ -243,6 +249,46 @@ def test_on_a_terminal_train_shows_every_step_and_a_few_summary_lines(
         f"next: {data['next_command']}",
     ]
     assert lines[-3].startswith(f"run {data['run_id']} completed in ")
+
+
+class DownForUntooledAnswers(FakeJudge):
+    """The offline judge, unreachable for a text answer where the reference calls a tool:
+    base's answers to the tool-call cases end in errors, so base is graded on fewer cases."""
+
+    def complete(self, messages: Sequence[Mapping[str, Any]], **kwargs: Any) -> ChatCompletion:
+        found = super().complete(messages, **kwargs)
+        if "the reference calls a tool and the candidate does not" in found.message["content"]:
+            raise ExternalError("the judge endpoint is unreachable", source="judge")
+        return found
+
+
+@pytest.mark.usefixtures("terminal")
+def test_the_agreement_row_shows_the_rates_the_result_holds(
+    run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    @contextmanager
+    def opened(config: JudgeConfig, **options: Any) -> Iterator[ChatCompleter]:
+        yield DownForUntooledAnswers()
+
+    monkeypatch.setattr(runner_module, "open_judge_client", opened)
+    result = invoke("evaluate", str(run_dir), "--skip-calibration", "--no-publish", "--confirm")
+    data = output_of(result)
+    assert data["status"] == "complete_with_errors", result.stderr
+    rates = data["headline"]["judge_pass_rate"]
+    assert rates["judged_cases"] == {"base": 2, "tuned": 4}
+    assert rates["common_cases"] == 2
+    base, tuned = (
+        f"{round(rates[name] * 100)}% of {rates['judged_cases'][name]}"
+        for name in ("base", "tuned")
+    )
+    common = {name: f"{round(rate * 100)}%" for name, rate in rates["common_pass_rate"].items()}
+    lines = result.stderr.splitlines()
+    row = next(line for line in lines if line.startswith("judge agreement"))
+    assert row.startswith(f"{'judge agreement':<21}{base:<11}{tuned:<11}")
+    assert (
+        f"paired on 2 of 4 cases, tuned {common['tuned']} vs base {common['base']}: 0 wins, "
+        "0 regressions, 2 ties, 2 errors"
+    ) in lines
 
 
 @pytest.mark.usefixtures("terminal")
