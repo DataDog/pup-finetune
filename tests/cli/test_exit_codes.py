@@ -29,6 +29,7 @@ from typer.testing import CliRunner, Result
 from pup_finetune.cli import app
 from pup_finetune.cli import dataset as dataset_cli
 from pup_finetune.cli import train as train_module
+from pup_finetune.data.push import PUSH_FILE
 from pup_finetune.errors import ERROR_CODES
 from pup_finetune.providers.base import Provider
 from pup_finetune.providers.fireworks.provider import FireworksProvider
@@ -147,9 +148,12 @@ def _still_training(command: str) -> Callable[[World], list[str]]:
     return setup
 
 
-def _read_only_deploy(w: World) -> list[str]:
+def _read_only_push(w: World) -> list[str]:
+    copy = w.tmp / "ds"
+    shutil.copytree(w.dataset, copy)
+    (copy / PUSH_FILE).unlink()
     w.monkeypatch.setenv("PUP_READ_ONLY", "1")
-    return ["deploy", str(w.run), "--confirm"]
+    return ["dataset", "push", str(copy), "--name", "synthetic-push", "--confirm"]
 
 
 def _unwritable_markdown(w: World) -> list[str]:
@@ -259,7 +263,7 @@ MISTAKES: list[tuple[str, Setup, int, str]] = [
     ("--markdown in an unwritable directory", _unwritable_markdown, 2, "usage"),
     # A preview is exit 2 too: nothing ran.
     ("train without --confirm", lambda w: w.train(), 2, "confirmation_required"),
-    ("a remote write under PUP_READ_ONLY", _read_only_deploy, 2, "read_only"),
+    ("a remote write under PUP_READ_ONLY", _read_only_push, 2, "read_only"),
     # The wrong, missing or used directory.
     ("status of a missing run", lambda w: ["status", str(w.tmp / "nope")], 2, "not_a_run_dir"),
     ("evaluate a dataset", lambda w: ["evaluate", str(w.dataset)], 2, "not_a_run_dir"),

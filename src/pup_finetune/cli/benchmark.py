@@ -27,7 +27,7 @@ from pup_finetune.cli._flags import given
 from pup_finetune.cli._presentation import TRAIN, CommandDoc, Safety, default_note, describe
 from pup_finetune.cli.train import provider_for_model
 from pup_finetune.display import joined
-from pup_finetune.errors import PAID_RUN, UsageError, require_confirm, require_writable
+from pup_finetune.errors import PAID_RUN, UsageError, require_approval
 from pup_finetune.evaluation import benchmark, runner
 from pup_finetune.judge_models import BY_KEY
 from pup_finetune.providers import aliases_for_model, known_providers, providers_for_model
@@ -293,15 +293,15 @@ def benchmark_command(
         evaluators=evaluators,
     )
     plan = benchmark.plan_benchmark(runtime, dataset_dir, resolved, settings)
-    # PUP_READ_ONLY refuses paid and remote runs, not one that never leaves the machine.
-    if confirm and not plan.offline:
-        require_writable(runtime, "benchmarking models", what=PAID_RUN)
     preview = _with_defaults_used(plan.preview(), current_context())
-    require_confirm(
-        confirm,
-        preview,
-        shlex.join([*plan.command(), "--confirm"]),
-        read_only=runtime.read_only and not plan.offline,
+    require_approval(
+        runtime,
+        "benchmarking models",
+        what=PAID_RUN,
+        confirm=confirm,
+        offline=plan.offline,
+        preview=preview,
+        rerun=shlex.join([*plan.command(), "--confirm"]),
     )
     result = benchmark.execute(plan)
     code = benchmark.exit_code(result)

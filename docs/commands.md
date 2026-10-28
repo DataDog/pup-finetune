@@ -92,8 +92,8 @@ What each command does without and with `--confirm`, where its data goes, and wh
 | `pup finetune resume` | previews where it resumes | resumes training (paid) | the training provider | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider and judge) |
 | `pup finetune cancel` | previews which process gets the signal | sends it SIGTERM | nowhere: a signal to a local process | allowed |
 | `pup finetune evaluate` | previews the calls | evaluates (paid) and publishes the experiments | the training provider, the judge's provider, the compare model's provider (with --compare-model), Datadog (experiments) | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider and judge) |
-| `pup finetune deploy` | previews the deployment | creates it (billed while it runs) | the provider: a deployment of the model | preview allowed; `--confirm` refused |
-| `pup finetune undeploy` | previews the delete | deletes the deployment | the provider: the delete request | preview allowed; `--confirm` refused |
+| `pup finetune deploy` | previews the deployment | creates it (billed while it runs) | the provider: a deployment of the model | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider and judge) |
+| `pup finetune undeploy` | previews the delete | deletes the deployment | the provider: the delete request | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider and judge) |
 
 ## `pup finetune doctor`
 
@@ -814,7 +814,7 @@ pup finetune deploy run
 pup finetune deploy run --timeout-minutes 45
 ```
 
-Safety: Paid with --confirm · creates a deployment that bills until undeploy · PUP_READ_ONLY: preview only.
+Safety: Paid with --confirm · creates a deployment that bills until undeploy · PUP_READ_ONLY: preview only unless offline.
 
 ## `pup finetune undeploy`
 
@@ -839,4 +839,4 @@ pup finetune undeploy run
 pup finetune undeploy ft-20261007183443-a8b181
 ```
 
-Safety: Free · --confirm deletes the deployment · PUP_READ_ONLY: preview only.
+Safety: Free · --confirm deletes the deployment · PUP_READ_ONLY: preview only unless offline.

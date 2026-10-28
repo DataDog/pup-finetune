@@ -70,7 +70,7 @@ from pup_finetune.errors import (
 from pup_finetune.next_steps import PROGRAM, command, step, template
 from pup_finetune.output import info
 from pup_finetune.progress import EvaluationProgress
-from pup_finetune.providers import get_provider, require_packages
+from pup_finetune.providers import get_provider, provider_info, require_packages
 from pup_finetune.providers.base import (
     CheckpointRef,
     Generation,
@@ -526,7 +526,7 @@ class EvalPlan:
         """Whether nothing it does leaves the machine: the fake provider generates, the fake
         judge judges and nothing is published. ``PUP_READ_ONLY`` allows such a run."""
         return (
-            self.provider == "fake"
+            provider_info(self.provider, self.runtime).offline
             and self.judge.provider == "fake"
             and (self.compare is None or self.compare.offline)
             and (self.evaluators is None or self.evaluators.offline)

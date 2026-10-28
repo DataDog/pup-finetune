@@ -137,8 +137,8 @@ like a budget-capped run, a cancelled run is evaluated by `evaluate` on request 
 epoch; one cancelled before any epoch has nothing to evaluate). Evaluating a real run is paid
 and needs the judge's key (the default judge follows the keys there are; see below); the
 preview is free and allowed with `PUP_READ_ONLY` set, evaluating is not (an offline one, on the
-fake provider and judge and not published, is allowed: nothing leaves the machine; `train` and
-`resume` on the fake provider likewise). A changed `--max-tokens`, judge, seed or cap needs a
+fake provider and judge and not published, is allowed: nothing leaves the machine; `train`,
+`resume`, `deploy` and `undeploy` on the fake provider likewise). A changed `--max-tokens`, judge, seed or cap needs a
 new `--out-dir`. An evaluation whose pairs ended in errors (a sampler or judge outage) reports
 `complete_with_errors` with an error count and a `next_command` that retries them, and exits
 1 when a target has no verdict at all; a cancelled one reports `partial`. `evaluator_errors`
@@ -465,9 +465,12 @@ Source lives under `src/pup_finetune/`.
   (`NotADatasetDir`, `NotARunDir`, `RunDirNotEmpty`, `SettingsConflict`, `WrongPhase`) are
   both a `UsageError` and a `StateError`, so code that caught either still does, and exit 2;
   `Interrupted` is a Ctrl-C or SIGTERM. The `--confirm` and read-only guards
-  (`require_confirm(..., read_only=...)` adds `read_only` to a preview and offers no
-  `--confirm`), `READ_ONLY_HINT`, and `install_hint` / `reinstall_hint`, the one wording of
-  how to install an extra (`uv sync --all-extras`, never a bare `uv sync --extra X`).
+  (`require_approval`, the one gate of every paid or remote-changing command: with
+  `--confirm`, `require_writable` refuses it under `PUP_READ_ONLY` unless it runs `offline`;
+  without, `require_confirm` previews it with `offline` in the preview, adding `read_only`
+  and offering no `--confirm` when read-only mode would refuse it), `READ_ONLY_HINT`, and
+  `install_hint` / `reinstall_hint`, the one wording of how to install an extra (`uv sync
+  --all-extras`, never a bare `uv sync --extra X`).
   `tests/test_hint_commands.py` parses every backticked `pup finetune ...` in a string in
   `src/` with the app and holds every backticked `uv ...` to an allowlist.
 - `next_steps.py` - the `next_command` rule (see Conventions): `command` (every word quoted),
@@ -1145,10 +1148,14 @@ Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds can
   (the provider's sentence: what it bills for and the usage counted, never a dollar figure
   we cannot compute), `data_recipients`, `rows`, `settings` (the resolved values that will
   be used, each value a default resolved to with its source, e.g. `rank_source`),
-  `defaults_used` and `warnings`.
+  `defaults_used`, `warnings` and `offline` (whether nothing it does leaves the machine; the
+  cards read it, never the billing sentence or the provider's name).
 - Honor `PUP_READ_ONLY`: reject every remote write and paid run when it is set. Previews still
   run (they make no remote write) and say so: `"read_only"` in the preview and `next_command`
   null. A run that never leaves the machine (the offline fake provider and judge) is allowed.
+  Every such command goes through `errors.require_approval`, with `offline` from one source:
+  `ProviderInfo.offline` for a provider, an evaluation's or benchmark's plan for those
+  (`tests/cli/test_approval_gate.py` runs each one against the rule).
 - Never ignore what the user asked: an option that does nothing without another one is a
   usage error (add it to its command's table for `_flags.require_enablers`), and a preview
   names every recipient of the data it would send in `data_recipients`.

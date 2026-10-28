@@ -228,10 +228,13 @@ def reinstall_hint(extra: str) -> str:
     )
 
 
-def require_writable(runtime: Runtime, action: str, *, what: str = "a remote write") -> None:
+def require_writable(
+    runtime: Runtime, action: str, *, what: str = "a remote write", offline: bool = False
+) -> None:
     """Raise :class:`ReadOnlyError` when ``PUP_READ_ONLY`` forbids ``action``, which is
-    ``what`` (a remote write; :data:`PAID_RUN` for training and evaluating)."""
-    if runtime.read_only:
+    ``what`` (a remote write; :data:`PAID_RUN` for training and evaluating), unless it runs
+    ``offline``: nothing it does leaves the machine."""
+    if runtime.read_only and not offline:
         raise ReadOnlyError(f"{action} is {what} and PUP_READ_ONLY is set", hint=READ_ONLY_HINT)
 
 
@@ -283,4 +286,32 @@ def require_confirm(
         preview=preview,
         rerun=rerun,
         hint=hint,
+    )
+
+
+def require_approval(
+    runtime: Runtime,
+    action: str,
+    *,
+    confirm: bool,
+    offline: bool,
+    preview: Mapping[str, Any],
+    rerun: str,
+    what: str = "a remote write",
+) -> None:
+    """The gate of every paid or remote-changing ``action``, which is ``what`` to
+    ``PUP_READ_ONLY``: return when ``confirm`` approves it and read-only mode allows it.
+
+    ``PUP_READ_ONLY`` refuses ``--confirm`` (:func:`require_writable`) and a preview offers
+    none, unless the action runs ``offline``: nothing it does leaves the machine (the offline
+    fake provider and judge). Without ``confirm``, :func:`require_confirm` previews it, and
+    the preview says under ``offline`` whether it runs offline.
+    """
+    if confirm:
+        require_writable(runtime, action, what=what, offline=offline)
+    require_confirm(
+        confirm,
+        {**preview, "offline": offline},
+        rerun,
+        read_only=runtime.read_only and not offline,
     )

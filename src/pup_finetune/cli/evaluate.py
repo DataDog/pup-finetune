@@ -45,7 +45,7 @@ from pup_finetune.cli._presentation import (
     describe,
 )
 from pup_finetune.cli._views import evaluation_view
-from pup_finetune.errors import PAID_RUN, require_confirm, require_writable
+from pup_finetune.errors import PAID_RUN, require_approval
 from pup_finetune.evaluation import runner
 from pup_finetune.judge_models import BY_KEY
 
@@ -300,14 +300,16 @@ def evaluate(
         evaluators=evaluators,
     )
     evaluation = runner.plan_standalone(runtime, run_dir, settings)
-    # PUP_READ_ONLY refuses paid and remote runs, not one that never leaves the machine.
-    offline = evaluation.plan.offline
-    if confirm and not offline:
-        require_writable(runtime, f"evaluating on {evaluation.provider.name}", what=PAID_RUN)
     rerun = [*evaluation.plan.evaluate_command(evaluators=True), "--confirm"]
     preview = _with_source(_with_defaults_used(evaluation.preview(), current_context()), source)
-    require_confirm(
-        confirm, preview, shlex.join(rerun), read_only=runtime.read_only and not offline
+    require_approval(
+        runtime,
+        f"evaluating on {evaluation.provider.name}",
+        what=PAID_RUN,
+        confirm=confirm,
+        offline=evaluation.plan.offline,
+        preview=preview,
+        rerun=shlex.join(rerun),
     )
     outcome = evaluation.execute()
     code = runner.evaluation_exit_code(outcome)

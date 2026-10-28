@@ -368,6 +368,8 @@ def test_a_gated_command_runs_only_when_approved_and_allowed(
         if not refused:
             assert offered.endswith(" --confirm")
         assert ("read_only" in data["preview"]) is refused
+        if gated.read_only_refuses:
+            assert data["preview"]["offline"] is bool(gated.offline)
         assert not gated.ran(world)
     elif refused:
         assert result.exit_code == 2, result.stderr

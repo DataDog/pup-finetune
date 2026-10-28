@@ -80,6 +80,7 @@ from pup_finetune.errors import (
     NotARunDir,
     UsageError,
     WrongPhase,
+    require_approval,
     require_confirm,
     require_writable,
 )
@@ -1087,16 +1088,14 @@ def train(
         rerun += ["--remote", "--team", rplan.team]
     if plan is not None:
         rerun += plan.train_flags()
-    # PUP_READ_ONLY refuses paid and remote runs; one that never leaves the machine (the
-    # offline fake provider, and an evaluation that is offline too) is allowed.
-    offline = provider.name == "fake" and (plan is None or plan.offline)
-    if confirm and not offline:
-        require_writable(runtime, f"training on {provider.name}", what=PAID_RUN)
-    require_confirm(
-        confirm,
-        preview,
-        shlex.join([*rerun, "--confirm"]),
-        read_only=runtime.read_only and not offline,
+    require_approval(
+        runtime,
+        f"training on {provider.name}",
+        what=PAID_RUN,
+        confirm=confirm,
+        offline=provider_info(provider.name, runtime).offline and (plan is None or plan.offline),
+        preview=preview,
+        rerun=shlex.join([*rerun, "--confirm"]),
     )
     # A new ./runs gets a .gitignore: runs hold trace-derived rows.
     notes = ignore_new_parent(run_dir)
@@ -1271,9 +1270,11 @@ def _run_settings(run: RunDir, manifest: Mapping[str, Any]) -> dict[str, Any]:
     return run.spec().resolved_settings(run.profile())
 
 
-def _resume_billing(provider: Provider, mode: WorkerMode, usage: TrainingUsage) -> str:
+def _resume_billing(
+    provider: Provider, mode: WorkerMode, usage: TrainingUsage, *, offline: bool
+) -> str:
     if mode == "finalize":
-        if provider.name == "fake":
+        if offline:
             return f"{OFFLINE_BILLING}: it trains nothing, only promotes the best checkpoint"
         return (
             f"{provider.name} bills the session that promotes the best checkpoint at its own "
@@ -1316,6 +1317,7 @@ def resume(
             "<PROVIDER> --dataset <DIR> --model <MODEL>`)"
         )
         raise
+    registered = provider_info(str(manifest["provider"]), runtime)
     provider, inputs = load_run_inputs(run, runtime, finalize_only=mode == "finalize")
     action, resume_from = _resume_action(mode, state)
     spec = run.spec()
@@ -1325,7 +1327,7 @@ def resume(
     rows = _rows(inputs)
     preview = {
         "action": action,
-        "billing": _resume_billing(provider, mode, usage),
+        "billing": _resume_billing(provider, mode, usage, offline=registered.offline),
         "run_id": manifest["run_id"],
         "run_dir": display_path(run_dir),
         **_by_id(source),
@@ -1351,14 +1353,14 @@ def resume(
             f"this run trained in {job_name(sync.view)}; this resume trains on this machine"
         )
     rerun = [*PROGRAM, "resume", str(run_dir), *(["--detach"] if detach else [])]
-    offline = provider.name == "fake"
-    if confirm and not offline:
-        require_writable(runtime, f"training on {provider.name}", what=PAID_RUN)
-    require_confirm(
-        confirm,
-        preview,
-        shlex.join([*rerun, "--confirm"]),
-        read_only=runtime.read_only and not offline,
+    require_approval(
+        runtime,
+        f"training on {provider.name}",
+        what=PAID_RUN,
+        confirm=confirm,
+        offline=registered.offline,
+        preview=preview,
+        rerun=shlex.join([*rerun, "--confirm"]),
     )
     if detach:
         return _with_source(
@@ -1801,8 +1803,12 @@ def worker(
             # It runs what `train --confirm` or `resume --confirm` already allowed, but is a
             # command of its own: PUP_READ_ONLY must stop it too.
             provider_name = str(run.manifest()["provider"])
-            if provider_name != "fake":
-                require_writable(runtime, f"training on {provider_name}", what=PAID_RUN)
+            require_writable(
+                runtime,
+                f"training on {provider_name}",
+                what=PAID_RUN,
+                offline=provider_info(provider_name, runtime).offline,
+            )
             info(f"worker {os.getpid()} started: {mode} {run_dir}")
             provider, inputs = load_run_inputs(run, runtime, finalize_only=mode == "finalize")
             result = run_in_dir(provider, run, mode, inputs, on_event=TrainingProgress())

@@ -86,7 +86,7 @@ from pup_finetune.datadog.spans import (
     parse_time_bound,
 )
 from pup_finetune.display import counted, display_path
-from pup_finetune.errors import SettingsConflict, UsageError, require_confirm, require_writable
+from pup_finetune.errors import SettingsConflict, UsageError, require_approval
 from pup_finetune.next_steps import command, step, template
 from pup_finetune.output import info
 from pup_finetune.storage import atomic_write_text, ensure_private_dir
@@ -836,15 +836,14 @@ def push(
     plan = plan_push(dataset, project=project, name=name)
     plan.require_rows()
     if plan.needs_remote:
-        preview = _push_preview(plan, defaults_used)
-        if confirm:
-            require_writable(runtime, "dataset push")
         # The preview reads local files only, so it is allowed under PUP_READ_ONLY.
-        require_confirm(
-            confirm,
-            preview,
-            command(*rerun, "--confirm"),
-            read_only=runtime.read_only,
+        require_approval(
+            runtime,
+            "dataset push",
+            confirm=confirm,
+            offline=False,
+            preview=_push_preview(plan, defaults_used),
+            rerun=command(*rerun, "--confirm"),
         )
         receipt = push_dataset(
             dataset, project=plan.project, name=plan.dataset_name, pup=Pup(), progress=info

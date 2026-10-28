@@ -222,7 +222,10 @@ class BenchmarkPlan:
         judges. ``PUP_READ_ONLY`` allows such a run."""
         return (
             self.judge.provider == "fake"
-            and all(candidate.provider == "fake" for candidate in self.candidates)
+            and all(
+                provider_info(candidate.provider, self.runtime).offline
+                for candidate in self.candidates
+            )
             and (self.evaluators is None or self.evaluators.offline)
         )
 

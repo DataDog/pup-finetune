@@ -33,6 +33,7 @@ from pup_finetune.providers.base import ModelProfile, Sampler
 from pup_finetune.providers.fake import FakeBackend, FakeProvider, FakeRenderer
 from pup_finetune.rendering.base import ChatMessage, RendererError, RendererErrorCode, ToolSpec
 from pup_finetune.storage import DirectoryLock
+from tests.fakes.pushed import mark_pushed
 from tests.fakes.rows import (
     import_with_opening_assistant_test_row,
     import_with_refused_test_row,
@@ -632,8 +633,8 @@ def test_the_preview_fails_without_the_key_of_a_provider_it_generates_with(
         dev_only=True,
         models={"fake-model": ("fake-model",)},
         credential="fireworks",
-        offline=True,
     )
+    mark_pushed(dataset)  # a provider that leaves the machine needs the dataset in Datadog
     models = "fake/fake-model,keyed/fake-model"
 
     result = invoke("benchmark", str(dataset), "--models", models)
