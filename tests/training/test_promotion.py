@@ -15,12 +15,14 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from pup_finetune.errors import FinetuneError
+from pup_finetune.errors import ExternalError, FinetuneError
 from pup_finetune.providers.base import (
     MAX_MODEL_ID_LEN,
     MODEL_ID_PATTERN,
+    CheckpointRef,
     LoraConfig,
     ModelRef,
+    TrainingSession,
     TrainSpec,
 )
 from pup_finetune.providers.fake import (
@@ -162,6 +164,47 @@ def test_a_spend_guard_can_refuse_re_creating_a_sampler_checkpoint() -> None:
     assert info.value.result.best_epoch == 1
     assert backend.promoted == []
     assert [ref.kind for ref in backend.saved if ref.kind == "sampler"] == []
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class SlowLoads(RecordingSession):
+    """A session whose weight loads take ``load_s`` seconds on ``clock``."""
+
+    def __init__(self, inner: TrainingSession, clock: Clock, load_s: float) -> None:
+        super().__init__(inner)
+        self.clock, self.load_s = clock, load_s
+
+    def load_weights(self, ckpt: CheckpointRef) -> None:
+        super().load_weights(ckpt)
+        self.clock.now += self.load_s
+
+
+def test_a_re_created_sampler_checkpoint_is_not_saved_once_loading_spent_the_budget() -> None:
+    options = FakeOptions(val_curve=[1.0, 2.0, 3.0])
+    cancelled = train(
+        FakeBackend(options), spec(patience=5), state=MemoryState(cancel_after_steps=3)
+    )
+    clock = Clock()
+    budget = Budget(max_spend_usd=1.0, hourly_rate_usd=3600.0, clock=clock)
+    budget.start()
+    clock.now = 0.8  # 0.80 of 1.00 USD spent: enough left to start loading the weights
+    guarded = dataclasses.replace(
+        promotion(), spend_guard=lambda: budget.spend_exhausted(use_reserve=True)
+    )
+    backend = FakeBackend(options)  # a new process: the best epoch's session has ended
+    with backend.open_session(FAKE_PROFILE, LORA, **SESSION) as inner:
+        session = SlowLoads(inner, clock, load_s=0.5)
+        with pytest.raises(ExternalError, match="reached max_spend_usd"):
+            guarded(session, cancelled)
+    assert session.saved == []
+    assert backend.promoted == []
 
 
 def test_a_spend_guard_is_not_asked_when_nothing_is_re_created() -> None:
