@@ -17,9 +17,10 @@ from typing import Any
 import pytest
 
 from pup_finetune.errors import StateError
-from pup_finetune.providers.base import LogLine
+from pup_finetune.providers.base import CheckpointRef, LogLine
 from pup_finetune.runs import RunDir, RunState
 from pup_finetune.storage import atomic_write_json
+from pup_finetune.training.records import EpochMetrics, ResumePoint
 from pup_finetune.training.report import (
     MAX_CHUNK,
     Snapshot,
@@ -27,6 +28,7 @@ from pup_finetune.training.report import (
     apply_snapshot,
     encode,
     newest_snapshot,
+    read_snapshot,
 )
 from pup_finetune.training.worker import record_worker_exit
 
@@ -206,3 +208,114 @@ def test_apply_refuses_what_is_not_a_run_s_files(tmp_path: Path, files: dict[str
         )
     assert run.state_path.read_text() == before
     assert not run.epochs_path.exists()
+
+
+def checkpoint(kind: str, epoch: int) -> CheckpointRef:
+    return CheckpointRef(
+        kind=kind,
+        name=f"{kind[0]}{epoch}s{2 * epoch}",
+        uri=f"fake://{kind}/{epoch}",
+        epoch=epoch,
+        step=2 * epoch,
+        created_in_session="job-session",
+    )
+
+
+def end_of(epoch: int) -> ResumePoint:
+    return ResumePoint(
+        checkpoint=checkpoint("training", epoch),
+        epoch=epoch,
+        step=2 * epoch,
+        steps_in_epoch=2,
+        epoch_loss_sum=2.0,
+        epoch_weight=2.0,
+        epoch_tokens=8,
+        train_tokens=8 * epoch,
+        elapsed_seconds=60.0 * epoch,
+    )
+
+
+def finished(epoch: int) -> EpochMetrics:
+    return EpochMetrics(
+        epoch=epoch,
+        steps=2,
+        train_loss=1.0,
+        val_loss=1.0 / epoch,
+        train_tokens=8,
+        new_best=True,
+        training_ckpt=checkpoint("training", epoch),
+        sampler_ckpt=checkpoint("sampler", epoch),
+    )
+
+
+def finish_epoch(run: RunDir, epoch: int) -> None:
+    """Record epoch ``epoch``'s end as training does: its checkpoint, then the epoch."""
+    state = run.load_state()
+    state.record_checkpoint(end_of(epoch).checkpoint, resume_point=end_of(epoch))
+    state.record_epoch(finished(epoch), best=finished(epoch))
+
+
+def training_run(tmp_path: Path) -> RunDir:
+    run = run_dir(tmp_path)
+    saved(run, datetime(2026, 10, 9, 11, 0, tzinfo=UTC), phase="training")
+    finish_epoch(run, 1)
+    return run
+
+
+class TrainsDuringRead(RunDir):
+    """A run whose trainer finishes epoch 2 just before ``file`` is first opened."""
+
+    def __init__(self, path: Path, file: str) -> None:
+        super().__init__(path)
+        self.file = file
+        self.trained = False
+
+    def _opened(self, name: str) -> Path:
+        if name == self.file and not self.trained:
+            self.trained = True
+            finish_epoch(RunDir(self.path), 2)
+        return self.path / name
+
+    @property
+    def state_path(self) -> Path:
+        return self._opened("state.json")
+
+    @property
+    def epochs_path(self) -> Path:
+        return self._opened("epochs.json")
+
+    @property
+    def result_path(self) -> Path:
+        return self._opened("result.json")
+
+
+@pytest.mark.parametrize("file", ["state.json", "epochs.json", "result.json"])
+def test_a_snapshot_taken_while_an_epoch_is_recorded_can_be_resumed_from(
+    tmp_path: Path, file: str
+) -> None:
+    run = training_run(tmp_path)
+    taken = read_snapshot(TrainsDuringRead(run.path, file), seq=1, final=False)
+    finished_epochs = len(taken.files["epochs.json"])
+    point = taken.files["state.json"]["resume_point"]["epoch"]
+    assert finished_epochs <= point <= finished_epochs + 1
+
+
+def test_apply_refuses_a_checkpoint_older_than_the_finished_epochs(tmp_path: Path) -> None:
+    run = training_run(tmp_path)
+    before = {path: path.read_bytes() for path in (run.state_path, run.epochs_path)}
+    state = RunState(run, phase="training", epochs=1, resume_point=end_of(1).to_json())
+    stale = Snapshot(
+        run_id=RUN_ID,
+        seq=5,
+        at="2026-10-09T12:00:00+00:00",
+        final=False,
+        files={
+            "state.json": state.to_json(),
+            "epochs.json": [finished(1).to_json(), finished(2).to_json()],
+            "result.json": None,
+        },
+        exit_error=None,
+    )
+    with pytest.raises(StateError):
+        apply_snapshot(run, stale)
+    assert {path: path.read_bytes() for path in before} == before
