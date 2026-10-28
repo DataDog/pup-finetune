@@ -346,8 +346,12 @@ class PublishSettings:
         return (*TARGETS, COMPARE) if self.compare is not None else TARGETS
 
     def replayed(self, target: str, cases: Sequence[ReplayCase]) -> Sequence[ReplayCase]:
-        """The cases ``target`` replayed: its :attr:`replays`, else every one of ``cases``."""
-        return self.replays.get(target, cases)
+        """Those of ``cases`` that ``target`` replayed: in its :attr:`replays`, when it has
+        an entry there."""
+        if target not in self.replays:
+            return cases
+        allowed = {case.id for case in self.replays[target]}
+        return [case for case in cases if case.id in allowed]
 
     @property
     def dataset_id(self) -> str:
