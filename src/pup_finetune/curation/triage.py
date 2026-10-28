@@ -87,6 +87,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
+from pup_finetune.billing import billing_fields
 from pup_finetune.concurrency import DaemonPool
 from pup_finetune.curation.labels import Label, LabelReport, apply_labels
 from pup_finetune.data.dataset_dir import DatasetDir
@@ -95,7 +96,7 @@ from pup_finetune.data.schema import TrainingRow
 from pup_finetune.display import counted, display_path
 from pup_finetune.errors import ExternalError, SettingsConflict, StateError, UsageError
 from pup_finetune.judge_models import alias_of
-from pup_finetune.providers.base import ProviderAuthError, billing_fields
+from pup_finetune.providers.base import ProviderAuthError
 from pup_finetune.redaction import redact
 from pup_finetune.storage import (
     DirectoryLock,
@@ -683,13 +684,10 @@ class TriagePlan:
         preview: dict[str, Any] = {
             "action": action,
             **billing_fields(
-                (
-                    billing(
-                        config,
-                        sum(pending[spec] for spec in group),
-                        input_tokens=sum(tokens.get(spec, 0) for spec in group),
-                    ),
-                    config.offline,
+                billing(
+                    config,
+                    sum(pending[spec] for spec in group),
+                    input_tokens=sum(tokens.get(spec, 0) for spec in group),
                 )
                 for config, group in _by_provider(configs)
             ),

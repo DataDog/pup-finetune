@@ -46,6 +46,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
+from pup_finetune.billing import billing_fields
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.display import display_path, joined
 from pup_finetune.errors import ExternalError, SettingsConflict, UsageError
@@ -80,6 +81,7 @@ from pup_finetune.providers import (
     provider_info,
     providers_for_model,
     require_packages,
+    sampling_billing,
 )
 from pup_finetune.providers import require_key as require_provider_key
 from pup_finetune.providers.base import (
@@ -88,7 +90,6 @@ from pup_finetune.providers.base import (
     ModelProfile,
     Sampler,
     SamplingUsage,
-    billing_fields,
 )
 from pup_finetune.redaction import redact
 from pup_finetune.rendering.base import Renderer, RendererError
@@ -479,7 +480,7 @@ class BenchmarkPlan:
 
         judge = (
             "the offline fake judge (judge; nothing is sent)"
-            if self.judge.provider == "fake"
+            if self.judge.offline
             else f"{recipient(self.judge)} (judge)"
         )
         generate = f"{', '.join(providers)} (generate), " if providers else ""
@@ -549,15 +550,14 @@ class BenchmarkPlan:
         if judge_calls + calibration:
             require_key(self.judge, warnings=soft)
         billing = [
-            (
-                get_provider(name, self.runtime).sampling_billing(
-                    SamplingUsage(calls=calls, max_tokens_per_call=settings.max_tokens)
-                ),
-                provider_info(name, self.runtime).offline,
+            sampling_billing(
+                name,
+                self.runtime,
+                SamplingUsage(calls=calls, max_tokens_per_call=settings.max_tokens),
             )
             for name, calls in calls_by_provider.items()
         ]
-        billing.append((judge_billing(self.judge, judge_calls + calibration), self.judge.offline))
+        billing.append(judge_billing(self.judge, judge_calls + calibration))
         evaluated = None
         scoring: list[str] = []
         if (evaluators := self.evaluators) is not None:
@@ -586,7 +586,7 @@ class BenchmarkPlan:
         judge_name = "the fake judge" if self.judge.provider == "fake" else self.judge.spec
         judged_at = (
             "the offline fake judge (nothing is sent)"
-            if self.judge.provider == "fake"
+            if self.judge.offline
             else destination(self.judge)
         )
         sampled = "" if self.sampled_from is None else f" (of {self.sampled_from}, --max-rows)"

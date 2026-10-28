@@ -478,6 +478,11 @@ Source lives under `src/pup_finetune/`.
   `template` (a `next_steps` command, `<UPPER_CASE>` placeholders left as they are), `step`
   and `problems`, which checks a result against the rule (the test conftest runs it on every
   emitted result; tests that break it on purpose are marked `any_next_command`).
+- `billing.py` - a preview's `billing` and `paid_billing`: `BillingPart`, one part's
+  sentence and whether it runs offline, which every function that writes a billing sentence
+  returns (`judges.billing`, the registry's `training_billing` and `sampling_billing`, which
+  read `ProviderInfo.offline`); `billing_fields` builds both fields and `merge_billing`
+  adds a sub-preview's to its parent's, so the two are always written together.
 - `display.py` - how values read in results and hints: `display_path` (relative to the
   current directory when inside it, else absolute; `next_steps.command` and the hints'
   `quoted`, the shell-quoted `word`,
@@ -1148,7 +1153,7 @@ Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds can
 - A preview is the approval: `action` (one sentence of what `--confirm` does), `billing`
   (the provider's sentence: what it bills for and the usage counted, never a dollar figure
   we cannot compute; `paid_billing` lists its parts that bill, none of an offline provider
-  or judge, and `providers/base.py`'s `billing_fields` builds both), `data_recipients`,
+  or judge, and `billing.py`'s `billing_fields` builds both), `data_recipients`,
   `rows`, `settings` (the resolved values that will be used, each value a default resolved
   to with its source, e.g. `rank_source`), `defaults_used`, `warnings` and `offline`
   (whether nothing it does leaves the machine). The cards read `offline` and

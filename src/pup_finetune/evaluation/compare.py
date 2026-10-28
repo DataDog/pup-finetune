@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Final, Literal
 
 from pup_finetune.anthropic_messages import anthropic_messages
+from pup_finetune.billing import BillingPart
 from pup_finetune.data.split import split_position
 from pup_finetune.display import joined, quoted
 from pup_finetune.errors import SettingsConflict, StateError, UsageError
@@ -164,8 +165,8 @@ class CompareTarget:
             return "the offline fake compare model (nothing is sent)"
         return f"{self.spec} on {destination(self.config)}"
 
-    def billing(self, calls: int) -> str:
-        """What ``calls`` compare-model calls bill, in one sentence for a preview."""
+    def billing(self, calls: int) -> BillingPart:
+        """What ``calls`` compare-model calls bill, as a preview's billing part."""
         from pup_finetune.judges import billing
 
         return billing(self.config, calls, what="compare-model")

@@ -45,6 +45,7 @@ from typing import Annotated, Any, Final
 import typer
 from pydantic import ValidationError
 
+from pup_finetune.billing import BillingPart, billing_fields, merge_billing
 from pup_finetune.cli._common import (
     CommandResult,
     current_context,
@@ -100,6 +101,7 @@ from pup_finetune.providers import (
     require_packages,
     require_remote,
     require_supported_flags,
+    training_billing,
 )
 from pup_finetune.providers.base import (
     MAX_SEQ_LEN_FLAG,
@@ -110,7 +112,6 @@ from pup_finetune.providers.base import (
     RemotePlan,
     TrainingUsage,
     TrainSpec,
-    billing_fields,
 )
 from pup_finetune.rendering.base import Renderer
 from pup_finetune.runs import (
@@ -448,7 +449,7 @@ def _preview(
     provider_source: str,
     defaults_used: Sequence[str],
     max_seq_len_flag: str,
-    offline: bool,
+    runtime: Runtime,
 ) -> dict[str, Any]:
     warnings = []
     if not inputs.validation_rows:
@@ -465,7 +466,7 @@ def _preview(
     max_steps = spec.max_steps(len(inputs.train_rows))
     return {
         "action": _action(profile, spec, rows),
-        **billing_fields([(provider.training_billing(usage), offline)]),
+        **billing_fields([training_billing(provider, runtime, usage)]),
         "provider": provider.name,
         "provider_source": provider_source,
         "model": profile.alias,
@@ -606,8 +607,7 @@ def _add_remote_preview(
         f", in a Baseten CPU job in team {plan.team} that runs the training loop, so training "
         "continues while this machine sleeps"
     )
-    preview["billing"] += f"; {plan.billing}"
-    preview["paid_billing"].append(plan.billing)
+    merge_billing(preview, billing_fields([BillingPart(plan.billing, offline=False)]))
     preview["data_destination"] += (
         "; the train and validation rows, their split assignments, the run files and "
         "pup-finetune's source are uploaded to Baseten storage for the job"
@@ -1027,7 +1027,7 @@ def train(
         provider_source=provider_source,
         defaults_used=defaults_used,
         max_seq_len_flag=seq_flag,
-        offline=provider_info(provider.name, runtime).offline,
+        runtime=runtime,
     )
     rplan: RemotePlan | None = None
     if remote:
@@ -1069,8 +1069,7 @@ def train(
         )
         preview["action"] += f", then {preview['evaluation']['action']}"
         # Each part names who bills it, so the card can say who bills what.
-        preview["billing"] += f"; {preview['evaluation']['billing']}"
-        preview["paid_billing"] += preview["evaluation"]["paid_billing"]
+        merge_billing(preview, preview["evaluation"])
         # The consent fields name every recipient, the evaluation's judge included.
         preview["data_destination"] += f"; {preview['evaluation']['data_destination']}"
         preview["data_recipients"] += preview["evaluation"]["data_recipients"]
@@ -1276,16 +1275,20 @@ def _run_settings(run: RunDir, manifest: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _resume_billing(
-    provider: Provider, mode: WorkerMode, usage: TrainingUsage, *, offline: bool
-) -> str:
-    if mode == "finalize":
-        if offline:
-            return f"{OFFLINE_BILLING}: it trains nothing, only promotes the best checkpoint"
-        return (
-            f"{provider.name} bills the session that promotes the best checkpoint at its own "
-            "rates, which pup-finetune does not know: it trains nothing"
+    provider: Provider, runtime: Runtime, mode: WorkerMode, usage: TrainingUsage
+) -> BillingPart:
+    if mode != "finalize":
+        return training_billing(provider, runtime, usage)
+    if provider_info(provider.name, runtime).offline:
+        return BillingPart(
+            f"{OFFLINE_BILLING}: it trains nothing, only promotes the best checkpoint",
+            offline=True,
         )
-    return provider.training_billing(usage)
+    return BillingPart(
+        f"{provider.name} bills the session that promotes the best checkpoint at its own "
+        "rates, which pup-finetune does not know: it trains nothing",
+        offline=False,
+    )
 
 
 @run_command
@@ -1333,14 +1336,7 @@ def resume(
     rows = _rows(inputs)
     preview = {
         "action": action,
-        **billing_fields(
-            [
-                (
-                    _resume_billing(provider, mode, usage, offline=registered.offline),
-                    registered.offline,
-                )
-            ]
-        ),
+        **billing_fields([_resume_billing(provider, runtime, mode, usage)]),
         "run_id": manifest["run_id"],
         "run_dir": display_path(run_dir),
         **_by_id(source),

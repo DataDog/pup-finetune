@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal
 
+from pup_finetune.billing import BillingPart, billing_fields
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.push import (
     PUSH_FILE,
@@ -70,7 +71,12 @@ from pup_finetune.errors import (
 from pup_finetune.next_steps import PROGRAM, command, step, template
 from pup_finetune.output import info
 from pup_finetune.progress import EvaluationProgress
-from pup_finetune.providers import get_provider, provider_info, require_packages
+from pup_finetune.providers import (
+    get_provider,
+    provider_info,
+    require_packages,
+    sampling_billing,
+)
 from pup_finetune.providers.base import (
     CheckpointRef,
     Generation,
@@ -79,7 +85,6 @@ from pup_finetune.providers.base import (
     Provider,
     Sampler,
     TrainingSession,
-    billing_fields,
 )
 from pup_finetune.redaction import redact
 from pup_finetune.runs import (
@@ -683,7 +688,7 @@ class EvalPlan:
             sent.append(self.compare.recipient())
         sent.append(
             "the offline fake judge (judge; nothing is sent)"
-            if self.judge.provider == "fake"
+            if self.judge.offline
             else f"{recipient(self.judge)} (judge)"
         )
         found = [f"test split -> {', '.join(sent)}"]
@@ -822,7 +827,7 @@ class EvalPlan:
         trajectories = len({case.row_id for case in self.cases})
         judged_at = (
             "the offline fake judge (nothing is sent)"
-            if self.judge.provider == "fake"
+            if self.judge.offline
             else judge_destination(self.judge)
         )
         generators = [self.provider] if trained else []
@@ -883,14 +888,13 @@ class EvalPlan:
             for target in TARGETS
             if not by_target[target]["generate"] and not (target == "base" and from_store)
         ]
-        billing: list[tuple[str, bool]] = []
+        billing: list[BillingPart] = []
         if trained:
             billing.append(
-                (
-                    get_provider(self.provider, self.runtime).sampling_billing(
-                        SamplingUsage(calls=trained, max_tokens_per_call=settings.max_tokens)
-                    ),
-                    provider_info(self.provider, self.runtime).offline,
+                sampling_billing(
+                    self.provider,
+                    self.runtime,
+                    SamplingUsage(calls=trained, max_tokens_per_call=settings.max_tokens),
                 )
             )
         if self.compare is not None and compared:
@@ -899,10 +903,10 @@ class EvalPlan:
                 if work.probe
                 else self.compare.spec
             )
-            billing.append((self.compare.billing(compared), self.compare.offline))
+            billing.append(self.compare.billing(compared))
         elif self.compare is not None:
             reused.append("compare")
-        billing.append((judge_billing(self.judge, judge_calls), self.judge.offline))
+        billing.append(judge_billing(self.judge, judge_calls))
         if evaluated is not None:
             billing.extend(evaluated.billing)
         steps = [_store_step(taken)] if from_store else []
@@ -1112,8 +1116,7 @@ class EvaluatorsPreview:
     """What the user's evaluators add to a preview."""
 
     block: dict[str, Any]
-    billing: list[tuple[str, bool]]
-    """Each part of what they bill, and whether it runs offline."""
+    billing: list[BillingPart]
     recipients: list[str]
     notes: list[str]
     warnings: list[str]
@@ -1179,7 +1182,7 @@ def evaluators_preview(
             recipients.append(
                 f"test cases and answers -> the offline fake judge (evaluator {evaluator.name}; "
                 "nothing is sent)"
-                if config.provider == "fake"
+                if config.offline
                 else f"test cases and answers -> {recipient(config)} (evaluator {evaluator.name})"
             )
         items.append(
@@ -1207,10 +1210,7 @@ def evaluators_preview(
             "headline": evaluators.headline,
             "items": items,
         },
-        billing=[
-            (billing(config, count, what="evaluator"), config.offline)
-            for config, count in calls.values()
-        ],
+        billing=[billing(config, count, what="evaluator") for config, count in calls.values()],
         recipients=recipients,
         notes=notes,
         warnings=uncalibrated(evaluators, reports, calibrate=calibrate),
@@ -1467,7 +1467,7 @@ def open_evaluator_clients(
     from pup_finetune.judges import open_clients
 
     busy = [judge.config for judge in judges]
-    with open_clients([config for config in busy if config.provider != "fake"]) as clients:
+    with open_clients([config for config in busy if not config.offline]) as clients:
         found: dict[str, ChatCompleter] = {str(name): client for name, client in clients.items()}
         if any(config.provider == "fake" for config in busy):
             found["fake"] = FakeJudge()
