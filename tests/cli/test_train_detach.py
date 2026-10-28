@@ -109,7 +109,11 @@ def watch(run_dir: Path) -> dict[str, Any]:
     # the last attempt ended, and the line says the worker is starting.
     for line in progress:
         training = re.fullmatch(r"\d\d:\d\d:\d\d (training|created): epoch .*", line)
-        starting = re.fullmatch(r"\d\d:\d\d:\d\d .*: epoch .* \(worker pid \d+ starting\)", line)
+        starting = re.fullmatch(
+            r"\d\d:\d\d:\d\d (created|interrupted|failed|cancelled)( \([a-z_]+\))?: "
+            r"epoch .* \(worker pid \d+ starting\)",
+            line,
+        )
         assert training or starting, line
     assert summary.startswith(f"{final['phase']}: epoch "), summary
     assert summary.endswith(f". Next: {final['next_command']}"), summary
