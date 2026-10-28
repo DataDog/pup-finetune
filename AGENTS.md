@@ -1147,10 +1147,12 @@ Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds can
   conftest checks every emitted result against the rule.
 - A preview is the approval: `action` (one sentence of what `--confirm` does), `billing`
   (the provider's sentence: what it bills for and the usage counted, never a dollar figure
-  we cannot compute), `data_recipients`, `rows`, `settings` (the resolved values that will
-  be used, each value a default resolved to with its source, e.g. `rank_source`),
-  `defaults_used`, `warnings` and `offline` (whether nothing it does leaves the machine; the
-  cards read it, never the billing sentence or the provider's name).
+  we cannot compute; `paid_billing` lists its parts that bill, none of an offline provider
+  or judge, and `providers/base.py`'s `billing_fields` builds both), `data_recipients`,
+  `rows`, `settings` (the resolved values that will be used, each value a default resolved
+  to with its source, e.g. `rank_source`), `defaults_used`, `warnings` and `offline`
+  (whether nothing it does leaves the machine). The cards read `offline` and
+  `paid_billing`, never the billing sentence or the provider's name.
 - Honor `PUP_READ_ONLY`: reject every remote write and paid run when it is set. Previews still
   run (they make no remote write) and say so: `"read_only"` in the preview and `next_command`
   null. A run that never leaves the machine (the offline fake provider and judge) is allowed.

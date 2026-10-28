@@ -79,6 +79,7 @@ from pup_finetune.providers.base import (
     Provider,
     Sampler,
     TrainingSession,
+    billing_fields,
 )
 from pup_finetune.redaction import redact
 from pup_finetune.runs import (
@@ -882,11 +883,14 @@ class EvalPlan:
             for target in TARGETS
             if not by_target[target]["generate"] and not (target == "base" and from_store)
         ]
-        billing = []
+        billing: list[tuple[str, bool]] = []
         if trained:
             billing.append(
-                get_provider(self.provider, self.runtime).sampling_billing(
-                    SamplingUsage(calls=trained, max_tokens_per_call=settings.max_tokens)
+                (
+                    get_provider(self.provider, self.runtime).sampling_billing(
+                        SamplingUsage(calls=trained, max_tokens_per_call=settings.max_tokens)
+                    ),
+                    provider_info(self.provider, self.runtime).offline,
                 )
             )
         if self.compare is not None and compared:
@@ -895,10 +899,10 @@ class EvalPlan:
                 if work.probe
                 else self.compare.spec
             )
-            billing.append(self.compare.billing(compared))
+            billing.append((self.compare.billing(compared), self.compare.offline))
         elif self.compare is not None:
             reused.append("compare")
-        billing.append(judge_billing(self.judge, judge_calls))
+        billing.append((judge_billing(self.judge, judge_calls), self.judge.offline))
         if evaluated is not None:
             billing.extend(evaluated.billing)
         steps = [_store_step(taken)] if from_store else []
@@ -931,7 +935,7 @@ class EvalPlan:
         compare_max = 0 if self.compare is None else self.compare.config.max_tokens
         return {
             "action": action,
-            "billing": "; ".join(billing),
+            **billing_fields(billing),
             "run_id": self.run_id,
             "out_dir": display_path(self.out_dir),
             "rows": {"test": trajectories},
@@ -1108,7 +1112,8 @@ class EvaluatorsPreview:
     """What the user's evaluators add to a preview."""
 
     block: dict[str, Any]
-    billing: list[str]
+    billing: list[tuple[str, bool]]
+    """Each part of what they bill, and whether it runs offline."""
     recipients: list[str]
     notes: list[str]
     warnings: list[str]
@@ -1202,7 +1207,10 @@ def evaluators_preview(
             "headline": evaluators.headline,
             "items": items,
         },
-        billing=[billing(config, count, what="evaluator") for config, count in calls.values()],
+        billing=[
+            (billing(config, count, what="evaluator"), config.offline)
+            for config, count in calls.values()
+        ],
         recipients=recipients,
         notes=notes,
         warnings=uncalibrated(evaluators, reports, calibrate=calibrate),

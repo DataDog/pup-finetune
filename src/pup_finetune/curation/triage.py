@@ -95,7 +95,7 @@ from pup_finetune.data.schema import TrainingRow
 from pup_finetune.display import counted, display_path
 from pup_finetune.errors import ExternalError, SettingsConflict, StateError, UsageError
 from pup_finetune.judge_models import alias_of
-from pup_finetune.providers.base import ProviderAuthError
+from pup_finetune.providers.base import ProviderAuthError, billing_fields
 from pup_finetune.redaction import redact
 from pup_finetune.storage import (
     DirectoryLock,
@@ -682,11 +682,14 @@ class TriagePlan:
             action = f"label {which} the checks fail (free), {action}"
         preview: dict[str, Any] = {
             "action": action,
-            "billing": "; ".join(
-                billing(
-                    config,
-                    sum(pending[spec] for spec in group),
-                    input_tokens=sum(tokens.get(spec, 0) for spec in group),
+            **billing_fields(
+                (
+                    billing(
+                        config,
+                        sum(pending[spec] for spec in group),
+                        input_tokens=sum(tokens.get(spec, 0) for spec in group),
+                    ),
+                    config.offline,
                 )
                 for config, group in _by_provider(configs)
             ),

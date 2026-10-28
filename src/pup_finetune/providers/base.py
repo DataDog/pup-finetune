@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime
@@ -382,6 +382,16 @@ class SamplingUsage:
 OFFLINE_BILLING: Final = "the fake provider is offline and bills nothing"
 """How the offline fake provider's billing sentences start, before ``: `` and what it would
 use."""
+
+
+def billing_fields(parts: Iterable[tuple[str, bool]]) -> dict[str, Any]:
+    """A preview's ``billing``, every part of it ``; ``-separated, and ``paid_billing``, the
+    parts that bill, from each part's sentence and whether it runs offline."""
+    parts = list(parts)
+    return {
+        "billing": "; ".join(sentence for sentence, _ in parts),
+        "paid_billing": [sentence for sentence, offline in parts if not offline],
+    }
 
 
 def spend_cap_text(

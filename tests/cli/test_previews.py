@@ -265,6 +265,10 @@ def test_a_remote_train_card_says_where_the_loop_runs() -> None:
         ],
         "billing": "Baseten bills the trainer at its own rates: while it runs; Baseten bills "
         "the CPU job at its own rates: from the job's start until training ends",
+        "paid_billing": [
+            "Baseten bills the trainer at its own rates: while it runs",
+            "Baseten bills the CPU job at its own rates: from the job's start until training ends",
+        ],
     }
     lines = preview_card("train", preview)
     assert len(lines) == CARD_LINES

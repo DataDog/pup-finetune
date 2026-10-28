@@ -88,6 +88,7 @@ from pup_finetune.providers.base import (
     ModelProfile,
     Sampler,
     SamplingUsage,
+    billing_fields,
 )
 from pup_finetune.redaction import redact
 from pup_finetune.rendering.base import Renderer, RendererError
@@ -548,12 +549,15 @@ class BenchmarkPlan:
         if judge_calls + calibration:
             require_key(self.judge, warnings=soft)
         billing = [
-            get_provider(name, self.runtime).sampling_billing(
-                SamplingUsage(calls=calls, max_tokens_per_call=settings.max_tokens)
+            (
+                get_provider(name, self.runtime).sampling_billing(
+                    SamplingUsage(calls=calls, max_tokens_per_call=settings.max_tokens)
+                ),
+                provider_info(name, self.runtime).offline,
             )
             for name, calls in calls_by_provider.items()
         ]
-        billing.append(judge_billing(self.judge, judge_calls + calibration))
+        billing.append((judge_billing(self.judge, judge_calls + calibration), self.judge.offline))
         evaluated = None
         scoring: list[str] = []
         if (evaluators := self.evaluators) is not None:
@@ -599,7 +603,7 @@ class BenchmarkPlan:
                 f"left with {judge_name}"
             )
             + (f", and score each with {joined(scoring)}" if scoring else ""),
-            "billing": "; ".join(billing),
+            **billing_fields(billing),
             "dataset": display_path(self.dataset_dir),
             "out_dir": display_path(self.out_dir),
             "rows": {

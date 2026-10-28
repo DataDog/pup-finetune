@@ -1043,15 +1043,15 @@ OFFLINE: Final = "nothing: the fake provider runs offline"
 
 
 def _bills(preview: Mapping[str, Any]) -> str | None:
-    """Who bills what, from a preview's billing sentence: the head (before ``: ``) of each
-    ``; ``-separated part that has one, each once, with "at rates pup-finetune does not
-    know" said once; nothing for a preview that runs offline."""
-    billing = preview.get("billing")
-    if _offline(preview) or not isinstance(billing, str):
+    """Who bills what, from the parts of a preview's billing that bill (``paid_billing``):
+    the head (before ``: ``) of each part that has one, each once, with "at rates
+    pup-finetune does not know" said once."""
+    parts = preview.get("paid_billing")
+    if not isinstance(parts, list):
         return None
     heads: list[str] = []
     unknown = False
-    for part in billing.split("; "):
+    for part in map(str, parts):
         head, sep, _ = part.partition(": ")
         if not sep:
             continue

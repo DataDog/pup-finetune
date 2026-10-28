@@ -110,6 +110,7 @@ from pup_finetune.providers.base import (
     RemotePlan,
     TrainingUsage,
     TrainSpec,
+    billing_fields,
 )
 from pup_finetune.rendering.base import Renderer
 from pup_finetune.runs import (
@@ -447,6 +448,7 @@ def _preview(
     provider_source: str,
     defaults_used: Sequence[str],
     max_seq_len_flag: str,
+    offline: bool,
 ) -> dict[str, Any]:
     warnings = []
     if not inputs.validation_rows:
@@ -463,7 +465,7 @@ def _preview(
     max_steps = spec.max_steps(len(inputs.train_rows))
     return {
         "action": _action(profile, spec, rows),
-        "billing": provider.training_billing(usage),
+        **billing_fields([(provider.training_billing(usage), offline)]),
         "provider": provider.name,
         "provider_source": provider_source,
         "model": profile.alias,
@@ -605,6 +607,7 @@ def _add_remote_preview(
         "continues while this machine sleeps"
     )
     preview["billing"] += f"; {plan.billing}"
+    preview["paid_billing"].append(plan.billing)
     preview["data_destination"] += (
         "; the train and validation rows, their split assignments, the run files and "
         "pup-finetune's source are uploaded to Baseten storage for the job"
@@ -1024,6 +1027,7 @@ def train(
         provider_source=provider_source,
         defaults_used=defaults_used,
         max_seq_len_flag=seq_flag,
+        offline=provider_info(provider.name, runtime).offline,
     )
     rplan: RemotePlan | None = None
     if remote:
@@ -1066,6 +1070,7 @@ def train(
         preview["action"] += f", then {preview['evaluation']['action']}"
         # Each part names who bills it, so the card can say who bills what.
         preview["billing"] += f"; {preview['evaluation']['billing']}"
+        preview["paid_billing"] += preview["evaluation"]["paid_billing"]
         # The consent fields name every recipient, the evaluation's judge included.
         preview["data_destination"] += f"; {preview['evaluation']['data_destination']}"
         preview["data_recipients"] += preview["evaluation"]["data_recipients"]
@@ -1327,7 +1332,14 @@ def resume(
     rows = _rows(inputs)
     preview = {
         "action": action,
-        "billing": _resume_billing(provider, mode, usage, offline=registered.offline),
+        **billing_fields(
+            [
+                (
+                    _resume_billing(provider, mode, usage, offline=registered.offline),
+                    registered.offline,
+                )
+            ]
+        ),
         "run_id": manifest["run_id"],
         "run_dir": display_path(run_dir),
         **_by_id(source),
