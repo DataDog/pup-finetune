@@ -108,7 +108,7 @@ DEPLOY_DOC = CommandDoc(
         confirm="creates it (billed while it runs)",
         paid=True,
         read_only="confirm_refused",
-        offline_allowed=True,
+        offline_with="the fake provider",
     ),
     panel=EVALUATE_AND_SHIP,
 )
@@ -127,7 +127,7 @@ UNDEPLOY_DOC = CommandDoc(
         without="previews the delete",
         confirm="deletes the deployment",
         read_only="confirm_refused",
-        offline_allowed=True,
+        offline_with="the fake provider",
     ),
     panel=EVALUATE_AND_SHIP,
 )

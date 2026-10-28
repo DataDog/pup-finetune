@@ -1882,7 +1882,7 @@ TRAIN_DOC = CommandDoc(
         confirm="trains (paid)",
         paid=True,
         read_only="confirm_refused",
-        offline_allowed=True,
+        offline_with="the fake provider and judge",
     ),
     panel=TRAIN_PANEL,
 )
@@ -1905,7 +1905,7 @@ RESUME_DOC = CommandDoc(
         confirm="resumes training (paid)",
         paid=True,
         read_only="confirm_refused",
-        offline_allowed=True,
+        offline_with="the fake provider",
     ),
     panel=TRAIN_PANEL,
 )

@@ -95,7 +95,7 @@ DOC = CommandDoc(
         confirm="benchmarks every model (paid)",
         paid=True,
         read_only="confirm_refused",
-        offline_allowed=True,
+        offline_with="the fake provider and judge",
     ),
     panel=TRAIN,
 )

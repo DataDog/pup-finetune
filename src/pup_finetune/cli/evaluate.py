@@ -158,7 +158,7 @@ DOC = CommandDoc(
         confirm="evaluates (paid) and publishes the experiments",
         paid=True,
         read_only="confirm_refused",
-        offline_allowed=True,
+        offline_with="the fake provider and judge",
     ),
     panel=EVALUATE_AND_SHIP,
 )
