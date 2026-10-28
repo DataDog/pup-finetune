@@ -966,6 +966,9 @@ class TrainingBackend(Protocol):
         ...
 
 
+BODY_FAILED_FIRST = "the session failed first"
+
+
 def raise_session_failure(body: BaseException | None, closing: Sequence[BaseException]) -> None:
     """Raise what a closed session ends with: ``body`` is what its body raised (``None``
     after a normal exit) and ``closing`` every failure to close it, most important first.
@@ -982,7 +985,7 @@ def raise_session_failure(body: BaseException | None, closing: Sequence[BaseExce
     for other in failures:
         if other is raised:
             continue
-        label = "the session failed first" if other is body else "ending the session also failed"
+        label = BODY_FAILED_FIRST if other is body else "ending the session also failed"
         raised.add_note(f"{label}: {_described(other)}")
         for note in getattr(other, "__notes__", ()):
             raised.add_note(note)
