@@ -559,7 +559,7 @@ class FireworksSession:
 
         ``checked`` says the model was absent when this promotion started, so only its base
         model is compared; otherwise it must also have been created no earlier than
-        ``since``, just before the run first asked for a promotion.
+        ``since``, just before the run sent a promotion.
         """
         name = record.get("name")
         name = name if isinstance(name, str) and name else expected
@@ -584,7 +584,7 @@ class FireworksSession:
             if created < since:
                 raise ModelIdTaken(
                     f"{taken}: it was created at {created.isoformat()}, before this run "
-                    f"first asked to promote it (allowing for clock skew, {since.isoformat()})"
+                    f"sent its promotion (allowing for clock skew, {since.isoformat()})"
                 )
         _warn(f"adopting the Fireworks model {name}, which this run already promoted")
         return ModelRef(provider=PROVIDER_NAME, model_id=model_id, uri=name)

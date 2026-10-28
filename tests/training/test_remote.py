@@ -619,9 +619,8 @@ def test_an_out_of_date_report_is_skipped_with_a_warning(run: RunDir) -> None:
     jobs.report(run, 1, step=4, resume_point=point.to_json(), epochs=epochs)
     _, _, warnings = synced(run, jobs)
     assert warnings == [
-        "the state report of Baseten job j1 is out of date (the state report's last training "
-        "checkpoint (epoch 1, step 2) does not follow its 2 finished epoch(s)); the next one "
-        "replaces it"
+        "the state report of Baseten job j1 is out of date (its last training checkpoint, at "
+        "epoch 1 step 2, does not follow its 2 finished epoch(s)); the next one replaces it"
     ]
     assert run.load_state().step == 5
 

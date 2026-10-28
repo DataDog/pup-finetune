@@ -307,8 +307,8 @@ def apply_snapshot(run: RunDir, snapshot: Snapshot) -> None:
         raise StateError("the state report's epochs.json is not a list of objects")
     if point is not None and not point.follows([EpochMetrics.from_json(e) for e in epochs]):
         raise StaleReport(
-            f"the state report's last training checkpoint (epoch {point.epoch}, step "
-            f"{point.step}) does not follow its {len(epochs)} finished epoch(s)"
+            f"its last training checkpoint, at epoch {point.epoch} step {point.step}, does not "
+            f"follow its {len(epochs)} finished epoch(s)"
         )
     run.write_epochs(epochs)
     if result is not None:

@@ -702,7 +702,7 @@ def test_an_existing_model_of_this_run_is_adopted_without_promoting(
 @pytest.mark.parametrize(
     ("created", "since", "match"),
     [
-        (SINCE - timedelta(seconds=1), SINCE, "before this run first asked to promote it"),
+        (SINCE - timedelta(seconds=1), SINCE, "before this run sent its promotion"),
         (SINCE, None, "already exists"),
         (None, SINCE, "does not say when it was created"),
     ],
