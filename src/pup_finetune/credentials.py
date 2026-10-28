@@ -62,6 +62,7 @@ __all__ = [
     "login_hint",
     "lookup",
     "missing_key_error",
+    "provider_secret_env",
     "redact",
     "register",
     "register_sdk_secrets",
@@ -177,6 +178,14 @@ def register(spec: CredentialSpec) -> None:
 def all_specs() -> list[CredentialSpec]:
     """Every registered spec, sorted by provider name."""
     return [_REGISTRY[name] for name in sorted(_REGISTRY)]
+
+
+def provider_secret_env() -> frozenset[str]:
+    """Every environment variable a registered provider reads a secret from: each spec's
+    ``env_var`` and ``other_secret_env``. Kept from child processes that need none of them."""
+    return frozenset(
+        name for spec in all_specs() for name in (spec.env_var, *spec.other_secret_env)
+    )
 
 
 def get_spec(provider: str) -> CredentialSpec:

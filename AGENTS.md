@@ -582,7 +582,9 @@ Source lives under `src/pup_finetune/`.
   reported as the source `anthropic-sdk`.
 - `datadog/` - Datadog access via `pup`. `pup.py` is the client every Datadog call goes
   through: `pup --no-agent --output json ...`, a scrubbed environment, timeouts, and failures as
-  `ExternalError`. `spans.py` exports LLM spans through the Export API
+  `ExternalError`. No pup process, `pup format` included, gets a provider key or SDK token
+  (`credentials.provider_secret_env`, which `skill.npx_env` drops too); Datadog's keys pass
+  through as they are. `spans.py` exports LLM spans through the Export API
   (`POST v2/llm-obs/v1/spans/events/search` via `Pup.api`): `SpanQuery` (the filter, plus
   `settings()` to freeze), `iter_spans` and `iter_span_pages` (cursor pagination, retries of
   timed-out pages, an optional raw page cache that resumes without refetching, `ExportStats`),

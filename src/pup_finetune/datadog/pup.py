@@ -23,6 +23,8 @@ import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol
 
+from pup_finetune import credentials
+from pup_finetune import providers as _providers  # noqa: F401 - registers provider API keys
 from pup_finetune.errors import ExternalError
 from pup_finetune.redaction import redact, register_secret
 
@@ -126,7 +128,7 @@ FormatRunner = Callable[[Sequence[str], str], "subprocess.CompletedProcess[str]"
 
 
 def run_pup(args: Sequence[str], stdin: str) -> subprocess.CompletedProcess[str]:
-    """Run ``pup <args>`` as given, inheriting this process's environment unchanged.
+    """Run ``pup <args>`` as given, in this process's environment without the provider keys.
 
     Only for ``pup format`` from :func:`pup_finetune.output.emit`, which needs ``PUP_OUTPUT``
     and ``PUP_FILTER`` to render the user's format. Use :class:`Pup` for everything else.
@@ -144,18 +146,27 @@ def run_pup(args: Sequence[str], stdin: str) -> subprocess.CompletedProcess[str]
         errors="replace",
         check=False,
         timeout=_FORMAT_TIMEOUT_SECONDS,
+        env=_without_provider_secrets(os.environ),
     )
 
 
+def _without_provider_secrets(environ: Mapping[str, str]) -> dict[str, str]:
+    """A copy of ``environ`` without any provider API key or SDK token
+    (:func:`~pup_finetune.credentials.provider_secret_env`): pup needs none of them."""
+    secret = credentials.provider_secret_env()
+    return {name: value for name, value in environ.items() if name not in secret}
+
+
 def child_env(environ: Mapping[str, str]) -> dict[str, str]:
-    """The environment for an internal pup call: a copy of ``environ``, scrubbed.
+    """The environment for an internal pup call: ``environ`` without the provider keys,
+    scrubbed.
 
     ``PUP_FILTER`` and ``PUP_OUTPUT`` are removed so the user's ``--jq`` and output format never
     mangle our reads. ``DD_ACCESS_TOKEN`` is removed too, unless ``PUP_FINETUNE_KEEP_DD_TOKEN=1``:
     the token pup injects is short-lived, and without it the child pup loads and refreshes its
     own stored OAuth token, so long-running workers keep working.
     """
-    env = dict(environ)
+    env = _without_provider_secrets(environ)
     for name in _OUTPUT_ENV:
         env.pop(name, None)
     if environ.get(KEEP_DD_TOKEN_ENV) != "1":
