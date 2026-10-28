@@ -527,7 +527,7 @@ class EvalPlan:
         judge judges and nothing is published. ``PUP_READ_ONLY`` allows such a run."""
         return (
             provider_info(self.provider, self.runtime).offline
-            and self.judge.provider == "fake"
+            and self.judge.offline
             and (self.compare is None or self.compare.offline)
             and (self.evaluators is None or self.evaluators.offline)
             and not (self.publishing.ready)

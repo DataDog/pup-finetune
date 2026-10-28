@@ -221,7 +221,7 @@ class BenchmarkPlan:
         """Whether nothing leaves the machine: the fake provider generates, the fake judge
         judges. ``PUP_READ_ONLY`` allows such a run."""
         return (
-            self.judge.provider == "fake"
+            self.judge.offline
             and all(
                 provider_info(candidate.provider, self.runtime).offline
                 for candidate in self.candidates
@@ -770,7 +770,7 @@ def plan_benchmark(
         candidates.append(candidate)
     if not candidates:
         raise UsageError("--models names no model", hint="pass --models MODEL,MODEL")
-    offline = all(candidate.provider == "fake" for candidate in candidates)
+    offline = all(provider_info(candidate.provider, runtime).offline for candidate in candidates)
     judge, judge_source = resolve_judge(
         settings.judge_model,
         provider="fake" if offline else candidates[0].provider,

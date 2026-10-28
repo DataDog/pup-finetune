@@ -143,7 +143,7 @@ class CompareTarget:
 
     @property
     def offline(self) -> bool:
-        return self.config.provider == "fake"
+        return self.config.offline
 
     def identity(self) -> dict[str, Any]:
         """``compare.json``: the spec, and the model as it is called."""

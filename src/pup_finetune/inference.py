@@ -226,6 +226,12 @@ class JudgeConfig(BaseModel):
     reasoning_effort: str | None = Field(default=None, min_length=1)
 
     @property
+    def offline(self) -> bool:
+        """Whether it judges on this machine (the fake judge): nothing is sent, nothing
+        bills."""
+        return self.provider == "fake"
+
+    @property
     def spec(self) -> str:
         """The judge as ``--judge-model`` names it: ``anthropic/<model>`` or
         ``openai/<model>``, and a Fireworks model id or the fake judge's name as they are."""

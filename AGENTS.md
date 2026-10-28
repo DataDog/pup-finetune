@@ -465,10 +465,11 @@ Source lives under `src/pup_finetune/`.
   (`NotADatasetDir`, `NotARunDir`, `RunDirNotEmpty`, `SettingsConflict`, `WrongPhase`) are
   both a `UsageError` and a `StateError`, so code that caught either still does, and exit 2;
   `Interrupted` is a Ctrl-C or SIGTERM. The `--confirm` and read-only guards
-  (`require_approval`, the one gate of every paid or remote-changing command: with
-  `--confirm`, `require_writable` refuses it under `PUP_READ_ONLY` unless it runs `offline`;
-  without, `require_confirm` previews it with `offline` in the preview, adding `read_only`
-  and offering no `--confirm` when read-only mode would refuse it), `READ_ONLY_HINT`, and
+  (`require_approval`, the gate of every paid or remote-changing command that
+  `PUP_READ_ONLY` refuses: with `--confirm`, `require_writable` refuses it under
+  `PUP_READ_ONLY` unless it runs `offline`; without, `require_confirm` previews it with
+  `offline` in the preview, adding `read_only` and offering no `--confirm` when read-only
+  mode would refuse it; see Conventions for the commands outside it), `READ_ONLY_HINT`, and
   `install_hint` / `reinstall_hint`, the one wording of how to install an extra (`uv sync
   --all-extras`, never a bare `uv sync --extra X`).
   `tests/test_hint_commands.py` parses every backticked `pup finetune ...` in a string in
@@ -1153,9 +1154,14 @@ Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds can
 - Honor `PUP_READ_ONLY`: reject every remote write and paid run when it is set. Previews still
   run (they make no remote write) and say so: `"read_only"` in the preview and `next_command`
   null. A run that never leaves the machine (the offline fake provider and judge) is allowed.
-  Every such command goes through `errors.require_approval`, with `offline` from one source:
-  `ProviderInfo.offline` for a provider, an evaluation's or benchmark's plan for those
-  (`tests/cli/test_approval_gate.py` runs each one against the rule).
+  Every such command goes through `errors.require_approval`, with `offline` from one source
+  each: `ProviderInfo.offline` for a provider and `JudgeConfig.offline` for a judge, which
+  an evaluation's and a benchmark's plan combine (`tests/cli/test_approval_gate.py` runs
+  each command against the rule). Outside it: `dataset triage` is paid but writes nothing
+  to Datadog, so `PUP_READ_ONLY` allows its `--confirm` and it calls `require_confirm`
+  alone; publishing an evaluation's experiments calls `require_writable` again right before
+  it writes (the evaluation's approval already counts it, so it is never offline); and the
+  hidden `_worker` checks `require_writable` for the run `train` or `resume` approved.
 - Never ignore what the user asked: an option that does nothing without another one is a
   usage error (add it to its command's table for `_flags.require_enablers`), and a preview
   names every recipient of the data it would send in `data_recipients`.
