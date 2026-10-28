@@ -37,7 +37,7 @@ from pup_finetune.providers.baseten.backend import (
     BasetenBackend,
     fitted_seq_len,
 )
-from pup_finetune.providers.baseten.client import to_loops_datum
+from pup_finetune.providers.baseten.client import DeploymentRejected, to_loops_datum
 from pup_finetune.rendering.families import QWEN3_5
 from pup_finetune.rendering.hf import HFChatTemplateRenderer
 from pup_finetune.rendering.tokens import TokenizedExample
@@ -55,6 +55,7 @@ from tests.fakes.baseten import (
     loss_at,
 )
 from tests.fakes.tokenizer import FakeChatTokenizer
+from tests.providers.baseten.test_baseten_client import AUTH_HINT
 from tests.providers.contract import BackendContract
 
 KEY = SecretStr("synthetic-baseten-key")
@@ -86,6 +87,8 @@ SAMPLER_CKPT = CheckpointRef(
 )
 FOREIGN_CKPT = dataclasses.replace(SAMPLER_CKPT, kind="training", uri="fake://checkpoints/t1")
 RUN_DEACTIVATE = "POST /v1/loops/runs/run1/deactivate"
+RUN_LEFT = "a run may remain in Loops session session1; deactivate it in the Baseten UI"
+SAMPLER_LEFT = "a sampler may remain in Loops session session1; deactivate it in the Baseten UI"
 SAMPLER_DEACTIVATE = "POST /v1/models/model1/deployments/dep1/deactivate"
 
 
@@ -254,6 +257,13 @@ def test_a_trainer_baseten_has_no_capacity_for_leaves_nothing_running(setup: Set
     assert caught.value.hint == "nothing was left running; retry after 60 s"
     assert setup.loops.runs == {}
     assert setup.transport.calls == []
+
+
+def test_a_trainer_that_never_becomes_ready_says_its_run_may_remain(setup: Setup) -> None:
+    setup.loops.lost["trainer"] = TimeoutError("the trainer did not become ready")
+    with pytest.raises(ExternalError, match="TimeoutError") as caught, setup.session():
+        pass
+    assert caught.value.hint == RUN_LEFT
 
 
 def test_the_renderer_is_built_once_per_profile(loops: FakeLoops) -> None:
@@ -772,9 +782,62 @@ def test_a_server_error_creating_a_sampler_says_one_may_remain(
         ckpt = session.save_sampler_checkpoint("s1", epoch=1, step=1) if checkpoint else None
         with pytest.raises(ExternalError, match="returned HTTP 503") as caught:
             session.sampler(ckpt)
-    assert caught.value.hint == (
-        "a sampler may remain in Loops session session1; deactivate it in the Baseten UI"
-    )
+    assert caught.value.hint == SAMPLER_LEFT
+
+
+@pytest.mark.parametrize(
+    ("lost", "kind", "hint"),
+    [
+        (
+            httpx.ReadTimeout("lost"),
+            ExternalError,
+            "the request may have reached Baseten; check before retrying",
+        ),
+        (
+            httpx.Response(200, content=b"<html>"),
+            TransientError,
+            "it may have created something that bills; check the Baseten UI",
+        ),
+    ],
+    ids=["lost", "unreadable"],
+)
+def test_a_sampler_created_without_a_readable_answer_says_it_may_remain(
+    setup: Setup, lost: httpx.Response | Exception, kind: type[ExternalError], hint: str
+) -> None:
+    setup.loops.lost["sampler"] = lost
+    with setup.session() as session, pytest.raises(kind) as caught:
+        session.sampler(None)
+    assert caught.value.hint == f"{SAMPLER_LEFT}; {hint}"
+
+
+def test_a_sampler_creation_cut_by_ctrl_c_says_it_may_remain(setup: Setup) -> None:
+    setup.loops.lost["sampler"] = KeyboardInterrupt()
+    with pytest.raises(KeyboardInterrupt) as caught, setup.session() as session:
+        session.sampler(None)
+    assert caught.value.__notes__ == [SAMPLER_LEFT]
+    assert not setup.loops.runs["run1"].active
+
+
+@pytest.mark.parametrize(
+    ("status", "kind", "hint"),
+    [
+        (422, DeploymentRejected, "nothing was created"),
+        (403, ProviderAuthError, AUTH_HINT),
+        (429, ProviderCapacityError, "retry later"),
+    ],
+    ids=["rejected", "auth", "capacity"],
+)
+def test_a_refused_sampler_creation_says_nothing_remains(
+    loops: FakeLoops,
+    renderer: HFChatTemplateRenderer,
+    status: int,
+    kind: type[ExternalError],
+    hint: str,
+) -> None:
+    setup = Setup(loops, renderer, {"POST /v1/loops/samplers": (status, {})})
+    with setup.session() as session, pytest.raises(kind) as caught:
+        session.sampler(None)
+    assert caught.value.hint == hint
 
 
 def test_generate_can_be_called_from_several_threads(setup: Setup) -> None:
