@@ -246,12 +246,13 @@ def _recorded_evaluation(evaluation: object) -> str | None:
         return None
     status = str(evaluation.get("status")).replace("_", " ")
     text = f"evaluation {status} in {evaluation.get('out_dir')}"
-    found = evaluation.get("headline")
-    rates = found.get("judge_pass_rate") if isinstance(found, Mapping) else None
+    found = evaluation.get("headline") or {}
+    rates = found.get("judge_pass_rate")
     if isinstance(rates, Mapping):
+        base, tuned = _paired_rates(rates, ("base", "tuned"))
         text += (
-            f": judge agreement base {_agreement(rates.get('base'))}, tuned "
-            f"{_agreement(rates.get('tuned'))}, tuned - base {_difference(rates)}"
+            f": judge agreement base {base}, tuned {tuned}, tuned - base {_difference(rates)}"
+            + _scope(rates.get("common_cases"), found.get("cases"))
         )
     return text
 
@@ -394,6 +395,31 @@ def _difference(rates: Mapping[str, Any]) -> str:
     return text
 
 
+def _paired_rates(found: Mapping[str, Any], sides: Sequence[str]) -> list[str]:
+    """Each of ``sides``' pass rate on the cases ``found``'s delta pairs, or its own rate
+    in ``found`` when the headline was recorded before it had them."""
+    common = found.get("common_pass_rate")
+    rates = common if isinstance(common, Mapping) else found
+    return [_agreement(rates.get(side)) for side in sides]
+
+
+def _scope(paired: object, cases: object) -> str:
+    """`` on 4 of 6 cases`` when a delta pairs fewer than every case, else nothing."""
+    if isinstance(paired, int) and isinstance(cases, int) and paired < cases:
+        return f" on {paired} of {_n(cases, 'case')}"
+    return ""
+
+
+def _versus(found: Mapping[str, Any], sides: tuple[str, str], cases: object) -> str:
+    """`` on 4 of 6 cases, tuned 75% vs compare 50%``: both rates on the cases a delta pairs,
+    when it pairs fewer than every case."""
+    scope = _scope(found.get("common_cases"), cases)
+    if not scope or not isinstance(found.get("common_pass_rate"), Mapping):
+        return scope
+    first, second = _paired_rates(found, sides)
+    return f"{scope}, {sides[0]} {first} vs {sides[1]} {second}"
+
+
 def _verdicts(paired: Mapping[str, Any], errors: object, targets: Sequence[str]) -> str:
     """One comparison's paired verdicts, and the errors of the two ``targets`` it compares."""
     failed = sum(int(errors.get(name, 0)) for name in targets) if isinstance(errors, Mapping) else 0
@@ -437,9 +463,10 @@ def _headline_evaluator(headline: Mapping[str, Any]) -> str | None:
         return None
     entry = (headline.get("evaluators") or {}).get(name) or {}
     label = "all (the judge and every evaluator)" if name == "all" else name
+    base, tuned = _paired_rates(entry, ("base", "tuned"))
     return (
-        f"headline {label}: base {_agreement(entry.get('base'))}, tuned "
-        f"{_agreement(entry.get('tuned'))}, tuned - base {_difference(entry)}"
+        f"headline {label}: base {base}, tuned {tuned}, tuned - base {_difference(entry)}"
+        + _scope(entry.get("n"), headline.get("cases"))
     )
 
 
@@ -486,10 +513,11 @@ def _evaluation_parts(result: Mapping[str, Any], *, compact: bool) -> Summary:
         + (f"; judge {judge}" if judge else "")
         + f", {_calibration(result)}"
     )
-    base, tuned = _agreement(rates.get("base")), _agreement(rates.get("tuned"))
+    base, tuned = _paired_rates(rates, ("base", "tuned"))
     difference = _difference(rates)
     verdicts = _verdicts(headline_data.get("paired") or {}, result.get("errors"), ("base", "tuned"))
-    paired = "paired: " + verdicts
+    scope = _scope(rates.get("common_cases"), headline_data.get("cases"))
+    paired = f"paired{scope}: {verdicts}"
     publication = _publication(result)
     chosen = [line] if (line := _headline_evaluator(headline_data)) is not None else []
     if isinstance(headline_data.get("tuned_minus_compare"), Mapping):
@@ -506,7 +534,7 @@ def _evaluation_parts(result: Mapping[str, Any], *, compact: bool) -> Summary:
             paired,
             CAVEAT,
         ]
-    parts = [headline, *chosen, agreement, verdicts, CAVEAT]
+    parts = [headline, *chosen, agreement, paired if scope else verdicts, CAVEAT]
     if publication is not None:
         lines.append(publication)
         parts.append(publication)
@@ -525,13 +553,21 @@ def _compared_parts(
     headline_data = result["headline"]
     rates: Mapping[str, Any] = headline_data["judge_pass_rate"]
     versus: Mapping[str, Any] = headline_data["tuned_minus_compare"]
-    names = [name for name in rates if name not in ("delta", "ci95")]
+    cases = headline_data.get("cases")
+    names = [name for name in ("base", "tuned", "compare") if name in rates]
+    judged = rates.get("judged_cases") or {}
+    counts = any(judged.get(name, cases) != cases for name in names)
     found = [
         headline,
         *chosen,
-        "judge agreement: " + ", ".join(f"{name} {_agreement(rates[name])}" for name in names),
-        f"tuned - base: {_difference(rates)}; {verdicts}",
-        f"tuned - compare: {_difference(versus)}; "
+        "judge agreement: "
+        + ", ".join(
+            f"{name} {_agreement(rates[name])}" + (f" of {judged.get(name)}" if counts else "")
+            for name in names
+        ),
+        f"tuned - base: {_difference(rates)}{_versus(rates, ('tuned', 'base'), cases)}; "
+        + verdicts,
+        f"tuned - compare: {_difference(versus)}{_versus(versus, ('tuned', 'compare'), cases)}; "
         + _verdicts(versus, result.get("errors"), ("tuned", "compare")),
         CAVEAT,
         *([publication] if publication is not None else []),

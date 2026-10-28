@@ -827,8 +827,13 @@ Source lives under `src/pup_finetune/`.
   `summary.json`: per-target pass rates (judge and metrics), per-trajectory agreement, the
   paired wins, regressions and ties, and `tuned_minus_base` with a seeded paired bootstrap
   95% CI over trajectories (`bootstrap.py`'s `paired_bootstrap_ci`), `tuned_minus_compare`
-  the same way over the compare target's cases (both through `_paired`; each target counts
-  the cases it does not replay as `skipped`), plus the agreement-not-task-success `CAVEAT`. A `Publisher` (default `NoopPublisher`) gets a complete evaluation and returns
+  the same way over the compare target's cases (both through `_paired`, with each side's
+  pass rate on the cases paired, `common_pass_rate`; each target counts the cases it does
+  not replay as `skipped`), plus the agreement-not-task-success `CAVEAT`. `runner.py`'s
+  `headline` shows each delta beside those rates and its `common_cases`, and each target's
+  own rate beside its `judged_cases`, so an error or a skipped case never sets a rate
+  beside a delta over other cases.
+  A `Publisher` (default `NoopPublisher`) gets a complete evaluation and returns
   what it reports, the outcome's `publication`. `runner.py` is what `evaluate` and `train
   --evaluate` run: `plan_evaluation` (an `EvalPlan`: cases, judge, settings and `Publishing`,
   whether the dataset's push receipt allows publishing; cases the run's model cannot replay

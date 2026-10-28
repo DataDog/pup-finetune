@@ -890,8 +890,10 @@ def test_a_compare_target_adds_its_own_comparison_and_changes_no_other(tmp_path:
         if target == "compare"
     } | {key: result for key, result in results.items() if key[0] == "tuned"}  # fmt: skip
     swapped = summarize(CASES, as_base, generations, seed=0)
+    rates = swapped["tuned_minus_base"]["common_pass_rate"]
     assert three["tuned_minus_compare"] == {
         **swapped["tuned_minus_base"],
+        "common_pass_rate": {"tuned": rates["tuned"], "compare": rates["base"]},
         "paired": swapped["paired"],
     }
     assert three["tuned_minus_compare"]["paired"]["regressions"] == 2
@@ -1286,4 +1288,4 @@ def test_without_evaluators_the_summary_is_unchanged(tmp_path: Path) -> None:
     assert not (out / "evaluators.json").exists()
 
 
-GOLDEN_SUMMARY_SHA256 = "5bb54fb09ca09b8d21380479f63f285801066350db83743943aa3ff18af11fec"
+GOLDEN_SUMMARY_SHA256 = "7e3bde40768995a49d0a29a73c512611631540225c4cb64070c236b4086df2cb"

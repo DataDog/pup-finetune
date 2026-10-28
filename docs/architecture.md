@@ -452,11 +452,11 @@ provider, and talks to models only through the `Sampler` protocol.
 - **Summary** (`summary.json`). Per target, the judge pass rate, every metric's rate and the
   mean of per-trajectory agreement. Across targets, the cases both answered are compared
   verdict by verdict (wins, regressions, ties), and `tuned_minus_base` is the mean paired
-  difference of the judge pass, with a 95% bootstrap interval that resamples whole
-  trajectories (2000 seeded resamples; `null` with fewer than two trajectories), since the
-  cases of one conversation are not independent. Every number is finite or `null`, and the
-  summary says what the scores measure: agreement with the recorded behavior on held-out
-  conversations, not task success.
+  difference of the judge pass, beside both pass rates on those cases, with a 95% bootstrap
+  interval that resamples whole trajectories (2000 seeded resamples; `null` with fewer than
+  two trajectories), since the cases of one conversation are not independent. Every number
+  is finite or `null`, and the summary says what the scores measure: agreement with the
+  recorded behavior on held-out conversations, not task success.
 - **Runner** ([`runner.py`](../src/pup_finetune/evaluation/runner.py)). What `evaluate` and
   `train --evaluate` run, so the CLI only parses flags and emits: an `EvalPlan` (cases,
   judge, settings, and whether the evaluation can be published), calibration, the replay

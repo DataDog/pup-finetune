@@ -1162,6 +1162,7 @@ def _evaluator_delta(
     return {
         "delta": difference["judge_pass_rate"],
         "ci95": difference["ci95"],
+        "common_pass_rate": difference["common_pass_rate"],
         "n_cases": difference["n_cases"],
         "n_trajectories": difference["n_trajectories"],
         **{key: value for key, value in paired.items() if key != "n"},
@@ -1181,14 +1182,15 @@ def _paired(
     """``first`` against ``second``, case by case: the paired verdict counts (a win is a case
     only ``first`` passes), and the mean difference of the pass of ``name`` (the built-in
     judge, an evaluator or ``all``, see :func:`outcome`), ``first`` minus ``second``, with
-    its paired bootstrap CI. An evaluator's cases where either side does not apply count as
-    ``not_applicable``."""
+    its paired bootstrap CI and each side's pass rate on those cases (``common_pass_rate``).
+    An evaluator's cases where either side does not apply count as ``not_applicable``."""
     paired: Counter[str] = Counter(
         {"wins": 0, "regressions": 0, "ties": 0, "both_error": 0, "one_error": 0, "pending": 0}
     )
     if name != JUDGE:
         paired["not_applicable"] = 0
     clusters: dict[str, list[float]] = defaultdict(list)
+    passes: Counter[str] = Counter()
     for case in cases:
         one = outcome(results.get((first, case.id)), name, names)
         two = outcome(results.get((second, case.id)), name, names)
@@ -1206,12 +1208,18 @@ def _paired(
             continue
         difference = int(one == "pass") - int(two == "pass")
         paired["wins" if difference > 0 else "regressions" if difference < 0 else "ties"] += 1
+        passes[first] += one == "pass"
+        passes[second] += two == "pass"
         clusters[case.row_id].append(float(difference))
     differences = [value for cluster in clusters.values() for value in cluster]
     interval = paired_bootstrap_ci(list(clusters.values()), seed=seed)
     return {"n": len(differences), **paired}, {
         "judge_pass_rate": sum(differences) / len(differences) if differences else None,
         "ci95": None if interval is None else list(interval),
+        "common_pass_rate": {
+            side: passes[side] / len(differences) if differences else None
+            for side in (first, second)
+        },
         "n_cases": len(differences),
         "n_trajectories": len(clusters),
         "resamples": BOOTSTRAP_RESAMPLES,
