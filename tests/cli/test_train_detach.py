@@ -158,50 +158,57 @@ def test_a_detached_run_completes_and_status_watch_follows_it(
         assert SECRET not in path.read_text(errors="replace"), path.name
 
 
-def test_cancel_stops_a_slow_worker_gracefully_and_promotes(dataset: Path, tmp_path: Path) -> None:
+def test_cancel_stops_a_detached_worker_gracefully_and_promotes(
+    dataset: Path, tmp_path: Path
+) -> None:
     run_dir = tmp_path / "run"
+    # One step per row. The worker holds itself at its second epoch's first step while this
+    # file exists, so it is still training when the cancel arrives, however slowly the
+    # commands below start, and its first epoch's best checkpoint is there to promote.
+    planned = cli(*train_args(dataset, run_dir, "--batch-size", "1"))
+    assert planned.returncode == 2, planned.stderr
+    second_epoch = one_json(planned.stdout)["preview"]["rows"]["train"] + 1
     hold = tmp_path / "hold"
-    slow = (
+    hold.touch()
+    held = (
         "--batch-size",
         "1",
         "--provider-option",
-        "step_delay_s=0.2",
-        "--provider-option",
         f"hold_file={json.dumps(str(hold))}",
+        "--provider-option",
+        f"hold_from_step={second_epoch}",
     )
-    # The --detach preview's next_command runs as written: it starts the worker.
-    previewed = cli(*train_args(dataset, run_dir, *slow, "--detach"))
-    assert previewed.returncode == 2, previewed.stderr
-    detach = shlex.split(one_json(previewed.stdout)["next_command"])
-    assert detach[:2] == ["pup", "finetune"] and detach[-1] == "--confirm"
-    assert "--detach" in detach
-    started = cli(*detach[2:])
-    assert started.returncode == 0, started.stderr
-    pid = one_json(started.stdout)["pid"]
-    # Wait until the first epoch's best checkpoint exists, so there is something to promote,
-    # then hold every step: the run is still training when the cancel arrives, however slowly
-    # the commands below start. The rest of the run takes seconds, so the hold comes first.
-    wait_until(lambda: state(run_dir).get("epochs", 0) >= 1, "the first epoch")
-    hold.touch()
-    # Its command line carries no secret: exactly our module, the run and the mode.
-    command = command_line(pid)
-    assert SECRET not in command
-    path = str(run_dir.resolve())
-    assert command.split()[1:] == ["-P", "-m", "pup_finetune", "_worker", path, "--mode", "train"]
+    try:
+        # The --detach preview's next_command runs as written: it starts the worker.
+        previewed = cli(*train_args(dataset, run_dir, *held, "--detach"))
+        assert previewed.returncode == 2, previewed.stderr
+        detach = shlex.split(one_json(previewed.stdout)["next_command"])
+        assert detach[:2] == ["pup", "finetune"] and detach[-1] == "--confirm"
+        assert "--detach" in detach
+        started = cli(*detach[2:])
+        assert started.returncode == 0, started.stderr
+        pid = one_json(started.stdout)["pid"]
+        wait_until(lambda: state(run_dir).get("epochs", 0) >= 1, "the first epoch")
+        # Its command line carries no secret: exactly our module, the run and the mode.
+        command = command_line(pid)
+        assert SECRET not in command
+        path = str(run_dir.resolve())
+        worker = ["-P", "-m", "pup_finetune", "_worker", path, "--mode", "train"]
+        assert command.split()[1:] == worker
 
-    preview = cli("cancel", str(run_dir))
-    assert preview.returncode == 2
-    cancel = one_json(preview.stdout)
-    assert cancel["preview"]["pid"] == pid
-    # Its next_command runs as written too.
-    words = shlex.split(cancel["next_command"])
-    assert words == ["pup", "finetune", "cancel", str(run_dir), "--confirm"]
+        preview = cli("cancel", str(run_dir))
+        assert preview.returncode == 2
+        cancel = one_json(preview.stdout)
+        assert cancel["preview"]["pid"] == pid
+        # Its next_command runs as written too.
+        words = shlex.split(cancel["next_command"])
+        assert words == ["pup", "finetune", "cancel", str(run_dir), "--confirm"]
 
-    cancelled = cli(*words[2:])
-    assert cancelled.returncode == 0, cancelled.stderr
-    assert one_json(cancelled.stdout)["status"] == "cancelling"
-
-    hold.unlink()
+        cancelled = cli(*words[2:])
+        assert cancelled.returncode == 0, cancelled.stderr
+        assert one_json(cancelled.stdout)["status"] == "cancelling"
+    finally:
+        hold.unlink(missing_ok=True)
     final = watch(run_dir)
     assert final["phase"] == "cancelled"
     assert final["stopped_reason"] == "cancelled"
@@ -314,16 +321,20 @@ def test_ctrl_c_cancels_a_foreground_run_gracefully(dataset: Path, tmp_path: Pat
 
 def test_a_second_ctrl_c_stops_at_once_with_a_resume_hint(dataset: Path, tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
+    # Every step from the second on is held while this file exists, and a cancel waits for
+    # the steps in flight: once the first step is recorded, with the second already sent,
+    # the run cannot end before the hold is let go, however slowly this test runs.
     hold = tmp_path / "hold"
+    hold.touch()
     args = train_args(
         dataset,
         run_dir,
         "--batch-size",
         "1",
         "--provider-option",
-        "step_delay_s=2",
-        "--provider-option",
         f"hold_file={json.dumps(str(hold))}",
+        "--provider-option",
+        "hold_from_step=2",
     )
     process = subprocess.Popen(  # noqa: S603 - our own interpreter and module, list args
         [sys.executable, "-m", "pup_finetune", *args, "--confirm"],
@@ -333,11 +344,10 @@ def test_a_second_ctrl_c_stops_at_once_with_a_resume_hint(dataset: Path, tmp_pat
         env=_env(),
     )
     try:
-        # After the first step, not when training starts: a cancel asked for before the first
-        # step stops at once. Then every step is held, so the cancel cannot finish before the
-        # second Ctrl-C; with 2s steps, the hold comes long before the epoch's last one.
         wait_until(lambda: state(run_dir).get("step", 0) >= 1, "the first step")
-        hold.touch()
+        # The second step is sent before the first one's result is read only with more than
+        # one step in flight.
+        assert RunDir(run_dir).spec().pipeline_depth > 1
         process.send_signal(signal.SIGINT)
         # Two Ctrl-Cs sent before the process next runs arrive as one: send the second only
         # once the first is handled.
@@ -347,6 +357,7 @@ def test_a_second_ctrl_c_stops_at_once_with_a_resume_hint(dataset: Path, tmp_pat
         hold.unlink()
         stdout, stderr = process.communicate(timeout=TIMEOUT_S)
     finally:
+        hold.unlink(missing_ok=True)
         if process.poll() is None:
             process.kill()
             process.wait()
