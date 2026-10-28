@@ -298,14 +298,15 @@ class WorkerStatus:
     last worker started for it. ``stale`` means the run is training but its heartbeat is
     older than :data:`STALE_AFTER_S`, or a worker has been starting for longer than that.
     ``starting`` means the last worker started, less than :data:`STALE_AFTER_S` ago, is
-    alive and has neither ended nor begun: a worker begins when it saves the state as the
-    run's training process (``state.json``'s ``pid``). While the run is training, that
-    worker is the one reported only once the process in ``state.json`` is gone (a SIGKILLed
-    run being resumed). ``running`` is whether training is under way or about to be: watch
-    it until it is not. ``log`` is the last worker's ``worker.log`` (``None`` when none was
-    started). ``problem`` says what went wrong with that worker since the state last
-    changed, if anything (it failed, or exited or hangs before training), and ``error`` is
-    the error it recorded when it ended.
+    alive and has not ended, begun or been replaced: a worker begins when it saves the state
+    as the run's training process (``state.json``'s ``pid``), and another process replaced
+    it when that process changed the state after the worker started. While the run is
+    training, that worker is the one reported only once the process in ``state.json`` is
+    gone (a SIGKILLed run being resumed). ``running`` is whether training is under way or
+    about to be: watch it until it is not. ``log`` is the last worker's ``worker.log``
+    (``None`` when none was started). ``problem`` says what went wrong with that worker
+    since the state last changed, if anything (it failed, or exited or hangs before
+    training), and ``error`` is the error it recorded when it ended.
     """
 
     pid: int | None
@@ -377,16 +378,23 @@ class _Launch:
             log=str(run_dir.worker_log_path),
         )
 
-    def started_after(self, heartbeat: datetime | None) -> bool:
-        """Whether it started after the state last changed (so it has not changed it)."""
-        return self.started is not None and (heartbeat is None or self.started >= heartbeat)
+    def pending(self, state_pid: int | None, heartbeat: datetime | None) -> bool:
+        """Whether it has neither begun nor been replaced. It begins when it saves the state
+        as the run's training process (``state_pid``); another process replaced it when the
+        state changed in a later second than it started (in the same second, only the pid
+        tells). A reused pid can mislead: a launch given the pid of the dead process the
+        state still names reads as begun."""
+        if self.started is None or self.pid == state_pid:
+            return False
+        return heartbeat is None or heartbeat <= self.started
 
-    def waiting_s(self, state_pid: int | None, now: datetime) -> float | None:
-        """How long it has been alive without beginning, if it has not begun: it begins when
-        it saves the state as the run's training process (``state_pid``)."""
+    def waiting_s(
+        self, state_pid: int | None, heartbeat: datetime | None, now: datetime
+    ) -> float | None:
+        """How long it has been alive and :meth:`pending`, if it is."""
         if not self.alive or self.ended is not None or self.started is None:
             return None
-        if self.pid == state_pid:
+        if not self.pending(state_pid, heartbeat):
             return None
         return (now - self.started).total_seconds()
 
@@ -397,12 +405,12 @@ class _Launch:
         who = f"the worker (process {self.pid})"
         where = f"its output is in {self.log}"
         if self.alive:
-            waiting = self.waiting_s(state_pid, now)
+            waiting = self.waiting_s(state_pid, heartbeat, now)
             if waiting is not None and waiting > STALE_AFTER_S:
                 return f"{who} started {round(waiting)}s ago and has not begun training; {where}"
             return None
         if self.ended is None:
-            if self.pid != state_pid and self.started_after(heartbeat):
+            if self.pending(state_pid, heartbeat):
                 return f"{who} exited before training, without recording why; {where}"
             return None
         if self.error is not None and (heartbeat is None or self.ended >= heartbeat):
@@ -431,7 +439,7 @@ def worker_status(
         "error": None if launch is None or problem is None else launch.error,
         "problem": problem,
     }
-    waiting = None if launch is None else launch.waiting_s(pid, current)
+    waiting = None if launch is None else launch.waiting_s(pid, heartbeat, current)
     starting = waiting is not None and waiting <= STALE_AFTER_S
     if phase == "training":
         alive = pid_alive(pid)
