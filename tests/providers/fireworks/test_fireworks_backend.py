@@ -1165,6 +1165,33 @@ def test_a_model_another_run_directory_promoted_under_the_run_id_is_refused(
     assert _live(fw) == []
 
 
+def test_a_model_another_run_directory_promoted_just_before_under_the_run_id_is_refused(
+    fw: FakeFireworksTrainingClient, renderer: Renderer, tmp_path: Path
+) -> None:
+    train_rows, validation_rows = _rows(renderer, 4, "train"), _rows(renderer, 2, "val")
+    # A preview's pinned command run into two run directories: both finish 30 s apart.
+    first = _new_run(tmp_path / "a" / "run", renderer, created_at=SINCE)
+    second = _new_run(tmp_path / "b" / "run", renderer, created_at=SINCE)
+    fw.now = lambda: SINCE + timedelta(minutes=10)
+    start_training(
+        _provider(fw), first, train_rows=train_rows, validation_rows=validation_rows, now=fw.now
+    )
+    fw.calls.clear()
+    with pytest.raises(FinalizeFailed) as caught:
+        start_training(
+            _provider(fw),
+            second,
+            train_rows=train_rows,
+            validation_rows=validation_rows,
+            now=lambda: SINCE + timedelta(minutes=10, seconds=30),
+        )
+    assert isinstance(caught.value.__cause__, StateError)
+    assert "already exists" in str(caught.value.__cause__)
+    assert not any(call[0] == "promote_session_checkpoint" for call in fw.calls)
+    assert (second.read_result() or {})["promoted_model"] is None
+    assert _live(fw) == []
+
+
 def test_a_failed_promotion_is_retried_from_the_best_training_checkpoint(
     fw: FakeFireworksTrainingClient, renderer: Renderer, tmp_path: Path
 ) -> None:
