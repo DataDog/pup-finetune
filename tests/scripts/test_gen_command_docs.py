@@ -171,6 +171,24 @@ def test_the_docs_keep_what_help_cuts_and_every_example_and_safety_line() -> Non
         assert f"| `pup finetune {name}` | {row} |" in text, name
 
 
+def test_the_safety_table_names_only_what_each_command_runs_offline() -> None:
+    rows = {
+        line.split("`")[1]: line
+        for line in gen.render_commands().splitlines()
+        if line.startswith("| `pup finetune ")
+    }
+    # Deploying calls no judge: only the fake provider keeps it offline.
+    for name in ("deploy", "undeploy"):
+        assert rows[f"pup finetune {name}"].endswith(
+            "| preview allowed; `--confirm` refused, except a run that stays offline (the "
+            "fake provider) |"
+        ), name
+    assert rows["pup finetune evaluate"].endswith(
+        "| preview allowed; `--confirm` refused, except a run that stays offline (the fake "
+        "provider and judge) |"
+    )
+
+
 def test_a_default_written_into_the_help_goes_to_the_default_column() -> None:
     text = gen.render_commands()
     assert "| `--run-id` | `ID` | generated | Run and model id. |" in text
