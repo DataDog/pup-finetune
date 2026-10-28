@@ -390,6 +390,24 @@ def test_an_interrupted_service_close_still_closes_the_client(
     assert fw.closed
 
 
+def test_an_interrupted_client_close_is_raised_ahead_of_a_failed_service_close(
+    fw: FakeFireworksTrainingClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def interrupted() -> None:
+        raise KeyboardInterrupt  # Ctrl-C while the client closes
+
+    fw.fail("close_service", "server")
+    monkeypatch.setattr(fw, "close", interrupted)
+    with (
+        pytest.raises(KeyboardInterrupt) as caught,
+        backend_for(fw).open_session(PROFILE, LORA, **SESSION),
+    ):
+        pass
+    [note] = caught.value.__notes__
+    assert "ending the Fireworks session also failed" in note
+    assert "ending a training session" in note
+
+
 def test_a_failed_service_close_is_raised_ahead_of_a_failed_sampler_close(
     fw: FakeFireworksTrainingClient,
 ) -> None:

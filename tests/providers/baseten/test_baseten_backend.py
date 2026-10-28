@@ -328,6 +328,21 @@ def test_an_interrupted_client_close_still_deactivates(
     assert not setup.loops.runs["run1"].active
 
 
+def test_an_interrupted_close_wins_over_a_failed_deactivation_and_names_it(
+    loops: FakeLoops, renderer: HFChatTemplateRenderer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def interrupted() -> None:
+        raise KeyboardInterrupt  # Ctrl-C while the SDK client closes
+
+    setup = Setup(loops, renderer, {SAMPLER_DEACTIVATE: (500, {})})
+    with pytest.raises(KeyboardInterrupt) as caught, setup.session() as session:
+        session.sampler(None)
+        monkeypatch.setattr(loops.trainers[0], "close", interrupted)
+    [note] = caught.value.__notes__
+    assert "could not deactivate the Baseten sampler deployment model1/dep1" in note
+    assert not loops.runs["run1"].active
+
+
 def test_a_failed_deactivation_names_the_manual_step(
     loops: FakeLoops, renderer: HFChatTemplateRenderer
 ) -> None:

@@ -707,6 +707,16 @@ def test_an_interrupted_close_still_stops_the_heartbeat() -> None:
     assert (sdk.closed, holder.closed) == (1, 1)
 
 
+def test_an_interrupted_close_wins_over_a_failed_one_and_names_it() -> None:
+    holder = StandInHolder(error=KeyboardInterrupt())
+    sdk = StandInService(close_error=RuntimeError("close refused"), holder=holder)
+    service = fw._Service(sdk, account_id="my-team")
+    with pytest.raises(KeyboardInterrupt) as caught:
+        service.close()
+    [note] = caught.value.__notes__
+    assert "closing the Fireworks training session failed: close refused" in note
+
+
 def test_other_start_failures_leave_the_session_to_the_caller() -> None:
     sdk = StandInService(error=FakeSdkError("invalid", status_code=400))
     service = fw._Service(sdk, account_id="my-team")
