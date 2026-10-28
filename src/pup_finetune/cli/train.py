@@ -1490,13 +1490,14 @@ def run_status(run: RunDir, *, source: str = "given") -> dict[str, Any]:
     prints is :func:`~pup_finetune.cli._views.status_view` of this. ``source`` is how the
     command found the run (``run_dir_source``: ``given``, ``run id`` or ``newest under
     ./runs``). ``evaluation`` is the run's recorded evaluation
-    (:func:`~pup_finetune.evaluation.runner.recorded_evaluation`), or ``None``. A process
-    that ends while the state and then the process are read saved its last state before it
-    ended, so when the process is gone and the state changed meanwhile, both are read again.
+    (:func:`~pup_finetune.evaluation.runner.recorded_evaluation`), or ``None``. The worker
+    saves its state before it records its exit, so when it is not running both are read
+    again: a read made after the worker is seen gone is final (a SIGKILLed worker leaves the
+    state as it was, which the second read reports unchanged).
     """
     sync = _remote_sync(run)
     summary, worker = _observed(run, sync)
-    if not worker.running and run.status() != summary:
+    if not worker.running:
         summary, worker = _observed(run, sync)
     best = summary["best"] or {}
     stale_alive = worker.stale and worker.alive
