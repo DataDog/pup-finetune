@@ -415,7 +415,7 @@ class DatasetDir:
         reviewer dropped stay out of training: it says ``by: manual``, which triage never
         relabels. A keep does not carry, as that row has turns nobody reviewed, and a drop
         does not replace a person's label on that row (``by: manual``), which was a
-        decision on the whole row.
+        decision on the whole row; it replaces a judge's or a check's.
 
         ``split_overrides`` assigns split keys to the splits a source already gave them (the
         splits recorded on a fetched dataset's records) before new keys are assigned; a key
@@ -610,9 +610,10 @@ def _carried_drops(
 
     That row can be retired too, as when a prefix's longer row repeats another stored row:
     the drop passes to the row its retirements end at, or to none when that row is not
-    stored, since nothing trains it. None passes to a row that is dropped already or that a
-    person labeled, so a rerun after a crash, which finds the drop it carried in force,
-    carries nothing twice.
+    stored, since nothing trains it. None passes to a row labeled ``manual``: a person's
+    decision on that row, or a drop carried already, so a rerun after a crash, which finds
+    the drop it carried in force, carries nothing twice. A judge's or a check's label is
+    replaced, even a drop, as triage would review it again and could keep the row.
     """
     targets = {e.row_id: e.into for e in retired if e.row_id is not None}
     current = dict(labels)
@@ -623,8 +624,7 @@ def _carried_drops(
         if into is None or into not in stored:
             continue
         label, own = current.get(row_id), current.get(into)
-        decided = own is not None and (not own.keep or own.by == "manual")
-        if label is None or label.keep or decided:
+        if label is None or label.keep or (own is not None and own.by == "manual"):
             continue
         current[into] = carried[row_id] = Label(
             id=into,
