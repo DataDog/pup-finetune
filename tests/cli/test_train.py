@@ -832,6 +832,27 @@ def test_ctrl_c_stops_only_the_watch_and_prints_the_status(
     )
 
 
+def test_ctrl_c_while_a_worker_resumes_a_killed_run_says_the_worker_is_starting(
+    trained: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_state(trained, phase="training", pid=_dead_pid(), heartbeat_at=_ago(120))
+    atomic_write_json(
+        trained / "worker.json", {"pid": os.getpid(), "mode": "resume", "started_at": _ago(1)}
+    )
+
+    def interrupted(seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(train_module.time, "sleep", interrupted)
+    result = invoke("status", str(trained), "--watch", "--timeout", "10m")
+    assert result.exit_code == 0, result.stderr
+    again = f"pup finetune status {trained} --watch --timeout 10m"
+    assert (
+        f"stopped watching; its worker is still starting (pid {os.getpid()}). "
+        f"Watch again: {again}" in result.stderr
+    )
+
+
 def test_ctrl_c_after_training_stopped_says_so_and_points_at_the_next_step(
     trained: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1168,6 +1189,19 @@ def test_cancel_refuses_a_dead_process(trained: Path) -> None:
     assert result.exit_code == 2
     assert "Error [wrong_phase]: " in result.stderr
     assert "no longer running" in result.stderr
+
+
+def test_cancel_points_to_the_watch_while_a_worker_resumes_a_killed_run(trained: Path) -> None:
+    _set_state(trained, phase="training", pid=_dead_pid(), heartbeat_at=_ago(120))
+    atomic_write_json(
+        trained / "worker.json", {"pid": os.getpid(), "mode": "resume", "started_at": _ago(1)}
+    )
+    result = invoke("cancel", str(trained), "--confirm")
+    assert result.exit_code == 2
+    assert "Error [wrong_phase]: " in result.stderr
+    assert f"is starting (process {os.getpid()})" in result.stderr
+    assert f"`pup finetune status {trained} --watch`" in result.stderr
+    assert "resume" not in result.stderr
 
 
 def test_cancel_refuses_a_live_process_that_does_not_hold_the_lock(trained: Path) -> None:
