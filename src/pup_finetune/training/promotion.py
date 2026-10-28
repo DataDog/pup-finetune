@@ -143,7 +143,8 @@ class Promotion:
     :func:`model_id_for_checkpoint` (a later one), and ``promote`` gets its model id and, once
     the request was sent, its time less :data:`ADOPT_CLOCK_ALLOWANCE` as ``adopt_since``, so
     that a model an earlier attempt of this run promoted from that checkpoint is adopted;
-    ``promote``'s ``on_sending`` marks the request sent, and a
+    ``promote``'s ``on_sending`` marks a request not yet sent as sent from then (a sent one
+    keeps its time, so a model the first send created stays adoptable), and a
     :class:`~pup_finetune.providers.base.ModelIdTaken` marks it contested. Without
     ``requests`` the checkpoint is promoted to ``model_id`` and no existing model is adopted.
     The returned result carries ``promoted_model`` (``None`` without promotion) and
@@ -192,7 +193,7 @@ class Promotion:
                 best,
                 model_id,
                 adopt_since=since,
-                on_sending=lambda: mark(PromotionStatus.SENT),
+                on_sending=None if since is not None else lambda: mark(PromotionStatus.SENT),
             )
         except ModelIdTaken:
             mark(PromotionStatus.CONTESTED)

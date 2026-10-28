@@ -310,7 +310,8 @@ Baseten Loops through `providers/baseten/client.py`, the only module that loads 
   `ModelRef`'s `model_id` is the bare id, its `uri` that full name. It looks the model up
   first: a model already under the id is refused (`ModelIdTaken`) unless the run's request
   was `sent` and the model created since. Only once the id is free does it call
-  `on_sending`, which marks the request `sent`, and promote. The shared
+  `on_sending`, which marks a request not yet `sent` as `sent` from then (a retry keeps the
+  first send's time), and promote. The shared
   `finalize` hook ([`training/promotion.py`](../src/pup_finetune/training/promotion.py)) runs
   it before the session ends; after a resume, it first re-creates the best epoch's sampler
   checkpoint from its training checkpoint (`load_state`, then `save_weights_for_sampler`).
