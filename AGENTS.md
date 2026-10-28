@@ -502,8 +502,7 @@ Source lives under `src/pup_finetune/`.
 - `storage.py` - atomic writes, `0600` files and `0700` directories, directory locks, frozen
   settings, and `identity_changes`, the keys two recorded identities differ in.
 - `doctor.py` - what a `doctor` check reports (`CheckResult`: `status`, `detail`, `label`,
-  `needed_for`, `fix`, `required`) and the registry of extra checks modules add with
-  `register_check`, which `doctor` runs after its own.
+  `needed_for`, `fix`, `required`) and the redacted details of a check that raised.
 - `readiness.py` - `doctor`'s provider and judge checks, built from the registries: each
   provider's key (`CredentialSpec.needed_for`) and packages (`ProviderInfo.packages`, found
   with `find_spec`, never imported), the judge-only keys and the Anthropic SDK, the live

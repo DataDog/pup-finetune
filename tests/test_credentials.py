@@ -17,7 +17,6 @@ import pytest
 from pydantic import SecretStr
 
 from pup_finetune import credentials, redaction
-from pup_finetune import doctor as doctor_registry
 from pup_finetune.cli._common import handle_exception
 from pup_finetune.credentials import CredentialSpec
 from pup_finetune.errors import ConfirmRequired, ExternalError, UsageError
@@ -41,7 +40,6 @@ SPEC = CredentialSpec(provider="acme", env_var="ACME_API_KEY", description="Acme
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setattr(credentials, "_REGISTRY", {})
-    monkeypatch.setattr(doctor_registry, "_REGISTRY", {})
     monkeypatch.delenv("ACME_API_KEY", raising=False)
     redaction.clear_secrets()
     yield
@@ -424,56 +422,14 @@ def stored_in(backend: MemoryKeyring) -> str | None:
 # --- doctor -----------------------------------------------------------------------------
 
 
-def test_registering_adds_no_doctor_check_and_reports_the_key_source(
+def test_the_key_source_reports_a_key_in_the_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     credentials.register(SPEC)
-    # doctor builds its key checks from every registered spec (pup_finetune.readiness).
-    assert doctor_registry.run_registered_checks() == []
     assert credentials.key_source("acme") is None
 
     monkeypatch.setenv("ACME_API_KEY", SECRET)
     assert credentials.key_source("acme") == "env"
-
-
-@pytest.mark.parametrize("debug", [False, True])
-def test_doctor_redacts_failing_check_details(
-    debug: bool, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    if debug:
-        monkeypatch.setenv("PUP_FINETUNE_DEBUG", "1")
-    credentials.register_secret(SECRET)
-
-    def expected() -> doctor_registry.CheckOutcome:
-        raise ExternalError(f"provider said {SECRET}", source="acme", hint=f"key {SECRET}")
-
-    def unexpected() -> doctor_registry.CheckOutcome:
-        raise RuntimeError(f"crashed with {SECRET}")
-
-    doctor_registry.register_check("expected", expected)
-    doctor_registry.register_check("unexpected", unexpected)
-    results = doctor_registry.run_registered_checks()
-    err = capsys.readouterr().err
-    details = " ".join(result.detail for result in results)
-    assert SECRET not in details + err
-    assert "provider said ***; key ***" in details
-    assert "RuntimeError: crashed with ***" in details
-    if debug:
-        assert "Traceback" in err
-        assert "RuntimeError: crashed with ***" in err
-
-
-def test_doctor_redacts_returned_check_details(capsys: pytest.CaptureFixture[str]) -> None:
-    credentials.register_secret(SECRET)
-    doctor_registry.register_check(
-        "passing", lambda: doctor_registry.CheckOutcome(True, f"using {SECRET}")
-    )
-    doctor_registry.register_check(
-        "failing", lambda: doctor_registry.CheckOutcome(False, "Authorization: Bearer tok3n")
-    )
-    passing, failing = doctor_registry.run_registered_checks()
-    assert passing.detail == "using ***"
-    assert failing.detail == "Authorization: Bearer ***"
 
 
 def test_the_key_source_reports_a_locked_keychain(monkeypatch: pytest.MonkeyPatch) -> None:

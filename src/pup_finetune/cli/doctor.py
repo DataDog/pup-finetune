@@ -34,7 +34,7 @@ from pup_finetune.cli._common import CommandResult, get_runtime, run_command
 from pup_finetune.cli._flags import require_enablers
 from pup_finetune.cli._presentation import SET_UP, CommandDoc, Safety, describe
 from pup_finetune.datadog.pup import MIN_PUP_VERSION, Pup, format_version
-from pup_finetune.doctor import CheckResult, error_detail, run_registered_checks
+from pup_finetune.doctor import CheckResult, error_detail
 from pup_finetune.errors import ExternalError
 from pup_finetune.next_steps import command, step, template
 from pup_finetune.providers import ProviderInfo, provider_info, provider_infos, registered_providers
@@ -268,7 +268,6 @@ def build_report(
         if required and live:
             checks += readiness.preflight_checks(info, runtime, offline)
     checks += readiness.judge_checks(runtime)
-    checks += run_registered_checks()
     ready = readiness.ready_map(checks, runtime)
     is_ready = all(check.ok for check in checks if check.required)
     next_command, next_steps = _next(checks, ready, named, live=live, runtime=runtime)
