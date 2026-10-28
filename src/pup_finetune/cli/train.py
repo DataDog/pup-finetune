@@ -1350,6 +1350,13 @@ def resume(
         preview["warnings"].append(
             f"this run trained in {job_name(sync.view)}; this resume trains on this machine"
         )
+    contested = state.contested_promotion()
+    if contested is not None:
+        preview["warnings"].append(
+            f"the last promotion found this run's model id {contested.model_id} held by another "
+            f"model on {provider.name}: this resume is refused again unless that model was "
+            "deleted"
+        )
     rerun = [*PROGRAM, "resume", str(run_dir), *(["--detach"] if detach else [])]
     offline = provider.name == "fake"
     if confirm and not offline:
