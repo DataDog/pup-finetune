@@ -4,7 +4,8 @@
 #
 # This product includes software developed at Datadog (https://www.datadoghq.com/).
 # Copyright 2026-present Datadog, Inc.
-"""`train --provider fireworks` and `resume` end to end, on the in-memory Fireworks.
+"""`train --provider fireworks` and `resume` end to end, on the in-memory Fireworks, and what
+`evaluate` reports when its session fails twice.
 
 The provider is the real :class:`FireworksProvider`, with the in-memory Training API, the
 fake REST API (for preflight) and the fake tokenizer injected through its constructor. Each
@@ -24,6 +25,7 @@ from typer.testing import CliRunner, Result
 from pup_finetune import providers
 from pup_finetune.cli import app
 from pup_finetune.cli import train as train_module
+from pup_finetune.evaluation import runner as eval_module
 from pup_finetune.providers.base import Provider
 from pup_finetune.providers.fireworks.provider import FireworksProvider
 from pup_finetune.runs import RunDir, model_id_for_run
@@ -75,6 +77,7 @@ def _fireworks(monkeypatch: pytest.MonkeyPatch, fw: CrashingFireworks) -> None:
 
     monkeypatch.setattr(train_module, "get_provider", get_provider)
     monkeypatch.setattr(inputs_module, "get_provider", get_provider)
+    monkeypatch.setattr(eval_module, "get_provider", get_provider)
 
 
 def invoke(*args: str) -> Result:
@@ -358,3 +361,31 @@ def test_a_missing_training_sdk_fails_the_evaluate_preview(
     assert result.exit_code == 2
     assert result.stdout == ""
     assert "evaluating on Fireworks needs the Fireworks Training SDK" in result.stderr
+
+
+def test_a_ctrl_c_while_evaluate_ends_its_session_wins_over_a_failed_sampler(
+    dataset: Path, tmp_path: Path, fw: CrashingFireworks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def interrupted() -> None:
+        raise KeyboardInterrupt  # Ctrl-C while the client closes
+
+    monkeypatch.setenv("PUP_FINETUNE_DEV", "1")
+    run_dir = tmp_path / "run"
+    assert train(dataset, run_dir, "--confirm").exit_code == 0
+    fw.fail("create_sampling_client", "bad_request")
+    monkeypatch.setattr(fw, "close", interrupted)
+    result = invoke(
+        "evaluate",
+        str(run_dir),
+        "--judge-model",
+        "fake-judge",
+        "--no-publish",
+        "--skip-calibration",
+        "--confirm",
+    )
+    assert result.exit_code == 1, result.stderr
+    assert "Error [interrupted]: evaluation stopped at once" in result.stderr
+    assert any(
+        line.startswith("warning: ") and "opening a sampler" in line
+        for line in result.stderr.splitlines()
+    )

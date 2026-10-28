@@ -38,7 +38,7 @@ from pup_finetune.providers.baseten import client
 from pup_finetune.runs import RunDir, model_id_for_run
 from pup_finetune.runtime import Runtime
 from pup_finetune.training import inputs as inputs_module
-from tests.fakes.baseten import FakeDeployment, FakeLoops
+from tests.fakes.baseten import Answer, FakeDeployment, FakeLoops
 from tests.fakes.fireworks_deploy import FakeClock
 from tests.fakes.pushed import mark_pushed
 from tests.fakes.tokenizer import FakeChatTokenizer
@@ -59,14 +59,24 @@ def clock() -> FakeClock:
     return FakeClock()
 
 
+@pytest.fixture
+def routes() -> dict[str, Answer]:
+    """Baseten HTTP routes the next command's provider answers before the fake's own."""
+    return {}
+
+
 @pytest.fixture(autouse=True)
-def _baseten(monkeypatch: pytest.MonkeyPatch, loops: FakeLoops, clock: FakeClock) -> Iterator[None]:
+def _baseten(
+    monkeypatch: pytest.MonkeyPatch, loops: FakeLoops, clock: FakeClock, routes: dict[str, Answer]
+) -> Iterator[None]:
     for name in (*client._REJECTED_ENV, "LOOPS_BASE_URL", "BASETEN_API_KEY"):
         monkeypatch.delenv(name, raising=False)
 
     def get_provider(name: str, runtime: Runtime) -> Provider:
         assert name == "baseten"
-        return provider_on(loops, FakeChatTokenizer(merge_newlines=True), clock=clock)
+        return provider_on(
+            loops, FakeChatTokenizer(merge_newlines=True), clock=clock, routes=routes
+        )
 
     monkeypatch.setattr(train_module, "get_provider", get_provider)
     monkeypatch.setattr(inputs_module, "get_provider", get_provider)
@@ -322,6 +332,27 @@ def test_a_ctrl_c_while_evaluate_creates_a_sampler_says_it_may_remain(
     assert result.exit_code == 1, result.stderr
     assert "Error [interrupted]: evaluation stopped at once" in result.stderr
     assert warned(result, left("sampler", "session2"))
+
+
+def test_a_ctrl_c_while_evaluate_creates_a_sampler_wins_over_a_failed_deactivation(
+    loops: FakeLoops, routes: dict[str, Answer], run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PUP_FINETUNE_DEV", "1")
+    loops.lost["sampler"] = KeyboardInterrupt()
+    routes["POST /v1/loops/runs/run2/deactivate"] = (500, {})
+    result = invoke(
+        "evaluate",
+        str(run_dir),
+        "--judge-model",
+        "fake-judge",
+        "--no-publish",
+        "--skip-calibration",
+        "--confirm",
+    )
+    assert result.exit_code == 1, result.stderr
+    assert "Error [interrupted]: evaluation stopped at once" in result.stderr
+    assert warned(result, left("sampler", "session2"))
+    assert warned(result, "could not deactivate Baseten run run2")
 
 
 def test_a_ctrl_c_while_benchmark_creates_a_sampler_says_it_may_remain(
