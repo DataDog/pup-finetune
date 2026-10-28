@@ -527,6 +527,16 @@ def _evaluation_parts(result: Mapping[str, Any], *, compact: bool) -> Summary:
     agreement = f"judge agreement: base {base}, tuned {tuned}, tuned - base {difference}{versus}"
     if compact:
         lines = [headline, *chosen, agreement, "paired: " + verdicts, CAVEAT]
+    elif versus:
+        width = max(11, len(base) + 2)
+        lines = [
+            headline,
+            *chosen,
+            f"{'':<21}{'base':<{width}}tuned",
+            f"{'judge agreement':<21}{base:<{width}}{tuned}",
+            f"tuned - base: {difference}{versus}; {verdicts}",
+            CAVEAT,
+        ]
     else:
         width = max(11, len(base) + 2, len(tuned) + 2)
         lines = [
@@ -534,7 +544,7 @@ def _evaluation_parts(result: Mapping[str, Any], *, compact: bool) -> Summary:
             *chosen,
             f"{'':<21}{'base':<{width}}{'tuned':<{width}}tuned - base",
             f"{'judge agreement':<21}{base:<{width}}{tuned:<{width}}{difference}",
-            f"paired{versus}: {verdicts}",
+            f"paired: {verdicts}",
             CAVEAT,
         ]
     parts = [headline, *chosen, agreement, verdicts, CAVEAT]
