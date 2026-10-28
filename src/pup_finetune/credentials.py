@@ -509,6 +509,8 @@ def key_source(
             found.source,
             f"the {spec.provider} API key (source: {found.source}) is malformed: "
             f"it must be {KEY_SHAPE}",
-            login_hint(spec),
+            f"fix or unset {spec.env_var}, which is read before the OS keychain"
+            if found.source == "env"
+            else login_hint(spec),
         )
     return found.source

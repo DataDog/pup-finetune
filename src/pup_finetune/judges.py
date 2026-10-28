@@ -137,12 +137,12 @@ def default_judges(
     from pup_finetune import credentials
 
     uninstalled: dict[str, str] = {}
-    malformed: dict[str, str] = {}
+    malformed: dict[str, credentials.KeyMalformed] = {}
 
     def source(name: str) -> str | None:
         found = credentials.key_source(name, env=env)
         if isinstance(found, credentials.KeyMalformed):
-            malformed[name] = found.source
+            malformed[name] = found
             return None
         if not isinstance(found, str):
             return None
@@ -156,14 +156,15 @@ def default_judges(
 
     row, found = pick_default(table, source)
     if warnings is not None:
-        for name, where in malformed.items():
+        for name, key in malformed.items():
             spec = credentials.get_spec(name)
             warnings.append(
-                f"the {spec.label} key ({credentials.shown_source(spec, where)}) is malformed, "
-                f"so no {spec.label} judge is used and the default is {' and '.join(row.judges)}; "
-                f"{credentials.login_hint(spec)}"
+                f"the {spec.label} key ({credentials.shown_source(spec, key.source)}) is "
+                f"malformed, so no {spec.label} judge is used and the default is "
+                f"{' and '.join(row.judges)}; {key.fix}"
             )
-    return row.judges, _default_source(found, uninstalled, malformed)
+    sources = {name: key.source for name, key in malformed.items()}
+    return row.judges, _default_source(found, uninstalled, sources)
 
 
 def pick_default(
@@ -402,8 +403,10 @@ def require_key(
     instead."""
     if config.provider == "fake":
         return
-    hint = login_hint(config.credential)
     found = credentials.key_source(config.credential)
+    hint = (
+        found.fix if isinstance(found, credentials.KeyMalformed) else login_hint(config.credential)
+    )
     if isinstance(found, credentials.KeyUnreadable):
         raise ExternalError(found.detail, hint=found.fix, source="the OS keychain")
     error: UsageError | None = None

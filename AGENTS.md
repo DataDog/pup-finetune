@@ -244,7 +244,8 @@ OpenAI's, else the two Fireworks models. Previews name the judges and where they
 (`judge_source`, `judges_source`), triage's `next_command` pins `--judges` as evaluate's pins
 `--judge-model`, and `doctor`'s `ready` map reads the default from its own key and package
 checks. A preview whose judge or compare model has no key, or a malformed one, fails with
-the key's login hint (`usage`, exit 2). The test conftest clears every provider key variable (except in `live`
+the key's login hint (`usage`, exit 2); a malformed key in the environment variable is fixed
+or unset instead, since the variable is read before the keychain. The test conftest clears every provider key variable (except in `live`
 tests), so the default tests see the Fireworks defaults. Anthropic judges need the `anthropic`
 extra (`uv sync --all-extras`; `uv sync` is exact, so a bare `uv sync --extra anthropic`
 removes the other extras):
@@ -518,7 +519,8 @@ Source lives under `src/pup_finetune/`.
   the key found is not `KEY_SHAPE` (`well_formed`: one word of printable ASCII of at least 16
   characters), or a `KeyUnreadable` when the lookup raised anything; `doctor`'s key checks,
   `auth status` and the default judges use it, and a malformed key counts as none for them
-  (a default judge passes it over with a warning in the preview).
+  (a default judge passes it over with a warning in the preview). Its `fix` is the login hint,
+  or for a key in the environment, to fix or unset the variable.
 - `redaction.py` - masks resolved secrets and `Bearer` tokens in error output and logs. A value
   shorter than `MIN_SECRET_LENGTH` (16) is never registered, so a placeholder key cannot
   rewrite ordinary words in a result.
