@@ -347,9 +347,18 @@ ACCEPTED_B1 = "synthetic-trace-b:synthetic-span-b1"
     [
         (None, True),
         (Label(id=ACCEPTED_B1, keep=True, by="judge"), True),
+        # Triage reviews these again, and a council keep would let A1 train.
+        (Label(id=ACCEPTED_B1, keep=False, reason="off topic", by="judge"), True),
+        (Label(id=ACCEPTED_B1, keep=False, reason="check first: too long", by="check"), True),
         (Label(id=ACCEPTED_B1, keep=True), False),
     ],
-    ids=["unlabeled", "kept-by-the-judge", "kept-by-a-person"],
+    ids=[
+        "unlabeled",
+        "kept-by-the-judge",
+        "dropped-by-the-judge",
+        "dropped-by-a-check",
+        "kept-by-a-person",
+    ],
 )
 def test_a_drop_carries_to_the_accepted_row_a_prefix_retires_into_unless_a_person_kept_it(
     tmp_path: Path, own: Label | None, carried: bool
