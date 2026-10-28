@@ -39,6 +39,7 @@ from typing import Any, Final, Protocol
 
 from pydantic import SecretStr
 
+from pup_finetune.billing import BillingPart
 from pup_finetune.credentials import login_hint
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.http_common import bearer_key
@@ -99,10 +100,11 @@ LOG_RETENTION: Final = timedelta(days=7)
 CLOCK_SLACK: Final = timedelta(seconds=60)
 DETAIL_CHARS: Final = 300
 NOTHING_CREATED: Final = "nothing that bills was created"
-BILLING: Final = (
+BILLING: Final = BillingPart(
     f"Baseten bills the CPU job that runs the training loop ({CPU_COUNT} vCPUs, "
     f"{MEMORY.removesuffix('Gi')} GiB) for the time it runs, at its own rates, which "
-    "pup-finetune does not know: from the job's start until training ends"
+    "pup-finetune does not know: from the job's start until training ends",
+    offline=False,
 )
 
 QUEUED: Final = frozenset(

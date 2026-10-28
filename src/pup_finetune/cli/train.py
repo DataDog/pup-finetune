@@ -607,7 +607,7 @@ def _add_remote_preview(
         f", in a Baseten CPU job in team {plan.team} that runs the training loop, so training "
         "continues while this machine sleeps"
     )
-    merge_billing(preview, billing_fields([BillingPart(plan.billing, offline=False)]))
+    merge_billing(preview, billing_fields([plan.billing]))
     preview["data_destination"] += (
         "; the train and validation rows, their split assignments, the run files and "
         "pup-finetune's source are uploaded to Baseten storage for the job"

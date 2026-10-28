@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+from pup_finetune.billing import BillingPart
 from pup_finetune.data.dataset_dir import DatasetDir, DatasetSettings
 from pup_finetune.data.labels import Label
 from pup_finetune.data.schema import TrainingRow, split_key, validate_row
@@ -249,7 +250,7 @@ def plan(root: str = "/b10/workspace") -> RemotePlan:
         compute={"cpu_count": 16},
         secret="pup_finetune_api_key",  # noqa: S106 - a secret's name
         tool_versions={"truss": "0.18.33"},
-        billing="",
+        billing=BillingPart("", offline=False),
         warnings=(),
     )
 
