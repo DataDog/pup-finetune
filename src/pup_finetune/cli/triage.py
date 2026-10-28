@@ -274,10 +274,13 @@ def triage_rows(
     module = load_checks(checks) if checks is not None else None
     council: tuple[str, ...] = ()
     council_source = ""
+    council_warnings: list[str] = []
     if judges is not None:
         council, council_source = triage.parse_judges(judges), triage.COUNCIL_GIVEN
     elif not checks_only:
-        council, council_source = triage.default_council(dataset, reset=reset_triage)
+        council, council_source = triage.default_council(
+            dataset, reset=reset_triage, warnings=council_warnings
+        )
     _check_available(council)
     plan = triage.plan_triage(
         dataset,
@@ -333,6 +336,8 @@ def triage_rows(
     planned["judges_source"] = council_source
     planned["rubric_file"] = str(rubric) if rubric is not None else None
     preview = with_settings(planned, settings, defaults_used)
+    if council_warnings:
+        preview["warnings"] = [*council_warnings, *preview.get("warnings", [])]
     refused = None
     if template_task is not None:
         preview["warnings"] = [*preview.get("warnings", []), template_task]

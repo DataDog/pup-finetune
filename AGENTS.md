@@ -234,7 +234,8 @@ OpenAI; per model on Fireworks, `judges.FIREWORKS_REASONING`). Without `--judge-
 directory froze (an evaluation with results, `triage.json`), else a default by the credentials
 that resolve offline (environment variable, keychain, or the Anthropic SDK's login), for a
 provider whose judge package is installed; an Anthropic key without the `anthropic` package is
-passed over, and the source says so. The defaults are `judge_models.EVALUATE_DEFAULTS` and
+passed over, and the source says so, as is a malformed key, which the preview also warns
+about. The defaults are `judge_models.EVALUATE_DEFAULTS` and
 `TRIAGE_DEFAULTS`, picked by `judges.default_judges`: `evaluate` takes
 `anthropic/claude-haiku-5-5`, else `openai/gpt-5.4-mini`, else Fireworks'
 `deepseek-v4p1-flash`; triage takes Haiku and `gpt-5.4-mini` with both keys, Haiku and
@@ -516,7 +517,8 @@ Source lives under `src/pup_finetune/`.
   `key_source` is where a key would come from without reading it out, a `KeyMalformed` when
   the key found is not `KEY_SHAPE` (`well_formed`: one word of printable ASCII of at least 16
   characters), or a `KeyUnreadable` when the lookup raised anything; `doctor`'s key checks,
-  `auth status` and the default judges use it, and a malformed key counts as none for them.
+  `auth status` and the default judges use it, and a malformed key counts as none for them
+  (a default judge passes it over with a warning in the preview).
 - `redaction.py` - masks resolved secrets and `Bearer` tokens in error output and logs. A value
   shorter than `MIN_SECRET_LENGTH` (16) is never registered, so a placeholder key cannot
   rewrite ordinary words in a result.

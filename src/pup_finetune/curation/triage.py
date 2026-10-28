@@ -273,11 +273,13 @@ COUNCIL_FROZEN: Final = SETTINGS_FILE
 """Where a council came from (``judges_source``) when it is not a default by credential."""
 
 
-def default_council(dataset: DatasetDir, *, reset: bool = False) -> tuple[tuple[str, ...], str]:
+def default_council(
+    dataset: DatasetDir, *, reset: bool = False, warnings: list[str] | None = None
+) -> tuple[tuple[str, ...], str]:
     """The council a triage of ``dataset`` without ``--judges`` uses, and where it came from:
     the judges ``triage.json`` froze (unless ``reset`` discards them), so a rerun keeps
     them, else the default by the credentials that resolve
-    (:data:`~pup_finetune.judge_models.TRIAGE_DEFAULTS`)."""
+    (:data:`~pup_finetune.judge_models.TRIAGE_DEFAULTS`), whose warnings go to ``warnings``."""
     from pup_finetune.judge_models import TRIAGE_DEFAULTS
     from pup_finetune.judges import default_judges
 
@@ -287,7 +289,7 @@ def default_council(dataset: DatasetDir, *, reset: bool = False) -> tuple[tuple[
         frozen = stored.get("judges") if isinstance(stored, dict) else None
         if isinstance(frozen, list) and frozen and all(isinstance(j, str) for j in frozen):
             return tuple(frozen), COUNCIL_FROZEN
-    return default_judges(TRIAGE_DEFAULTS)
+    return default_judges(TRIAGE_DEFAULTS, warnings=warnings)
 
 
 def parse_judges(value: str) -> tuple[str, ...]:
