@@ -1104,10 +1104,13 @@ def _not_carried_warnings(not_carried: Sequence[RefusedDrop]) -> list[str]:
             f"{pair}; your keep stands, so the turns dropped on {drop.id!r} train: drop "
             f"{held!r} with `dataset label` if they should not"
         ]
+    rows = len({refused.row_id for refused in not_carried})
+    one = rows == 1
     return [
-        f"{len(not_carried)} rows you kept hold the conversation of a dropped row this pull "
-        f"retired; your keeps stand, so the dropped turns train (e.g. {pair}; see "
-        "pull.drops_not_carried): drop those rows with `dataset label` if they should not"
+        f"{counted(rows, 'row')} now {'holds' if one else 'hold'} the conversations of "
+        f"{len(not_carried)} dropped rows this pull retired, and your keeps stand, so the "
+        f"dropped turns train (e.g. {pair}; see pull.drops_not_carried): drop "
+        f"{'it' if one else 'those rows'} with `dataset label` if they should not"
     ]
 
 
