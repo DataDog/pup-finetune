@@ -503,6 +503,11 @@ def test_redact_masks_the_longest_secret_whole() -> None:
     assert credentials.redact("v=synthetic-key-extended") == "v=***"
 
 
+def test_redact_never_masks_a_value_too_short_to_be_a_key() -> None:
+    credentials.register_secret("finetune")
+    assert credentials.redact("pup finetune doctor") == "pup finetune doctor"
+
+
 def test_redact_leaves_ordinary_text_alone() -> None:
     credentials.register_secret("")
     assert credentials.redact("nothing secret here") == "nothing secret here"

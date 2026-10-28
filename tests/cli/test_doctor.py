@@ -740,6 +740,33 @@ def test_a_crashing_keychain_backend_does_not_crash_doctor(
     ]
 
 
+def test_a_key_too_short_to_be_one_is_malformed_and_leaves_the_report_whole(
+    use_pup: UsePup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    use_pup(healthy_pup().client())
+    result = invoke()
+    assert result.exit_code == 0, result.stderr
+    assert "next_command" in report_of(result)
+    key = checks_of(result)["anthropic:key"]
+    assert (key["status"], key["label"]) == ("optional", "Anthropic key malformed")
+    assert "anthropic API key (source: env) is malformed" in key["detail"]
+    assert key["fix"] == (
+        "run `pup finetune auth login anthropic` in your own terminal, or set ANTHROPIC_API_KEY"
+    )
+
+
+def test_a_short_key_that_is_a_word_never_rewrites_the_next_command(
+    use_pup: UsePup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "finetune")
+    monkeypatch.setenv("FIREWORKS_API_KEY", API_KEY)
+    use_pup(healthy_pup().client())
+    result = invoke("--provider", "fireworks")
+    assert result.exit_code == 0, result.stderr
+    assert report_of(result)["next_command"] == "pup finetune doctor --provider fireworks --check"
+
+
 def test_a_package_that_cannot_be_loaded_is_not_missing(
     use_pup: UsePup, monkeypatch: pytest.MonkeyPatch
 ) -> None:
