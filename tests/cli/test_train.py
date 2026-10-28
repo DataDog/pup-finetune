@@ -889,6 +889,13 @@ def test_the_watch_line_says_when_the_training_process_is_gone() -> None:
     assert _line(phase="completed", worker=None).endswith("eta ~6m")
 
 
+def test_the_watch_line_says_when_a_worker_is_starting() -> None:
+    starting = {"pid": 7, "state": "starting", "heartbeat_age_s": 300.0, "log": None}
+    assert _line(worker=starting).endswith("(worker pid 7 starting)")
+    assert _line(phase="interrupted", worker=starting).endswith("(worker pid 7 starting)")
+    assert _line(worker={**starting, "pid": None}).endswith("(its worker starting)")
+
+
 @pytest.mark.parametrize(
     ("seconds", "exact", "rough"),
     [(0, "0s", "0s"), (45.4, "45s", "45s"), (252, "4m12s", "4m"), (7500, "2h05m", "2h05m")],
