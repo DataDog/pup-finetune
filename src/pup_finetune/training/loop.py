@@ -32,12 +32,13 @@ set. Between steps the loop stops cleanly when :meth:`LoopState.cancel_requested
 the :class:`~pup_finetune.training.budget.Budget` is exhausted; it then saves a training
 checkpoint of the steps since the last one. The spend guard is also asked before every other
 paid call: each ``forward_backward`` and ``optim_step`` (a step refused part-way is never
-applied or counted), each validation microbatch and each checkpoint save. A stop during an
-epoch's validation or checkpoints leaves that epoch unrecorded, so it never becomes the
-best on a partial validation. Only the checkpoint saved at a stop may use the budget's spend
-reserve. ``finalize`` runs last, while the session is still open (the place to promote the
-best checkpoint before the session ends); if it fails, :class:`FinalizeFailed` carries the
-training result so it is not lost.
+applied or counted), each validation microbatch and each checkpoint save. A budget stop
+during an epoch's validation or checkpoints leaves that epoch unrecorded, so it never
+becomes the best on a partial validation, while a cancel lets the epoch finish and stops
+training ``cancelled`` right after it, the last epoch included. Only the checkpoint saved at
+a stop may use the budget's spend reserve. ``finalize`` runs last, while the session is still
+open (the place to promote the best checkpoint before the session ends); if it fails,
+:class:`FinalizeFailed` carries the training result so it is not lost.
 """
 
 from __future__ import annotations
@@ -512,6 +513,8 @@ class _Loop:
                         self._end_epoch(epoch)
                     except _BudgetStop as exc:
                         stop = self._budget_stop(str(exc))
+                    else:
+                        stop = self._cancelled()
                 if stop is not None:
                     stopped = stop
                     if self._step > self._checkpoint_step:
@@ -596,13 +599,19 @@ class _Loop:
         return self._clock() - self._last_checkpoint_at >= interval
 
     def _stop_reason(self, step: Step) -> StoppedReason | None:
-        if self._state.cancel_requested():
-            self._emit({"type": "stopped", "reason": "cancelled", "step": self._step})
-            return "cancelled"
+        if (cancelled := self._cancelled()) is not None:
+            return cancelled
         why = self._budget.exhausted(step_tokens(step))
         if why is not None:
             return self._budget_stop(f"stopped before step {self._step + 1}: {why}")
         return None
+
+    def _cancelled(self) -> StoppedReason | None:
+        """``cancelled``, reported, when a cancel was requested."""
+        if not self._state.cancel_requested():
+            return None
+        self._emit({"type": "stopped", "reason": "cancelled", "step": self._step})
+        return "cancelled"
 
     def _budget_stop(self, why: str) -> StoppedReason:
         """Record that the budget stopped training, and why."""
