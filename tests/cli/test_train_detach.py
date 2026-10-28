@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import shlex
 import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -221,11 +223,30 @@ def test_cancel_stops_a_detached_worker_gracefully_and_promotes(
 
 def _first_line(stream: Any, pattern: str) -> str:
     """The first line ``stream`` (a process's stderr) prints that ``pattern`` matches at its
-    start, skipping anything else."""
-    while line := stream.readline():
+    start, skipping anything else, within :data:`TIMEOUT_S`.
+
+    A thread reads up to that line and no further, so the rest is left to ``communicate``.
+    """
+    lines: queue.Queue[str] = queue.Queue()
+
+    def read() -> None:
+        while line := stream.readline():
+            lines.put(line)
+            if re.match(pattern, line):
+                return
+        lines.put("")
+
+    threading.Thread(target=read, daemon=True).start()
+    deadline = time.monotonic() + TIMEOUT_S
+    while True:
+        try:
+            line = lines.get(timeout=max(deadline - time.monotonic(), 0))
+        except queue.Empty:
+            raise AssertionError(f"no line matching {pattern!r} in {TIMEOUT_S:g}s") from None
+        if not line:
+            raise AssertionError(f"the process ended before printing a line matching {pattern!r}")
         if re.match(pattern, line):
-            return str(line)
-    raise AssertionError(f"the process ended before printing a line matching {pattern!r}")
+            return line
 
 
 def _ignore_sigint() -> None:
@@ -278,6 +299,8 @@ def test_ctrl_c_stops_watching_a_detached_run_but_never_its_training(
         stdout, rest = watcher.communicate(timeout=TIMEOUT_S)
         stderr = first + rest
     finally:
+        # The worker trains on and completes once its steps are let go.
+        hold.unlink(missing_ok=True)
         if watcher.poll() is None:
             watcher.kill()
             watcher.wait()
@@ -285,8 +308,6 @@ def test_ctrl_c_stops_watching_a_detached_run_but_never_its_training(
     data = one_json(stdout)
     assert (data["phase"], data["watch_timed_out"]) == ("training", False)
     assert f"stopped watching; the run keeps training (pid {pid})" in stderr
-    # The worker trains on and completes once its steps are let go.
-    hold.unlink()
     final = watch(run_dir)
     assert final["phase"] == "completed"
     assert "cancel" not in (run_dir / "worker.log").read_text()
