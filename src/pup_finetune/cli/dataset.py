@@ -1349,7 +1349,8 @@ def _read_label_file(path: Path, *, at: datetime) -> list[Label]:
     """The labels in ``path``, all ``manual``; ``at`` fills in lines that leave it out.
 
     A line claiming ``"by": "judge"`` or ``"check"`` is refused: those labels come only from
-    ``dataset triage``."""
+    ``dataset triage``. So is one naming ``carried_from``: carried drops come only from
+    ``dataset pull``."""
     labels = parse_labels(
         path,
         defaults={"at": at},
@@ -1365,6 +1366,13 @@ def _read_label_file(path: Path, *, at: datetime) -> list[Label]:
             f"{path} labels {claimed.id!r} as decided by {by}",
             hint='leave "by" out: `dataset label` records your decisions, and judge and check '
             "labels come only from `pup finetune dataset triage`",
+        )
+    carried = next((label for label in labels if label.carried_from is not None), None)
+    if carried is not None:
+        raise UsageError(
+            f"{path} labels {carried.id!r} as carried from row {carried.carried_from!r}",
+            hint='leave "carried_from" out: `dataset label` records your decisions on the '
+            "rows themselves, and carried drops come only from `pup finetune dataset pull`",
         )
     return labels
 

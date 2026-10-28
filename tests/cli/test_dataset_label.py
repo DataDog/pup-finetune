@@ -126,6 +126,14 @@ def test_a_label_file_cannot_claim_the_judge_council_or_a_check(
     assert not (dataset / "labels.jsonl").exists()
 
 
+def test_a_label_file_cannot_claim_a_drop_a_pull_carried(dataset: Path, tmp_path: Path) -> None:
+    line = {"id": FIXTURE_IDS[0], "keep": False, "reason": "x", "carried_from": FIXTURE_IDS[1]}
+    result = label(dataset, label_file(tmp_path, line))
+    assert result.exit_code == 2
+    assert f"as carried from row {FIXTURE_IDS[1]!r}" in result.stderr
+    assert not (dataset / "labels.jsonl").exists()
+
+
 def test_label_has_no_by_option(dataset: Path, tmp_path: Path) -> None:
     file = label_file(tmp_path, {"id": FIXTURE_IDS[0], "keep": True})
     result = label(dataset, file, "--by", "human")

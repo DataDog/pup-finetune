@@ -654,9 +654,12 @@ Source lives under `src/pup_finetune/`.
   is kept as stored. A drop label in force on a retired row carries to the stored row that
   now holds its conversation (`Exclusion.into`, followed through the rows the same pull
   retires, as when the longer row of a prefix repeats a stored row the pull also retires):
-  `DatasetDir.add` appends a drop naming the retired id under its lock, before the rows,
-  unless that row is dropped already or a person labeled it, and the pull result lists them
-  in `pull.carried_drops`. A keep does not carry: the longer row has turns nobody reviewed.
+  `DatasetDir.add` appends a drop whose `Label.carried_from` names the retired id under its
+  lock, before the rows, unless that row is dropped already or a person labeled it, and the
+  pull result lists them in `pull.carried_drops`. A carried drop says `by: manual` whoever
+  dropped the retired row, so triage never relabels it; `--agreement` does not compare with
+  it, and `dataset label --file` refuses a line naming `carried_from`. A keep does not
+  carry: the longer row has turns nobody reviewed.
   `fetch.py` is `dataset fetch`: an Agent Observability dataset's current records back into
   rows (input messages plus expected output, the split from metadata or tags), frozen per
   dataset version, with the dataset's `push.json` so evaluations publish onto it.

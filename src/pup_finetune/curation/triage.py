@@ -46,16 +46,18 @@ one ran stops instead of mixing the votes of two rubrics.
 
 **Labels.** Decided rows are labeled through :func:`~pup_finetune.curation.labels.apply_labels`
 with ``by="judge"``, under the same lock as the voting. Rows whose decision in force came
-from the agent or a person are not reviewed, and the labels are read again just before the
-judge labels are recorded, so one written after planning is never overwritten either: that
-row is skipped. A label cannot be withdrawn, so a judge label
+from the agent or a person are not reviewed (nor are drops a pull carried, which say
+``manual`` too; see :attr:`~pup_finetune.data.labels.Label.carried_from`), and the labels
+are read again just before the judge labels are recorded, so one written after planning is
+never overwritten either: that row is skipped. A label cannot be withdrawn, so a judge label
 that the current votes do not back (cast under a rubric ``reset`` discarded, on a row outside
 this ``max_rows`` sample or ``only`` subset, or on a row left undecided) is reported as stale
 (:meth:`TriagePlan.stale_labels`), and the triage is not complete while any remains.
 
 **Agreement.** With ``agreement``, the council reviews the rows the agent or a person
-labeled instead, and labels nothing: :func:`run_triage` reports how often the council's
-decisions (and each judge's votes) agree with those labels (:class:`Agreement`: the rate,
+labeled instead (not the drops a pull carried: those decisions were made on other rows),
+and labels nothing: :func:`run_triage` reports how often the council's decisions (and each
+judge's votes) agree with those labels (:class:`Agreement`: the rate,
 Cohen's kappa, the confusion counts and the rows they disagree on), so a rubric can be
 checked against decisions the user made before the council labels the rest. Its votes are
 stored and frozen like any other.
@@ -906,10 +908,10 @@ def plan_triage(
                 judge_labels[row.id] = label
             continue
         if label is not None and label.by == "manual":
-            references[row.id] = label
-            if agreement:
+            if agreement and label.carried_from is None:
+                references[row.id] = label
                 reviewable.append(row)
-            else:
+            elif not agreement:
                 skipped += 1
             continue
         if label is not None and label.by == "check" and checks is None:
