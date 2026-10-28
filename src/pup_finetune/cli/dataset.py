@@ -1029,6 +1029,7 @@ def pull_rows(
         "warnings": [
             *notes.warnings,
             *_collection_warnings(collection, options),
+            *_not_carried_warnings(added.not_carried),
             *summary["warnings"],
             *pipeline_warnings,
         ],
@@ -1046,6 +1047,10 @@ def pull_rows(
             "updated": added.updated,
             "carried_drops": [
                 {"row_id": row_id, "from": retired} for row_id, retired in added.carried.items()
+            ],
+            "drops_not_carried": [
+                {"row_id": keep.id, "kept": keep.reason, "from": drop.id, "dropped": drop.reason}
+                for keep, drop in added.not_carried
             ],
             **collection.stats(),
         },
@@ -1070,6 +1075,33 @@ def _carried_notes(carried: Mapping[str, str]) -> list[str]:
         f"a dropped row this pull retired, so {'it takes' if one else 'they take'} its drop "
         f"label (e.g. {row_id!r} from {retired!r}; see pull.carried_drops)"
     ]
+
+
+def _not_carried_warnings(not_carried: Sequence[tuple[Label, Label]]) -> list[str]:
+    """The warning that rows a person kept hold the conversation of a dropped row this pull
+    retired, so their keeps stand and the dropped turns train."""
+    if not not_carried:
+        return []
+    keep, drop = not_carried[0]
+    pair = (
+        f"row {keep.id!r} ({_decision(keep)}) now holds the conversation of row {drop.id!r} "
+        f"({_decision(drop)}), which this pull retired"
+    )
+    if len(not_carried) == 1:
+        return [
+            f"{pair}; your keep stands, so the turns dropped on {drop.id!r} train: drop "
+            f"{keep.id!r} with `dataset label` if they should not"
+        ]
+    return [
+        f"{len(not_carried)} rows you kept hold the conversation of a dropped row this pull "
+        f"retired; your keeps stand, so the dropped turns train (e.g. {pair}; see "
+        "pull.drops_not_carried): drop those rows with `dataset label` if they should not"
+    ]
+
+
+def _decision(label: Label) -> str:
+    decision = "kept" if label.keep else "dropped"
+    return f"{decision}: {label.reason!r}" if label.reason else decision
 
 
 def _with_frozen(dataset: DatasetDir, directory: Path, values: Mapping[str, Any]) -> dict[str, Any]:

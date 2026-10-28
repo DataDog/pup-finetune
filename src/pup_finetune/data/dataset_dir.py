@@ -131,6 +131,9 @@ class AddResult:
     carried: dict[str, str] = field(default_factory=dict)
     """The rows labeled drop because they hold the conversation of a dropped row this add
     retired, each with that row's id."""
+    not_carried: list[tuple[Label, Label]] = field(default_factory=list)
+    """The drops of rows this add retired that a person's keep on the row holding their
+    conversation now refused, each as that keep and the drop: the dropped turns train."""
 
 
 class DatasetDir:
@@ -455,7 +458,7 @@ class DatasetDir:
                     )
                 splits.assignments[key] = split
             labels = self.labels()
-            carried = _carried_drops(retiring, labels, {row.id for row in all_rows})
+            carried, refused = _carried_drops(retiring, labels, {row.id for row in all_rows})
             dropped = {row_id for row_id, label in labels.items() if not label.keep}
             assign_splits(all_rows, splits, dropped=dropped | {c.id for c in carried.values()})
             repair = SOURCE_COMMANDS[settings.source]
@@ -492,6 +495,7 @@ class DatasetDir:
             retired_rows,
             changed,
             {label.id: row_id for row_id, label in carried.items()},
+            refused,
         )
 
     def _write_excluded(self, records: Iterable[dict[str, Any]]) -> None:
@@ -604,9 +608,10 @@ def _merge(
 
 def _carried_drops(
     retired: Iterable[Exclusion], labels: Mapping[str, Label], stored: Collection[str]
-) -> dict[str, Label]:
+) -> tuple[dict[str, Label], list[tuple[Label, Label]]]:
     """The drop label each ``retired`` row with a drop in force passes to the ``stored`` row
-    that holds its conversation (its exclusion's ``into``), by the retired row's id.
+    that holds its conversation (its exclusion's ``into``), by the retired row's id, and each
+    drop a person's keep on that row refuses, with that keep.
 
     That row can be retired too, as when a prefix's longer row repeats another stored row:
     the drop passes to the row its retirements end at, or to none when that row is not
@@ -618,13 +623,18 @@ def _carried_drops(
     targets = {e.row_id: e.into for e in retired if e.row_id is not None}
     current = dict(labels)
     carried: dict[str, Label] = {}
+    refused: list[tuple[Label, Label]] = []
     for row_id, into in targets.items():
         while into is not None and into in targets:
             into = targets[into]
         if into is None or into not in stored:
             continue
         label, own = current.get(row_id), current.get(into)
-        if label is None or label.keep or (own is not None and own.by == "manual"):
+        if label is None or label.keep:
+            continue
+        if own is not None and own.by == "manual":
+            if own.keep:
+                refused.append((own, label))
             continue
         current[into] = carried[row_id] = Label(
             id=into,
@@ -632,7 +642,7 @@ def _carried_drops(
             reason=f"carried from row {row_id!r}, which this row absorbed: {label.reason}",
             carried_from=row_id,
         )
-    return carried
+    return carried, refused
 
 
 def _apply_updates(
