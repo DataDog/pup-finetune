@@ -517,6 +517,11 @@ def test_redact_masks_registered_secrets_and_bearer_tokens() -> None:
     assert credentials.redact(text) == "a *** b *** c Authorization: Bearer ***"
 
 
+def test_redact_masks_a_bearer_token_whole_up_to_the_next_space() -> None:
+    text = "Authorization: Bearer abc.def,ghi!jkl:mn next"
+    assert credentials.redact(text) == "Authorization: Bearer *** next"
+
+
 def test_redact_masks_the_longest_secret_whole() -> None:
     credentials.register_secret("synthetic-key-0000")
     credentials.register_secret("synthetic-key-0000-extended")
