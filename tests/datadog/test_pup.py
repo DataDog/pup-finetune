@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -163,6 +164,23 @@ def test_child_env_drops_every_provider_secret_and_keeps_datadog_s_keys() -> Non
     env = fake.last.env
     assert not PROVIDER_SECRETS.keys() & env.keys()
     assert {name: env[name] for name in DATADOG_KEYS} == DATADOG_KEYS
+
+
+def test_a_process_that_imports_only_the_pup_client_drops_every_provider_secret() -> None:
+    code = (
+        "import json, sys; from pup_finetune.datadog.pup import child_env; "
+        "print(json.dumps(sorted(child_env(json.load(sys.stdin)))))"
+    )
+    completed = subprocess.run(  # noqa: S603 - our own interpreter and code
+        [sys.executable, "-c", code],
+        input=json.dumps({**USER_ENV, **PROVIDER_SECRETS}),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    names = set(json.loads(completed.stdout))
+    assert not PROVIDER_SECRETS.keys() & names
+    assert {"DD_SITE", "HOME"} <= names
 
 
 def test_keep_dd_token_override_passes_the_token_through() -> None:

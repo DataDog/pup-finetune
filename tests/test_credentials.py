@@ -7,8 +7,11 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
+import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -71,6 +74,23 @@ def test_spec_keeps_an_explicit_keychain_account() -> None:
 def test_spec_requires_a_provider_and_env_var(provider: str, env_var: str) -> None:
     with pytest.raises(ValueError, match="needs"):
         CredentialSpec(provider=provider, env_var=env_var)
+
+
+def test_provider_secret_env_names_every_provider_secret_in_a_fresh_process() -> None:
+    code = (
+        "import json; from pup_finetune.credentials import provider_secret_env; "
+        "print(json.dumps(sorted(provider_secret_env())))"
+    )
+    completed = subprocess.run(  # noqa: S603 - our own interpreter and code
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
+    assert set(json.loads(completed.stdout)) >= {
+        "FIREWORKS_API_KEY",
+        "BASETEN_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "OPENAI_API_KEY",
+    }
 
 
 def test_nothing_is_registered_by_default() -> None:
