@@ -659,8 +659,8 @@ Source lives under `src/pup_finetune/`.
   its conversation (`Exclusion.into`, followed through the rows the same pull retires, as
   when the longer row of a prefix repeats a stored row the pull also retires):
   `DatasetDir.add` appends a drop whose `Label.carried_from` names the retired id under its
-  lock, before the rows, unless a person labeled that row or a row the pull retired into it
-  on the way (a judge's or a check's label, even a drop, is replaced: triage reviews those
+  lock, before the rows, unless a person labeled that row or kept a row the pull retired into
+  it on the way (a judge's or a check's label, even a drop, is replaced: triage reviews those
   again), and the pull result lists them in `pull.carried_drops`. A carried drop says `by: manual` whoever dropped the retired row, so
   triage never relabels it; `--agreement` does not compare with it, and `dataset label
   --file` refuses a line naming `carried_from`. A person's keep on such a row stands, but the

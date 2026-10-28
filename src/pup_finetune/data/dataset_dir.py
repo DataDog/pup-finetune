@@ -428,9 +428,9 @@ class DatasetDir:
         retires), as a new drop label whose ``carried_from`` names it, so the turns the
         reviewer dropped stay out of training: it says ``by: manual``, which triage never
         relabels. A keep does not carry, as that row has turns nobody reviewed, and a drop
-        does not replace a person's label (``by: manual``) on that row or on a row this add
-        retired into it on the way, which was a decision on a whole row holding the
-        conversation; it replaces a judge's or a check's.
+        does not replace a person's label (``by: manual``) on that row, nor carry over a
+        person's keep on a row this add retired into it on the way, which was a decision on
+        a whole row holding the conversation; it replaces a judge's or a check's.
 
         ``split_overrides`` assigns split keys to the splits a source already gave them (the
         splits recorded on a fetched dataset's records) before new keys are assigned; a key
@@ -627,11 +627,11 @@ def _carried_drops(
 
     That row can be retired too, as when a prefix's longer row repeats another stored row:
     the drop passes to the row its retirements end at, or to none when that row is not
-    stored, since nothing trains it. None passes when a row along the way, or that row, is
-    labeled ``manual``: a person's decision on a row holding the conversation, or a drop
-    carried already, so a rerun after a crash, which finds the drop it carried in force,
-    carries nothing twice. A judge's or a check's label is replaced, even a drop, as triage
-    would review it again and could keep the row.
+    stored, since nothing trains it. None passes when that row has a ``manual`` drop: a
+    person's, or a drop carried already, so a rerun after a crash, which finds the drop it
+    carried in force, carries nothing twice. A person's keep on that row or on a row along
+    the way refuses the drop, unless another drop dropped the row. A judge's or a check's
+    label is replaced, even a drop, as triage would review it again and could keep the row.
     """
     targets = {e.row_id: e.into for e in retired if e.row_id is not None}
     current = dict(labels)
@@ -648,11 +648,13 @@ def _carried_drops(
         if label is None or label.keep:
             continue
         held = chain[-1]
-        decided = (current.get(hop) for hop in chain)
-        own = next((own for own in decided if own is not None and own.by == "manual"), None)
-        if own is not None:
-            if own.keep:
-                refused.append(RefusedDrop(held, own, label))
+        own = current.get(held)
+        if own is not None and own.by == "manual" and not own.keep:
+            continue
+        decided = (current.get(hop) for hop in reversed(chain))
+        keep = next((k for k in decided if k is not None and k.by == "manual" and k.keep), None)
+        if keep is not None:
+            refused.append(RefusedDrop(held, keep, label))
             continue
         current[held] = carried[row_id] = Label(
             id=held,
@@ -660,7 +662,8 @@ def _carried_drops(
             reason=f"carried from row {row_id!r}, which this row absorbed: {label.reason}",
             carried_from=row_id,
         )
-    return carried, refused
+    dropped = {label.id for label in carried.values()}
+    return carried, [r for r in refused if r.row_id not in dropped]
 
 
 def _apply_updates(
