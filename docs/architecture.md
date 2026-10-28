@@ -705,7 +705,8 @@ Using Baseten as the example:
    before sending it, `on_created` once the deployment exists, then wait
    until it serves, raising `DeploymentNotReady` when it fails or the wait runs out),
    `smoke_test` (one short chat completion, retried while it scales up; a failed answer is a
-   result, not an exception), `owns_deployment` (whether the deployment under an id is the
+   result, not an exception; `run_smoke_test` in `providers/base.py` sends it on a chat
+   client), `owns_deployment` (whether the deployment under an id is the
    one a `DeploymentRequest` creates) and an idempotent `undeploy` for a promoted `ModelRef`. Callers
    gate them behind `--confirm` and `PUP_READ_ONLY`.
 7. **Registration and install.** Call `register_provider("baseten",

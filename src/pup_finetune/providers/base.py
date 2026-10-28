@@ -35,12 +35,15 @@ from pydantic import (
 )
 
 from pup_finetune.errors import ExternalError, UsageError
+from pup_finetune.redaction import redact
 from pup_finetune.rendering.base import ChatMessage, Renderer, ToolSpec
 from pup_finetune.rendering.hf import COMMIT_SHA
 from pup_finetune.rendering.tokens import TokenizedExample
 
 if TYPE_CHECKING:
     from concurrent.futures import Future
+
+    from pup_finetune.inference import ChatCompleter
 
 # --- Models and training configuration ---------------------------------------------------
 
@@ -636,6 +639,50 @@ class SmokeTest:
             "attempts": self.attempts,
             "detail": self.detail,
         }
+
+
+SMOKE_PROMPT: Final = "Reply with the single word OK."
+SMOKE_MAX_TOKENS: Final = 16
+
+
+def run_smoke_test(
+    client: ChatCompleter,
+    model: str,
+    *,
+    clock: Callable[[], float],
+    sleep: Callable[[float], None],
+    poll_interval_s: float,
+    timeout_s: float,
+) -> SmokeTest:
+    """One chat completion of ``model`` through ``client``, retried every ``poll_interval_s``
+    seconds for up to ``timeout_s`` while the deployment scales up (a :class:`TransientError`
+    or :class:`ProviderCapacityError`). Never raises for a failed answer, only when the API
+    key is rejected; any other failure fails it at once."""
+    deadline = clock() + timeout_s
+    attempts = 0
+    while True:
+        attempts += 1
+        started = clock()
+        try:
+            client.complete(
+                [{"role": "user", "content": SMOKE_PROMPT}],
+                model=model,
+                temperature=0.0,
+                max_tokens=SMOKE_MAX_TOKENS,
+            )
+        except ProviderAuthError:
+            raise
+        except (TransientError, ProviderCapacityError) as exc:
+            detail = redact(str(exc))
+        except ExternalError as exc:
+            return SmokeTest(ok=False, attempts=attempts, detail=redact(str(exc)))
+        else:
+            latency = max(0.0, clock() - started)
+            return SmokeTest(ok=True, latency_s=round(latency, 3), attempts=attempts)
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return SmokeTest(ok=False, attempts=attempts, detail=detail)
+        sleep(min(poll_interval_s, remaining))
 
 
 class DeploymentNotReady(ExternalError):
