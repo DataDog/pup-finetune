@@ -460,6 +460,33 @@ def test_a_drop_whose_retirements_end_at_a_row_the_add_excludes_carries_nowhere(
     assert list(dataset.labels()) == ["short"]
 
 
+def test_a_drop_a_keep_refuses_is_not_reported_when_another_drop_drops_the_row(
+    tmp_path: Path,
+) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    prefix, middle, other, long = (
+        make_row(row_id, row_id) for row_id in ("prefix", "middle", "other", "long")
+    )
+    dataset.add([prefix, middle, other, long], settings=IMPORT)
+    dataset.append_labels(
+        [
+            Label(id="prefix", keep=False, reason="prefix is wrong"),
+            Label(id="middle", keep=True, reason="middle is right"),
+            Label(id="other", keep=False, reason="other is wrong"),
+        ]
+    )
+    code = ExclusionCode.CONTAINED_CONVERSATION
+    retired = [
+        Exclusion.for_row(prefix, code, "a prefix of row 'middle'", into="middle"),
+        Exclusion.for_row(middle, code, "a prefix of row 'long'", into="long"),
+        Exclusion.for_row(other, code, "a prefix of row 'long'", into="long"),
+    ]
+    added = dataset.add([], settings=IMPORT, retired=retired)
+    assert dataset.kept_rows() == []
+    assert added.carried == {"long": "other"}
+    assert added.not_carried == []
+
+
 def with_reasoning(row: TrainingRow, text: str) -> TrainingRow:
     """``row`` with ``text`` as the reasoning of its last (assistant) message."""
     *before, last = row.messages
