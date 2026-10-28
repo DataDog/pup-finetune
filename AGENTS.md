@@ -713,7 +713,10 @@ Source lives under `src/pup_finetune/`.
   (`train`, `resume`, `finalize`) in the foreground or a detached worker (`spawn_worker`:
   `python -P -m pup_finetune _worker` in a new session, in the run directory, output in
   `worker.log`, the environment inherited and no secret passed on; the worker notes how it
-  ended in `worker.json`), and has the liveness checks behind `status` and `cancel`.
+  ended in `worker.json`), and has the liveness checks behind `status` and `cancel` (a
+  worker is `starting` until it saves the state as the run's training process,
+  `state.json`'s `pid`; while the run is training, only once the process the state names
+  is gone, as after a SIGKILL).
   `remote.py` is `train --remote`, provider-neutral: `stage_run` (pup-finetune's source and
   `uv.lock` from the checkout, the kept train and validation rows with their splits, and the
   run files, in a private temporary directory), `submit_remote` (`remote.json` first, the

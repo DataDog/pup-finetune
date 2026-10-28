@@ -1506,7 +1506,7 @@ def run_status(run: RunDir, *, source: str = "given") -> dict[str, Any]:
         warnings += sync.warnings
     if worker.problem is not None:
         warnings.append(worker.problem)
-    live = summary["phase"] == "training" and worker.running
+    live = summary["phase"] == "training" and worker.running and not worker.starting
     live_s = (worker.heartbeat_age_s or 0.0) if live else 0.0
     data: dict[str, Any] = finite_json(
         {
