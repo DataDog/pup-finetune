@@ -254,6 +254,20 @@ def test_check_without_a_key_explains_how_to_add_one() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("provider", "env_var"), [("fireworks", "FIREWORKS_API_KEY"), ("baseten", "BASETEN_API_KEY")]
+)
+def test_check_says_to_fix_a_malformed_key_in_the_environment_there(
+    provider: str, env_var: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(env_var, "x")
+    result = invoke("--provider", provider, "--check")
+    assert result.exit_code == 1
+    preflight = output(result)["models"][0]["preflight"]
+    assert "API key is malformed" in preflight["error"]
+    assert preflight["hint"] == f"fix or unset {env_var}, which is read before the OS keychain"
+
+
 def test_check_is_allowed_read_only(
     fake: FakeFireworksApi, monkeypatch: pytest.MonkeyPatch
 ) -> None:
