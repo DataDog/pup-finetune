@@ -704,11 +704,12 @@ Source lives under `src/pup_finetune/`.
   before the session ends (re-creating its sampler checkpoint when that session expired) or
   records it as the deployable checkpoint, recording each promotion request per checkpoint
   first (a new best after an earlier promotion gets its own model id,
-  `model_id_for_checkpoint`, so a model id never holds two checkpoints; the attempt that
-  records a request passes no `adopt_since`, so it refuses a model id another run took,
-  however recently (`ModelIdTaken`), and marks the request contested; the next attempt
-  records a contested request afresh and again passes none, so only a retry after an
-  attempt whose outcome is unknown passes it); `runner.py` has
+  `model_id_for_checkpoint`, so a model id never holds two checkpoints; a request is
+  `recorded` until the provider's `on_sending` callback says the promotion is about to be
+  sent, then `sent`, and `contested` once a promotion finds its id held by a model the
+  provider does not adopt (`ModelIdTaken`); only a `sent` request's retry passes
+  `adopt_since`, so a model another run promoted under the id, however recently, is never
+  adopted, while one whose promotion's response was lost is); `runner.py` has
   `start_training` and `resume_training`, which open a session for a run directory and train
   or resume in it (`start_training` takes an `after_finalize` hook, run in the session after
   a successful promotion with the run's spend guard; its failure only adds a warning);
@@ -984,8 +985,9 @@ Source lives under `src/pup_finetune/`.
   computed from `forward`'s per-token logprobs, checkpoint names checked against the
   17-character limit before saving, `promote` picking the newest promotable sampler row
   carrying the checkpoint's name (`promotable_row`) and adopting a model this run already
-  promoted whose response was lost (`adopt_since`: the run's request to promote that
-  checkpoint, saved in `state.json` under `promotions`, less a minute's clock allowance),
+  promoted whose response was lost (`adopt_since`: when the run's request to promote that
+  checkpoint was sent, saved in `state.json` under `promotions`, less a minute's clock
+  allowance; `on_sending` is called after the lookups, right before the promotion),
   sampler checkpoints of an ended session refused with a hint); and `FireworksSampler`
   (render, sample greedily to the renderer's stop tokens, parse; only sampling is retried, a
   bounded number of times). `client.py` also wraps

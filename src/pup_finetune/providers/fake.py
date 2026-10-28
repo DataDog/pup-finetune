@@ -821,7 +821,12 @@ class FakeSession:
         self._state.policy = dict(state.policy)
 
     def promote(
-        self, ckpt: CheckpointRef, model_id: str, *, adopt_since: datetime | None = None
+        self,
+        ckpt: CheckpointRef,
+        model_id: str,
+        *,
+        adopt_since: datetime | None = None,
+        on_sending: Callable[[], None] | None = None,
     ) -> ModelRef:
         # The fake promotes the same weights to a model id again as the model it promoted them
         # to before, so it has nothing to adopt; other weights under a taken id are refused.
@@ -836,6 +841,8 @@ class FakeSession:
                 hint="use 1 to 63 lowercase letters, digits and dashes, starting with a letter "
                 "and not ending with a dash",
             )
+        if on_sending is not None:
+            on_sending()
         if self._backend.fail_promotions > 0:
             self._backend.fail_promotions -= 1
             error = self._backend.promotion_error

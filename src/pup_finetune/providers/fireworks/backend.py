@@ -26,13 +26,13 @@ leaves nothing running.
 - ``promote`` finds the checkpoint in the session's listing, where Fireworks has renamed it
   (``run-<hex>-<name>-<8 hex>``): the newest promotable sampler row carrying the name. It
   first looks the model up: one that already exists is adopted when it can only be this
-  run's (the same base model, created since ``adopt_since``, shortly before the run first
-  asked for a promotion), because an
-  earlier attempt's promotion succeeded but its response was lost; any other is refused
-  with a :class:`~pup_finetune.providers.base.ModelIdTaken` rather than promoted into a
-  conflict. A promotion that fails in a way that can hide a success (a timeout, a dropped
-  connection, a server error, a conflict) looks the model up again and adopts it when it is
-  there now.
+  run's (the same base model, created since ``adopt_since``, shortly before the run sent a
+  promotion), because an earlier attempt's promotion succeeded but its response was lost;
+  any other is refused with a :class:`~pup_finetune.providers.base.ModelIdTaken` rather than
+  promoted into a conflict. Only once the model is absent and the row found does it call
+  ``on_sending`` and send the promotion. A promotion that fails in a way that can hide a
+  success (a timeout, a dropped connection, a server error, a conflict) looks the model up
+  again and adopts it when it is there now.
 
 :class:`FireworksSampler` renders the prompt with the profile's renderer, samples greedily up
 to the renderer's stop tokens and parses the completion back into an OpenAI message; one cut
@@ -504,7 +504,12 @@ class FireworksSession:
         self._run.load_state(ckpt.uri).result()
 
     def promote(
-        self, ckpt: CheckpointRef, model_id: str, *, adopt_since: datetime | None = None
+        self,
+        ckpt: CheckpointRef,
+        model_id: str,
+        *,
+        adopt_since: datetime | None = None,
+        on_sending: Callable[[], None] | None = None,
     ) -> ModelRef:
         self._require_open()
         _checked_model_id(model_id)
@@ -516,6 +521,8 @@ class FireworksSession:
             # or another run's model under the same id; adopt_since tells them apart.
             return self._adopted(existing, expected, model_id, since=adopt_since, checked=False)
         row = promotable_row(self._client.list_session_checkpoints(session_name), ckpt)
+        if on_sending is not None:
+            on_sending()
         try:
             model = self._client.promote_session_checkpoint(
                 row.resource_name, output_model_id=model_id, base_model=self._profile.base_model

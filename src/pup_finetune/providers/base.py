@@ -855,7 +855,12 @@ class TrainingSession(Protocol):
         ...
 
     def promote(
-        self, ckpt: CheckpointRef, model_id: str, *, adopt_since: datetime | None = None
+        self,
+        ckpt: CheckpointRef,
+        model_id: str,
+        *,
+        adopt_since: datetime | None = None,
+        on_sending: Callable[[], None] | None = None,
     ) -> ModelRef:
         """Turn a sampler checkpoint into a deployable model named ``model_id``.
 
@@ -865,13 +870,15 @@ class TrainingSession(Protocol):
         accepts. The returned :class:`ModelRef` carries ``model_id`` as given and the
         provider's fully qualified name for the model as ``uri``.
 
-        A promotion can succeed on the provider while its response is lost, and a retry then
-        finds ``model_id`` taken. ``adopt_since`` (shortly before the run first asked for a
-        promotion) lets a provider that can look models up return such a model instead: one
-        named ``model_id``, of the same base model, created no earlier than ``adopt_since``, so
-        it is this run's and not another run's that used the same id. A provider that cannot
-        tell ignores it. A model it finds under ``model_id`` and does not adopt raises
-        :class:`ModelIdTaken`.
+        ``on_sending`` is called right before the promotion is sent, after every lookup it
+        needs, so the caller records that a model under ``model_id`` may be the run's only
+        once one can be. A promotion can succeed on the provider while its response is lost,
+        and a retry then finds ``model_id`` taken. ``adopt_since`` (shortly before the run sent
+        that promotion) lets a provider that can look models up return such a model instead:
+        one named ``model_id``, of the same base model, created no earlier than
+        ``adopt_since``, so it is this run's and not another run's that used the same id. A
+        provider that cannot tell ignores it. A model it finds under ``model_id`` and does not
+        adopt raises :class:`ModelIdTaken`.
         """
         ...
 

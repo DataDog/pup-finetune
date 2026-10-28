@@ -444,7 +444,12 @@ class BasetenSession:
             raise
 
     def promote(
-        self, ckpt: CheckpointRef, model_id: str, *, adopt_since: datetime | None = None
+        self,
+        ckpt: CheckpointRef,
+        model_id: str,
+        *,
+        adopt_since: datetime | None = None,
+        on_sending: Callable[[], None] | None = None,
     ) -> ModelRef:
         raise UsageError("Baseten has no promotion; the sampler checkpoint is deployed")
 

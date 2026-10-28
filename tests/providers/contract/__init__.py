@@ -597,10 +597,14 @@ class BackendContract:
             with pytest.raises(FinetuneError):
                 session.promote(ckpt, model_id)
             return
-        model = session.promote(ckpt, model_id)
+        sending: list[str] = []
+        model = session.promote(ckpt, model_id, on_sending=lambda: sending.append(model_id))
         assert isinstance(model, ModelRef)
         assert model.model_id == model_id
         assert model.uri
+        # The run marks its request sent from here; a provider that never says so leaves a
+        # promotion whose response was lost unadoptable on a retry.
+        assert sending == [model_id]
 
     def test_other_weights_are_not_promoted_under_a_promoted_model_id(
         self,

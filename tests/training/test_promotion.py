@@ -43,6 +43,7 @@ from pup_finetune.training import (
 from pup_finetune.training.promotion import (
     ADOPT_CLOCK_ALLOWANCE,
     PromotionRequest,
+    PromotionStatus,
     model_id_for_checkpoint,
 )
 from tests.fakes.training import SESSION, MemoryState, RecordingSession, row_examples
@@ -234,17 +235,15 @@ class Requests:
     def any_promotion_requested(self) -> bool:
         return bool(self.recorded)
 
-    def record_promotion_request(self, model_id: str, *, epoch: int, step: int) -> PromotionRequest:
-        request = PromotionRequest(model_id=model_id, epoch=epoch, step=step, requested_at=self.now)
+    def record_promotion_request(
+        self, model_id: str, *, epoch: int, step: int, status: PromotionStatus
+    ) -> PromotionRequest:
+        request = PromotionRequest(
+            model_id=model_id, epoch=epoch, step=step, status=status, requested_at=self.now
+        )
         self.recorded = [r for r in self.recorded if (r.epoch, r.step) != (epoch, step)]
         self.recorded.append(request)
         return request
-
-    def contest_promotion_request(self, epoch: int, step: int) -> None:
-        self.recorded = [
-            dataclasses.replace(r, contested=True) if (r.epoch, r.step) == (epoch, step) else r
-            for r in self.recorded
-        ]
 
 
 def promote_with(finalize: Promotion, *, epochs: int = 1) -> tuple[str, list[datetime | None]]:

@@ -23,18 +23,16 @@ asked before each, and when it refuses the promotion fails (and the run stays re
 retry only the promotion).
 
 Before it first asks to promote a checkpoint a run records the request (:class:`PromotionRequest`:
-the model id, the checkpoint's epoch and step, and when; saved in ``state.json`` and kept
-across resumes), and every later promotion of that checkpoint passes that time, less
+the model id, the checkpoint's epoch and step, its status and since when; saved in
+``state.json`` and kept across resumes). It is :attr:`~PromotionStatus.RECORDED` until the
+provider, having found the id free, is about to send the promotion, then
+:attr:`~PromotionStatus.SENT`; a promotion that finds the id held by a model it does not
+adopt (:class:`~pup_finetune.providers.base.ModelIdTaken`) makes it
+:attr:`~PromotionStatus.CONTESTED`. Only a sent request's retry passes its time, less
 :data:`ADOPT_CLOCK_ALLOWANCE` for the provider's clock, as ``adopt_since``. So a model an
 earlier attempt promoted, whose response was lost, is adopted rather than promoted again
-under a taken id, while a model under the same id that existed before the run first asked
-(another run directory reusing the run id, say) is refused. The attempt that records the
-request passes none: no model under that id can be the run's yet, however recently it was
-created. When that attempt finds the id taken
-(:class:`~pup_finetune.providers.base.ModelIdTaken`), the request is marked contested, and
-the next attempt records it afresh and again passes none, so that model is never adopted;
-an attempt whose outcome is unknown (a lost response, a crash) leaves its request to be
-adopted on a retry.
+under a taken id, while a model under the id before this run sent anything (another run
+directory reusing the run id, say, however recently) is refused on every attempt.
 
 A provider can only tell a model is the run's, not which weights it holds, so a model id is
 only ever reused for the checkpoint it was requested for. The run's first promotion uses the
@@ -50,6 +48,7 @@ import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import StrEnum
 from typing import Any, Protocol
 
 from pup_finetune.errors import ExternalError, StateError
@@ -70,16 +69,27 @@ ADOPT_CLOCK_ALLOWANCE = timedelta(seconds=60)
 the run's: the provider's clock and this machine's can disagree."""
 
 
+class PromotionStatus(StrEnum):
+    """Where a run's request to promote a checkpoint stands; see the module docstring."""
+
+    RECORDED = "recorded"
+    """No promotion was sent for it, so no model under its id can be the run's."""
+    SENT = "sent"
+    """A promotion was about to be sent, so a model under its id since then may be the run's."""
+    CONTESTED = "contested"
+    """Its id was found taken by a model the provider did not adopt as the run's."""
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PromotionRequest:
     """A run's request to promote the checkpoint at ``epoch`` and ``step`` to ``model_id``,
-    first made at ``requested_at``; ``contested`` once that attempt found the id taken."""
+    ``status`` since ``requested_at``."""
 
     model_id: str
     epoch: int
     step: int
+    status: PromotionStatus
     requested_at: datetime
-    contested: bool = False
 
 
 class PromotionRequests(Protocol):
@@ -93,13 +103,11 @@ class PromotionRequests(Protocol):
         """Whether the run recorded a request to promote any checkpoint."""
         ...
 
-    def record_promotion_request(self, model_id: str, *, epoch: int, step: int) -> PromotionRequest:
-        """Record, and save, a request to promote that checkpoint to ``model_id``, made now,
-        in place of any earlier one for it."""
-        ...
-
-    def contest_promotion_request(self, epoch: int, step: int) -> None:
-        """Mark, and save, the request to promote that checkpoint as contested."""
+    def record_promotion_request(
+        self, model_id: str, *, epoch: int, step: int, status: PromotionStatus
+    ) -> PromotionRequest:
+        """Record, and save, a request to promote that checkpoint to ``model_id``, ``status``
+        from now, in place of any earlier one for it."""
         ...
 
 
@@ -131,16 +139,16 @@ class Promotion:
     re-creation must not be paid for (e.g. the training budget, reserve included, is spent).
     ``requests`` records the run's promotion requests (see the module docstring): right
     before :meth:`~pup_finetune.providers.base.TrainingSession.promote` the request for the
-    best checkpoint is looked up, and ``promote`` gets its model id and its time less
-    :data:`ADOPT_CLOCK_ALLOWANCE` as ``adopt_since``, so that a model an earlier attempt of
-    this run promoted from that checkpoint is adopted. When there is none it is recorded
-    under ``model_id`` (the run's first) or :func:`model_id_for_checkpoint` (a later one), and
-    no existing model is adopted; a contested one is recorded again under its model id, and
-    adopts nothing either. Without ``requests`` the checkpoint is promoted to
-    ``model_id`` and no existing model is adopted. The returned result carries
-    ``promoted_model`` (``None`` without promotion) and ``deployable_ckpt``. ``on_event``
-    (the loop's event sink) gets ``promoting`` (the epoch and its losses) right before the
-    promotion and ``promoted`` (the model id) after it.
+    best checkpoint is looked up, or recorded under ``model_id`` (the run's first) or
+    :func:`model_id_for_checkpoint` (a later one), and ``promote`` gets its model id and, once
+    the request was sent, its time less :data:`ADOPT_CLOCK_ALLOWANCE` as ``adopt_since``, so
+    that a model an earlier attempt of this run promoted from that checkpoint is adopted;
+    ``promote``'s ``on_sending`` marks the request sent, and a
+    :class:`~pup_finetune.providers.base.ModelIdTaken` marks it contested. Without
+    ``requests`` the checkpoint is promoted to ``model_id`` and no existing model is adopted.
+    The returned result carries ``promoted_model`` (``None`` without promotion) and
+    ``deployable_ckpt``. ``on_event`` (the loop's event sink) gets ``promoting`` (the epoch
+    and its losses) right before the promotion and ``promoted`` (the model id) after it.
     """
 
     model_id: str
@@ -157,13 +165,19 @@ class Promotion:
         best = result.best_sampler_ckpt
         if best is None or best.created_in_session != session.session_id:
             best = self._recreate(session, result)
-        model_id, since = self.model_id, None
-        if self.requests is not None:
-            earlier = self.requests.promotion_request(best.epoch, best.step)
-            if earlier is None or earlier.contested:
-                model_id = self._record(self.requests, best, earlier).model_id
-            else:
-                model_id, since = earlier.model_id, earlier.requested_at - ADOPT_CLOCK_ALLOWANCE
+        requests = self.requests
+        request = None if requests is None else self._request(requests, best)
+        model_id = self.model_id if request is None else request.model_id
+        since = None
+        if request is not None and request.status is PromotionStatus.SENT:
+            since = request.requested_at - ADOPT_CLOCK_ALLOWANCE
+
+        def mark(status: PromotionStatus) -> None:
+            if requests is not None:
+                requests.record_promotion_request(
+                    model_id, epoch=best.epoch, step=best.step, status=status
+                )
+
         self._emit(
             {
                 "type": "promoting",
@@ -174,10 +188,14 @@ class Promotion:
             }
         )
         try:
-            model = session.promote(best, model_id, adopt_since=since)
+            model = session.promote(
+                best,
+                model_id,
+                adopt_since=since,
+                on_sending=lambda: mark(PromotionStatus.SENT),
+            )
         except ModelIdTaken:
-            if self.requests is not None and since is None:
-                self.requests.contest_promotion_request(best.epoch, best.step)
+            mark(PromotionStatus.CONTESTED)
             raise
         self._emit({"type": "promoted", "model_id": model.model_id, "epoch": result.best_epoch})
         return dataclasses.replace(result, promoted_model=model, deployable_ckpt=best)
@@ -186,18 +204,18 @@ class Promotion:
         if self.on_event is not None:
             self.on_event(finite_json(event))
 
-    def _record(
-        self, requests: PromotionRequests, best: CheckpointRef, contested: PromotionRequest | None
-    ) -> PromotionRequest:
-        """Record the run's request to promote ``best``: its first, or one again in place of
-        the ``contested`` one, under the same model id."""
+    def _request(self, requests: PromotionRequests, best: CheckpointRef) -> PromotionRequest:
+        """The recorded request to promote ``best``, recorded first if there is none."""
+        request = requests.promotion_request(best.epoch, best.step)
+        if request is not None:
+            return request
         model_id = self.model_id
-        if contested is not None:
-            model_id = contested.model_id
-        elif requests.any_promotion_requested():
+        if requests.any_promotion_requested():
             # The run's model id may already hold an earlier best: never reuse it for this one.
             model_id = model_id_for_checkpoint(self.model_id, best.epoch, best.step)
-        return requests.record_promotion_request(model_id, epoch=best.epoch, step=best.step)
+        return requests.record_promotion_request(
+            model_id, epoch=best.epoch, step=best.step, status=PromotionStatus.RECORDED
+        )
 
     def record_deployable(self, result: TrainResult) -> TrainResult:
         """Without promotion: the best sampler checkpoint is what to deploy. Needs no session."""

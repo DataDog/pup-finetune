@@ -98,7 +98,7 @@ from pup_finetune.storage import (
     settings_hash,
 )
 from pup_finetune.training.loop import CheckpointKind, CheckpointNamer, FinalizeFailed
-from pup_finetune.training.promotion import PromotionRequest
+from pup_finetune.training.promotion import PromotionRequest, PromotionStatus
 from pup_finetune.training.records import EpochMetrics, ResumePoint, TrainResult
 
 RUN_FILE = "run.json"
@@ -644,10 +644,10 @@ class RunState:
     provider to promote: the model id, the checkpoint's epoch and step, and when it first
     asked (:meth:`record_promotion_request`), saved before that request and kept across
     resumes, so a model created since under that id can be told to be this run's, holding
-    that checkpoint (see :class:`~pup_finetune.training.promotion.Promotion`). A request whose
-    first attempt found the id taken is ``contested`` (:meth:`contest_promotion_request`). A
-    state saved before these were recorded holds only ``promotion_requested_at``, the time of
-    the run's first request; it is read as a request for an unknown checkpoint.
+    that checkpoint (see :class:`~pup_finetune.training.promotion.Promotion`), and its
+    ``status``; a request saved before statuses were recorded is read as ``sent``. A state
+    saved before requests were recorded per checkpoint holds only ``promotion_requested_at``,
+    the time of the run's first request; it is read as a request for an unknown checkpoint.
     """
 
     def __init__(
@@ -888,13 +888,19 @@ class RunState:
                 record.get("model_id"),
                 _parsed_time(record.get("requested_at")),
             )
-            if isinstance(model_id, str) and requested_at is not None:
+            status = record.get("status", PromotionStatus.SENT)
+            if (
+                isinstance(model_id, str)
+                and requested_at is not None
+                and isinstance(status, str)
+                and status in PromotionStatus
+            ):
                 return PromotionRequest(
                     model_id=model_id,
                     epoch=epoch,
                     step=step,
+                    status=PromotionStatus(status),
                     requested_at=requested_at,
-                    contested=record.get("contested") is True,
                 )
         return None
 
@@ -902,26 +908,28 @@ class RunState:
         """Whether the run recorded a request to promote any checkpoint."""
         return bool(self.promotions)
 
-    def record_promotion_request(self, model_id: str, *, epoch: int, step: int) -> PromotionRequest:
+    def record_promotion_request(
+        self, model_id: str, *, epoch: int, step: int, status: PromotionStatus
+    ) -> PromotionRequest:
         """Record a request to promote the checkpoint at ``epoch`` and ``step`` to
-        ``model_id``, made now, in place of any earlier one for it, and save it before
-        returning it, so a request made after the call is always covered. Its time is
+        ``model_id``, ``status`` from now, in place of any earlier one for it, and save it
+        before returning it, so what follows the call is always covered. Its time is
         truncated to the second, as a resume reads it back.
         """
         moment = self._now().replace(microsecond=0)
-        record = {"model_id": model_id, "epoch": epoch, "step": step, "requested_at": _iso(moment)}
+        record = {
+            "model_id": model_id,
+            "epoch": epoch,
+            "step": step,
+            "status": status.value,
+            "requested_at": _iso(moment),
+        }
         kept = [r for r in self.promotions if (r.get("epoch"), r.get("step")) != (epoch, step)]
         self.promotions = [*kept, record]
         self.save()
-        return PromotionRequest(model_id=model_id, epoch=epoch, step=step, requested_at=moment)
-
-    def contest_promotion_request(self, epoch: int, step: int) -> None:
-        """Mark the request to promote the checkpoint at ``epoch`` and ``step`` contested, and
-        save it: its model id was taken before the run could have promoted it."""
-        for record in self.promotions:
-            if (record.get("epoch"), record.get("step")) == (epoch, step):
-                record["contested"] = True
-        self.save()
+        return PromotionRequest(
+            model_id=model_id, epoch=epoch, step=step, status=status, requested_at=moment
+        )
 
     def record_warning(self, message: str) -> None:
         self.warnings.append(message)

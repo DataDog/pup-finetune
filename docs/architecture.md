@@ -307,7 +307,10 @@ Baseten Loops through `providers/baseten/client.py`, the only module that loads 
 - **Promotion.** Fireworks renames checkpoints (`run-<hex>-<name>-<8 hex>`), so `promote`
   lists the session's checkpoints and takes the newest promotable sampler row carrying the
   checkpoint's name, then promotes it to `accounts/<account>/models/<model id>`: the
-  `ModelRef`'s `model_id` is the bare id, its `uri` that full name. The shared
+  `ModelRef`'s `model_id` is the bare id, its `uri` that full name. It looks the model up
+  first: a model already under the id is refused (`ModelIdTaken`) unless the run's request
+  was `sent` and the model created since. Only once the id is free does it call
+  `on_sending`, which marks the request `sent`, and promote. The shared
   `finalize` hook ([`training/promotion.py`](../src/pup_finetune/training/promotion.py)) runs
   it before the session ends; after a resume, it first re-creates the best epoch's sampler
   checkpoint from its training checkpoint (`load_state`, then `save_weights_for_sampler`).
@@ -682,7 +685,9 @@ Using Baseten as the example:
    stopped early or failed. Convert each `TokenizedExample` to the SDK's datum type, map
    `AdamConfig` onto its optimizer parameters on every step, size the trainer from the
    `seed` and `max_seq_len` passed to `open_session`, set `max_checkpoint_name_len` to the
-   provider's limit, and declare `supports_resume` and `supports_promotion`. Map SDK
+   provider's limit, and declare `supports_resume` and `supports_promotion`. A backend
+   with promotion calls `promote`'s `on_sending` right before it sends the promotion, after
+   any lookup, and raises `ModelIdTaken` for a model id another model holds. Map SDK
    failures onto the neutral errors in `providers/base.py`: `ProviderCapacityError` when
    there is no capacity or quota (end what the failed call started before raising it, and
    say so in the hint only then), `ProviderAuthError` for a rejected key and
