@@ -1304,20 +1304,20 @@ def resume(
     manifest = run.manifest()
     state = run.load_state()
     mode = _resume_mode(run, state)
+    provider_name = str(manifest["provider"])
     # Before the provider loads: a missing SDK fails the preview, not the worker.
-    require_packages(str(manifest["provider"]), runtime, "train")
-    try:
-        require_supported_flags(str(manifest["provider"]), runtime, run.spec().model_dump())
-    except UsageError as exc:
-        # A resume takes no training flags: the run recorded the one refused.
-        flag = exc.message.partition(" ")[0]
-        exc.hint = (
-            f"the run was recorded with {flag}, and a resume trains with its recorded "
-            f"settings: start a new run without {flag} (`pup finetune train --provider "
-            "<PROVIDER> --dataset <DIR> --model <MODEL>`)"
-        )
-        raise
-    registered = provider_info(str(manifest["provider"]), runtime)
+    require_packages(provider_name, runtime, "train")
+    registered = provider_info(provider_name, runtime)
+    recorded = run.spec().model_dump()
+    for refused in registered.refuses:
+        if recorded.get(refused.field) is not None:
+            # A resume takes no training flags: the run recorded the one refused.
+            raise UsageError(
+                f"{refused.flag} is not supported on {provider_name}: {refused.reason}",
+                hint=f"the run was recorded with {refused.flag}, and a resume trains with its "
+                f"recorded settings: start a new run without {refused.flag} (`pup finetune "
+                "train --provider <PROVIDER> --dataset <DIR> --model <MODEL>`)",
+            )
     provider, inputs = load_run_inputs(run, runtime, finalize_only=mode == "finalize")
     action, resume_from = _resume_action(mode, state)
     spec = run.spec()
