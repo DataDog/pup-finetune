@@ -414,7 +414,8 @@ class DatasetDir:
         accepted row that no longer belongs, such as a conversation a later pull found inside
         a longer one. The row is removed from ``rows.jsonl`` and the exclusion recorded. A
         ``row_id`` that is not stored is recorded as an exclusion all the same, and one that
-        ``rows`` also holds raises :class:`ValueError`.
+        ``rows`` also holds, or retirements whose ``into`` lead back to a row they retire,
+        raise :class:`ValueError`.
 
         ``updated`` replaces stored rows in place, by id: each must name a stored row and
         differ from it only in ``reasoning_content``, such as reasoning a later pull read for
@@ -632,6 +633,7 @@ def _carried_drops(
     carried in force, carries nothing twice. A person's keep on that row or on a row along
     the way refuses the drop, unless another drop dropped the row. A judge's or a check's
     label is replaced, even a drop, as triage would review it again and could keep the row.
+    Raises :class:`ValueError` when the retirements form a cycle.
     """
     targets = {e.row_id: e.into for e in retired if e.row_id is not None}
     current = dict(labels)
@@ -640,6 +642,8 @@ def _carried_drops(
     for row_id, into in targets.items():
         chain: list[str] = []
         while into is not None:
+            if into == row_id or into in chain:
+                raise ValueError(f"retirements form a cycle at {into!r}")
             chain.append(into)
             into = targets.get(into)
         if not chain or chain[-1] not in stored:

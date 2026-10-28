@@ -487,6 +487,20 @@ def test_a_drop_a_keep_refuses_is_not_reported_when_another_drop_drops_the_row(
     assert added.not_carried == []
 
 
+def test_retirements_that_form_a_cycle_are_refused(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    first, second = make_row("first", "one"), make_row("second", "two")
+    dataset.add([first, second], settings=IMPORT)
+    code = ExclusionCode.DUPLICATE_CONVERSATION
+    retired = [
+        Exclusion.for_row(first, code, "same conversation as row 'second'", into="second"),
+        Exclusion.for_row(second, code, "same conversation as row 'first'", into="first"),
+    ]
+    with pytest.raises(ValueError, match="retirements form a cycle at 'first'"):
+        dataset.add([], settings=IMPORT, retired=retired)
+    assert [row.id for row in dataset.rows()] == ["first", "second"]
+
+
 def with_reasoning(row: TrainingRow, text: str) -> TrainingRow:
     """``row`` with ``text`` as the reasoning of its last (assistant) message."""
     *before, last = row.messages
