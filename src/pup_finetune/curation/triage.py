@@ -566,6 +566,8 @@ class TriagePlan:
     """The rows the checks ran on: :attr:`rows` and :attr:`checked`."""
     skipped_checked: int = 0
     """Rows not reviewed because a check labeled them, without ``checks``."""
+    skipped_carried: int = 0
+    """Rows not reviewed because they hold a drop a pull carried (none with ``agreement``)."""
     stale_check_labels: list[str] = field(default_factory=list)
     """Rows the checks ran on whose ``by: check`` label every check now passes."""
     checks_to_label: int = 0
@@ -721,6 +723,8 @@ class TriagePlan:
         }
         if self.skipped_checked:
             preview["rows"]["skipped_checked"] = self.skipped_checked
+        if self.skipped_carried:
+            preview["rows"]["skipped_carried"] = self.skipped_carried
         if self.checks is not None:
             preview["notes"] = [
                 f"{display_path(self.checks.path)} is Python you wrote: its checks run in this "
@@ -900,18 +904,22 @@ def plan_triage(
     reviewable: list[TrainingRow] = []
     references: dict[str, Label] = {}
     judge_labels: dict[str, Label] = {}
-    skipped = skipped_checked = 0
+    skipped = skipped_checked = skipped_carried = 0
     for row in stored_rows:
         label = labels.get(row.id)
         if only is not None and row.id not in only:
             if label is not None and label.by == "judge":
                 judge_labels[row.id] = label
             continue
+        if label is not None and label.carried_from is not None:
+            if not agreement:
+                skipped_carried += 1
+            continue
         if label is not None and label.by == "manual":
-            if agreement and label.carried_from is None:
+            if agreement:
                 references[row.id] = label
                 reviewable.append(row)
-            elif not agreement:
+            else:
                 skipped += 1
             continue
         if label is not None and label.by == "check" and checks is None:
@@ -984,6 +992,7 @@ def plan_triage(
         checked=checked,
         rows_checked=len(rows) if checks is not None else 0,
         skipped_checked=skipped_checked,
+        skipped_carried=skipped_carried,
         stale_check_labels=stale_checked,
         checks_to_label=sum(
             1

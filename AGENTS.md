@@ -220,6 +220,9 @@ file as `checks_file`, which a dataset's step to finish the triage passes again 
 exists. With `--checks` alone it calls no
 judge and labels at once, without `--confirm` (refusing `--judges`, `--concurrency` and
 `--reset-triage`), reporting `stale_check_labels`; `dataset label --file` refuses `by: check`.
+Rows holding a drop a pull carried are never reviewed and are counted apart from the user's
+labels (`skipped_carried`), so neither `--agreement` nor the preview's note about it counts
+them.
 Tests replace the judges' clients (`cli/triage.py`'s `open_clients`) with a fake.
 
 Judges can run on Anthropic or OpenAI too: `--judge-model`, `--eval-judge-model` and each
