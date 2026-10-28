@@ -24,6 +24,7 @@ from typer.testing import CliRunner, Result
 from pup_finetune import providers
 from pup_finetune.cli import app
 from pup_finetune.cli import train as train_module
+from pup_finetune.next_steps import command
 from pup_finetune.providers.base import Provider
 from pup_finetune.providers.fireworks.provider import FireworksProvider
 from pup_finetune.runs import RunDir, model_id_for_run, resume_command
@@ -275,7 +276,11 @@ def test_a_run_whose_model_id_another_run_took_offers_no_resume_that_fails_again
     data = output(status)
     assert data["next_command"] is None
     commands = [entry["command"] for entry in data["next_steps"]]
-    assert any(" train " in c and "--run-id <NEW_RUN_ID>" in c for c in commands), commands
+    # A new run (train generates its id) of the same model on the same dataset, as written.
+    retrain = command(
+        "train", "--provider", "fireworks", "--dataset", dataset, "--model", "qwen3p8-27b"
+    )
+    assert retrain in commands
     assert resume_command(second) in commands
 
 
