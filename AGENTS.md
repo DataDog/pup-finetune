@@ -485,7 +485,7 @@ Source lives under `src/pup_finetune/`.
   the order they were built, text not escaped, plain lists and objects on one line when they
   fit; through `pup format` under pup, with `--command
   'finetune <command>'` and the result's `next_command` as `--next-action` for pup's envelope
-  metadata, and a command's table view as `--jq`), progress on stderr (`info`, stamped `HH:MM:SS` off a terminal, `worker.log`
+  metadata, and a command's table view as `--jq`), progress on stderr (`info`, redacted, stamped `HH:MM:SS` off a terminal, `worker.log`
   included), `echo_warnings` (`warning: <text>` for every warning a result holds, read only
   from the result's own mappings, `WARNING_PATHS`, never from trace data in it; each once)
   and `summary` (a few lines on a terminal, one off it).

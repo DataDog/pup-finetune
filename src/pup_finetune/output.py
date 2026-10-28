@@ -375,10 +375,11 @@ def stderr_is_terminal() -> bool:
 
 
 def info(message: str) -> None:
-    """Write one progress line to stderr; off a terminal it starts with :func:`timestamp`."""
+    """Write one progress line to stderr, redacted; off a terminal it starts with
+    :func:`timestamp`."""
     console = stderr_console()
-    line = message if console.is_terminal else f"{timestamp()} {message}"
-    console.print(line, markup=False)
+    text = redact(message)
+    console.print(text if console.is_terminal else f"{timestamp()} {text}", markup=False)
 
 
 def note(message: str) -> None:

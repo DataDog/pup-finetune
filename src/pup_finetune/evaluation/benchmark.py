@@ -930,7 +930,7 @@ def _base_sampler(plan: BenchmarkPlan, candidate: Candidate) -> Iterator[Sampler
             try:
                 sampler.close()
             except Exception as exc:  # its work is done: only note it
-                info(f"closing the {candidate.target} sampler failed: {redact(str(exc))}")
+                info(f"closing the {candidate.target} sampler failed: {exc}")
 
 
 def _prompt_length(renderer: Renderer, case: ReplayCase) -> int:
@@ -1098,7 +1098,7 @@ def _replay_model(
             with _base_sampler(plan, candidate) as sampler:
                 replay({candidate.target: sampler})
         except ExternalError as exc:
-            info(f"{candidate.target} could not be benchmarked: {redact(exc.message)}")
+            info(f"{candidate.target} could not be benchmarked: {exc.message}")
             return error_json(exc)
     _share(plan, candidate, inputs, warnings)
     return None
