@@ -52,6 +52,8 @@ from pup_finetune.providers.base import (
     LoraConfig,
     ModelProfile,
     ModelRef,
+    ProviderAuthError,
+    ProviderCapacityError,
     StepMetrics,
     TransientError,
     is_transient,
@@ -516,6 +518,10 @@ class BasetenSession:
 
     def _start_sampler(self, renderer: Renderer, checkpoint_path: str | None) -> BasetenSampler:
         context = self._profile.max_seq_len
+        left = (
+            f"a sampler may remain in Loops session {self.loops_session_id}; deactivate it in "
+            "the Baseten UI"
+        )
         try:
             record = self._http.create_sampler(
                 session_id=self.loops_session_id,
@@ -523,11 +529,13 @@ class BasetenSession:
                 model_path=checkpoint_path,
                 base_model=self._profile.base_model if checkpoint_path is None else None,
             )
-        except ExternalError as exc:  # without a hint, a server error: the sampler may exist
-            exc.hint = exc.hint or (
-                f"a sampler may remain in Loops session {self.loops_session_id}; deactivate it "
-                "in the Baseten UI"
-            )
+        except (DeploymentRejected, ProviderAuthError, ProviderCapacityError):
+            raise  # refused, so nothing was created
+        except ExternalError as exc:
+            exc.hint = "; ".join(filter(None, (left, exc.hint)))
+            raise
+        except BaseException as exc:  # e.g. Ctrl-C while the sampler is created
+            exc.add_note(left)
             raise
         sampler = BasetenSampler(
             record,
