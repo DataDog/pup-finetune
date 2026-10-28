@@ -23,7 +23,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +65,16 @@ def dataset(tmp_path: Path) -> Path:
     imported = cli("dataset", "import", str(path), "--file", str(ROWS))
     assert imported.returncode == 0, imported.stderr
     return path
+
+
+@pytest.fixture
+def hold(tmp_path: Path) -> Iterator[Path]:
+    """The fake provider's ``hold_file``, there before the test starts its run and removed
+    however the test ends, so no held worker outlives it."""
+    path = tmp_path / "hold"
+    path.touch()
+    yield path
+    path.unlink(missing_ok=True)
 
 
 def train_args(dataset: Path, run_dir: Path, *extra: str) -> list[str]:
@@ -165,17 +175,15 @@ def test_a_detached_run_completes_and_status_watch_follows_it(
 
 
 def test_cancel_stops_a_detached_worker_gracefully_and_promotes(
-    dataset: Path, tmp_path: Path
+    dataset: Path, tmp_path: Path, hold: Path
 ) -> None:
     run_dir = tmp_path / "run"
-    # One step per row. The worker holds itself at its second epoch's first step while this
-    # file exists, so it is still training when the cancel arrives, however slowly the
+    # One step per row. The worker holds itself at its second epoch's first step while the
+    # hold file exists, so it is still training when the cancel arrives, however slowly the
     # commands below start, and its first epoch's best checkpoint is there to promote.
     planned = cli(*train_args(dataset, run_dir, "--batch-size", "1"))
     assert planned.returncode == 2, planned.stderr
     second_epoch = one_json(planned.stdout)["preview"]["rows"]["train"] + 1
-    hold = tmp_path / "hold"
-    hold.touch()
     held = (
         "--batch-size",
         "1",
@@ -184,37 +192,35 @@ def test_cancel_stops_a_detached_worker_gracefully_and_promotes(
         "--provider-option",
         f"hold_from_step={second_epoch}",
     )
-    try:
-        # The --detach preview's next_command runs as written: it starts the worker.
-        previewed = cli(*train_args(dataset, run_dir, *held, "--detach"))
-        assert previewed.returncode == 2, previewed.stderr
-        detach = shlex.split(one_json(previewed.stdout)["next_command"])
-        assert detach[:2] == ["pup", "finetune"] and detach[-1] == "--confirm"
-        assert "--detach" in detach
-        started = cli(*detach[2:])
-        assert started.returncode == 0, started.stderr
-        pid = one_json(started.stdout)["pid"]
-        wait_until(lambda: state(run_dir).get("epochs", 0) >= 1, "the first epoch")
-        # Its command line carries no secret: exactly our module, the run and the mode.
-        command = command_line(pid)
-        assert SECRET not in command
-        path = str(run_dir.resolve())
-        worker = ["-P", "-m", "pup_finetune", "_worker", path, "--mode", "train"]
-        assert command.split()[1:] == worker
+    # The --detach preview's next_command runs as written: it starts the worker.
+    previewed = cli(*train_args(dataset, run_dir, *held, "--detach"))
+    assert previewed.returncode == 2, previewed.stderr
+    detach = shlex.split(one_json(previewed.stdout)["next_command"])
+    assert detach[:2] == ["pup", "finetune"] and detach[-1] == "--confirm"
+    assert "--detach" in detach
+    started = cli(*detach[2:])
+    assert started.returncode == 0, started.stderr
+    pid = one_json(started.stdout)["pid"]
+    wait_until(lambda: state(run_dir).get("epochs", 0) >= 1, "the first epoch")
+    # Its command line carries no secret: exactly our module, the run and the mode.
+    command = command_line(pid)
+    assert SECRET not in command
+    path = str(run_dir.resolve())
+    assert command.split()[1:] == ["-P", "-m", "pup_finetune", "_worker", path, "--mode", "train"]
 
-        preview = cli("cancel", str(run_dir))
-        assert preview.returncode == 2
-        cancel = one_json(preview.stdout)
-        assert cancel["preview"]["pid"] == pid
-        # Its next_command runs as written too.
-        words = shlex.split(cancel["next_command"])
-        assert words == ["pup", "finetune", "cancel", str(run_dir), "--confirm"]
+    preview = cli("cancel", str(run_dir))
+    assert preview.returncode == 2
+    cancel = one_json(preview.stdout)
+    assert cancel["preview"]["pid"] == pid
+    # Its next_command runs as written too.
+    words = shlex.split(cancel["next_command"])
+    assert words == ["pup", "finetune", "cancel", str(run_dir), "--confirm"]
 
-        cancelled = cli(*words[2:])
-        assert cancelled.returncode == 0, cancelled.stderr
-        assert one_json(cancelled.stdout)["status"] == "cancelling"
-    finally:
-        hold.unlink(missing_ok=True)
+    cancelled = cli(*words[2:])
+    assert cancelled.returncode == 0, cancelled.stderr
+    assert one_json(cancelled.stdout)["status"] == "cancelling"
+
+    hold.unlink()
     final = watch(run_dir)
     assert final["phase"] == "cancelled"
     assert final["stopped_reason"] == "cancelled"
@@ -259,13 +265,11 @@ def _ignore_sigint() -> None:
 
 @pytest.mark.parametrize("sigint_ignored", [False, True], ids=["default", "inherited-ignored"])
 def test_ctrl_c_stops_watching_a_detached_run_but_never_its_training(
-    dataset: Path, tmp_path: Path, sigint_ignored: bool
+    dataset: Path, tmp_path: Path, hold: Path, sigint_ignored: bool
 ) -> None:
     run_dir = tmp_path / "run"
-    # Every step's result is held while this file exists, so the run is still training
+    # Every step's result is held while the hold file exists, so the run is still training
     # whenever the watch is interrupted, however slowly the processes start.
-    hold = tmp_path / "hold"
-    hold.touch()
     slow = ("--batch-size", "1", "--provider-option", f"hold_file={json.dumps(str(hold))}")
     # The --detach preview's next_command runs as written: it starts the worker.
     previewed = cli(*train_args(dataset, run_dir, *slow, "--detach"))
@@ -303,8 +307,6 @@ def test_ctrl_c_stops_watching_a_detached_run_but_never_its_training(
         stdout, rest = watcher.communicate(timeout=TIMEOUT_S)
         stderr = first + rest
     finally:
-        # The worker trains on and completes once its steps are let go.
-        hold.unlink(missing_ok=True)
         if watcher.poll() is None:
             watcher.kill()
             watcher.wait()
@@ -312,6 +314,8 @@ def test_ctrl_c_stops_watching_a_detached_run_but_never_its_training(
     data = one_json(stdout)
     assert (data["phase"], data["watch_timed_out"]) == ("training", False)
     assert f"stopped watching; the run keeps training (pid {pid})" in stderr
+    # The worker trains on and completes once its steps are let go.
+    hold.unlink()
     final = watch(run_dir)
     assert final["phase"] == "completed"
     assert "cancel" not in (run_dir / "worker.log").read_text()
@@ -344,13 +348,13 @@ def test_ctrl_c_cancels_a_foreground_run_gracefully(dataset: Path, tmp_path: Pat
     assert "cancel requested" in stderr
 
 
-def test_a_second_ctrl_c_stops_at_once_with_a_resume_hint(dataset: Path, tmp_path: Path) -> None:
+def test_a_second_ctrl_c_stops_at_once_with_a_resume_hint(
+    dataset: Path, tmp_path: Path, hold: Path
+) -> None:
     run_dir = tmp_path / "run"
-    # Every step from the second on is held while this file exists, and a cancel waits for
-    # the steps in flight: once the first step is recorded, with the second already sent,
-    # the run cannot end before the hold is let go, however slowly this test runs.
-    hold = tmp_path / "hold"
-    hold.touch()
+    # Every step from the second on is held while the hold file exists, and a cancel waits
+    # for the steps in flight: once the first step is recorded, with the second already
+    # sent, the run cannot end before the hold is let go, however slowly this test runs.
     args = train_args(
         dataset,
         run_dir,
@@ -382,7 +386,6 @@ def test_a_second_ctrl_c_stops_at_once_with_a_resume_hint(dataset: Path, tmp_pat
         hold.unlink()
         stdout, stderr = process.communicate(timeout=TIMEOUT_S)
     finally:
-        hold.unlink(missing_ok=True)
         if process.poll() is None:
             process.kill()
             process.wait()
