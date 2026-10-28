@@ -231,10 +231,11 @@ def test_a_read_only_card_says_confirm_is_refused_and_never_cuts_the_cost(
         "bills",
         "cost",
     ]
-    # The judge bills, so the run is not offline: the cost row offers the spend cap.
+    # The judge bills, so the run is not offline: the cost row offers the spend cap. Only
+    # the judge bills: the offline fake provider is no biller.
     assert lines[-2] == (
-        "  bills     the fake provider is offline and bills nothing; Anthropic bills each "
-        "judge call per token at its own rates (pup-finetune does not know the rates)"
+        "  bills     Anthropic bills each judge call per token at its own rates "
+        "(pup-finetune does not know the rates)"
     )
     assert lines[-1] == "  cost      no spend cap (add --max-spend-usd with --hourly-rate-usd)"
     assert "Next: " not in result.stderr
@@ -500,6 +501,19 @@ def completed(dataset: Path, tmp_path: Path) -> Path:
     result = invoke(*train_args(dataset, run_dir, "--max-epochs", "1", "--confirm"))
     assert result.exit_code == 0, result.stderr
     return run_dir
+
+
+@pytest.mark.usefixtures("all_judge_keys")
+def test_an_evaluate_card_bills_only_what_leaves_the_machine(completed: Path) -> None:
+    judge = ("--judge-model", "anthropic/claude-opus-5-5", "--no-publish")
+    result = invoke("evaluate", str(completed), *judge)
+    assert result.exit_code == 2, result.stderr
+    assert output(result)["preview"]["offline"] is False
+    bills = [line for line in card(result) if line.split()[0] == "bills"]
+    assert bills == [
+        "  bills     Anthropic bills each judge call per token at its own rates "
+        "(pup-finetune does not know the rates)"
+    ]
 
 
 def test_the_evaluate_preview_has_the_shape(completed: Path) -> None:
