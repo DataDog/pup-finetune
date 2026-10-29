@@ -278,8 +278,8 @@ app's current model, reusing base and tuned: report `headline.tuned_minus_compar
 own judges and pure-function checks go in `--evaluators evals.toml`, reusing every answer:
 report `headline.evaluator` and `headline.evaluators`, and show an uncalibrated warning. Report:
 
-- `headline.judge_pass_rate` (`base`, `tuned`, `delta`, `ci95`), `headline.paired`, and the
-  `cases` and `trajectories` behind them. An interval that includes 0 is no clear difference.
+- `headline.judge_pass_rate`: `delta`, `ci95` and `common_pass_rate` (on `common_cases`), and
+  `base`, `tuned` (on `judged_cases`); `headline.paired`. A CI with 0 is no clear difference.
 - `metrics.<name>.base` and `.tuned`, and the experiment ids under `publication.experiments`.
 - The caveat: replay measures agreement with the recorded behavior, not task success.
 - `headline.truncated`: failures from length, not quality, which inflate the delta. Do not

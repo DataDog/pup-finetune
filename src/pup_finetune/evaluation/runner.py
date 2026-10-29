@@ -2122,9 +2122,10 @@ def _ci(value: object) -> list[Any] | None:
 
 
 def headline(summary: Mapping[str, Any]) -> dict[str, Any]:
-    """An evaluation summary's headline: the judge pass rate per target, tuned minus base
-    with its 95% CI, the paired verdicts and the cases; with a compare target, tuned minus
-    compare too."""
+    """An evaluation summary's headline: the judge pass rate per target on its own judged
+    cases (``judged_cases``), tuned minus base with its 95% CI beside both pass rates on the
+    cases it pairs (``common_pass_rate`` on ``common_cases``), the paired verdicts and the
+    cases; with a compare target, tuned minus compare too."""
     from pup_finetune.evaluation.replay import COMPARE
 
     targets: Mapping[str, Any] = summary.get("targets") or {}
@@ -2132,16 +2133,17 @@ def headline(summary: Mapping[str, Any]) -> dict[str, Any]:
     paired: Mapping[str, Any] = summary.get("paired") or {}
     verdicts = ("wins", "regressions", "ties")
 
-    def rate(name: str) -> Any:
+    def judged(name: str) -> Mapping[str, Any]:
         found = (targets.get(name) or {}).get("judge_pass")
-        return found.get("rate") if isinstance(found, Mapping) else None
+        return found if isinstance(found, Mapping) else {}
 
-    rates = {"base": rate("base"), "tuned": rate("tuned")}
-    if COMPARE in targets:
-        rates[COMPARE] = rate(COMPARE)
+    names = ("base", "tuned", COMPARE) if COMPARE in targets else ("base", "tuned")
     found: dict[str, Any] = {
         "judge_pass_rate": {
-            **rates,
+            **{name: judged(name).get("rate") for name in names},
+            "judged_cases": {name: judged(name).get("n") for name in names},
+            "common_pass_rate": difference.get("common_pass_rate"),
+            "common_cases": difference.get("n_cases"),
             "delta": difference.get("judge_pass_rate"),
             "ci95": _ci(difference.get("ci95")),
         },
@@ -2151,6 +2153,8 @@ def headline(summary: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(versus, Mapping):
         against: Mapping[str, Any] = versus.get("paired") or {}
         found["tuned_minus_compare"] = {
+            "common_pass_rate": versus.get("common_pass_rate"),
+            "common_cases": versus.get("n_cases"),
             "delta": versus.get("judge_pass_rate"),
             "ci95": _ci(versus.get("ci95")),
             **{key: against.get(key, 0) for key in verdicts},
@@ -2172,18 +2176,23 @@ def headline(summary: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _evaluator_rates(targets: Mapping[str, Any], evaluators: Mapping[str, Any]) -> dict[str, Any]:
-    """Each evaluator's and ``all``'s pass rate per target, and tuned minus base (and
-    minus compare) with its CI and the cases paired."""
+    """Each evaluator's and ``all``'s pass rate per target on its own scored cases
+    (``scored_cases``), and tuned minus base (and minus compare) with its CI beside both
+    pass rates on the ``n`` cases paired."""
     from pup_finetune.evaluation.evaluators import ALL
 
     found: dict[str, Any] = {}
     for name in [*(evaluators.get("names") or []), ALL]:
         entry: dict[str, Any] = {}
+        scored: dict[str, Any] = {}
         for target, values in targets.items():
             rate = ((values.get("evaluators") or {}).get(name) or {}).get("pass") or {}
             entry[target] = rate.get("rate")
+            scored[target] = rate.get("n")
         base = (evaluators.get("tuned_minus_base") or {}).get(name) or {}
         entry |= {
+            "scored_cases": scored,
+            "common_pass_rate": base.get("common_pass_rate"),
             "delta": base.get("delta"),
             "ci95": _ci(base.get("ci95")),
             "n": base.get("n_cases"),
@@ -2191,6 +2200,7 @@ def _evaluator_rates(targets: Mapping[str, Any], evaluators: Mapping[str, Any]) 
         versus = (evaluators.get("tuned_minus_compare") or {}).get(name)
         if isinstance(versus, Mapping):
             entry["tuned_minus_compare"] = {
+                "common_pass_rate": versus.get("common_pass_rate"),
                 "delta": versus.get("delta"),
                 "ci95": _ci(versus.get("ci95")),
                 "n": versus.get("n_cases"),

@@ -246,12 +246,14 @@ def _recorded_evaluation(evaluation: object) -> str | None:
         return None
     status = str(evaluation.get("status")).replace("_", " ")
     text = f"evaluation {status} in {evaluation.get('out_dir')}"
-    found = evaluation.get("headline")
-    rates = found.get("judge_pass_rate") if isinstance(found, Mapping) else None
+    found = evaluation.get("headline") or {}
+    rates = found.get("judge_pass_rate")
     if isinstance(rates, Mapping):
+        cases = found.get("cases")
+        base, tuned = _own_rates(rates, ("base", "tuned"), rates.get("judged_cases"), cases)
         text += (
-            f": judge agreement base {_agreement(rates.get('base'))}, tuned "
-            f"{_agreement(rates.get('tuned'))}, tuned - base {_difference(rates)}"
+            f": judge agreement base {base}, tuned {tuned}, tuned - base {_difference(rates)}"
+            + _versus(rates, ("tuned", "base"), rates.get("common_cases"), cases)
         )
     return text
 
@@ -394,6 +396,31 @@ def _difference(rates: Mapping[str, Any]) -> str:
     return text
 
 
+def _own_rates(
+    found: Mapping[str, Any], sides: Sequence[str], counted: object, cases: object
+) -> list[str]:
+    """Each of ``sides``' pass rate on the cases it was graded on (``counted``): ``67%``, or
+    ``67% of 6`` for each once one of them was graded on fewer than every case."""
+    counts = counted if isinstance(counted, Mapping) else {}
+    shown = any(counts.get(side, cases) != cases for side in sides)
+    return [
+        _agreement(found.get(side)) + (f" of {counts.get(side)}" if shown else "") for side in sides
+    ]
+
+
+def _versus(found: Mapping[str, Any], sides: tuple[str, str], paired: object, cases: object) -> str:
+    """`` on 4 of 6 cases, tuned 75% vs compare 50%``: the cases a delta pairs and both rates
+    on them, when it pairs fewer than every case."""
+    if not (isinstance(paired, int) and isinstance(cases, int) and paired < cases):
+        return ""
+    scope = f" on {paired} of {_n(cases, 'case')}"
+    common = found.get("common_pass_rate")
+    if not isinstance(common, Mapping):
+        return scope
+    first, second = (_agreement(common.get(side)) for side in sides)
+    return f"{scope}, {sides[0]} {first} vs {sides[1]} {second}"
+
+
 def _verdicts(paired: Mapping[str, Any], errors: object, targets: Sequence[str]) -> str:
     """One comparison's paired verdicts, and the errors of the two ``targets`` it compares."""
     failed = sum(int(errors.get(name, 0)) for name in targets) if isinstance(errors, Mapping) else 0
@@ -437,9 +464,11 @@ def _headline_evaluator(headline: Mapping[str, Any]) -> str | None:
         return None
     entry = (headline.get("evaluators") or {}).get(name) or {}
     label = "all (the judge and every evaluator)" if name == "all" else name
+    cases = headline.get("cases")
+    base, tuned = _own_rates(entry, ("base", "tuned"), entry.get("scored_cases"), cases)
     return (
-        f"headline {label}: base {_agreement(entry.get('base'))}, tuned "
-        f"{_agreement(entry.get('tuned'))}, tuned - base {_difference(entry)}"
+        f"headline {label}: base {base}, tuned {tuned}, tuned - base {_difference(entry)}"
+        + _versus(entry, ("tuned", "base"), entry.get("n"), cases)
     )
 
 
@@ -486,24 +515,36 @@ def _evaluation_parts(result: Mapping[str, Any], *, compact: bool) -> Summary:
         + (f"; judge {judge}" if judge else "")
         + f", {_calibration(result)}"
     )
-    base, tuned = _agreement(rates.get("base")), _agreement(rates.get("tuned"))
+    cases = headline_data.get("cases")
+    base, tuned = _own_rates(rates, ("base", "tuned"), rates.get("judged_cases"), cases)
     difference = _difference(rates)
+    versus = _versus(rates, ("tuned", "base"), rates.get("common_cases"), cases)
     verdicts = _verdicts(headline_data.get("paired") or {}, result.get("errors"), ("base", "tuned"))
-    paired = "paired: " + verdicts
     publication = _publication(result)
     chosen = [line] if (line := _headline_evaluator(headline_data)) is not None else []
     if isinstance(headline_data.get("tuned_minus_compare"), Mapping):
         return _compared_parts(result, headline, verdicts, publication, chosen)
-    agreement = f"judge agreement: base {base}, tuned {tuned}, tuned - base {difference}"
+    agreement = f"judge agreement: base {base}, tuned {tuned}, tuned - base {difference}{versus}"
     if compact:
-        lines = [headline, *chosen, agreement, paired, CAVEAT]
-    else:
+        lines = [headline, *chosen, agreement, "paired: " + verdicts, CAVEAT]
+    elif versus:
+        width = max(11, len(base) + 2)
         lines = [
             headline,
             *chosen,
-            f"{'':<21}{'base':<11}{'tuned':<11}tuned - base",
-            f"{'judge agreement':<21}{base:<11}{tuned:<11}{difference}",
-            paired,
+            f"{'':<21}{'base':<{width}}tuned",
+            f"{'judge agreement':<21}{base:<{width}}{tuned}",
+            f"tuned - base: {difference}{versus}; {verdicts}",
+            CAVEAT,
+        ]
+    else:
+        width = max(11, len(base) + 2, len(tuned) + 2)
+        lines = [
+            headline,
+            *chosen,
+            f"{'':<21}{'base':<{width}}{'tuned':<{width}}tuned - base",
+            f"{'judge agreement':<21}{base:<{width}}{tuned:<{width}}{difference}",
+            f"paired: {verdicts}",
             CAVEAT,
         ]
     parts = [headline, *chosen, agreement, verdicts, CAVEAT]
@@ -525,13 +566,20 @@ def _compared_parts(
     headline_data = result["headline"]
     rates: Mapping[str, Any] = headline_data["judge_pass_rate"]
     versus: Mapping[str, Any] = headline_data["tuned_minus_compare"]
-    names = [name for name in rates if name not in ("delta", "ci95")]
+    cases = headline_data.get("cases")
+    names = [name for name in ("base", "tuned", "compare") if name in rates]
+    own = _own_rates(rates, names, rates.get("judged_cases"), cases)
     found = [
         headline,
         *chosen,
-        "judge agreement: " + ", ".join(f"{name} {_agreement(rates[name])}" for name in names),
-        f"tuned - base: {_difference(rates)}; {verdicts}",
-        f"tuned - compare: {_difference(versus)}; "
+        "judge agreement: "
+        + ", ".join(f"{name} {rate}" for name, rate in zip(names, own, strict=True)),
+        f"tuned - base: {_difference(rates)}"
+        + _versus(rates, ("tuned", "base"), rates.get("common_cases"), cases)
+        + f"; {verdicts}",
+        f"tuned - compare: {_difference(versus)}"
+        + _versus(versus, ("tuned", "compare"), versus.get("common_cases"), cases)
+        + "; "
         + _verdicts(versus, result.get("errors"), ("tuned", "compare")),
         CAVEAT,
         *([publication] if publication is not None else []),

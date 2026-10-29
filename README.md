@@ -346,16 +346,23 @@ result leads with its `headline`:
 
 ```json
 "headline": {
-  "judge_pass_rate": {"base": 0.0, "tuned": 0.25, "delta": 0.25, "ci95": [0.0, 0.5]},
+  "judge_pass_rate": {
+    "base": 0.0, "tuned": 0.25, "judged_cases": {"base": 4, "tuned": 4},
+    "common_pass_rate": {"tuned": 0.25, "base": 0.0}, "common_cases": 4,
+    "delta": 0.25, "ci95": [0.0, 0.5]
+  },
   "paired": {"wins": 1, "regressions": 0, "ties": 3},
   "cases": 4,
   "trajectories": 2
 }
 ```
 
-`delta` is the tuned pass rate minus the base one. When its interval `ci95` includes 0, the
-evaluation has not shown that the models differ. The tools are never run, so the scores measure
-agreement with the recorded behavior, not task success.
+`delta` is the tuned pass rate minus the base one, on the `common_cases` where the judge
+graded both models, and `common_pass_rate` holds those two rates. `base` and `tuned` are
+each model's rate on every case it was graded on, `judged_cases`, so they differ from
+`common_pass_rate` when a case ended in an error for one model. When the interval `ci95`
+includes 0, the evaluation has not shown that the models differ. The tools are never run, so
+the scores measure agreement with the recorded behavior, not task success.
 
 An answer cut off at `--max-tokens` fails, and `headline.truncated` counts those per model. A
 reasoning base model can spend its whole budget thinking and make the delta look larger than it
