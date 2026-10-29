@@ -1312,9 +1312,14 @@ def _converted(error: BaseException) -> BaseException:
     detail = redact(str(error))
     message = f"training stopped: {type(error).__name__}{': ' + detail if detail else ''}"
     # A dropped connection or a timeout is the provider's failure, not the run directory's.
+    converted: FinetuneError
     if isinstance(error, OSError) and not isinstance(error, ConnectionError | TimeoutError):
-        return StateError(f"{message} (writing the run directory)")
-    return ExternalError(message, source="training")
+        converted = StateError(f"{message} (writing the run directory)")
+    else:
+        converted = ExternalError(message, source="training")
+    for note in getattr(error, "__notes__", []):
+        converted.add_note(note)
+    return converted
 
 
 def execute_run(

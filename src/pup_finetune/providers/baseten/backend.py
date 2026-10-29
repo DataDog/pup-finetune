@@ -52,9 +52,12 @@ from pup_finetune.providers.base import (
     LoraConfig,
     ModelProfile,
     ModelRef,
+    ProviderAuthError,
+    ProviderCapacityError,
     StepMetrics,
     TransientError,
     is_transient,
+    raise_session_failure,
 )
 from pup_finetune.providers.baseten import PROVIDER_NAME
 from pup_finetune.providers.baseten.client import (
@@ -206,12 +209,16 @@ class BasetenBackend:
                 renderer=self.renderer_for,
                 sleep=self._sleep,
             )
+            failure: BaseException | None = None
             try:
                 if resume_from is not None:
                     session.load(resume_from, with_optimizer=True)
                 yield session
+            except BaseException as exc:
+                failure = exc
+                raise
             finally:
-                session.close()
+                raise_session_failure(failure, session.close())
 
     def renderer_for(self, profile: ModelProfile) -> Renderer:
         """``profile``'s renderer, built once per backend."""
@@ -474,35 +481,23 @@ class BasetenSession:
                 exc.hint = f"{exc.hint}; {expired}" if exc.hint else expired
             raise
 
-    def close(self) -> None:
-        """End the session: stop its samplers, close the trainer client, deactivate the run.
+    def close(self) -> list[BaseException]:
+        """End the session: stop its samplers, close the trainer client, deactivate the run;
+        every failure, in that order, each failed deactivation naming its manual step.
 
         :meth:`BasetenBackend.open_session` calls it on exit. Every step is attempted, also
-        after one is interrupted (Ctrl-C cuts only that step's wait); the failures are raised
-        together, each with its manual step, else the interrupt is raised again.
+        after one is interrupted (Ctrl-C cuts only that step's wait).
         """
         if self._closed:
-            return
+            return []
         self._closed = True
-        failures: list[ExternalError] = []
-        interrupt: BaseException | None = None
+        failures: list[BaseException] = []
         for step in (*(sampler.close for sampler in self._samplers), self._end_run):
             try:
                 step()
-            except ExternalError as exc:
-                failures.append(exc)
             except BaseException as exc:
-                interrupt = interrupt or exc
-        if len(failures) == 1:
-            raise failures[0]
-        if failures:
-            raise ExternalError(
-                "; ".join(failure.message for failure in failures),
-                source=SOURCE,
-                hint="; ".join(failure.hint for failure in failures if failure.hint),
-            )
-        if interrupt is not None:
-            raise interrupt
+                failures.append(exc)
+        return failures
 
     def _end_run(self) -> None:
         try:
@@ -521,6 +516,10 @@ class BasetenSession:
 
     def _start_sampler(self, renderer: Renderer, checkpoint_path: str | None) -> BasetenSampler:
         context = self._profile.max_seq_len
+        left = (
+            f"a sampler may remain in Loops session {self.loops_session_id}; deactivate it in "
+            "the Baseten UI"
+        )
         try:
             record = self._http.create_sampler(
                 session_id=self.loops_session_id,
@@ -528,11 +527,13 @@ class BasetenSession:
                 model_path=checkpoint_path,
                 base_model=self._profile.base_model if checkpoint_path is None else None,
             )
-        except ExternalError as exc:  # without a hint, a server error: the sampler may exist
-            exc.hint = exc.hint or (
-                f"a sampler may remain in Loops session {self.loops_session_id}; deactivate it "
-                "in the Baseten UI"
-            )
+        except (DeploymentRejected, ProviderAuthError, ProviderCapacityError):
+            raise  # refused, so nothing was created
+        except ExternalError as exc:
+            exc.hint = "; ".join(filter(None, (left, exc.hint)))
+            raise
+        except BaseException as exc:  # e.g. Ctrl-C while the sampler is created
+            exc.add_note(left)
             raise
         sampler = BasetenSampler(
             record,

@@ -34,13 +34,16 @@ from pydantic import (
     model_validator,
 )
 
-from pup_finetune.errors import ExternalError, StateError, UsageError
+from pup_finetune.errors import ExternalError, FinetuneError, StateError, UsageError
+from pup_finetune.redaction import redact
 from pup_finetune.rendering.base import ChatMessage, Renderer, ToolSpec
 from pup_finetune.rendering.hf import COMMIT_SHA
 from pup_finetune.rendering.tokens import TokenizedExample
 
 if TYPE_CHECKING:
     from concurrent.futures import Future
+
+    from pup_finetune.inference import ChatCompleter
 
 # --- Models and training configuration ---------------------------------------------------
 
@@ -651,6 +654,50 @@ class SmokeTest:
         }
 
 
+SMOKE_PROMPT: Final = "Reply with the single word OK."
+SMOKE_MAX_TOKENS: Final = 16
+
+
+def run_smoke_test(
+    client: ChatCompleter,
+    model: str,
+    *,
+    clock: Callable[[], float],
+    sleep: Callable[[float], None],
+    poll_interval_s: float,
+    timeout_s: float,
+) -> SmokeTest:
+    """One chat completion of ``model`` through ``client``, retried every ``poll_interval_s``
+    seconds for up to ``timeout_s`` while the deployment scales up (a :class:`TransientError`
+    or :class:`ProviderCapacityError`). Never raises for a failed answer, only when the API
+    key is rejected; any other failure fails it at once."""
+    deadline = clock() + timeout_s
+    attempts = 0
+    while True:
+        attempts += 1
+        started = clock()
+        try:
+            client.complete(
+                [{"role": "user", "content": SMOKE_PROMPT}],
+                model=model,
+                temperature=0.0,
+                max_tokens=SMOKE_MAX_TOKENS,
+            )
+        except ProviderAuthError:
+            raise
+        except (TransientError, ProviderCapacityError) as exc:
+            detail = redact(str(exc))
+        except ExternalError as exc:
+            return SmokeTest(ok=False, attempts=attempts, detail=redact(str(exc)))
+        else:
+            latency = max(0.0, clock() - started)
+            return SmokeTest(ok=True, latency_s=round(latency, 3), attempts=attempts)
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return SmokeTest(ok=False, attempts=attempts, detail=detail)
+        sleep(min(poll_interval_s, remaining))
+
+
 class DeploymentNotReady(ExternalError):
     """A deployment that was created but did not come to serve.
 
@@ -935,9 +982,42 @@ class TrainingBackend(Protocol):
         session will train on, at most ``profile.max_seq_len``; a provider may size its
         trainer from them. Resuming needs :attr:`supports_resume`. Leaving the context ends
         the session and releases what it holds on the provider, whether training finished,
-        stopped early or failed.
+        stopped early or failed, and raises what :func:`raise_session_failure` picks.
         """
         ...
+
+
+BODY_FAILED_FIRST = "the session failed first"
+
+
+def raise_session_failure(body: BaseException | None, closing: Sequence[BaseException]) -> None:
+    """Raise what a closed session ends with: ``body`` is what its body raised (``None``
+    after a normal exit) and ``closing`` every failure to close it, most important first.
+
+    The first interrupt (a :class:`BaseException` that is not an :class:`Exception`, such as
+    ``KeyboardInterrupt``), from the body or from closing, wins, so the command reports it as
+    interrupted; else the body's error; else the first failure to close. Every other one, and
+    its own notes, become notes on it, so nothing is lost. Returns when nothing failed.
+    """
+    failures = [*([] if body is None else [body]), *closing]
+    if not failures:
+        return
+    raised = next((exc for exc in failures if not isinstance(exc, Exception)), failures[0])
+    for other in failures:
+        if other is raised:
+            continue
+        label = BODY_FAILED_FIRST if other is body else "ending the session also failed"
+        raised.add_note(f"{label}: {_described(other)}")
+        for note in getattr(other, "__notes__", ()):
+            raised.add_note(note)
+    raise raised
+
+
+def _described(error: BaseException) -> str:
+    detail = str(error)
+    hint = error.hint if isinstance(error, FinetuneError) else None
+    text = f"{type(error).__name__}{': ' + detail if detail else ''}"
+    return redact("; ".join(filter(None, (text, hint))))
 
 
 @runtime_checkable

@@ -2688,11 +2688,12 @@ class StandaloneEvaluation:
                     result = self._replay(client, compare, cancel, report, scoring)
                 record_evaluation(plan, result)
                 return result
-            except KeyboardInterrupt:
+            except KeyboardInterrupt as exc:
                 raise Interrupted(
                     f"evaluation stopped at once (Ctrl-C); what finished is kept in {display_path(plan.out_dir)}",
                     hint=f"preview what is left with `{shlex.join(plan.evaluate_command())}`; "
                     "its next_command continues it",
+                    interrupt=exc,
                 ) from None
 
     def _open_compare(self, stack: ExitStack, work: EvalWork) -> Sampler | None:

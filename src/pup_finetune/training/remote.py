@@ -345,13 +345,14 @@ def submit_remote(
         except (RemoteJobRejected, ProviderAuthError, ProviderCapacityError):
             _roll_back(run, created_dir)
             raise
-        except KeyboardInterrupt:
+        except KeyboardInterrupt as exc:
             if not submitting:
                 _roll_back(run, created_dir)
                 raise
             raise Interrupted(
                 f"the submit of run {run.run_id} stopped (Ctrl-C); the job may exist",
                 hint=f"`{status}` looks for the job",
+                interrupt=exc,
             ) from None
         except BaseException as exc:
             if not submitting:

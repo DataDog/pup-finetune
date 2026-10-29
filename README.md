@@ -448,8 +448,9 @@ the envelope and `--no-envelope`.
 Exit code `0` means the command finished. `2` means a preview, or a mistake you can fix in the
 command or the directory. `1` means something outside failed, or local state is broken. An error
 prints nothing on stdout. It prints `Error [<code>]: <message>` on stderr, and a hint when there
-is one. A command that returns a result still prints it on stdout when it exits `1`. Two
-examples are `doctor` when a required check fails and `deploy` when its smoke test fails.
+is one. Each of the error's notes follows as a `warning:` line, such as a resource a Ctrl-C may
+have left running. A command that returns a result still prints it on stdout when it exits `1`.
+Two examples are `doctor` when a required check fails and `deploy` when its smoke test fails.
 
 [Exit codes and errors](docs/commands.md#exit-codes-and-errors) lists every error code.
 `pup finetune help <COMMAND>` prints a command's help.
