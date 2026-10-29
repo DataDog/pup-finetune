@@ -1326,7 +1326,6 @@ def resume(
             "<PROVIDER> --dataset <DIR> --model <MODEL>`)"
         ),
     )
-    registered = provider_info(provider_name, runtime)
     provider, inputs = load_run_inputs(run, runtime, finalize_only=mode == "finalize")
     action, resume_from = _resume_action(mode, state)
     spec = run.spec()
@@ -1367,7 +1366,7 @@ def resume(
         f"training on {provider.name}",
         what=PAID_RUN,
         confirm=confirm,
-        offline=registered.offline,
+        offline=provider_info(provider_name, runtime).offline,
         preview=preview,
         rerun=shlex.join([*rerun, "--confirm"]),
     )

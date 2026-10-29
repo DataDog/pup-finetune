@@ -231,8 +231,7 @@ def test_a_read_only_card_says_confirm_is_refused_and_never_cuts_the_cost(
         "bills",
         "cost",
     ]
-    # The judge bills, so the run is not offline: the cost row offers the spend cap. Only
-    # the judge bills: the offline fake provider is no biller.
+    # Only the judge bills, but that makes the run paid, so the cost row offers the spend cap.
     assert lines[-2] == (
         "  bills     Anthropic bills each judge call per token at its own rates "
         "(pup-finetune does not know the rates)"

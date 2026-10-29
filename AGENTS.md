@@ -138,7 +138,8 @@ epoch; one cancelled before any epoch has nothing to evaluate). Evaluating a rea
 and needs the judge's key (the default judge follows the keys there are; see below); the
 preview is free and allowed with `PUP_READ_ONLY` set, evaluating is not (an offline one, on the
 fake provider and judge and not published, is allowed: nothing leaves the machine; `train`,
-`resume`, `deploy` and `undeploy` on the fake provider likewise). A changed `--max-tokens`, judge, seed or cap needs a
+`resume`, `deploy` and `undeploy` on the fake provider likewise). A changed `--max-tokens`,
+judge, seed or cap needs a
 new `--out-dir`. An evaluation whose pairs ended in errors (a sampler or judge outage) reports
 `complete_with_errors` with an error count and a `next_command` that retries them, and exits
 1 when a target has no verdict at all; a cancelled one reports `partial`. `evaluator_errors`

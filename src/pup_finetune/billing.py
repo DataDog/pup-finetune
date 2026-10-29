@@ -7,10 +7,8 @@
 """What a preview says it bills: ``billing``, every part's sentence, and ``paid_billing``,
 the sentences of the parts that leave the machine.
 
-Each function that writes a billing sentence returns a :class:`BillingPart`, which carries
-whether that part runs offline, so no caller pairs a sentence with a flag.
-:func:`billing_fields` builds a preview's two fields and :func:`merge_billing` adds a
-sub-preview's to its parent's, so the two are always written together.
+A billing sentence is always a :class:`BillingPart`, which carries whether it runs offline,
+so no caller pairs a sentence with a flag.
 """
 
 from __future__ import annotations

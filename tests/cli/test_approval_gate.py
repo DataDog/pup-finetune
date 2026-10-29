@@ -25,7 +25,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import SecretStr
 from typer.testing import CliRunner, Result
 
 from pup_finetune import judges
@@ -39,7 +38,6 @@ from pup_finetune.evaluation.fake_judge import FakeJudge
 from pup_finetune.inference import ChatCompleter, ChatCompletion, JudgeConfig
 from pup_finetune.providers import get_provider as real_get_provider
 from pup_finetune.providers.base import Provider
-from pup_finetune.providers.fireworks.deploy import FireworksDeployer
 from pup_finetune.providers.fireworks.provider import FireworksProvider
 from pup_finetune.runs import RunDir
 from pup_finetune.runtime import Runtime
@@ -89,16 +87,13 @@ class Fireworks:
         self.clock = FakeClock()
 
     def provider(self, runtime: Runtime) -> FireworksProvider:
-        def deployer(key: SecretStr) -> FireworksDeployer:
-            return fake_deployer(self.sdk, self.chat, self.clock)(key)
-
         return FireworksProvider(
             runtime,
             env={"FIREWORKS_API_KEY": API_KEY},
             transport=FakeFireworksApi().transport,
             tokenizer=FakeChatTokenizer(),
             training_client=lambda _key: self.training,
-            deployer=deployer,
+            deployer=fake_deployer(self.sdk, self.chat, self.clock),
         )
 
 
