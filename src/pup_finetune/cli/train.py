@@ -1484,8 +1484,7 @@ def run_status(run: RunDir, *, source: str = "given") -> dict[str, Any]:
     ./runs``). ``evaluation`` is the run's recorded evaluation
     (:func:`~pup_finetune.evaluation.runner.recorded_evaluation`), or ``None``. The worker
     saves its state before it records its exit, so when it is not running both are read
-    again: a read made after the worker is seen gone is final (a SIGKILLed worker leaves the
-    state as it was, which the second read reports unchanged).
+    again: a read made after the worker is seen gone is final.
     """
     sync = _remote_sync(run)
     summary, worker = _observed(run, sync)
