@@ -496,12 +496,14 @@ def require_not_training(run_dir: RunDir, state: RunState) -> None:
 def cancellable_pid(run_dir: RunDir) -> int:
     """The pid of the live process of ours training ``run_dir``, checked; else raise.
 
-    Raises :class:`WrongPhase` when the run is not training or the process recorded in
-    ``state.json`` is gone (naming the worker starting to resume it, if one is) or no longer
-    holds the run's lock, and :class:`StateError` when that process belongs to another user
-    or another process holds the lock.
+    Raises :class:`WrongPhase` while a worker started for the run is starting
+    (:func:`require_no_worker_starting`), when the run is not training, or when the process
+    recorded in ``state.json`` is gone or no longer holds the run's lock, and
+    :class:`StateError` when that process belongs to another user or another process holds
+    the lock.
     """
     state = run_dir.load_state()
+    require_no_worker_starting(run_dir, state)
     resume = command("resume", run_dir.path)
     if state.phase != "training":
         why = (
@@ -513,7 +515,6 @@ def cancellable_pid(run_dir: RunDir) -> int:
     pid = state.pid
     probe = probe_pid(pid)
     if pid is None or probe == "gone":
-        require_no_worker_starting(run_dir, state)
         raise WrongPhase(
             f"the process training the run in {run_dir.path} ({pid}) is no longer running",
             hint=f"it stopped without recording why; resume the run with `{resume}`",
