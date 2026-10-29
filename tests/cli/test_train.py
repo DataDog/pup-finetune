@@ -12,6 +12,7 @@ detached worker is covered by ``test_train_detach.py``.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
@@ -1141,6 +1142,44 @@ def test_of_two_detached_resumes_at_once_only_one_starts_a_worker(
     assert "is starting" in resumed.stderr
     assert len(workers) == 1
     assert (data["worker"]["pid"], data["worker"]["state"]) == (workers[0].pid, "starting")
+
+
+def test_a_detached_resume_refuses_once_the_other_resumes_worker_has_begun(
+    trained: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_state(trained, phase="interrupted", pid=_dead_pid(), heartbeat_at=_ago(30))
+    real_popen = subprocess.Popen
+    workers: list[subprocess.Popen[bytes]] = []
+
+    def launched(args: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
+        workers.append(real_popen([sys.executable, "-c", "import time; time.sleep(60)"]))
+        return workers[-1]
+
+    real_spawn = train_module.spawn_worker
+    with contextlib.ExitStack() as held:
+
+        def after_the_other_worker_began(run: RunDir, mode: worker_module.WorkerMode) -> int:
+            # The other resume's worker, this process, has taken the run and begun training.
+            held.enter_context(RunDir(trained).lock())
+            launch = {"pid": os.getpid(), "mode": "resume", "started_at": _ago(2)}
+            atomic_write_json(trained / "worker.json", launch)
+            _set_state(trained, phase="training", pid=os.getpid(), heartbeat_at=_ago(0))
+            return real_spawn(run, mode)
+
+        monkeypatch.setattr(subprocess, "Popen", launched)
+        monkeypatch.setattr(train_module, "spawn_worker", after_the_other_worker_began)
+        try:
+            resumed = invoke("resume", str(trained), "--detach", "--confirm")
+            data = output(invoke("status", str(trained)))
+        finally:
+            for worker in workers:
+                worker.kill()
+                worker.wait()
+    assert resumed.exit_code == 2
+    assert "Error [wrong_phase]: " in resumed.stderr
+    assert "is still training" in resumed.stderr
+    assert workers == []
+    assert (data["worker"]["pid"], data["worker"]["state"]) == (os.getpid(), "running")
 
 
 def test_resume_refuses_a_changed_renderer(trained: Path) -> None:
