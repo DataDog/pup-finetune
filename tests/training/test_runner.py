@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -296,6 +297,40 @@ def test_a_run_left_training_by_a_dead_process_resumes(tmp_path: Path) -> None:
     result = resume(run_dir)
     assert result["phase"] == "completed"
     assert [e["epoch"] for e in result["epochs"]] == [1, 2, 3]
+
+
+class KilledAfterEpoch(RunDir):
+    """A run directory that keeps its files as they stood right after ``epochs.json`` got
+    epoch ``epoch``, before ``state.json`` did: what a crash at that moment leaves."""
+
+    def __init__(self, path: Path, epoch: int) -> None:
+        super().__init__(path)
+        self.epoch = epoch
+        self.kept: dict[Path, bytes] = {}
+
+    def write_epochs(self, epochs: Sequence[Mapping[str, Any]]) -> None:
+        super().write_epochs(epochs)
+        if not self.kept and any(row.get("epoch") == self.epoch for row in epochs):
+            self.kept = {path: path.read_bytes() for path in (self.state_path, self.epochs_path)}
+
+    def crash(self) -> None:
+        for path, data in self.kept.items():
+            path.write_bytes(data)
+        self.result_path.unlink()
+
+
+def test_a_resume_after_a_crash_recording_the_last_epoch_reports_its_best(
+    tmp_path: Path,
+) -> None:
+    run_dir = new_run(tmp_path / "run", max_epochs=1)
+    killed = KilledAfterEpoch(run_dir.path, epoch=1)
+    start(killed)
+    killed.crash()
+    result = resume(run_dir)
+    assert (result["phase"], result["best_epoch"]) == ("completed", 1)
+    status = run_dir.status()
+    assert status["epochs_completed"] == 1
+    assert status["best"] is not None and status["best"]["epoch"] == 1
 
 
 def test_a_cancelled_run_resumes_and_completes(

@@ -159,6 +159,7 @@ class Evaluation:
             max_tokens=256,
             push=self.push(),
             records=self.records,
+            replays=dict.fromkeys(TARGETS, self.cases),
         )
 
 
@@ -1082,6 +1083,24 @@ def test_finished_rows_are_published_live_and_rows_with_errors_wait(
     assert report["status"] == "published"
     assert len(by_target["tuned"].spans) == 2 * per_row
     assert report["experiments"]["base"]["already_published"] == 2 * per_row
+
+
+def test_a_row_with_a_case_still_running_waits_live(
+    fake: FakePup, api: FakeExperimentsApi, clock: Clock, tmp_path: Path
+) -> None:
+    signed_in(fake)
+    evaluation = Evaluation()
+    running = evaluation.cases[0]
+    for store in (evaluation.generations, evaluation.results):
+        del store[("tuned", running.id)]
+    live = publisher(fake, evaluation, tmp_path / "eval", clock)
+    live.start()
+    live.publish_ready(
+        cases=evaluation.cases, generations=evaluation.generations, results=evaluation.results
+    )
+    tuned = next(e for e in api.experiments.values() if e.attributes["config"]["target"] == "tuned")
+    assert len(tuned.spans) == 3  # the other row only
+    assert running.row_id not in json.dumps(tuned.spans)
 
 
 def test_a_failure_while_live_waits_for_the_final_publish(

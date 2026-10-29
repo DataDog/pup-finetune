@@ -308,7 +308,11 @@ Baseten Loops through `providers/baseten/client.py`, the only module that loads 
 - **Promotion.** Fireworks renames checkpoints (`run-<hex>-<name>-<8 hex>`), so `promote`
   lists the session's checkpoints and takes the newest promotable sampler row carrying the
   checkpoint's name, then promotes it to `accounts/<account>/models/<model id>`: the
-  `ModelRef`'s `model_id` is the bare id, its `uri` that full name. The shared
+  `ModelRef`'s `model_id` is the bare id, its `uri` that full name. It looks the model up
+  first: a model already under the id is refused (`ModelIdTaken`) unless the run's request
+  was `sent` and the model created since. Only once the id is free does it call
+  `on_sending`, which marks a request not yet `sent` as `sent` from then (a retry keeps the
+  first send's time), and promote. The shared
   `finalize` hook ([`training/promotion.py`](../src/pup_finetune/training/promotion.py)) runs
   it before the session ends; after a resume, it first re-creates the best epoch's sampler
   checkpoint from its training checkpoint (`load_state`, then `save_weights_for_sampler`).
@@ -340,7 +344,10 @@ that runs the `baseten` CLI.
   `state.json`, `epochs.json` and `result.json` to stdout as checksummed `PUPFT1` lines, on a
   change, every minute and at exit with the worker's error. `status` reads them back from the
   job's logs, newest first, and copies the newest complete one into the run directory (the
-  pid cleared), skipping the write while another process holds the run's lock.
+  pid cleared), skipping the write while another process holds the run's lock. A snapshot
+  is read `epochs.json` first and `result.json` last, so its training checkpoint is never
+  older than its finished epochs; one that pairs them so anyway is refused with a warning,
+  keeping the last copy, since a resume could not continue from it.
 - **The key.** The job reads a Baseten API key from the team secret `pup_finetune_api_key`;
   the local key goes only into the CLI's environment, never on its command line or in a file.
   Both keys must belong to the same workspace, since `deploy` and a local `resume` load the
@@ -453,16 +460,16 @@ provider, and talks to models only through the `Sampler` protocol.
 - **Summary** (`summary.json`). Per target, the judge pass rate, every metric's rate and the
   mean of per-trajectory agreement. Across targets, the cases both answered are compared
   verdict by verdict (wins, regressions, ties), and `tuned_minus_base` is the mean paired
-  difference of the judge pass, with a 95% bootstrap interval that resamples whole
-  trajectories (2000 seeded resamples; `null` with fewer than two trajectories), since the
-  cases of one conversation are not independent. Every number is finite or `null`, and the
-  summary says what the scores measure: agreement with the recorded behavior on held-out
-  conversations, not task success.
+  difference of the judge pass, beside both pass rates on those cases, with a 95% bootstrap
+  interval that resamples whole trajectories (2000 seeded resamples; `null` with fewer than
+  two trajectories), since the cases of one conversation are not independent. Every number
+  is finite or `null`, and the summary says what the scores measure: agreement with the
+  recorded behavior on held-out conversations, not task success.
 - **Runner** ([`runner.py`](../src/pup_finetune/evaluation/runner.py)). What `evaluate` and
   `train --evaluate` run, so the CLI only parses flags and emits: an `EvalPlan` (cases,
   judge, settings, and whether the evaluation can be published), calibration, the replay
-  with the plan's publisher, and the result and exit code. The package exports its names
-  lazily, so the CLI loads the runner for every command without loading the judge's client.
+  with the plan's publisher, and the result and exit code. The package's `__init__` imports
+  nothing, so the CLI loads the runner for every command without loading the judge's client.
 - **Publishing** ([`datadog/experiments.py`](../src/pup_finetune/datadog/experiments.py)).
   `Publisher` receives a complete evaluation and returns what it reports. Datadog is the
   system of record: `ExperimentsPublisher` publishes the evaluation, through pup's OAuth, as
@@ -684,7 +691,9 @@ Using Baseten as the example:
    as a `warning:`. Convert each `TokenizedExample` to the SDK's datum type, map
    `AdamConfig` onto its optimizer parameters on every step, size the trainer from the
    `seed` and `max_seq_len` passed to `open_session`, set `max_checkpoint_name_len` to the
-   provider's limit, and declare `supports_resume` and `supports_promotion`. Map SDK
+   provider's limit, and declare `supports_resume` and `supports_promotion`. A backend
+   with promotion calls `promote`'s `on_sending` right before it sends the promotion, after
+   any lookup, and raises `ModelIdTaken` for a model id another model holds. Map SDK
    failures onto the neutral errors in `providers/base.py`: `ProviderCapacityError` when
    there is no capacity or quota (end what the failed call started before raising it, and
    say so in the hint only then), `ProviderAuthError` for a rejected key and

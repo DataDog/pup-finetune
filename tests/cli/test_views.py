@@ -18,7 +18,6 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from pup_finetune import doctor as registry
 from pup_finetune import output
 from pup_finetune.cli import _common, app
 from pup_finetune.cli import doctor as doctor_cli
@@ -185,7 +184,6 @@ def formats(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
         return subprocess.CompletedProcess(["pup", *args], 0, stdout=stdin, stderr="")
 
     monkeypatch.setattr(output, "run_pup", run)
-    monkeypatch.setattr(registry, "_REGISTRY", {})
     healthy = FakePup().on("--version", raw=True, stdout="pup 1.10.7\n")
     healthy.on("auth", "status", stdout=json.dumps({"status": "valid"}))
     monkeypatch.setattr(doctor_cli, "Pup", healthy.client)

@@ -117,6 +117,17 @@ class DatasetSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class RefusedDrop:
+    """A drop on a row :meth:`DatasetDir.add` retired that a person's keep refused to carry."""
+
+    row_id: str
+    """The stored row that holds the dropped row's conversation now, and trains its turns."""
+    keep: Label
+    """The person's keep: on :attr:`row_id`, or on a row this add retired into it."""
+    drop: Label
+
+
+@dataclass(frozen=True, slots=True)
 class AddResult:
     """What one :meth:`DatasetDir.add` did, and the dataset summary afterwards."""
 
@@ -128,6 +139,12 @@ class AddResult:
     """Stored rows taken out and recorded as excluded."""
     updated: int = 0
     """Stored rows replaced by a version with more reasoning."""
+    carried: dict[str, str] = field(default_factory=dict)
+    """The rows labeled drop because they hold the conversation of a dropped row this add
+    retired, each with that row's id."""
+    not_carried: list[RefusedDrop] = field(default_factory=list)
+    """The drops of rows this add retired that a person's keep refused: the dropped turns
+    train."""
 
 
 class DatasetDir:
@@ -323,14 +340,17 @@ class DatasetDir:
         :func:`~pup_finetune.curation.labels.apply_labels`). The file is rewritten as its
         current content plus ``labels`` in one atomic replace; ``rows.jsonl`` is untouched.
         """
-        if labels:
+        self._append_labels(labels)
+        return self._write_summary()
+
+    def _append_labels(self, labels: Iterable[Label]) -> None:
+        lines = "".join(canonical_json(label.to_json()) + "\n" for label in labels)
+        if lines:
             path = self.labels_path
             text = path.read_text(encoding="utf-8") if path.exists() else ""
             if text and not text.endswith("\n"):
                 text += "\n"
-            text += "".join(canonical_json(label.to_json()) + "\n" for label in labels)
-            atomic_write_text(path, text)
-        return self._write_summary()
+            atomic_write_text(path, text + lines)
 
     def _write_summary(self) -> dict[str, Any]:
         summary, conflicts = self._summary()
@@ -394,7 +414,8 @@ class DatasetDir:
         accepted row that no longer belongs, such as a conversation a later pull found inside
         a longer one. The row is removed from ``rows.jsonl`` and the exclusion recorded. A
         ``row_id`` that is not stored is recorded as an exclusion all the same, and one that
-        ``rows`` also holds raises :class:`ValueError`.
+        ``rows`` also holds, or retirements whose ``into`` lead back to a row they retire,
+        raise :class:`ValueError`.
 
         ``updated`` replaces stored rows in place, by id: each must name a stored row and
         differ from it only in ``reasoning_content``, such as reasoning a later pull read for
@@ -403,14 +424,22 @@ class DatasetDir:
         also holds, a change to anything but reasoning, or an update that leaves the row
         holding the same conversation as another stored row raises :class:`ValueError`.
 
+        A drop label in force on a ``retired`` row carries to the stored row that holds its
+        conversation now (the exclusion's ``into``, followed through the rows this add
+        retires), as a ``manual`` drop whose ``carried_from`` names it, which triage never
+        relabels. It does not replace a person's label on that row, nor carry over a person's
+        keep on a row along the way (:attr:`AddResult.not_carried`). A keep does not carry, as
+        that row has turns nobody reviewed.
+
         ``split_overrides`` assigns split keys to the splits a source already gave them (the
         splits recorded on a fetched dataset's records) before new keys are assigned; a key
         assigned to another split already raises :class:`StateError`.
 
         A validation error (a conflicting id, changed settings) leaves existing dataset files
         unchanged. If writing fails part-way, re-running the same add repairs the directory;
-        the exclusions of ``retired`` are written before the rows are, so a retired row is
-        never gone from ``rows.jsonl`` without its record in ``excluded.jsonl``.
+        the exclusions of ``retired`` and the drops they carry are written before the rows
+        are, so a retired row is never gone from ``rows.jsonl`` without its record in
+        ``excluded.jsonl`` or the drop it carries.
         """
         self._prepare()
         with DirectoryLock(self.path):
@@ -439,8 +468,10 @@ class DatasetDir:
                         f"{self.splits_path} assigns {key!r} to {splits.get(key)}, not {split}"
                     )
                 splits.assignments[key] = split
-            dropped = {row_id for row_id, label in self.labels().items() if not label.keep}
-            assign_splits(all_rows, splits, dropped=dropped)
+            labels = self.labels()
+            carried, refused = _carried_drops(retiring, labels, {row.id for row in all_rows})
+            dropped = {row_id for row_id, label in labels.items() if not label.keep}
+            assign_splits(all_rows, splits, dropped=dropped | {c.id for c in carried.values()})
             repair = SOURCE_COMMANDS[settings.source]
             check_isolation(
                 _group_by_split(all_rows, splits, where=self.splits_path, repair=repair)
@@ -462,11 +493,21 @@ class DatasetDir:
                     self.excluded(), retiring, accepted_ids={row.id for row in existing}
                 )
                 self._write_excluded(staged)
+            self._append_labels(carried.values())
             write_rows(self.rows_path, all_rows)
             self._write_excluded(records)
             summary = self._write_summary()
         retired_rows = len(stored) - len(existing)
-        return AddResult(len(new_rows), unchanged, len(excluded), summary, retired_rows, changed)
+        return AddResult(
+            len(new_rows),
+            unchanged,
+            len(excluded),
+            summary,
+            retired_rows,
+            changed,
+            {label.id: row_id for row_id, label in carried.items()},
+            refused,
+        )
 
     def _write_excluded(self, records: Iterable[dict[str, Any]]) -> None:
         lines = "".join(canonical_json(record) + "\n" for record in records)
@@ -574,6 +615,57 @@ def _merge(
         by_hash[digest] = row.id
         new_rows.append(row)
     return new_rows, unchanged
+
+
+def _carried_drops(
+    retired: Iterable[Exclusion], labels: Mapping[str, Label], stored: Collection[str]
+) -> tuple[dict[str, Label], list[RefusedDrop]]:
+    """The drop label each ``retired`` row with a drop in force passes to the ``stored`` row
+    that holds its conversation (its exclusion's ``into``), by the retired row's id, and each
+    drop a person's keep refuses.
+
+    That row can be retired too, as when a prefix's longer row repeats another stored row:
+    the drop passes to the row its retirements end at, or to none when that row is not
+    stored, since nothing trains it. None passes when that row has a ``manual`` drop: a
+    person's, or a drop carried already, so a rerun after a crash, which finds the drop it
+    carried in force, carries nothing twice. A person's keep on that row or on a row along
+    the way refuses the drop, unless another drop dropped the row. A judge's or a check's
+    label is replaced, even a drop, as triage would review it again and could keep the row.
+    Raises :class:`ValueError` when the retirements form a cycle.
+    """
+    targets = {e.row_id: e.into for e in retired if e.row_id is not None}
+    current = dict(labels)
+    carried: dict[str, Label] = {}
+    refused: list[RefusedDrop] = []
+    for row_id, into in targets.items():
+        chain: list[str] = []
+        while into is not None:
+            if into == row_id or into in chain:
+                raise ValueError(f"retirements form a cycle at {into!r}")
+            chain.append(into)
+            into = targets.get(into)
+        if not chain or chain[-1] not in stored:
+            continue
+        label = current.get(row_id)
+        if label is None or label.keep:
+            continue
+        held = chain[-1]
+        own = current.get(held)
+        if own is not None and own.by == "manual" and not own.keep:
+            continue
+        decided = (current.get(hop) for hop in reversed(chain))
+        keep = next((k for k in decided if k is not None and k.by == "manual" and k.keep), None)
+        if keep is not None:
+            refused.append(RefusedDrop(held, keep, label))
+            continue
+        current[held] = carried[row_id] = Label(
+            id=held,
+            keep=False,
+            reason=f"carried from row {row_id!r}, which this row absorbed: {label.reason}",
+            carried_from=row_id,
+        )
+    dropped = {label.id for label in carried.values()}
+    return carried, [r for r in refused if r.row_id not in dropped]
 
 
 def _apply_updates(

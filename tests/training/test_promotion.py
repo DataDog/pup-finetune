@@ -15,12 +15,14 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from pup_finetune.errors import FinetuneError
+from pup_finetune.errors import ExternalError, FinetuneError
 from pup_finetune.providers.base import (
     MAX_MODEL_ID_LEN,
     MODEL_ID_PATTERN,
+    CheckpointRef,
     LoraConfig,
     ModelRef,
+    TrainingSession,
     TrainSpec,
 )
 from pup_finetune.providers.fake import (
@@ -41,6 +43,7 @@ from pup_finetune.training import (
 from pup_finetune.training.promotion import (
     ADOPT_CLOCK_ALLOWANCE,
     PromotionRequest,
+    PromotionStatus,
     model_id_for_checkpoint,
 )
 from tests.fakes.training import SESSION, MemoryState, RecordingSession, row_examples
@@ -164,6 +167,47 @@ def test_a_spend_guard_can_refuse_re_creating_a_sampler_checkpoint() -> None:
     assert [ref.kind for ref in backend.saved if ref.kind == "sampler"] == []
 
 
+class Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class SlowLoads(RecordingSession):
+    """A session whose weight loads take ``load_s`` seconds on ``clock``."""
+
+    def __init__(self, inner: TrainingSession, clock: Clock, load_s: float) -> None:
+        super().__init__(inner)
+        self.clock, self.load_s = clock, load_s
+
+    def load_weights(self, ckpt: CheckpointRef) -> None:
+        super().load_weights(ckpt)
+        self.clock.now += self.load_s
+
+
+def test_a_re_created_sampler_checkpoint_is_not_saved_once_loading_spent_the_budget() -> None:
+    options = FakeOptions(val_curve=[1.0, 2.0, 3.0])
+    cancelled = train(
+        FakeBackend(options), spec(patience=5), state=MemoryState(cancel_after_steps=3)
+    )
+    clock = Clock()
+    budget = Budget(max_spend_usd=1.0, hourly_rate_usd=3600.0, clock=clock)
+    budget.start()
+    clock.now = 0.8  # 0.80 of 1.00 USD spent: enough left to start loading the weights
+    guarded = dataclasses.replace(
+        promotion(), spend_guard=lambda: budget.spend_exhausted(use_reserve=True)
+    )
+    backend = FakeBackend(options)  # a new process: the best epoch's session has ended
+    with backend.open_session(FAKE_PROFILE, LORA, **SESSION) as inner:
+        session = SlowLoads(inner, clock, load_s=0.5)
+        with pytest.raises(ExternalError, match="reached max_spend_usd"):
+            guarded(session, cancelled)
+    assert session.saved == []
+    assert backend.promoted == []
+
+
 def test_a_spend_guard_is_not_asked_when_nothing_is_re_created() -> None:
     asked: list[bool] = []
 
@@ -191,8 +235,13 @@ class Requests:
     def any_promotion_requested(self) -> bool:
         return bool(self.recorded)
 
-    def record_promotion_request(self, model_id: str, *, epoch: int, step: int) -> PromotionRequest:
-        request = PromotionRequest(model_id=model_id, epoch=epoch, step=step, requested_at=self.now)
+    def record_promotion_request(
+        self, model_id: str, *, epoch: int, step: int, status: PromotionStatus
+    ) -> PromotionRequest:
+        request = PromotionRequest(
+            model_id=model_id, epoch=epoch, step=step, status=status, requested_at=self.now
+        )
+        self.recorded = [r for r in self.recorded if (r.epoch, r.step) != (epoch, step)]
         self.recorded.append(request)
         return request
 
@@ -217,18 +266,29 @@ def promote_with(finalize: Promotion, *, epochs: int = 1) -> tuple[str, list[dat
     return result.promoted_model.model_id, session.adopt_since
 
 
-def test_a_promotion_adopts_only_models_created_since_the_run_asked_for_that_checkpoint() -> None:
+def test_a_retry_adopts_only_models_created_since_the_run_asked_for_that_checkpoint() -> None:
     asked = datetime(2026, 10, 6, 12, 0, tzinfo=UTC)
     requests = Requests(asked)
     finalize = dataclasses.replace(promotion(), requests=requests)
-    since = asked - ADOPT_CLOCK_ALLOWANCE
-    assert promote_with(finalize) == ("ft-run-1", [since])
+    # The attempt that records the request adopts nothing: no model can be the run's yet.
+    assert promote_with(finalize) == ("ft-run-1", [None])
     # Promoting the same checkpoint again (a retry) reuses its recorded request.
     requests.now = asked + timedelta(hours=1)
-    assert promote_with(finalize) == ("ft-run-1", [since])
+    assert promote_with(finalize) == ("ft-run-1", [asked - ADOPT_CLOCK_ALLOWANCE])
     assert [(r.model_id, r.epoch, r.step) for r in requests.recorded] == [("ft-run-1", 1, 2)]
     # Without a recorded request, no existing model can be told to be the run's.
     assert promote_with(promotion()) == ("ft-run-1", [None])
+
+
+def test_every_retry_adopts_models_created_since_the_first_promotion_was_sent() -> None:
+    asked = datetime(2026, 10, 6, 12, 0, tzinfo=UTC)
+    requests = Requests(asked)
+    finalize = dataclasses.replace(promotion(), requests=requests)
+    promote_with(finalize)
+    # A retry sends the promotion again; the model the first send created stays the run's.
+    for hours in (1, 2):
+        requests.now = asked + timedelta(hours=hours)
+        assert promote_with(finalize) == ("ft-run-1", [asked - ADOPT_CLOCK_ALLOWANCE])
 
 
 def test_a_new_best_after_a_promotion_gets_its_own_model_id() -> None:
@@ -238,14 +298,16 @@ def test_a_new_best_after_a_promotion_gets_its_own_model_id() -> None:
     finalize = dataclasses.replace(promotion(), requests=requests)
     assert promote_with(finalize)[0] == "ft-run-1"
     requests.now = later = asked + timedelta(hours=1)
-    model_id, since = promote_with(finalize, epochs=3)
-    assert (model_id, since) == ("ft-run-1-e3s6", [later - ADOPT_CLOCK_ALLOWANCE])
+    assert promote_with(finalize, epochs=3) == ("ft-run-1-e3s6", [None])
     assert [(r.model_id, r.epoch, r.step) for r in requests.recorded] == [
         ("ft-run-1", 1, 2),
         ("ft-run-1-e3s6", 3, 6),
     ]
     # Asked again, epoch 3 keeps its own id and request.
-    assert promote_with(finalize, epochs=3) == ("ft-run-1-e3s6", since)
+    assert promote_with(finalize, epochs=3) == (
+        "ft-run-1-e3s6",
+        [later - ADOPT_CLOCK_ALLOWANCE],
+    )
 
 
 def test_a_checkpoint_model_id_fits_the_model_id_rules() -> None:

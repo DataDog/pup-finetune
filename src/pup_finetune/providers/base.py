@@ -34,7 +34,7 @@ from pydantic import (
     model_validator,
 )
 
-from pup_finetune.errors import ExternalError, FinetuneError, UsageError
+from pup_finetune.errors import ExternalError, FinetuneError, StateError, UsageError
 from pup_finetune.redaction import redact
 from pup_finetune.rendering.base import ChatMessage, Renderer, ToolSpec
 from pup_finetune.rendering.hf import COMMIT_SHA
@@ -467,6 +467,19 @@ class ProviderAuthError(ExternalError):
     error_code: ClassVar[str] = "provider_auth"
 
 
+class ModelIdTaken(StateError):
+    """:meth:`TrainingSession.promote` found its model id taken by a model it does not adopt:
+    another run's, or one it cannot tell is this run's. ``hint`` names the ways out, since a
+    resume fails the same way while that model holds the id."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(
+            message,
+            hint="train a new run under another run id, or delete that model and then resume "
+            "this run",
+        )
+
+
 # --- Results the seam returns ------------------------------------------------------------
 
 
@@ -897,7 +910,12 @@ class TrainingSession(Protocol):
         ...
 
     def promote(
-        self, ckpt: CheckpointRef, model_id: str, *, adopt_since: datetime | None = None
+        self,
+        ckpt: CheckpointRef,
+        model_id: str,
+        *,
+        adopt_since: datetime | None = None,
+        on_sending: Callable[[], None] | None = None,
     ) -> ModelRef:
         """Turn a sampler checkpoint into a deployable model named ``model_id``.
 
@@ -907,12 +925,15 @@ class TrainingSession(Protocol):
         accepts. The returned :class:`ModelRef` carries ``model_id`` as given and the
         provider's fully qualified name for the model as ``uri``.
 
-        A promotion can succeed on the provider while its response is lost, and a retry then
-        finds ``model_id`` taken. ``adopt_since`` (shortly before the run first asked for a
-        promotion) lets a provider that can look models up return such a model instead: one
-        named ``model_id``, of the same base model, created no earlier than ``adopt_since``, so
-        it is this run's and not another run's that used the same id. A provider that cannot
-        tell ignores it.
+        ``on_sending`` is called right before the promotion is sent, after every lookup it
+        needs, so the caller records that a model under ``model_id`` may be the run's only
+        once one can be. A promotion can succeed on the provider while its response is lost,
+        and a retry then finds ``model_id`` taken. ``adopt_since`` (shortly before the run sent
+        that promotion) lets a provider that can look models up return such a model instead:
+        one named ``model_id``, of the same base model, created no earlier than
+        ``adopt_since``, so it is this run's and not another run's that used the same id. A
+        provider that cannot tell ignores it. A model it finds under ``model_id`` and does not
+        adopt raises :class:`ModelIdTaken`.
         """
         ...
 

@@ -461,13 +461,17 @@ def retirements(
             continue
         container = keepers.find(row)
         if container is not None:
+            into = container.id
             detail = f"a prefix of row {container.id!r}, read by a later pull"
             if (other := repeats.get(container.id)) is not None:
+                into = other
                 detail = (
                     f"a prefix of {container.id!r}, the same conversation as row {other!r}, "
                     "read by a later pull"
                 )
-            retired.append(Exclusion.for_row(row, ExclusionCode.CONTAINED_CONVERSATION, detail))
+            retired.append(
+                Exclusion.for_row(row, ExclusionCode.CONTAINED_CONVERSATION, detail, into=into)
+            )
     code = ExclusionCode.CONTAINED_CONVERSATION
     for record in stored_exclusions:
         row_id = record.get("row_id")
@@ -517,7 +521,8 @@ def repeat_retirements(
             theirs = _fill_reasoning(repeated, yielded) or repeated
         if row_content_hash(mine) == row_content_hash(theirs):
             detail = f"same conversation as row {other!r}, read by a later pull"
-            retired.append(Exclusion.for_row(known, ExclusionCode.DUPLICATE_CONVERSATION, detail))
+            code = ExclusionCode.DUPLICATE_CONVERSATION
+            retired.append(Exclusion.for_row(known, code, detail, into=other))
     return retired
 
 
@@ -610,12 +615,13 @@ def reasoning_updates(
     With ``reasoning="preserve"`` a kept row takes the reasoning of the conversations
     collapsed into it (:mod:`pup_finetune.data.trajectories`) and keeps its id, so a re-run
     that reads more or less of its trace can yield a stored id with more or less reasoning.
-    Such a row, equal to the stored one but for reasoning, is reconciled with it: each stored
-    assistant message without reasoning takes the row's, and stored reasoning is never
-    replaced. When nothing is filled in the stored row is returned among ``rows``, unchanged;
-    otherwise the filled-in row is returned among the updates, for
-    :meth:`~pup_finetune.data.dataset_dir.DatasetDir.add` to replace the stored one with. Any
-    other difference is left to the dataset, which rejects it.
+    Such a row, equal to the stored one but for reasoning and its source, is reconciled with
+    it: the stored row keeps its whole source, and each stored assistant message without
+    reasoning takes the row's, as stored reasoning is never replaced. When nothing is filled
+    in the stored row is returned among ``rows``, unchanged; otherwise the filled-in row is
+    returned among the updates, for :meth:`~pup_finetune.data.dataset_dir.DatasetDir.add`
+    to replace the stored one with. Any other difference is left to the dataset, which
+    rejects it.
     """
     stored = {row.id: row for row in stored_rows}
     kept: list[TrainingRow] = []
@@ -661,7 +667,8 @@ def reconciled_repeats(
         other = first.setdefault(row_content_hash(held.get(stored.id, stored)), stored.id)
         if other != stored.id:
             detail = f"same conversation as row {other!r}, read by a later pull"
-            repeats.append(Exclusion.for_row(stored, ExclusionCode.DUPLICATE_CONVERSATION, detail))
+            code = ExclusionCode.DUPLICATE_CONVERSATION
+            repeats.append(Exclusion.for_row(stored, code, detail, into=other))
     if not repeats:
         return list(rows), list(updated), []
     gone = {exclusion.row_id for exclusion in repeats}
@@ -674,8 +681,11 @@ def reconciled_repeats(
 
 def _fill_reasoning(stored: TrainingRow, row: TrainingRow) -> TrainingRow | None:
     """``stored`` with the reasoning of ``row`` where it has none, or ``None`` when the two
-    differ in more than reasoning."""
-    if without_reasoning(stored) != without_reasoning(row):
+    differ in more than reasoning and source. ``stored`` keeps its whole source: the shared id
+    fixes the trace and span, and evaluations or tags may have been attached since."""
+    if without_reasoning(stored) != without_reasoning(
+        row.model_copy(update={"source": stored.source})
+    ):
         return None
     messages = [
         mine.model_copy(update={"reasoning_content": theirs.reasoning_content})
@@ -785,7 +795,9 @@ def pull(
     (:func:`reasoning_updates`), stored rows those updates make repeat another are retired
     instead (:func:`reconciled_repeats`), new rows a stored row contains are excluded instead of
     added (:func:`contained`), and so are new rows past the per-trace cap (:func:`trace_capped`);
-    the returned collection is what the export read and converted, before any of these.
+    the returned collection is what the export read and converted, before any of these. A
+    retired row's drop label carries to the row that holds its conversation
+    (:meth:`~pup_finetune.data.dataset_dir.DatasetDir.add`).
 
     The cache is locked from the export through the add, so a concurrent pull into the same
     dataset fails with :class:`~pup_finetune.errors.LockBusy` instead of changing the stored

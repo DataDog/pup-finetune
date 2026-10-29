@@ -46,6 +46,7 @@ from pup_finetune.runs import (
 )
 from pup_finetune.storage import DirectoryLock
 from pup_finetune.training import Budget, EpochMetrics, FinalizeFailed, TrainResult, run_training
+from pup_finetune.training.promotion import PromotionStatus
 from tests.fakes.training import SESSION, RecordingSession, row_examples
 
 NOW = datetime(2026, 10, 6, 12, 30, 45, tzinfo=UTC)
@@ -271,11 +272,19 @@ def test_a_promotion_request_is_saved_per_checkpoint_and_kept(tmp_path: Path) ->
     assert not state.any_promotion_requested()
     assert state.promotion_request(1, 2) is None
     # Saved before it is returned, to the second, as read back later.
-    request = state.record_promotion_request("ft-run", epoch=1, step=2)
+    request = state.record_promotion_request(
+        "ft-run", epoch=1, step=2, status=PromotionStatus.RECORDED
+    )
     assert (request.model_id, request.epoch, request.step) == ("ft-run", 1, 2)
     assert request.requested_at == first.replace(microsecond=0)
     assert read(run_dir.state_path)["promotions"] == [
-        {"model_id": "ft-run", "epoch": 1, "step": 2, "requested_at": "2026-10-06T13:30:45+00:00"}
+        {
+            "model_id": "ft-run",
+            "epoch": 1,
+            "step": 2,
+            "status": "recorded",
+            "requested_at": "2026-10-06T13:30:45+00:00",
+        }
     ]
     # A later attempt (a resume, a promotion retry) finds the recorded request of the
     # checkpoint, not its own, and none for another checkpoint.
@@ -283,10 +292,23 @@ def test_a_promotion_request_is_saved_per_checkpoint_and_kept(tmp_path: Path) ->
     assert later.any_promotion_requested()
     assert later.promotion_request(1, 2) == request
     assert later.promotion_request(3, 6) is None
-    other = later.record_promotion_request("ft-run-e3s6", epoch=3, step=6)
+    other = later.record_promotion_request(
+        "ft-run-e3s6", epoch=3, step=6, status=PromotionStatus.SENT
+    )
     assert other.requested_at == NOW + timedelta(days=1)
     reloaded = run_dir.load_state()
     assert (reloaded.promotion_request(1, 2), reloaded.promotion_request(3, 6)) == (request, other)
+
+
+def test_a_promotion_request_saved_without_a_status_reads_as_sent(tmp_path: Path) -> None:
+    run_dir = create(tmp_path / "run")
+    data = read(run_dir.state_path)
+    data["promotions"] = [
+        {"model_id": "ft-run", "epoch": 1, "step": 2, "requested_at": "2026-10-06T13:30:45+00:00"}
+    ]
+    run_dir.state_path.write_text(json.dumps(data))
+    request = run_dir.load_state().promotion_request(1, 2)
+    assert request is not None and request.status is PromotionStatus.SENT
 
 
 def test_a_state_saved_with_only_the_first_request_time_reads_as_an_unknown_checkpoint(

@@ -83,7 +83,7 @@ row-weather-002 (train, 2 turns, tools: get_weather)
 | `phase` `training`, `worker.state` `stale` or `exited` | The worker died or hangs. Read `worker.log`, then see Debugging. |
 | `phase` `completed` | Go to step 6. |
 | `phase` `cancelled` with a `best_epoch` | Evaluate or deploy it as is. Resume only to train further, with a yes. |
-| `phase` `interrupted` or `failed` | Preview `resume` (step 5); `resume_mode` `finalize_only` retries only keeping the best epoch. |
+| `phase` `interrupted` or `failed` | Preview `resume` (step 5); `resume_mode` `finalize_only` retries only keeping the best epoch. With `next_command` null, another model holds the run's model id: offer the user its `next_steps`. |
 | evaluate `status` `complete` | Report the headline (step 6). |
 | evaluate `status` `complete_with_errors` | Its `next_command` retries the errors; it is paid, so ask first. A check that raised is not retried: its `hint` says how to fix it. |
 | evaluate `status` `partial` | Rerun the same command to continue. |
@@ -278,8 +278,8 @@ app's current model, reusing base and tuned: report `headline.tuned_minus_compar
 own judges and pure-function checks go in `--evaluators evals.toml`, reusing every answer:
 report `headline.evaluator` and `headline.evaluators`, and show an uncalibrated warning. Report:
 
-- `headline.judge_pass_rate` (`base`, `tuned`, `delta`, `ci95`), `headline.paired`, and the
-  `cases` and `trajectories` behind them. An interval that includes 0 is no clear difference.
+- `headline.judge_pass_rate`: `delta`, `ci95` and `common_pass_rate` (on `common_cases`), and
+  `base`, `tuned` (on `judged_cases`); `headline.paired`. A CI with 0 is no clear difference.
 - `metrics.<name>.base` and `.tuned`, and the experiment ids under `publication.experiments`.
 - The caveat: replay measures agreement with the recorded behavior, not task success.
 - `headline.truncated`: failures from length, not quality, which inflate the delta. Do not

@@ -41,7 +41,7 @@ from pup_finetune.storage import (
     loads_finite,
     read_json,
 )
-from pup_finetune.training.records import TrainResult
+from pup_finetune.training.records import EpochMetrics, TrainResult
 
 __all__ = [
     "CHECK_S",
@@ -175,23 +175,27 @@ def _snapshot(data: Mapping[str, Any], run_id: str, seq: int, log_ns: int) -> Sn
 
 
 def read_snapshot(run: RunDir, *, seq: int, final: bool, now: Clock = utcnow) -> Snapshot:
-    """``run``'s files now; ``final`` adds the error ``worker.json`` records."""
+    """``run``'s files now; ``final`` adds the error ``worker.json`` records.
+
+    They are read while training may write them: ``epochs.json`` first, so the
+    ``state.json`` read next holds a training checkpoint at least as new as the last finished
+    epoch, and ``result.json`` last, since training writes it before its final phase.
+    """
     exit_error = None
     if final:
         with contextlib.suppress(FileNotFoundError, StateError):
             worker = read_json(run.worker_path)
             found = worker.get("exit_error") if isinstance(worker, dict) else None
             exit_error = found if isinstance(found, dict) else None
+    epochs = run.read_epochs()
+    state = read_json(run.state_path)
+    result = run.read_result()
     return Snapshot(
         run_id=run.run_id,
         seq=seq,
         at=now().isoformat(timespec="seconds"),
         final=final,
-        files={
-            "state.json": read_json(run.state_path),
-            "epochs.json": run.read_epochs(),
-            "result.json": run.read_result(),
-        },
+        files={"state.json": state, "epochs.json": epochs, "result.json": result},
         exit_error=exit_error,
     )
 
@@ -278,16 +282,22 @@ class StateReporter:
             return True
 
 
+class StaleReport(StateError):
+    """A state report whose last training checkpoint does not follow its finished epochs:
+    read while training wrote them, so out of date rather than damaged."""
+
+
 def apply_snapshot(run: RunDir, snapshot: Snapshot) -> None:
     """Write ``snapshot``'s files into ``run``: ``epochs.json``, ``result.json`` when it has
     one, then ``state.json`` without the job's process id (its heartbeat kept). Raises
-    :class:`StateError`, writing nothing, when they are not a run's files."""
+    :class:`StateError`, writing nothing, when they are not a run's files, and
+    :class:`StaleReport` when a resume could not continue from them."""
     state, epochs, result = (
         snapshot.files.get(name) for name in ("state.json", "epochs.json", "result.json")
     )
     if not isinstance(state, dict):
         raise StateError("the state report holds no state.json")
-    RunState.from_json(run, state)
+    point = RunState.from_json(run, state).last_resume_point()
     if result is not None:
         if not isinstance(result, dict):
             raise StateError("the state report's result.json is not an object")
@@ -295,6 +305,11 @@ def apply_snapshot(run: RunDir, snapshot: Snapshot) -> None:
             TrainResult.from_json(result)
     if not isinstance(epochs, list) or not all(isinstance(epoch, dict) for epoch in epochs):
         raise StateError("the state report's epochs.json is not a list of objects")
+    if point is not None and not point.follows([EpochMetrics.from_json(e) for e in epochs]):
+        raise StaleReport(
+            f"its last training checkpoint, at epoch {point.epoch} step {point.step}, does not "
+            f"follow its {len(epochs)} finished epoch(s)"
+        )
     run.write_epochs(epochs)
     if result is not None:
         run.write_result(result)
