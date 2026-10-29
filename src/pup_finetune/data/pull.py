@@ -681,9 +681,8 @@ def reconciled_repeats(
 
 def _fill_reasoning(stored: TrainingRow, row: TrainingRow) -> TrainingRow | None:
     """``stored`` with the reasoning of ``row`` where it has none, or ``None`` when the two
-    differ in more than reasoning and source. ``stored`` keeps its whole source: the two
-    share an id, which fixes the trace and span, and the rest of a span's source (its
-    evaluations and tags, say) can change after its row is stored, which stored rows do not."""
+    differ in more than reasoning and source. ``stored`` keeps its whole source: the shared id
+    fixes the trace and span, and evaluations or tags may have been attached since."""
     if without_reasoning(stored) != without_reasoning(
         row.model_copy(update={"source": stored.source})
     ):

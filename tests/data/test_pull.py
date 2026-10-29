@@ -955,19 +955,18 @@ def retirement_chain_pages() -> list[dict[str, Any]]:
 
 
 def test_a_drop_carries_along_retirements_to_the_row_that_survives_them(tmp_path: Path) -> None:
-    prefix = CHAIN_PREFIX
     pages = retirement_chain_pages()
     dataset = DatasetDir(tmp_path / "ds")
     pull_repeats(dataset, pages, target_count=3)
-    assert [row.id for row in dataset.rows()] == [REPEATED_A, REPEAT_B, prefix]
-    dataset.append_labels([Label(id=prefix, keep=False, reason="A1 is wrong")])
+    assert [row.id for row in dataset.rows()] == [REPEATED_A, REPEAT_B, CHAIN_PREFIX]
+    dataset.append_labels([Label(id=CHAIN_PREFIX, keep=False, reason="A1 is wrong")])
 
     _, added = pull_repeats(dataset, pages)
     assert added.retired == 2
     assert [row.id for row in dataset.rows()] == [REPEATED_A]
     assert dataset.kept_rows() == []
     assert "A1 is wrong" in dataset.labels()[REPEATED_A].reason
-    assert added.carried == {REPEATED_A: prefix}
+    assert added.carried == {REPEATED_A: CHAIN_PREFIX}
 
 
 def test_a_person_s_keep_along_retirements_refuses_the_drop_and_is_reported(
@@ -1207,7 +1206,6 @@ def test_dropped_rows_do_not_count_toward_the_target() -> None:
 
 
 def test_a_rerun_after_a_review_reads_on_to_replace_the_dropped_rows(tmp_path: Path) -> None:
-
     dataset = DatasetDir(tmp_path / "ds")
 
     def pull_three() -> Any:

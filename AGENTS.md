@@ -653,21 +653,18 @@ Source lives under `src/pup_finetune/`.
   re-run reads more reasoning for is updated in place, never losing reasoning it has
   (`reasoning_updates`, `DatasetDir.add(updated=...)`), and a stored row that update makes
   repeat another stored row is retired as `duplicate_conversation` (`repeat_retirements`).
-  A stored row read again with another `source` is kept as stored, its source included: the
-  id fixes the trace and span, and the rest (evaluations or tags attached since, say) is not
-  updated. A drop label in force on a retired row carries to the stored row that now holds
-  its conversation (`Exclusion.into`, followed through the rows the same pull retires, as
-  when the longer row of a prefix repeats a stored row the pull also retires):
-  `DatasetDir.add` appends a drop whose `Label.carried_from` names the retired id under its
-  lock, before the rows, unless a person labeled that row or kept a row the pull retired into
-  it on the way (a judge's or a check's label, even a drop, is replaced: triage reviews those
-  again), and the pull result lists them in `pull.carried_drops`. A carried drop says `by: manual` whoever dropped the retired row, so
-  triage never relabels it; `--agreement` does not compare with it, and `dataset label
-  --file` refuses a line naming `carried_from`. A person's keep on such a row stands, but the
-  pull result lists the drop it refused in `pull.drops_not_carried` (the row that now holds
-  the conversation, the kept and the dropped row, and both reasons; `RefusedDrop`) and
-  warns, as the dropped turns now train. A keep does not carry: the longer row
-  has turns nobody reviewed.
+  A stored row read again with another `source` keeps its stored source: the id fixes the
+  trace and span, and evaluations or tags attached since are not updated. A drop in force on
+  a retired row carries to the stored row that now holds its conversation (`Exclusion.into`,
+  followed through the rows the same pull retires): `DatasetDir.add` appends, under its lock
+  and before the rows, a `by: manual` drop whose `Label.carried_from` names the retired id,
+  so triage never relabels it, `--agreement` does not compare with it and `dataset label
+  --file` refuses a line naming `carried_from`; the pull lists them in `pull.carried_drops`.
+  It replaces a judge's or a check's label, even a drop (triage would review those again),
+  but not a person's label on that row. A person's keep there, or on a row the pull retired
+  into it on the way, stands: the pull lists the drop it refused in `pull.drops_not_carried`
+  (`RefusedDrop`) and warns, as the dropped turns now train. A keep does not carry: the
+  longer row has turns nobody reviewed.
   `fetch.py` is `dataset fetch`: an Agent Observability dataset's current records back into
   rows (input messages plus expected output, the split from metadata or tags), frozen per
   dataset version, with the dataset's `push.json` so evaluations publish onto it.

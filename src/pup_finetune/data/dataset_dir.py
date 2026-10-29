@@ -426,12 +426,10 @@ class DatasetDir:
 
         A drop label in force on a ``retired`` row carries to the stored row that holds its
         conversation now (the exclusion's ``into``, followed through the rows this add
-        retires), as a new drop label whose ``carried_from`` names it, so the turns the
-        reviewer dropped stay out of training: it says ``by: manual``, which triage never
-        relabels. A keep does not carry, as that row has turns nobody reviewed, and a drop
-        does not replace a person's label (``by: manual``) on that row, nor carry over a
-        person's keep on a row this add retired into it on the way, which was a decision on
-        a whole row holding the conversation; it replaces a judge's or a check's.
+        retires), as a ``manual`` drop whose ``carried_from`` names it, which triage never
+        relabels. It does not replace a person's label on that row, nor carry over a person's
+        keep on a row along the way (:attr:`AddResult.not_carried`). A keep does not carry, as
+        that row has turns nobody reviewed.
 
         ``split_overrides`` assigns split keys to the splits a source already gave them (the
         splits recorded on a fetched dataset's records) before new keys are assigned; a key
