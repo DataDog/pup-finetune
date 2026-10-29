@@ -99,7 +99,7 @@ def test_evaluate_needs_the_judge_s_key(run_dir: Path) -> None:
 
 def test_a_key_in_the_keychain_is_enough(run_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     keychain = MemoryKeyring()
-    keychain.set_password("pup-finetune", "openai", "sk-test-key")
+    keychain.set_password("pup-finetune", "openai", "sk-synthetic-test-key")
     monkeypatch.setattr(keyring.core, "_keyring_backend", keychain)
     offered(invoke("evaluate", str(run_dir), "--judge-model", PAID))
 
@@ -270,6 +270,8 @@ def test_a_preview_refuses_a_malformed_judge_key(
         result = invoke(*args)
         assert result.exit_code == 2, result.stderr
         assert "Error [usage]: the openai API key is malformed" in result.stderr
+        assert "fix or unset OPENAI_API_KEY" in result.stderr
+        assert "auth login" not in result.stderr
         assert result.stdout == ""
 
 

@@ -26,7 +26,6 @@ from pathlib import Path
 from typing import Final, Literal
 
 from pup_finetune import credentials
-from pup_finetune import providers as _providers  # noqa: F401 - registers provider API keys
 from pup_finetune.datadog.pup import SECRET_ENV
 from pup_finetune.errors import StateError, UsageError
 from pup_finetune.storage import atomic_write_text
@@ -103,9 +102,7 @@ def npx_env(environ: Mapping[str, str]) -> dict[str, str]:
     npx downloads and runs a package from npm, so it gets neither the Datadog secrets pup may
     hold (:data:`~pup_finetune.datadog.pup.SECRET_ENV`) nor any provider API key variable.
     """
-    secret = set(SECRET_ENV)
-    for spec in credentials.all_specs():
-        secret |= {spec.env_var, *spec.other_secret_env}
+    secret = credentials.provider_secret_env() | set(SECRET_ENV)
     return {name: value for name, value in environ.items() if name not in secret}
 
 

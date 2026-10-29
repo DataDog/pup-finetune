@@ -7,8 +7,11 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
+import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -69,6 +72,23 @@ def test_spec_keeps_an_explicit_keychain_account() -> None:
 def test_spec_requires_a_provider_and_env_var(provider: str, env_var: str) -> None:
     with pytest.raises(ValueError, match="needs"):
         CredentialSpec(provider=provider, env_var=env_var)
+
+
+def test_provider_secret_env_names_every_provider_secret_in_a_fresh_process() -> None:
+    code = (
+        "import json; from pup_finetune.credentials import provider_secret_env; "
+        "print(json.dumps(sorted(provider_secret_env())))"
+    )
+    completed = subprocess.run(  # noqa: S603 - our own interpreter and code
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
+    assert set(json.loads(completed.stdout)) >= {
+        "FIREWORKS_API_KEY",
+        "BASETEN_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "OPENAI_API_KEY",
+    }
 
 
 def test_nothing_is_registered_by_default() -> None:
@@ -453,10 +473,28 @@ def test_redact_masks_registered_secrets_and_bearer_tokens() -> None:
     assert credentials.redact(text) == "a *** b *** c Authorization: Bearer ***"
 
 
+def test_redact_masks_a_bearer_token_whole_up_to_the_next_space() -> None:
+    text = "Authorization: Bearer abc.def,ghi!jkl:mn next"
+    assert credentials.redact(text) == "Authorization: Bearer *** next"
+
+
+def test_redact_masks_a_quoted_bearer_token_and_keeps_a_variable_reference() -> None:
+    assert credentials.redact('-H "Authorization: Bearer abc,def"') == (
+        '-H "Authorization: Bearer ***"'
+    )
+    example = "-H \"Authorization: Bearer $FIREWORKS_API_KEY\" -H 'Authorization: Bearer ${KEY}'"
+    assert credentials.redact(example) == example
+
+
 def test_redact_masks_the_longest_secret_whole() -> None:
-    credentials.register_secret("synthetic-key")
-    credentials.register_secret("synthetic-key-extended")
-    assert credentials.redact("v=synthetic-key-extended") == "v=***"
+    credentials.register_secret("synthetic-key-0000")
+    credentials.register_secret("synthetic-key-0000-extended")
+    assert credentials.redact("v=synthetic-key-0000-extended") == "v=***"
+
+
+def test_redact_never_masks_a_value_too_short_to_be_a_key() -> None:
+    credentials.register_secret("finetune")
+    assert credentials.redact("pup finetune doctor") == "pup finetune doctor"
 
 
 def test_redact_leaves_ordinary_text_alone() -> None:

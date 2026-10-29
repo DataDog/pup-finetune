@@ -19,7 +19,7 @@ from pup_finetune import credentials
 from pup_finetune import providers as _providers  # noqa: F401 - registers provider API keys
 from pup_finetune.cli._common import run_command
 from pup_finetune.cli._presentation import SET_UP, CommandDoc, Safety, default_note, describe, group
-from pup_finetune.errors import ExternalError, UsageError
+from pup_finetune.errors import UsageError
 
 PROVIDERS = ", ".join(spec.provider for spec in credentials.all_specs())
 """The providers whose keys ``auth`` manages, for help texts: every registered credential
@@ -61,7 +61,8 @@ STATUS_DOC = CommandDoc(
     description=(
         "Report, per provider, whether an API key is configured and where it comes from: "
         "env, keychain, provider-config, or anthropic-sdk when the Anthropic SDK can sign in "
-        "on its own, and what the key is needed for. Never prints the key."
+        "on its own, and what the key is needed for. A malformed key is not configured, and "
+        "its error says why. Never prints the key."
     ),
     examples=("pup finetune auth status", "pup finetune auth status fireworks"),
     safety=Safety(
@@ -149,15 +150,13 @@ def _status_entry(spec: credentials.CredentialSpec) -> dict[str, Any]:
         "source": None,
         "needed_for": spec.needed_for or None,
     }
-    try:
-        found = credentials.lookup(spec.provider)
-    except ExternalError as exc:
-        entry["error"] = credentials.redact(exc.message)
-        return entry
-    if found is not None:
-        entry.update(configured=True, source=found.source)
-    elif (sdk := credentials.sdk_login_source(spec.provider)) is not None:
-        entry.update(configured=True, source=sdk)
+    source = credentials.key_source(spec.provider)
+    if isinstance(source, credentials.KeyUnreadable):
+        entry["error"] = source.detail
+    elif isinstance(source, credentials.KeyMalformed):
+        entry.update(source=source.source, error=source.detail)
+    elif source is not None:
+        entry.update(configured=True, source=source)
     return entry
 
 

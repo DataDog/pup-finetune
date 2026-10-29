@@ -8,7 +8,8 @@
 
 Kept free of heavy imports so the output and error paths can always use it. Credential
 resolution registers every secret it hands out; :func:`redact` then replaces those values,
-and anything shaped like ``Bearer <token>``, with ``***``.
+and anything shaped like ``Bearer <token>``, with ``***``. A value shorter than
+:data:`MIN_SECRET_LENGTH` is never registered.
 """
 
 from __future__ import annotations
@@ -17,11 +18,17 @@ import functools
 import logging
 import re
 import threading
-from typing import Any, Protocol
+from typing import Any, Final, Protocol
 
 MASK = "***"
+MIN_SECRET_LENGTH: Final = 16
+"""The shortest value :func:`register_secret` masks. No API key or Datadog secret is shorter,
+and masking a shorter value would rewrite ordinary words in every result and command line."""
 
-_BEARER = re.compile(r"(\bBearer\s+)[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
+_BEARER = re.compile(r"(\bBearer\s+)([^\s\"']+)", re.IGNORECASE)
+"""A ``Bearer`` token: everything after it up to whitespace or a quote."""
+_VARIABLE = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?")
+"""A shell variable reference, such as a usage example's ``$FIREWORKS_API_KEY``: no token."""
 
 _lock = threading.Lock()
 _secrets: set[str] = set()
@@ -34,9 +41,10 @@ class _Secret(Protocol):
 
 
 def register_secret(value: str | _Secret) -> None:
-    """Remember ``value`` so :func:`redact` masks it from now on (for this process)."""
+    """Remember ``value`` so :func:`redact` masks it from now on (for this process), unless it
+    is shorter than :data:`MIN_SECRET_LENGTH`."""
     text = value if isinstance(value, str) else value.get_secret_value()
-    if text:
+    if len(text) >= MIN_SECRET_LENGTH:
         with _lock:
             _secrets.add(text)
 
@@ -55,7 +63,11 @@ def redact(text: str) -> str:
     for secret in secrets:
         if secret in text:
             text = text.replace(secret, MASK)
-    return _BEARER.sub(rf"\g<1>{MASK}", text)
+    return _BEARER.sub(_mask_bearer, text)
+
+
+def _mask_bearer(match: re.Match[str]) -> str:
+    return match[0] if _VARIABLE.fullmatch(match[2]) else f"{match[1]}{MASK}"
 
 
 _STANDARD_RECORD_ATTRIBUTES = frozenset(vars(logging.LogRecord("", 0, "", 0, "", None, None)))

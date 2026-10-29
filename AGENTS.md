@@ -237,7 +237,8 @@ OpenAI; per model on Fireworks, `judges.FIREWORKS_REASONING`). Without `--judge-
 directory froze (an evaluation with results, `triage.json`), else a default by the credentials
 that resolve offline (environment variable, keychain, or the Anthropic SDK's login), for a
 provider whose judge package is installed; an Anthropic key without the `anthropic` package is
-passed over, and the source says so. The defaults are `judge_models.EVALUATE_DEFAULTS` and
+passed over, and the source says so, as is a malformed key, which the preview also warns
+about. The defaults are `judge_models.EVALUATE_DEFAULTS` and
 `TRIAGE_DEFAULTS`, picked by `judges.default_judges`: `evaluate` takes
 `anthropic/claude-haiku-5-5`, else `openai/gpt-5.4-mini`, else Fireworks'
 `deepseek-v4p1-flash`; triage takes Haiku and `gpt-5.4-mini` with both keys, Haiku and
@@ -246,7 +247,8 @@ OpenAI's, else the two Fireworks models. Previews name the judges and where they
 (`judge_source`, `judges_source`), triage's `next_command` pins `--judges` as evaluate's pins
 `--judge-model`, and `doctor`'s `ready` map reads the default from its own key and package
 checks. A preview whose judge or compare model has no key, or a malformed one, fails with
-the key's login hint (`usage`, exit 2). The test conftest clears every provider key variable (except in `live`
+the key's login hint (`usage`, exit 2); a malformed key in the environment variable is fixed
+or unset instead, since the variable is read before the keychain. The test conftest clears every provider key variable (except in `live`
 tests), so the default tests see the Fireworks defaults. Anthropic judges need the `anthropic`
 extra (`uv sync --all-extras`; `uv sync` is exact, so a bare `uv sync --extra anthropic`
 removes the other extras):
@@ -492,7 +494,7 @@ Source lives under `src/pup_finetune/`.
   the order they were built, text not escaped, plain lists and objects on one line when they
   fit; through `pup format` under pup, with `--command
   'finetune <command>'` and the result's `next_command` as `--next-action` for pup's envelope
-  metadata, and a command's table view as `--jq`), progress on stderr (`info`, stamped `HH:MM:SS` off a terminal, `worker.log`
+  metadata, and a command's table view as `--jq`), progress on stderr (`info`, redacted, stamped `HH:MM:SS` off a terminal, `worker.log`
   included), `echo_warnings` (`warning: <text>` for every warning a result holds, read only
   from the result's own mappings, `WARNING_PATHS`, never from trace data in it; each once)
   and `summary` (a few lines on a terminal, one off it).
@@ -519,9 +521,16 @@ Source lives under `src/pup_finetune/`.
 - `credentials.py` - provider API keys (never Datadog's): a `CredentialSpec` registry, resolution
   from the environment variable, then the OS keychain (`keyring`), as `SecretStr`; `store` refuses
   when there is no OS keychain rather than writing a file. `auth login/status/logout` use it.
-  `key_source` is where a key would come from without reading it out, or a `KeyUnreadable`
-  when the lookup raised anything; `doctor`'s key checks and the default judges both use it.
-- `redaction.py` - masks resolved secrets and `Bearer` tokens in error output and logs.
+  `key_source` is where a key would come from without reading it out, a `KeyMalformed` when
+  the key found is not `KEY_SHAPE` (`well_formed`: one word of printable ASCII of at least 16
+  characters), or a `KeyUnreadable` when the lookup raised anything; `doctor`'s key checks,
+  `auth status` and the default judges use it, and a malformed key counts as none for them
+  (a default judge passes it over with a warning in the preview). Its `fix` is `key_fix`: the login
+  hint, or for a key in the environment, to fix or unset the variable; the Fireworks and
+  Baseten clients refuse a malformed key with the same hint.
+- `redaction.py` - masks resolved secrets and `Bearer` tokens in error output and logs. A value
+  shorter than `MIN_SECRET_LENGTH` (16) is never registered, so a placeholder key cannot
+  rewrite ordinary words in a result.
 - `user_checks.py` - the user's Python checks, shared by `evaluate --evaluators` and `dataset
   triage --checks`:
   `load_checks` runs a file as a module named by its sha256 (`CheckModule`: its public
@@ -531,7 +540,8 @@ Source lives under `src/pup_finetune/`.
 - `concurrency.py` - `DaemonPool`, worker threads for parallel remote calls that never hold
   up the process's exit, so Ctrl-C stops at once instead of waiting for a call in flight.
 - `http_common.py` - what the `httpx` clients that send a provider key share: `bearer_key`
-  (refuses an empty or malformed key and registers it for redaction), `CLIENT_SOURCE`
+  (refuses an empty or malformed key, by `credentials.well_formed`, and registers it for
+  redaction), `CLIENT_SOURCE`
   (`pup-finetune/<version>`) and short, redacted failure text.
 - `inference.py` - `ChatClient`, an OpenAI-compatible `POST {base_url}/chat/completions` client
   over `httpx` (no SDK): bounded retries with backoff and jitter on 408, 429, 5xx and connection
@@ -583,7 +593,10 @@ Source lives under `src/pup_finetune/`.
   reported as the source `anthropic-sdk`.
 - `datadog/` - Datadog access via `pup`. `pup.py` is the client every Datadog call goes
   through: `pup --no-agent --output json ...`, a scrubbed environment, timeouts, and failures as
-  `ExternalError`. `spans.py` exports LLM spans through the Export API
+  `ExternalError`. No pup process, `pup format` included, gets a provider key or SDK token
+  (`credentials.provider_secret_env`, which loads the provider registry itself and which
+  `skill.npx_env` drops too); Datadog's keys pass
+  through as they are. `spans.py` exports LLM spans through the Export API
   (`POST v2/llm-obs/v1/spans/events/search` via `Pup.api`): `SpanQuery` (the filter, plus
   `settings()` to freeze), `iter_spans` and `iter_span_pages` (cursor pagination, retries of
   timed-out pages, an optional raw page cache that resumes without refetching, `ExportStats`),

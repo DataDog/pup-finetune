@@ -443,6 +443,21 @@ def test_a_missing_training_sdk_fails_the_evaluate_preview(
     assert "evaluating on Fireworks needs the Fireworks Training SDK" in result.stderr
 
 
+def test_an_evaluate_preview_says_why_a_malformed_key_s_provider_is_passed_over(
+    dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    assert train(dataset, run_dir, "--confirm").exit_code == 0
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-synthetic-openai-0000-test-key")
+    result = invoke("evaluate", str(run_dir))
+    assert result.exit_code == 2, result.stderr
+    preview = output(result)["preview"]
+    assert preview["judge_model"] == "openai/gpt-5.4-mini"
+    assert "ANTHROPIC_API_KEY) is malformed" in preview["judge_source"]
+    assert any("ANTHROPIC_API_KEY" in w and "malformed" in w for w in preview["warnings"])
+
+
 def test_a_ctrl_c_while_evaluate_ends_its_session_wins_over_a_failed_sampler(
     dataset: Path, tmp_path: Path, fw: CrashingFireworks, monkeypatch: pytest.MonkeyPatch
 ) -> None:

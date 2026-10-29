@@ -198,3 +198,22 @@ def test_a_triage_rerun_keeps_the_council_triage_json_froze(
     assert default_council(DatasetDir(dataset), reset=True)[0] == (HAIKU, SONNET)
     preview = output(invoke("dataset", "triage", str(dataset), "--rule", "x"))
     assert preview["preview"]["judges_source"] == "triage.json"
+
+
+def test_a_triage_preview_says_why_a_malformed_key_s_provider_is_passed_over(
+    dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    monkeypatch.setenv("OPENAI_API_KEY", OPENAI_KEY)
+    result = invoke("dataset", "triage", str(dataset), "--rule", "stay on topic", "--max-rows", "2")
+    assert result.exit_code == 2, result.stderr
+    preview = output(result)["preview"]
+    assert [judge["model"] for judge in preview["judges"]] == [MINI, ASTRA]
+    assert preview["judges_source"] == (
+        "default: OpenAI credential (OPENAI_API_KEY); the Anthropic credential is not used, "
+        "as its key (ANTHROPIC_API_KEY) is malformed"
+    )
+    (warning,) = [w for w in preview["warnings"] if "ANTHROPIC_API_KEY" in w]
+    assert "malformed" in warning
+    assert warning.endswith("fix or unset ANTHROPIC_API_KEY, which is read before the OS keychain")
+    assert "auth login" not in warning

@@ -460,6 +460,8 @@ class EvalPlan:
     judge: JudgeConfig
     judge_source: str
     """Where the judge came from (see :func:`resolve_judge`)."""
+    judge_warnings: tuple[str, ...] = ()
+    """What the preview warns about the default judge, such as a malformed key passed over."""
     settings: EvalSettings
     publishing: Publishing
     runtime: Runtime
@@ -785,7 +787,7 @@ class EvalPlan:
         from pup_finetune.evaluation.replay import CAVEAT, COMPARE, TARGETS, EvalDir
 
         settings = self.settings
-        warnings = self.exclusion_warnings()
+        warnings = [*self.judge_warnings, *self.exclusion_warnings()]
         if (remote := self.profile.remote_code_warning()) is not None:
             warnings.append(remote)
         warnings += [] if self.reuse is None else self.reuse.warnings
@@ -1236,12 +1238,13 @@ def resolve_judge(
     provider: str,
     runtime: Runtime,
     stored: str | None = None,
+    warnings: list[str] | None = None,
 ) -> tuple[JudgeConfig, str]:
     """The judge for ``--judge-model`` and where it came from (``judge_source``): the judge
     the spec names (:func:`pup_finetune.judges.parse_judge`); without one, ``stored`` (the
     judge an evaluation directory froze, so a rerun keeps it), for a ``fake`` run the fake
     judge, else the default by the credentials that resolve
-    (:data:`~pup_finetune.judge_models.EVALUATE_DEFAULTS`).
+    (:data:`~pup_finetune.judge_models.EVALUATE_DEFAULTS`), whose warnings go to ``warnings``.
 
     :data:`~pup_finetune.evaluation.fake_judge.FAKE_JUDGE_MODEL` is the offline judge, for
     development mode only. Raises :class:`UsageError` for an empty spec or an empty model
@@ -1264,7 +1267,7 @@ def resolve_judge(
             )
         return fake_judge_config(), source
     if judge_model is None:
-        (judge_model,), source = default_judges(EVALUATE_DEFAULTS)
+        (judge_model,), source = default_judges(EVALUATE_DEFAULTS, warnings=warnings)
     config = parse_judge(judge_model)
     check_available(config)
     return config, source
@@ -1319,11 +1322,13 @@ def plan_evaluation(
     from pup_finetune.evaluation.replay import EvalDir, remaining_work
     from pup_finetune.evaluation.reuse import ReuseIndex, Wanted, generation_key, key_inputs
 
+    judge_warnings: list[str] = []
     judge_config, judge_source = resolve_judge(
         settings.judge_model,
         provider=provider,
         runtime=runtime,
         stored=_stored(EvalDir(settings.out_dir)),
+        warnings=judge_warnings,
     )
     compare = resolve_compare(
         settings.compare_model,
@@ -1374,6 +1379,7 @@ def plan_evaluation(
         excluded=excluded,
         judge=judge_config,
         judge_source=judge_source,
+        judge_warnings=tuple(judge_warnings),
         settings=settings,
         publishing=plan_publishing(dataset, enabled=settings.publish, no_publish=no_publish),
         runtime=runtime,

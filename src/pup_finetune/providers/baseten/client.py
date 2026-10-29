@@ -48,7 +48,7 @@ from urllib.parse import urlsplit
 import httpx
 from pydantic import SecretStr
 
-from pup_finetune.credentials import login_hint
+from pup_finetune.credentials import key_fix, login_hint
 from pup_finetune.errors import ExternalError, UsageError, install_hint, reinstall_hint
 from pup_finetune.http_common import (
     CLIENT_SOURCE,
@@ -101,8 +101,7 @@ _CREATE_TIMEOUT: Final = 300.0
 _ID: Final = re.compile(r"[A-Za-z0-9_-]{1,128}")
 _TRANSIENT_STATUS: Final = frozenset({408, 500, 502, 503, 504})
 _AUTH_STATUS: Final = frozenset({401, 403})
-_LOGIN_HINT: Final = login_hint(CREDENTIALS)
-_AUTH_HINT: Final = f"{_LOGIN_HINT} to a valid key"
+_AUTH_HINT: Final = f"{login_hint(CREDENTIALS)} to a valid key"
 _CREATED_HINT: Final = "it may have created something that bills; check the Baseten UI"
 _TRAINERS: Final = "/trainers"
 _REJECTED_ENV: Final = (
@@ -600,7 +599,7 @@ def _checked_key(api_key: SecretStr) -> str:
     Raises :class:`UsageError` for an empty key, which would make the SDK read
     ``BASETEN_API_KEY``, or a malformed one (see :func:`~pup_finetune.http_common.bearer_key`).
     """
-    return bearer_key(api_key, label="the Baseten API key", hint=_LOGIN_HINT)
+    return bearer_key(api_key, label="the Baseten API key", hint=key_fix(CREDENTIALS))
 
 
 def _clean(text: str) -> str:

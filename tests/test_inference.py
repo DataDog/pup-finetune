@@ -151,7 +151,7 @@ def test_plain_http_is_allowed_on_a_local_host(fake: FakeChatApi) -> None:
     assert str(fake.requests[0].url) == "http://127.0.0.1:8000/v1/chat/completions"
 
 
-@pytest.mark.parametrize("key", ["", "two words", "line\nbreak", "naïve"])
+@pytest.mark.parametrize("key", ["", "two words", "line\nbreak", "naïve", "fw-short-key"])
 def test_an_empty_or_malformed_key_is_refused_before_any_request(
     fake: FakeChatApi, sleeps: list[float], key: str
 ) -> None:
