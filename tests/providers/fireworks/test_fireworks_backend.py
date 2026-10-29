@@ -21,6 +21,7 @@ from pup_finetune.providers.base import (
     AdamConfig,
     CheckpointRef,
     LoraConfig,
+    ModelIdTaken,
     ModelProfile,
     ProviderCapacityError,
     TrainingSession,
@@ -701,7 +702,7 @@ def test_an_existing_model_of_this_run_is_adopted_without_promoting(
 @pytest.mark.parametrize(
     ("created", "since", "match"),
     [
-        (SINCE - timedelta(seconds=1), SINCE, "before this run first asked to promote it"),
+        (SINCE - timedelta(seconds=1), SINCE, "before this run sent its promotion"),
         (SINCE, None, "already exists"),
         (None, SINCE, "does not say when it was created"),
     ],
@@ -1159,9 +1160,157 @@ def test_a_model_another_run_directory_promoted_under_the_run_id_is_refused(
             now=lambda: SINCE + timedelta(hours=1),
         )
     assert isinstance(caught.value.__cause__, StateError)
-    assert "before this run first asked to promote it" in str(caught.value.__cause__)
+    assert "already exists" in str(caught.value.__cause__)
     assert not any(call[0] == "promote_session_checkpoint" for call in fw.calls)
     assert (first.read_result() or {})["promoted_model"] is None
+    assert _live(fw) == []
+
+
+def test_a_model_another_run_directory_promoted_just_before_under_the_run_id_is_refused(
+    fw: FakeFireworksTrainingClient, renderer: Renderer, tmp_path: Path
+) -> None:
+    train_rows, validation_rows = _rows(renderer, 4, "train"), _rows(renderer, 2, "val")
+    # A preview's pinned command run into two run directories: both finish 30 s apart.
+    first = _new_run(tmp_path / "a" / "run", renderer, created_at=SINCE)
+    second = _new_run(tmp_path / "b" / "run", renderer, created_at=SINCE)
+    fw.now = lambda: SINCE + timedelta(minutes=10)
+    start_training(
+        _provider(fw), first, train_rows=train_rows, validation_rows=validation_rows, now=fw.now
+    )
+    fw.calls.clear()
+    with pytest.raises(FinalizeFailed) as caught:
+        start_training(
+            _provider(fw),
+            second,
+            train_rows=train_rows,
+            validation_rows=validation_rows,
+            now=lambda: SINCE + timedelta(minutes=10, seconds=30),
+        )
+    assert isinstance(caught.value.__cause__, StateError)
+    assert "already exists" in str(caught.value.__cause__)
+    assert caught.value.hint is not None and "another run id" in caught.value.hint
+    assert not any(call[0] == "promote_session_checkpoint" for call in fw.calls)
+    assert (second.read_result() or {})["promoted_model"] is None
+    assert _live(fw) == []
+
+    # The resume the failed run offers still refuses that model, however recently it was made.
+    with pytest.raises(FinalizeFailed) as again:
+        resume_training(
+            _provider(fw),
+            second,
+            train_rows=train_rows,
+            validation_rows=validation_rows,
+            now=lambda: SINCE + timedelta(minutes=11),
+        )
+    assert "already exists" in str(again.value.__cause__)
+    assert (second.read_result() or {})["promoted_model"] is None
+
+    # Once that model is deleted, the resume promotes this run's checkpoint under the id.
+    taken = (first.read_result() or {})["promoted_model"]["model_id"]
+    del fw.promoted[taken]
+    fw.calls.clear()
+    result = resume_training(
+        _provider(fw),
+        second,
+        train_rows=train_rows,
+        validation_rows=validation_rows,
+        now=lambda: SINCE + timedelta(minutes=12),
+    )
+    assert result["promoted_model"]["model_id"] == taken
+    assert any(call[0] == "promote_session_checkpoint" for call in fw.calls)
+    assert _live(fw) == []
+
+
+def test_a_promotion_lost_after_a_refused_one_is_adopted_on_resume(
+    fw: FakeFireworksTrainingClient, renderer: Renderer, tmp_path: Path
+) -> None:
+    train_rows, validation_rows = _rows(renderer, 4, "train"), _rows(renderer, 2, "val")
+    first = _new_run(tmp_path / "a" / "run", renderer, created_at=SINCE)
+    second = _new_run(tmp_path / "b" / "run", renderer, created_at=SINCE)
+    fw.now = lambda: SINCE + timedelta(minutes=10)
+    start_training(
+        _provider(fw), first, train_rows=train_rows, validation_rows=validation_rows, now=fw.now
+    )
+    with pytest.raises(FinalizeFailed):
+        start_training(
+            _provider(fw),
+            second,
+            train_rows=train_rows,
+            validation_rows=validation_rows,
+            now=lambda: SINCE + timedelta(minutes=10, seconds=30),
+        )
+    model_id = model_id_for_run(RUN_ID)
+    del fw.promoted[model_id]
+    # The resume's promotion takes place, but its response and the lookup after it are lost.
+    fw.lost_responses.append("connection")
+    fw.fail("get_model", "connection", after=1)
+    fw.now = lambda: SINCE + timedelta(minutes=20)
+    with pytest.raises(FinalizeFailed):
+        resume_training(
+            _provider(fw),
+            second,
+            train_rows=train_rows,
+            validation_rows=validation_rows,
+            now=fw.now,
+        )
+    assert model_id in fw.promoted
+
+    fw.calls.clear()
+    result = resume_training(
+        _provider(fw),
+        second,
+        train_rows=train_rows,
+        validation_rows=validation_rows,
+        now=lambda: SINCE + timedelta(hours=1),
+    )
+    assert result["promoted_model"]["uri"] == f"accounts/{ACCOUNT}/models/{model_id}"
+    assert not any(call[0] == "promote_session_checkpoint" for call in fw.calls)
+    assert _live(fw) == []
+
+
+@pytest.mark.parametrize(
+    "lookup_fails",
+    [pytest.param((True,), id="first-attempt"), pytest.param((False, True), id="after-a-refusal")],
+)
+def test_a_resume_after_attempts_that_sent_no_promotion_adopts_no_model(
+    fw: FakeFireworksTrainingClient,
+    renderer: Renderer,
+    tmp_path: Path,
+    lookup_fails: tuple[bool, ...],
+) -> None:
+    train_rows, validation_rows = _rows(renderer, 4, "train"), _rows(renderer, 2, "val")
+    first = _new_run(tmp_path / "a" / "run", renderer, created_at=SINCE)
+    second = _new_run(tmp_path / "b" / "run", renderer, created_at=SINCE)
+    fw.now = lambda: SINCE + timedelta(minutes=10)
+    start_training(
+        _provider(fw), first, train_rows=train_rows, validation_rows=validation_rows, now=fw.now
+    )
+    # Each attempt of the second run stops before sending a promotion: its lookup of the model
+    # id fails, or finds the first run's model there.
+    for attempt, fails in enumerate(lookup_fails):
+        if fails:
+            fw.fail("get_model", "connection")
+        with pytest.raises(FinalizeFailed):
+            (start_training if attempt == 0 else resume_training)(
+                _provider(fw),
+                second,
+                train_rows=train_rows,
+                validation_rows=validation_rows,
+                now=lambda: SINCE + timedelta(minutes=10, seconds=30),
+            )
+
+    fw.calls.clear()
+    with pytest.raises(FinalizeFailed) as caught:
+        resume_training(
+            _provider(fw),
+            second,
+            train_rows=train_rows,
+            validation_rows=validation_rows,
+            now=lambda: SINCE + timedelta(minutes=11),
+        )
+    assert isinstance(caught.value.__cause__, ModelIdTaken)
+    assert (second.read_result() or {})["promoted_model"] is None
+    assert not any(call[0] == "promote_session_checkpoint" for call in fw.calls)
     assert _live(fw) == []
 
 

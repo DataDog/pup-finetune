@@ -24,9 +24,10 @@ from typer.testing import CliRunner, Result
 from pup_finetune import providers
 from pup_finetune.cli import app
 from pup_finetune.cli import train as train_module
+from pup_finetune.next_steps import command
 from pup_finetune.providers.base import Provider
 from pup_finetune.providers.fireworks.provider import FireworksProvider
-from pup_finetune.runs import RunDir, model_id_for_run
+from pup_finetune.runs import RunDir, model_id_for_run, resume_command
 from pup_finetune.runtime import Runtime
 from pup_finetune.training import inputs as inputs_module
 from tests.fakes.fireworks import ACCOUNT, FakeFireworksTrainingClient
@@ -257,6 +258,46 @@ def test_resume_after_a_crash_finishes_and_promotes(
     ]
     assert resumed_from == [training[-1].path]
     assert _no_session_left(fw)
+
+
+def test_a_run_whose_model_id_another_run_took_offers_no_resume_that_fails_again(
+    dataset: Path, tmp_path: Path
+) -> None:
+    # A preview's pinned command run into two run directories: the second's model id is taken.
+    assert train(dataset, tmp_path / "first", "--confirm").exit_code == 0
+    second = tmp_path / "second"
+    refused = train(dataset, second, "--confirm")
+    assert refused.exit_code == 1, refused.stderr
+    assert "another run id" in refused.stderr
+    assert resume_command(second) not in refused.stderr
+
+    status = invoke("status", str(second))
+    assert status.exit_code == 0, status.stderr
+    data = output(status)
+    assert data["next_command"] is None
+    commands = [entry["command"] for entry in data["next_steps"]]
+    # A new run (train generates its id) of the same model on the same dataset, as written.
+    retrain = command(
+        "train", "--provider", "fireworks", "--dataset", dataset, "--model", "qwen3p8-27b"
+    )
+    assert retrain in commands
+    assert resume_command(second) in commands
+
+
+def test_a_resume_preview_of_a_run_whose_model_id_another_run_took_warns_it_may_be_refused(
+    dataset: Path, tmp_path: Path
+) -> None:
+    assert train(dataset, tmp_path / "first", "--confirm").exit_code == 0
+    second = tmp_path / "second"
+    assert train(dataset, second, "--confirm").exit_code == 1
+    preview = invoke("resume", str(second))
+    assert preview.exit_code == 2, preview.stderr
+    data = output(preview)
+    # The model may have been deleted since, so the resume is still offered.
+    assert data["next_command"] == f"{resume_command(second)} --confirm"
+    model_id = model_id_for_run(RUN_ID)
+    warnings = data["preview"]["warnings"]
+    assert any(model_id in w and "refused again" in w for w in warnings), warnings
 
 
 def test_a_max_seq_len_option_shorter_than_every_row_is_refused_in_the_preview(

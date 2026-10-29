@@ -45,6 +45,7 @@ from pup_finetune.providers.base import (
     Endpoint,
     Generation,
     LoraConfig,
+    ModelIdTaken,
     ModelProfile,
     ModelRef,
     Provider,
@@ -596,10 +597,14 @@ class BackendContract:
             with pytest.raises(FinetuneError):
                 session.promote(ckpt, model_id)
             return
-        model = session.promote(ckpt, model_id)
+        sending: list[str] = []
+        model = session.promote(ckpt, model_id, on_sending=lambda: sending.append(model_id))
         assert isinstance(model, ModelRef)
         assert model.model_id == model_id
         assert model.uri
+        # The run marks its request sent from here; a provider that never says so leaves a
+        # promotion whose response was lost unadoptable on a retry.
+        assert sending == [model_id]
 
     def test_other_weights_are_not_promoted_under_a_promoted_model_id(
         self,
@@ -617,8 +622,10 @@ class BackendContract:
         self._train_one_step(session, batch)
         second = session.save_sampler_checkpoint("second", epoch=2, step=2)
         assert session.promote(first, model_id).model_id == model_id
-        with pytest.raises(FinetuneError):
+        with pytest.raises(ModelIdTaken) as taken:
             session.promote(second, model_id)
+        # A resume cannot promote to the id while that model holds it: the hint says what can.
+        assert taken.value.hint
 
     def test_a_sampler_checkpoint_from_a_closed_session_works_or_fails_cleanly(
         self,

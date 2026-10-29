@@ -718,7 +718,12 @@ Source lives under `src/pup_finetune/`.
   before the session ends (re-creating its sampler checkpoint when that session expired) or
   records it as the deployable checkpoint, recording each promotion request per checkpoint
   first (a new best after an earlier promotion gets its own model id,
-  `model_id_for_checkpoint`, so a model id never holds two checkpoints); `runner.py` has
+  `model_id_for_checkpoint`, so a model id never holds two checkpoints; a request is
+  `recorded` until the provider's `on_sending` callback says the promotion is about to be
+  sent, then `sent`, and `contested` once a promotion finds its id held by a model the
+  provider does not adopt (`ModelIdTaken`); only a `sent` request's retry passes
+  `adopt_since`, so a model another run promoted under the id, however recently, is never
+  adopted, while one whose promotion's response was lost is); `runner.py` has
   `start_training` and `resume_training`, which open a session for a run directory and train
   or resume in it (`start_training` takes an `after_finalize` hook, run in the session after
   a successful promotion with the run's spend guard; its failure only adds a warning);
@@ -760,7 +765,13 @@ Source lives under `src/pup_finetune/`.
   `interrupted`, resumable from its last training checkpoint; a failed promotion leaves it
   `failed` with `resume_mode` `finalize_only`, so a resume only retries the promotion. Every
   error that leaves the run `interrupted` or `failed`, a `FinetuneError` included, ends its
-  hint with `Next: pup finetune resume RUN_DIR` (`resume_hint`).
+  hint with `Next: pup finetune resume RUN_DIR` (`resume_hint`), except a promotion that
+  found the run's model id held by another model (`ModelIdTaken`): a resume alone fails the
+  same way, so its hint names a new run under another run id, or deleting that model and
+  then resuming, and `status` gives such a run (`RunState.contested_promotion`) no
+  `next_command`, with those two as `next_steps` (the new run's `train` filled in from
+  `run.json`); its `resume` preview warns that it is refused again unless that model was
+  deleted.
   `result.json` records `promoted_model`, `deployable_checkpoint` and `finalize_error`. With
   `signals="cancel"` (what the CLI uses), SIGTERM and the first Ctrl-C cancel gracefully
   instead: stop at a step boundary, checkpoint, promote the best epoch, end `cancelled`; with
@@ -1001,8 +1012,9 @@ Source lives under `src/pup_finetune/`.
   computed from `forward`'s per-token logprobs, checkpoint names checked against the
   17-character limit before saving, `promote` picking the newest promotable sampler row
   carrying the checkpoint's name (`promotable_row`) and adopting a model this run already
-  promoted whose response was lost (`adopt_since`: the run's request to promote that
-  checkpoint, saved in `state.json` under `promotions`, less a minute's clock allowance),
+  promoted whose response was lost (`adopt_since`: when the run's request to promote that
+  checkpoint was sent, saved in `state.json` under `promotions`, less a minute's clock
+  allowance; `on_sending` is called after the lookups, right before the promotion),
   sampler checkpoints of an ended session refused with a hint); and `FireworksSampler`
   (render, sample greedily to the renderer's stop tokens, parse; only sampling is retried, a
   bounded number of times). `client.py` also wraps

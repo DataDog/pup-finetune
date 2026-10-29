@@ -307,7 +307,11 @@ Baseten Loops through `providers/baseten/client.py`, the only module that loads 
 - **Promotion.** Fireworks renames checkpoints (`run-<hex>-<name>-<8 hex>`), so `promote`
   lists the session's checkpoints and takes the newest promotable sampler row carrying the
   checkpoint's name, then promotes it to `accounts/<account>/models/<model id>`: the
-  `ModelRef`'s `model_id` is the bare id, its `uri` that full name. The shared
+  `ModelRef`'s `model_id` is the bare id, its `uri` that full name. It looks the model up
+  first: a model already under the id is refused (`ModelIdTaken`) unless the run's request
+  was `sent` and the model created since. Only once the id is free does it call
+  `on_sending`, which marks a request not yet `sent` as `sent` from then (a retry keeps the
+  first send's time), and promote. The shared
   `finalize` hook ([`training/promotion.py`](../src/pup_finetune/training/promotion.py)) runs
   it before the session ends; after a resume, it first re-creates the best epoch's sampler
   checkpoint from its training checkpoint (`load_state`, then `save_weights_for_sampler`).
@@ -339,7 +343,10 @@ that runs the `baseten` CLI.
   `state.json`, `epochs.json` and `result.json` to stdout as checksummed `PUPFT1` lines, on a
   change, every minute and at exit with the worker's error. `status` reads them back from the
   job's logs, newest first, and copies the newest complete one into the run directory (the
-  pid cleared), skipping the write while another process holds the run's lock.
+  pid cleared), skipping the write while another process holds the run's lock. A snapshot
+  is read `epochs.json` first and `result.json` last, so its training checkpoint is never
+  older than its finished epochs; one that pairs them so anyway is refused with a warning,
+  keeping the last copy, since a resume could not continue from it.
 - **The key.** The job reads a Baseten API key from the team secret `pup_finetune_api_key`;
   the local key goes only into the CLI's environment, never on its command line or in a file.
   Both keys must belong to the same workspace, since `deploy` and a local `resume` load the
@@ -679,7 +686,9 @@ Using Baseten as the example:
    stopped early or failed. Convert each `TokenizedExample` to the SDK's datum type, map
    `AdamConfig` onto its optimizer parameters on every step, size the trainer from the
    `seed` and `max_seq_len` passed to `open_session`, set `max_checkpoint_name_len` to the
-   provider's limit, and declare `supports_resume` and `supports_promotion`. Map SDK
+   provider's limit, and declare `supports_resume` and `supports_promotion`. A backend
+   with promotion calls `promote`'s `on_sending` right before it sends the promotion, after
+   any lookup, and raises `ModelIdTaken` for a model id another model holds. Map SDK
    failures onto the neutral errors in `providers/base.py`: `ProviderCapacityError` when
    there is no capacity or quota (end what the failed call started before raising it, and
    say so in the hint only then), `ProviderAuthError` for a rejected key and
