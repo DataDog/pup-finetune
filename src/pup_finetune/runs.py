@@ -83,6 +83,7 @@ from pup_finetune.providers.base import (
     MAX_SEQ_LEN_FLAG,
     MODEL_ID_PATTERN,
     CheckpointRef,
+    ModelIdTaken,
     ModelProfile,
     TrainSpec,
 )
@@ -98,7 +99,7 @@ from pup_finetune.storage import (
     settings_hash,
 )
 from pup_finetune.training.loop import CheckpointKind, CheckpointNamer, FinalizeFailed
-from pup_finetune.training.promotion import PromotionRequest
+from pup_finetune.training.promotion import PromotionRequest, PromotionStatus
 from pup_finetune.training.records import EpochMetrics, ResumePoint, TrainResult
 
 RUN_FILE = "run.json"
@@ -507,12 +508,15 @@ class RunDir:
         always agree. ``steps_per_epoch`` and ``max_steps`` are ``None`` until training
         started (a state saved before they were recorded takes them from the first finished
         epoch). ``elapsed_seconds`` is the spend guard's time over every attempt, as of the
-        snapshot, and ``hourly_rate_usd`` the rate the run prices it at, if any. While the run
-        is ``created`` or ``training`` (e.g. resumed), nothing is reported from
+        snapshot, and ``hourly_rate_usd`` the rate the run prices it at, if any.
+        ``contested_model_id`` is the model id of the promotion a resume would retry when a
+        model the provider did not adopt holds it (:meth:`RunState.contested_promotion`).
+        While the run is ``created`` or ``training`` (e.g. resumed), nothing is reported from
         ``result.json``, which then describes an earlier attempt.
         """
         manifest = self.manifest()
         state = self.load_state()
+        contested = state.contested_promotion()
         result = None if state.phase in ("created", "training") else self.read_result()
         epochs = self.read_epochs()
         if state.phase == "training":
@@ -546,6 +550,7 @@ class RunDir:
             "pid": state.pid,
             "error": state.error,
             "resume_mode": state.resume_mode,
+            "contested_model_id": None if contested is None else contested.model_id,
             "stopped_reason": result.get("stopped_reason") if result else None,
             "promoted_model": result.get("promoted_model") if result else None,
             "deployable_checkpoint": result.get("deployable_checkpoint") if result else None,
@@ -644,9 +649,10 @@ class RunState:
     provider to promote: the model id, the checkpoint's epoch and step, and when it first
     asked (:meth:`record_promotion_request`), saved before that request and kept across
     resumes, so a model created since under that id can be told to be this run's, holding
-    that checkpoint (see :class:`~pup_finetune.training.promotion.Promotion`). A state saved
-    before these were recorded holds only ``promotion_requested_at``, the time of the run's
-    first request; it is read as a request for an unknown checkpoint.
+    that checkpoint (see :class:`~pup_finetune.training.promotion.Promotion`), and its
+    ``status``; a request saved before statuses were recorded is read as ``sent``. A state
+    saved before requests were recorded per checkpoint holds only ``promotion_requested_at``,
+    the time of the run's first request; it is read as a request for an unknown checkpoint.
     """
 
     def __init__(
@@ -887,9 +893,19 @@ class RunState:
                 record.get("model_id"),
                 _parsed_time(record.get("requested_at")),
             )
-            if isinstance(model_id, str) and requested_at is not None:
+            status = record.get("status", PromotionStatus.SENT)
+            if (
+                isinstance(model_id, str)
+                and requested_at is not None
+                and isinstance(status, str)
+                and status in PromotionStatus
+            ):
                 return PromotionRequest(
-                    model_id=model_id, epoch=epoch, step=step, requested_at=requested_at
+                    model_id=model_id,
+                    epoch=epoch,
+                    step=step,
+                    status=PromotionStatus(status),
+                    requested_at=requested_at,
                 )
         return None
 
@@ -897,16 +913,41 @@ class RunState:
         """Whether the run recorded a request to promote any checkpoint."""
         return bool(self.promotions)
 
-    def record_promotion_request(self, model_id: str, *, epoch: int, step: int) -> PromotionRequest:
+    def contested_promotion(self) -> PromotionRequest | None:
+        """The promotion a resume retries, when its model id is held by a model the provider
+        did not adopt: the best epoch's request, contested, while a resume only retries the
+        promotion."""
+        best = self.best or {}
+        ckpt = best.get("sampler_ckpt") or best.get("training_ckpt")
+        if self.resume_mode != "finalize_only" or not isinstance(ckpt, dict):
+            return None
+        request = self.promotion_request(_int(ckpt.get("epoch")), _int(ckpt.get("step")))
+        if request is None or request.status is not PromotionStatus.CONTESTED:
+            return None
+        return request
+
+    def record_promotion_request(
+        self, model_id: str, *, epoch: int, step: int, status: PromotionStatus
+    ) -> PromotionRequest:
         """Record a request to promote the checkpoint at ``epoch`` and ``step`` to
-        ``model_id``, made now, and save it before returning it, so a request made after the
-        call is always covered. Its time is truncated to the second, as a resume reads it back.
+        ``model_id``, ``status`` from now, in place of any earlier one for it, and save it
+        before returning it, so what follows the call is always covered. Its time is
+        truncated to the second, as a resume reads it back.
         """
         moment = self._now().replace(microsecond=0)
-        record = {"model_id": model_id, "epoch": epoch, "step": step, "requested_at": _iso(moment)}
-        self.promotions.append(record)
+        record = {
+            "model_id": model_id,
+            "epoch": epoch,
+            "step": step,
+            "status": status.value,
+            "requested_at": _iso(moment),
+        }
+        kept = [r for r in self.promotions if (r.get("epoch"), r.get("step")) != (epoch, step)]
+        self.promotions = [*kept, record]
         self.save()
-        return PromotionRequest(model_id=model_id, epoch=epoch, step=step, requested_at=moment)
+        return PromotionRequest(
+            model_id=model_id, epoch=epoch, step=step, status=status, requested_at=moment
+        )
 
     def record_warning(self, message: str) -> None:
         self.warnings.append(message)
@@ -1247,10 +1288,12 @@ def _for_cli(error: BaseException, resumable: Path | None) -> BaseException:
 
     ``resumable`` is the run directory when the error left the run ``interrupted`` or
     ``failed``: every :class:`FinetuneError` returned then ends its hint with the resume
-    command (:func:`resume_hint`).
+    command (:func:`resume_hint`), except when a promotion found the run's model id taken
+    (:class:`~pup_finetune.providers.base.ModelIdTaken`), which a resume alone repeats.
     """
     converted = _converted(error)
-    if resumable is not None and isinstance(converted, FinetuneError):
+    taken = isinstance(error, FinalizeFailed) and isinstance(error.cause, ModelIdTaken)
+    if resumable is not None and isinstance(converted, FinetuneError) and not taken:
         converted.hint = resume_hint(resumable, converted.hint)
     return converted
 
@@ -1269,9 +1312,14 @@ def _converted(error: BaseException) -> BaseException:
     detail = redact(str(error))
     message = f"training stopped: {type(error).__name__}{': ' + detail if detail else ''}"
     # A dropped connection or a timeout is the provider's failure, not the run directory's.
+    converted: FinetuneError
     if isinstance(error, OSError) and not isinstance(error, ConnectionError | TimeoutError):
-        return StateError(f"{message} (writing the run directory)")
-    return ExternalError(message, source="training")
+        converted = StateError(f"{message} (writing the run directory)")
+    else:
+        converted = ExternalError(message, source="training")
+    for note in getattr(error, "__notes__", []):
+        converted.add_note(note)
+    return converted
 
 
 def execute_run(

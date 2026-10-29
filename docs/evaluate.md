@@ -94,9 +94,11 @@ pup finetune evaluate <RUN_ID> --compare-model anthropic/claude-opus-5-5
 ```
 
 `--compare-model` replays the same cases with a third model and grades it with the same judge.
-The compare model must differ from the judge. The result adds `headline.tuned_minus_compare`,
-and publishing adds a third experiment. Added to a complete evaluation, the compare model
-reuses the base and tuned results, so you pay only for its answers and their judge calls.
+The compare model must differ from the judge. The result adds `headline.tuned_minus_compare`:
+its `delta` and, in `common_pass_rate`, the tuned and compare pass rates on the
+`common_cases` that delta compares. Publishing adds a third experiment. Added to a complete
+evaluation, the compare model reuses the base and tuned results, so you pay only for its
+answers and their judge calls.
 
 Every answer comes from the model you name. Anthropic can answer a refused request with
 another model on its side. `pup-finetune` asks for that fallback for judges, and turns it off

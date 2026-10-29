@@ -46,10 +46,10 @@ from pup_finetune.providers.base import (
     DeployOptions,
     Endpoint,
     ModelRef,
-    ProviderAuthError,
     ProviderCapacityError,
     SmokeTest,
     TransientError,
+    run_smoke_test,
 )
 from pup_finetune.providers.fireworks import ENV_VAR, PROVIDER_NAME
 from pup_finetune.providers.fireworks.client import (
@@ -59,7 +59,6 @@ from pup_finetune.providers.fireworks.client import (
     FireworksDeployments,
     ShapeVersion,
 )
-from pup_finetune.redaction import redact
 
 __all__ = [
     "BAD_STATES",
@@ -84,8 +83,6 @@ SCALE_TO_ZERO_WINDOW: Final = "300s"
 """How long without requests before the deployment scales to zero: Fireworks' minimum."""
 READY: Final = "READY"
 BAD_STATES: Final = frozenset({"FAILED", "DELETING", "DELETED"})
-SMOKE_PROMPT: Final = "Reply with the single word OK."
-SMOKE_MAX_TOKENS: Final = 16
 
 
 class ChatSession(ChatCompleter, AbstractContextManager["ChatSession"], Protocol):
@@ -203,32 +200,15 @@ class FireworksDeployer:
         """One chat completion to ``endpoint``, retried while it scales up (HTTP 503, 429
         or a dropped connection). Never raises for a failed answer, only when the API key is
         rejected; an answer that retrying cannot fix (e.g. HTTP 404) fails it at once."""
-        deadline = self._clock() + self._smoke_timeout_s
-        attempts = 0
         with self._chat() as client:
-            while True:
-                attempts += 1
-                started = self._clock()
-                try:
-                    client.complete(
-                        [{"role": "user", "content": SMOKE_PROMPT}],
-                        model=endpoint.inference_model,
-                        temperature=0.0,
-                        max_tokens=SMOKE_MAX_TOKENS,
-                    )
-                except ProviderAuthError:
-                    raise
-                except (TransientError, ProviderCapacityError) as exc:
-                    detail = redact(str(exc))
-                except ExternalError as exc:
-                    return SmokeTest(ok=False, attempts=attempts, detail=redact(str(exc)))
-                else:
-                    latency = max(0.0, self._clock() - started)
-                    return SmokeTest(ok=True, latency_s=round(latency, 3), attempts=attempts)
-                remaining = deadline - self._clock()
-                if remaining <= 0:
-                    return SmokeTest(ok=False, attempts=attempts, detail=detail)
-                self._sleep(min(self._poll_interval_s, remaining))
+            return run_smoke_test(
+                client,
+                endpoint.inference_model,
+                clock=self._clock,
+                sleep=self._sleep,
+                poll_interval_s=self._poll_interval_s,
+                timeout_s=self._smoke_timeout_s,
+            )
 
     def undeploy(self, endpoint: Endpoint) -> bool:
         """Delete the deployment; ``False`` when it was already gone. The model is kept.

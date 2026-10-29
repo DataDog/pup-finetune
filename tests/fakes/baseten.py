@@ -61,7 +61,10 @@ What it mimics:
 Failures are injected with :meth:`FakeLoops.fail_on`, at the call or in its future. Every SDK
 call is recorded in ``loops.calls`` with its keyword arguments. :attr:`FakeLoops.fail` and
 :attr:`FakeLoops.lost` inject an answer or an exception into a serving route (``deploy``,
-``status``, ``delete``, ``autoscaling``), once, before it takes effect or after.
+``status``, ``delete``, ``autoscaling``), once, before it takes effect or after. ``lost`` also
+takes ``sampler`` (``POST /v1/loops/samplers``) and ``trainer``: an exception
+``create_lora_training_client`` raises once its run is allocated, as when the trainer never
+becomes ready.
 
 ``BasetenTransport`` answers by ``"METHOD /path"`` and records every request::
 
@@ -548,6 +551,7 @@ class FakeServiceClient:
         self._loops.runs[run.run_id] = run
         trainer = FakeTrainingClient(self._loops, run)
         self._loops.trainers.append(trainer)
+        self._loops._injected("trainer", self._loops.lost)
         return trainer
 
 
@@ -600,7 +604,8 @@ class FakeLoops:
         self.fail: dict[str, httpx.Response | BaseException] = {}
         """What a serving route answers or raises once, before it takes effect."""
         self.lost: dict[str, httpx.Response | BaseException] = {}
-        """What a serving route answers or raises once, after it took effect."""
+        """What a serving route answers or raises once, after it took effect (also ``sampler``
+        and ``trainer``)."""
         self.after_deploy: Callable[[FakeDeployment], None] | None = None
         """Called once with the next deployment a create makes, before it answers."""
 
@@ -725,7 +730,9 @@ class FakeLoops:
             max_seq_len=body["max_seq_length"],
         )
         self.samplers[sampler.sampler_id] = sampler
-        return httpx.Response(200, json={"sampler": sampler.record()})
+        return self._injected("sampler", self.lost) or httpx.Response(
+            200, json={"sampler": sampler.record()}
+        )
 
     def _handle_deployment(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         model_id, deployment_id, deactivate = match.groups()

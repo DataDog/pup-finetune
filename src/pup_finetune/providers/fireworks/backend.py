@@ -26,12 +26,13 @@ leaves nothing running.
 - ``promote`` finds the checkpoint in the session's listing, where Fireworks has renamed it
   (``run-<hex>-<name>-<8 hex>``): the newest promotable sampler row carrying the name. It
   first looks the model up: one that already exists is adopted when it can only be this
-  run's (the same base model, created since ``adopt_since``, shortly before the run first
-  asked for a promotion), because an
-  earlier attempt's promotion succeeded but its response was lost; any other is refused
-  with a :class:`~pup_finetune.errors.StateError` rather than promoted into a conflict. A
-  promotion that fails in a way that can hide a success (a timeout, a dropped connection, a
-  server error, a conflict) looks the model up again and adopts it when it is there now.
+  run's (the same base model, created since ``adopt_since``, shortly before the run sent a
+  promotion), because an earlier attempt's promotion succeeded but its response was lost;
+  any other is refused with a :class:`~pup_finetune.providers.base.ModelIdTaken` rather than
+  promoted into a conflict. Only once the model is absent and the row found does it call
+  ``on_sending`` and send the promotion. A promotion that fails in a way that can hide a
+  success (a timeout, a dropped connection, a server error, a conflict) looks the model up
+  again and adopts it when it is there now.
 
 :class:`FireworksSampler` renders the prompt with the profile's renderer, samples greedily up
 to the renderer's stop tokens and parses the completion back into an OpenAI message; one cut
@@ -61,6 +62,7 @@ from pup_finetune.providers.base import (
     CheckpointRef,
     Generation,
     LoraConfig,
+    ModelIdTaken,
     ModelProfile,
     ModelRef,
     PendingResult,
@@ -69,6 +71,7 @@ from pup_finetune.providers.base import (
     StepMetrics,
     TransientError,
     is_transient,
+    raise_session_failure,
 )
 from pup_finetune.providers.fireworks import PROVIDER_NAME
 from pup_finetune.providers.fireworks.client import (
@@ -502,7 +505,12 @@ class FireworksSession:
         self._run.load_state(ckpt.uri).result()
 
     def promote(
-        self, ckpt: CheckpointRef, model_id: str, *, adopt_since: datetime | None = None
+        self,
+        ckpt: CheckpointRef,
+        model_id: str,
+        *,
+        adopt_since: datetime | None = None,
+        on_sending: Callable[[], None] | None = None,
     ) -> ModelRef:
         self._require_open()
         _checked_model_id(model_id)
@@ -514,6 +522,8 @@ class FireworksSession:
             # or another run's model under the same id; adopt_since tells them apart.
             return self._adopted(existing, expected, model_id, since=adopt_since, checked=False)
         row = promotable_row(self._client.list_session_checkpoints(session_name), ckpt)
+        if on_sending is not None:
+            on_sending()
         try:
             model = self._client.promote_session_checkpoint(
                 row.resource_name, output_model_id=model_id, base_model=self._profile.base_model
@@ -546,11 +556,11 @@ class FireworksSession:
         checked: bool,
     ) -> ModelRef:
         """The :class:`ModelRef` of ``record``, the existing model ``expected``, once it can
-        only be this run's; :class:`StateError` otherwise.
+        only be this run's; :class:`ModelIdTaken` otherwise.
 
         ``checked`` says the model was absent when this promotion started, so only its base
         model is compared; otherwise it must also have been created no earlier than
-        ``since``, just before the run first asked for a promotion.
+        ``since``, just before the run sent a promotion.
         """
         name = record.get("name")
         name = name if isinstance(name, str) and name else expected
@@ -558,27 +568,24 @@ class FireworksSession:
             f"the Fireworks model {name} already exists, so the best checkpoint cannot be "
             f"promoted to the model id {model_id!r}"
         )
-        hint = "train a new run under another run id, or delete that model in Fireworks"
         base = _record_base_model(record)
         if base is not None and base != self._profile.base_model:
-            raise StateError(
-                f"{taken}: it is a model of {base}, not of {self._profile.base_model}", hint=hint
+            raise ModelIdTaken(
+                f"{taken}: it is a model of {base}, not of {self._profile.base_model}"
             )
         if not checked:
             if since is None:
-                raise StateError(taken, hint=hint)
+                raise ModelIdTaken(taken)
             created = _record_time(record)
             if created is None:
-                raise StateError(
+                raise ModelIdTaken(
                     f"{taken}, and Fireworks does not say when it was created, so it cannot "
-                    "be told apart from another run's",
-                    hint=hint,
+                    "be told apart from another run's"
                 )
             if created < since:
-                raise StateError(
+                raise ModelIdTaken(
                     f"{taken}: it was created at {created.isoformat()}, before this run "
-                    f"first asked to promote it (allowing for clock skew, {since.isoformat()})",
-                    hint=hint,
+                    f"sent its promotion (allowing for clock skew, {since.isoformat()})"
                 )
         _warn(f"adopting the Fireworks model {name}, which this run already promoted")
         return ModelRef(provider=PROVIDER_NAME, model_id=model_id, uri=name)
@@ -789,15 +796,9 @@ class FireworksBackend:
             failure = exc
             raise
         finally:
-            errors = self._end(client, service, session, abandon=failure is not None)
-            if errors:
-                # After a normal exit the first failure (closing the service, if that failed:
-                # a session that may still be open) is raised; every other one is a note.
-                raised = failure if failure is not None else errors[0]
-                for error in errors if failure is not None else errors[1:]:
-                    raised.add_note(f"ending the Fireworks session also failed: {_text(error)}")
-                if failure is None:
-                    raise raised
+            raise_session_failure(
+                failure, self._end(client, service, session, abandon=failure is not None)
+            )
 
     def live_session_name(self, session_id: str) -> str | None:
         """The resource name of the session ``session_id`` while it is open here, else ``None``."""
@@ -844,25 +845,27 @@ class FireworksBackend:
         *,
         abandon: bool,
     ) -> list[BaseException]:
-        """End ``session``, then close ``service`` and ``client``; every failure.
+        """End ``session``, then close ``service`` and ``client``; every failure, most
+        important first.
 
         Failures to close the service or the client come first, since a service that failed
-        to close may leave a billed session open; then those of closing the samplers.
+        to close may leave a billed session open; then those of ending the session.
         """
-        closing: list[BaseException] = []
         ending: list[BaseException] = []
-        try:
-            if session is not None:
-                self._live.pop(session.session_id, None)
+        if session is not None:
+            self._live.pop(session.session_id, None)
+            try:
                 ending = session.end(abandon=abandon)
-        finally:
-            for close in (service.close if service is not None else None, client.close):
-                if close is None:
-                    continue
-                try:
-                    close()
-                except Exception as exc:
-                    closing.append(exc)
+            except BaseException as exc:  # e.g. Ctrl-C while results in flight are awaited
+                ending = [exc]
+        closing: list[BaseException] = []
+        for close in (service.close if service is not None else None, client.close):
+            if close is None:
+                continue
+            try:
+                close()
+            except BaseException as exc:
+                closing.append(exc)
         return [*closing, *ending]
 
 

@@ -545,7 +545,7 @@ def _in_foreground(
             on_event=TrainingProgress(),
             after_finalize=after_finalize,
         )
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
         # A second Ctrl-C stops at once; the run recorded where it stopped.
         try:
             phase = run.load_state().phase
@@ -554,6 +554,7 @@ def _in_foreground(
         raise Interrupted(
             f"training stopped at once (Ctrl-C): the run in {run.path} is {phase}",
             hint=resume_hint(run.path),
+            interrupt=exc,
         ) from None
     return dict(result)
 
@@ -1350,6 +1351,13 @@ def resume(
         preview["warnings"].append(
             f"this run trained in {job_name(sync.view)}; this resume trains on this machine"
         )
+    contested = state.contested_promotion()
+    if contested is not None:
+        preview["warnings"].append(
+            f"the last promotion found this run's model id {contested.model_id} held by another "
+            f"model on {provider.name}: this resume is refused again unless that model was "
+            "deleted"
+        )
     rerun = [*PROGRAM, "resume", str(run_dir), *(["--detach"] if detach else [])]
     offline = provider.name == "fake"
     if confirm and not offline:
@@ -1389,7 +1397,13 @@ NOTHING_TRAINED_STEP = (
 
 
 def run_next(
-    path: Path, phase: str, *, promoted: bool, running: bool, stale: bool = False
+    path: Path,
+    phase: str,
+    *,
+    promoted: bool,
+    running: bool,
+    stale: bool = False,
+    contested_model_id: str | None = None,
 ) -> dict[str, Any]:
     """``next_command`` and ``next_steps`` for the run in ``path``, from its state.
 
@@ -1401,7 +1415,10 @@ def run_next(
     does a cancelled one whose best epoch was promoted, with resuming it as a step. A
     completed run without one (no epoch finished, e.g. under a token budget below one
     epoch) has no next command: the step trains a new run. Anything else (interrupted,
-    failed, or cancelled before any epoch) is resumed.
+    failed, or cancelled before any epoch) is resumed, except a run whose promotion found its
+    model id (``contested_model_id``) held by another model: a resume alone fails again, so
+    it has no next command, and the steps train a new run of the same model on the same
+    dataset (under a new run id) or, once that model is deleted, resume.
     """
     steps: list[dict[str, str]] = []
     next_command: str | None
@@ -1430,6 +1447,31 @@ def run_next(
         )
     elif phase == "training" and stale:
         next_command = command("cancel", path)
+    elif contested_model_id is not None:
+        next_command = None
+        manifest = RunDir(path).manifest()
+        steps.append(
+            step(
+                command(
+                    "train",
+                    "--provider",
+                    str(manifest["provider"]),
+                    "--dataset",
+                    Path(manifest["dataset_dir"]),
+                    "--model",
+                    str(manifest["profile"]["alias"]),
+                ),
+                f"another model holds this run's model id {contested_model_id}: train a new "
+                "run, under a new run id (paid; it previews first)",
+            )
+        )
+        steps.append(
+            step(
+                resume_command(path),
+                f"once the model under {contested_model_id} is deleted from the provider, "
+                "retry only the promotion (paid; it previews first)",
+            )
+        )
     else:
         next_command = resume_command(path)
     return {"next_command": next_command, "next_steps": steps}
@@ -1536,6 +1578,7 @@ def run_status(run: RunDir, *, source: str = "given") -> dict[str, Any]:
                 promoted=_promoted(summary),
                 running=worker.running,
                 stale=stale_alive,
+                contested_model_id=summary["contested_model_id"],
             ),
             "files": files(
                 run=run.run_path,

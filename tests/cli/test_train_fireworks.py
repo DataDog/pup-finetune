@@ -4,7 +4,8 @@
 #
 # This product includes software developed at Datadog (https://www.datadoghq.com/).
 # Copyright 2026-present Datadog, Inc.
-"""`train --provider fireworks` and `resume` end to end, on the in-memory Fireworks.
+"""`train --provider fireworks` and `resume` end to end, on the in-memory Fireworks, and what
+`evaluate` reports when its session fails twice.
 
 The provider is the real :class:`FireworksProvider`, with the in-memory Training API, the
 fake REST API (for preflight) and the fake tokenizer injected through its constructor. Each
@@ -24,10 +25,11 @@ from typer.testing import CliRunner, Result
 from pup_finetune import providers
 from pup_finetune.cli import app
 from pup_finetune.cli import train as train_module
-from pup_finetune.evaluation import runner as runner_module
+from pup_finetune.evaluation import runner as eval_module
+from pup_finetune.next_steps import command
 from pup_finetune.providers.base import Provider
 from pup_finetune.providers.fireworks.provider import FireworksProvider
-from pup_finetune.runs import RunDir, model_id_for_run
+from pup_finetune.runs import RunDir, model_id_for_run, resume_command
 from pup_finetune.runtime import Runtime
 from pup_finetune.training import inputs as inputs_module
 from tests.fakes.fireworks import ACCOUNT, FakeFireworksTrainingClient
@@ -76,7 +78,7 @@ def _fireworks(monkeypatch: pytest.MonkeyPatch, fw: CrashingFireworks) -> None:
 
     monkeypatch.setattr(train_module, "get_provider", get_provider)
     monkeypatch.setattr(inputs_module, "get_provider", get_provider)
-    monkeypatch.setattr(runner_module, "get_provider", get_provider)
+    monkeypatch.setattr(eval_module, "get_provider", get_provider)
 
 
 def invoke(*args: str) -> Result:
@@ -261,6 +263,85 @@ def test_resume_after_a_crash_finishes_and_promotes(
     assert _no_session_left(fw)
 
 
+def test_an_unexpected_error_in_training_prints_its_notes(
+    dataset: Path, tmp_path: Path, fw: CrashingFireworks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pending = fw._pending_failure
+
+    def buggy(operation: str, what: str) -> Exception | None:
+        if operation == "forward_backward":
+            return RuntimeError("a bug in the step")
+        return pending(operation, what)
+
+    monkeypatch.setattr(fw, "_pending_failure", buggy)
+    fw.fail("close", "server")
+    result = train(dataset, tmp_path / "run", "--confirm")
+    assert result.exit_code == 1, result.stderr
+    assert "training stopped: RuntimeError: a bug in the step" in result.stderr
+    assert any(
+        line.startswith("warning: ending the session also failed: ")
+        and "closing the Fireworks client failed" in line
+        for line in result.stderr.splitlines()
+    )
+
+
+def test_a_ctrl_c_while_a_failed_promotion_ends_its_session_prints_each_failure_once(
+    dataset: Path, tmp_path: Path, fw: CrashingFireworks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def interrupted() -> None:
+        raise KeyboardInterrupt  # Ctrl-C while the client closes
+
+    fw.fail("promote_session_checkpoint", "bad_request")
+    monkeypatch.setattr(fw, "close", interrupted)
+    result = train(dataset, tmp_path / "run", "--confirm")
+    assert result.exit_code == 1, result.stderr
+    assert result.stderr.count("promoting a Fireworks checkpoint") == 1, result.stderr
+    assert any(
+        line.startswith("warning: ending the session also failed: KeyboardInterrupt")
+        for line in result.stderr.splitlines()
+    )
+
+
+def test_a_run_whose_model_id_another_run_took_offers_no_resume_that_fails_again(
+    dataset: Path, tmp_path: Path
+) -> None:
+    # A preview's pinned command run into two run directories: the second's model id is taken.
+    assert train(dataset, tmp_path / "first", "--confirm").exit_code == 0
+    second = tmp_path / "second"
+    refused = train(dataset, second, "--confirm")
+    assert refused.exit_code == 1, refused.stderr
+    assert "another run id" in refused.stderr
+    assert resume_command(second) not in refused.stderr
+
+    status = invoke("status", str(second))
+    assert status.exit_code == 0, status.stderr
+    data = output(status)
+    assert data["next_command"] is None
+    commands = [entry["command"] for entry in data["next_steps"]]
+    # A new run (train generates its id) of the same model on the same dataset, as written.
+    retrain = command(
+        "train", "--provider", "fireworks", "--dataset", dataset, "--model", "qwen3p8-27b"
+    )
+    assert retrain in commands
+    assert resume_command(second) in commands
+
+
+def test_a_resume_preview_of_a_run_whose_model_id_another_run_took_warns_it_may_be_refused(
+    dataset: Path, tmp_path: Path
+) -> None:
+    assert train(dataset, tmp_path / "first", "--confirm").exit_code == 0
+    second = tmp_path / "second"
+    assert train(dataset, second, "--confirm").exit_code == 1
+    preview = invoke("resume", str(second))
+    assert preview.exit_code == 2, preview.stderr
+    data = output(preview)
+    # The model may have been deleted since, so the resume is still offered.
+    assert data["next_command"] == f"{resume_command(second)} --confirm"
+    model_id = model_id_for_run(RUN_ID)
+    warnings = data["preview"]["warnings"]
+    assert any(model_id in w and "refused again" in w for w in warnings), warnings
+
+
 def test_a_max_seq_len_option_shorter_than_every_row_is_refused_in_the_preview(
     dataset: Path, tmp_path: Path, fw: CrashingFireworks
 ) -> None:
@@ -375,3 +456,31 @@ def test_an_evaluate_preview_says_why_a_malformed_key_s_provider_is_passed_over(
     assert preview["judge_model"] == "openai/gpt-5.4-mini"
     assert "ANTHROPIC_API_KEY) is malformed" in preview["judge_source"]
     assert any("ANTHROPIC_API_KEY" in w and "malformed" in w for w in preview["warnings"])
+
+
+def test_a_ctrl_c_while_evaluate_ends_its_session_wins_over_a_failed_sampler(
+    dataset: Path, tmp_path: Path, fw: CrashingFireworks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def interrupted() -> None:
+        raise KeyboardInterrupt  # Ctrl-C while the client closes
+
+    monkeypatch.setenv("PUP_FINETUNE_DEV", "1")
+    run_dir = tmp_path / "run"
+    assert train(dataset, run_dir, "--confirm").exit_code == 0
+    fw.fail("create_sampling_client", "bad_request")
+    monkeypatch.setattr(fw, "close", interrupted)
+    result = invoke(
+        "evaluate",
+        str(run_dir),
+        "--judge-model",
+        "fake-judge",
+        "--no-publish",
+        "--skip-calibration",
+        "--confirm",
+    )
+    assert result.exit_code == 1, result.stderr
+    assert "Error [interrupted]: evaluation stopped at once" in result.stderr
+    assert any(
+        line.startswith("warning: ") and "opening a sampler" in line
+        for line in result.stderr.splitlines()
+    )

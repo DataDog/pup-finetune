@@ -23,7 +23,7 @@ loop's reports in lists and can ask for cancellation after a number of steps.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -200,10 +200,15 @@ class RecordingSession:
         self.inner.load_weights(ckpt)
 
     def promote(
-        self, ckpt: CheckpointRef, model_id: str, *, adopt_since: datetime | None = None
+        self,
+        ckpt: CheckpointRef,
+        model_id: str,
+        *,
+        adopt_since: datetime | None = None,
+        on_sending: Callable[[], None] | None = None,
     ) -> ModelRef:
         self.adopt_since.append(adopt_since)
-        return self.inner.promote(ckpt, model_id, adopt_since=adopt_since)
+        return self.inner.promote(ckpt, model_id, adopt_since=adopt_since, on_sending=on_sending)
 
     def sampler(self, ckpt: CheckpointRef | None) -> Sampler:
         return self.inner.sampler(ckpt)

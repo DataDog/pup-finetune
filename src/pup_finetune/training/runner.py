@@ -56,6 +56,7 @@ from typing import Any
 
 from pup_finetune.errors import StateError, UsageError
 from pup_finetune.providers.base import (
+    BODY_FAILED_FIRST,
     CheckpointRef,
     LoraConfig,
     ModelProfile,
@@ -363,7 +364,7 @@ class _Run:
                     raise
         except BaseException as exc:
             if raised is not None and exc is not raised:
-                raised.add_note(f"ending the session also failed: {_describe(exc)}")
+                raised.add_note(f"ending the session also failed: {_describe(exc, raised)}")
                 raise raised from raised.__cause__
             if outcome is None:
                 raise
@@ -374,9 +375,17 @@ class _Run:
         return outcome
 
 
-def _describe(error: BaseException) -> str:
+def _describe(error: BaseException, body: BaseException | None = None) -> str:
+    """``error``'s type and message, then its notes (e.g. a resource that may remain), less
+    those :func:`~pup_finetune.providers.base.raise_session_failure` copied from ``body``."""
     detail = redact(str(error))
-    return f"{type(error).__name__}{': ' + detail if detail else ''}"
+    copied = set(getattr(body, "__notes__", ()))
+    notes = (
+        redact(note)
+        for note in getattr(error, "__notes__", ())
+        if note not in copied and not note.startswith(f"{BODY_FAILED_FIRST}: ")
+    )
+    return "; ".join((f"{type(error).__name__}{': ' + detail if detail else ''}", *notes))
 
 
 def _longest_example(rows: Iterable[RowExamples]) -> int | None:

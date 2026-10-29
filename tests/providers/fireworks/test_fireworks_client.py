@@ -585,7 +585,7 @@ class StandInSampler:
 @dataclass
 class StandInHolder:
     closed: int = 0
-    error: Exception | None = None
+    error: BaseException | None = None
 
     def close(self) -> None:
         self.closed += 1
@@ -598,7 +598,7 @@ class StandInService:
     training_session_id: str | None = "ts-0123"
     training_session_name: str | None = None
     error: Exception | None = None
-    close_error: Exception | None = None
+    close_error: BaseException | None = None
     closed: int = 0
     calls: list[tuple[Any, ...]] = field(default_factory=list)
     holder: StandInHolder | None = None
@@ -696,6 +696,25 @@ def test_closing_keeps_the_first_failure() -> None:
     )
     with pytest.raises(ExternalError, match="heartbeat"):
         holder_only.close()
+
+
+def test_an_interrupted_close_still_stops_the_heartbeat() -> None:
+    holder = StandInHolder()
+    sdk = StandInService(close_error=KeyboardInterrupt(), holder=holder)
+    service = fw._Service(sdk, account_id="my-team")
+    with pytest.raises(KeyboardInterrupt):
+        service.close()
+    assert (sdk.closed, holder.closed) == (1, 1)
+
+
+def test_an_interrupted_close_wins_over_a_failed_one_and_names_it() -> None:
+    holder = StandInHolder(error=KeyboardInterrupt())
+    sdk = StandInService(close_error=RuntimeError("close refused"), holder=holder)
+    service = fw._Service(sdk, account_id="my-team")
+    with pytest.raises(KeyboardInterrupt) as caught:
+        service.close()
+    [note] = caught.value.__notes__
+    assert "closing the Fireworks training session failed: close refused" in note
 
 
 def test_other_start_failures_leave_the_session_to_the_caller() -> None:

@@ -220,6 +220,9 @@ file as `checks_file`, which a dataset's step to finish the triage passes again 
 exists. With `--checks` alone it calls no
 judge and labels at once, without `--confirm` (refusing `--judges`, `--concurrency` and
 `--reset-triage`), reporting `stale_check_labels`; `dataset label --file` refuses `by: check`.
+Rows holding a drop a pull carried are never reviewed and are counted apart from the user's
+labels (`skipped_carried`), so neither `--agreement` nor the preview's note about it counts
+them.
 Tests replace the judges' clients (`cli/triage.py`'s `open_clients`) with a fake.
 
 Judges can run on Anthropic or OpenAI too: `--judge-model`, `--eval-judge-model` and each
@@ -463,10 +466,13 @@ Source lives under `src/pup_finetune/`.
   `warnings`.
 - `errors.py` - expected failures, their exit codes and their stable `error_code`s
   (`ERROR_CODES`, each with its exit code and meaning, which `docs/commands.md` lists; the
-  error line reads `Error [<code>]: ...`). `DirectoryUsageError` and its subclasses
+  error line reads `Error [<code>]: ...`, and each of the error's notes follows it as a
+  `warning:`). `DirectoryUsageError` and its subclasses
   (`NotADatasetDir`, `NotARunDir`, `RunDirNotEmpty`, `SettingsConflict`, `WrongPhase`) are
   both a `UsageError` and a `StateError`, so code that caught either still does, and exit 2;
-  `Interrupted` is a Ctrl-C or SIGTERM. The `--confirm` and read-only guards
+  `Interrupted` is a Ctrl-C or SIGTERM, and every conversion of a `KeyboardInterrupt` into it
+  passes `interrupt=` so it keeps the interrupt's notes (e.g. a Loops sampler a Ctrl-C cut
+  while it was created may remain). The `--confirm` and read-only guards
   (`require_confirm(..., read_only=...)` adds `read_only` to a preview and offers no
   `--confirm`), `READ_ONLY_HINT`, and `install_hint` / `reinstall_hint`, the one wording of
   how to install an extra (`uv sync --all-extras`, never a bare `uv sync --extra X`).
@@ -504,8 +510,7 @@ Source lives under `src/pup_finetune/`.
 - `storage.py` - atomic writes, `0600` files and `0700` directories, directory locks, frozen
   settings, and `identity_changes`, the keys two recorded identities differ in.
 - `doctor.py` - what a `doctor` check reports (`CheckResult`: `status`, `detail`, `label`,
-  `needed_for`, `fix`, `required`) and the registry of extra checks modules add with
-  `register_check`, which `doctor` runs after its own.
+  `needed_for`, `fix`, `required`) and the redacted details of a check that raised.
 - `readiness.py` - `doctor`'s provider and judge checks, built from the registries: each
   provider's key (`CredentialSpec.needed_for`) and packages (`ProviderInfo.packages`, found
   with `find_spec`, never imported), the judge-only keys and the Anthropic SDK, the live
@@ -663,6 +668,18 @@ Source lives under `src/pup_finetune/`.
   re-run reads more reasoning for is updated in place, never losing reasoning it has
   (`reasoning_updates`, `DatasetDir.add(updated=...)`), and a stored row that update makes
   repeat another stored row is retired as `duplicate_conversation` (`repeat_retirements`).
+  A stored row read again with another `source` keeps its stored source: the id fixes the
+  trace and span, and evaluations or tags attached since are not updated. A drop in force on
+  a retired row carries to the stored row that now holds its conversation (`Exclusion.into`,
+  followed through the rows the same pull retires): `DatasetDir.add` appends, under its lock
+  and before the rows, a `by: manual` drop whose `Label.carried_from` names the retired id,
+  so triage never relabels it, `--agreement` does not compare with it and `dataset label
+  --file` refuses a line naming `carried_from`; the pull lists them in `pull.carried_drops`.
+  It replaces a judge's or a check's label, even a drop (triage would review those again),
+  but not a person's label on that row. A person's keep there, or on a row the pull retired
+  into it on the way, stands: the pull lists the drop it refused in `pull.drops_not_carried`
+  (`RefusedDrop`) and warns, as the dropped turns now train. A keep does not carry: the
+  longer row has turns nobody reviewed.
   `fetch.py` is `dataset fetch`: an Agent Observability dataset's current records back into
   rows (input messages plus expected output, the split from metadata or tags), frozen per
   dataset version, with the dataset's `push.json` so evaluations publish onto it.
@@ -717,7 +734,12 @@ Source lives under `src/pup_finetune/`.
   before the session ends (re-creating its sampler checkpoint when that session expired) or
   records it as the deployable checkpoint, recording each promotion request per checkpoint
   first (a new best after an earlier promotion gets its own model id,
-  `model_id_for_checkpoint`, so a model id never holds two checkpoints); `runner.py` has
+  `model_id_for_checkpoint`, so a model id never holds two checkpoints; a request is
+  `recorded` until the provider's `on_sending` callback says the promotion is about to be
+  sent, then `sent`, and `contested` once a promotion finds its id held by a model the
+  provider does not adopt (`ModelIdTaken`); only a `sent` request's retry passes
+  `adopt_since`, so a model another run promoted under the id, however recently, is never
+  adopted, while one whose promotion's response was lost is); `runner.py` has
   `start_training` and `resume_training`, which open a session for a run directory and train
   or resume in it (`start_training` takes an `after_finalize` hook, run in the session after
   a successful promotion with the run's spend guard; its failure only adds a warning);
@@ -759,7 +781,13 @@ Source lives under `src/pup_finetune/`.
   `interrupted`, resumable from its last training checkpoint; a failed promotion leaves it
   `failed` with `resume_mode` `finalize_only`, so a resume only retries the promotion. Every
   error that leaves the run `interrupted` or `failed`, a `FinetuneError` included, ends its
-  hint with `Next: pup finetune resume RUN_DIR` (`resume_hint`).
+  hint with `Next: pup finetune resume RUN_DIR` (`resume_hint`), except a promotion that
+  found the run's model id held by another model (`ModelIdTaken`): a resume alone fails the
+  same way, so its hint names a new run under another run id, or deleting that model and
+  then resuming, and `status` gives such a run (`RunState.contested_promotion`) no
+  `next_command`, with those two as `next_steps` (the new run's `train` filled in from
+  `run.json`); its `resume` preview warns that it is refused again unless that model was
+  deleted.
   `result.json` records `promoted_model`, `deployable_checkpoint` and `finalize_error`. With
   `signals="cancel"` (what the CLI uses), SIGTERM and the first Ctrl-C cancel gracefully
   instead: stop at a step boundary, checkpoint, promote the best epoch, end `cancelled`; with
@@ -840,8 +868,15 @@ Source lives under `src/pup_finetune/`.
   `summary.json`: per-target pass rates (judge and metrics), per-trajectory agreement, the
   paired wins, regressions and ties, and `tuned_minus_base` with a seeded paired bootstrap
   95% CI over trajectories (`bootstrap.py`'s `paired_bootstrap_ci`), `tuned_minus_compare`
-  the same way over the compare target's cases (both through `_paired`; each target counts
-  the cases it does not replay as `skipped`), plus the agreement-not-task-success `CAVEAT`. A `Publisher` (default `NoopPublisher`) gets a complete evaluation and returns
+  the same way over the compare target's cases (both through `_paired`, with each side's
+  pass rate on the cases paired, `common_pass_rate`; each target counts the cases it does
+  not replay as `skipped`), plus the agreement-not-task-success `CAVEAT`. `runner.py`'s
+  `headline` shows each delta beside those rates and its `common_cases`, and each target's
+  own rate beside its `judged_cases`, so an error or a skipped case never sets a rate
+  beside a delta over other cases. The closing summary prints them the same way: "judge
+  agreement" is each target's own rate (`of N` once one was graded on fewer cases), and each
+  delta names the cases it pairs and both rates on them.
+  A `Publisher` (default `NoopPublisher`) gets a complete evaluation and returns
   what it reports, the outcome's `publication`. `runner.py` is what `evaluate` and `train
   --evaluate` run: `plan_evaluation` (an `EvalPlan`: cases, judge, settings and `Publishing`,
   whether the dataset's push receipt allows publishing; cases the run's model cannot replay
@@ -914,8 +949,8 @@ Source lives under `src/pup_finetune/`.
   `--target-pass-rate` and its `headline_cases` cover `TARGET_COVERAGE`, 90% of the test cases
   with a prompt; or `no_result`; the reason quotes that count and says when results are
   partial, and models within noise of the best are named).
-  The package exports its names lazily, so importing the runner (the CLI does, for every
-  command) loads no judge client. `targets.py` makes the two samplers from a session: the live training
+  The package's `__init__` imports nothing, so importing the runner (the CLI does, for
+  every command) loads no judge client. `targets.py` makes the two samplers from a session: the live training
   session's best sampler checkpoint, or the best training checkpoint loaded and saved again
   as an `ev...` sampler checkpoint in a new session (`run_samplers`), only for the targets
   with a case left to generate (`targets`). `reuse.py` is the dataset's store of base
@@ -948,8 +983,12 @@ Source lives under `src/pup_finetune/`.
   Evaluators are scored per directory, never shared through the store; their metrics go only
   with spans being published, and one added after is a warning.
 - `providers/` - the provider seam. `base.py` has the neutral types (`ModelProfile`,
-  `TrainSpec`, `CheckpointRef`, `StepMetrics`, ...) and the `Provider`, `TrainingBackend`,
-  `TrainingSession` and `Sampler` protocols; `__init__.py` is the lazy registry
+  `TrainSpec`, `CheckpointRef`, `StepMetrics`, ...), the `Provider`, `TrainingBackend`,
+  `TrainingSession` and `Sampler` protocols, `raise_session_failure`, what every backend's
+  `open_session` raises once its session is closed (the first interrupt, from the body or a
+  close step, else the body's error, else the first close failure; the others as notes),
+  and `run_smoke_test`, the deploy smoke test every
+  provider's `smoke_test` runs on its chat client; `__init__.py` is the lazy registry
   (`register_provider`, `get_provider`, `known_providers`), which imports a provider only on
   first use; each entry names its `--provider-option` keys (`registered_option_keys`, which
   `train --help` lists; a test holds them to the option models) and its model table, each
@@ -993,8 +1032,9 @@ Source lives under `src/pup_finetune/`.
   computed from `forward`'s per-token logprobs, checkpoint names checked against the
   17-character limit before saving, `promote` picking the newest promotable sampler row
   carrying the checkpoint's name (`promotable_row`) and adopting a model this run already
-  promoted whose response was lost (`adopt_since`: the run's request to promote that
-  checkpoint, saved in `state.json` under `promotions`, less a minute's clock allowance),
+  promoted whose response was lost (`adopt_since`: when the run's request to promote that
+  checkpoint was sent, saved in `state.json` under `promotions`, less a minute's clock
+  allowance; `on_sending` is called after the lookups, right before the promotion),
   sampler checkpoints of an ended session refused with a hint); and `FireworksSampler`
   (render, sample greedily to the renderer's stop tokens, parse; only sampling is retried, a
   bounded number of times). `client.py` also wraps

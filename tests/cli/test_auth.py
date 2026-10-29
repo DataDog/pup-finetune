@@ -20,7 +20,6 @@ from pydantic import SecretStr
 from typer.testing import CliRunner, Result
 
 from pup_finetune import credentials, redaction
-from pup_finetune import doctor as doctor_registry
 from pup_finetune.cli import app
 from pup_finetune.cli import auth as auth_cli
 from pup_finetune.credentials import CredentialSpec
@@ -42,7 +41,6 @@ runner = CliRunner()
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
     monkeypatch.setattr(credentials, "_REGISTRY", {})
-    monkeypatch.setattr(doctor_registry, "_REGISTRY", {})
     for name in ("ACME_API_KEY", "BETA_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     home = tmp_path / "home"

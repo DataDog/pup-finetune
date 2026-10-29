@@ -46,16 +46,18 @@ one ran stops instead of mixing the votes of two rubrics.
 
 **Labels.** Decided rows are labeled through :func:`~pup_finetune.curation.labels.apply_labels`
 with ``by="judge"``, under the same lock as the voting. Rows whose decision in force came
-from the agent or a person are not reviewed, and the labels are read again just before the
-judge labels are recorded, so one written after planning is never overwritten either: that
-row is skipped. A label cannot be withdrawn, so a judge label
+from the agent or a person are not reviewed (nor are drops a pull carried, which say
+``manual`` too; see :attr:`~pup_finetune.data.labels.Label.carried_from`), and the labels
+are read again just before the judge labels are recorded, so one written after planning is
+never overwritten either: that row is skipped. A label cannot be withdrawn, so a judge label
 that the current votes do not back (cast under a rubric ``reset`` discarded, on a row outside
 this ``max_rows`` sample or ``only`` subset, or on a row left undecided) is reported as stale
 (:meth:`TriagePlan.stale_labels`), and the triage is not complete while any remains.
 
 **Agreement.** With ``agreement``, the council reviews the rows the agent or a person
-labeled instead, and labels nothing: :func:`run_triage` reports how often the council's
-decisions (and each judge's votes) agree with those labels (:class:`Agreement`: the rate,
+labeled instead (not the drops a pull carried: those decisions were made on other rows),
+and labels nothing: :func:`run_triage` reports how often the council's decisions (and each
+judge's votes) agree with those labels (:class:`Agreement`: the rate,
 Cohen's kappa, the confusion counts and the rows they disagree on), so a rubric can be
 checked against decisions the user made before the council labels the rest. Its votes are
 stored and frozen like any other.
@@ -102,6 +104,7 @@ from pup_finetune.storage import (
     append_jsonl,
     atomic_write_json,
     canonical_json,
+    identity_changes,
     parse_jsonl_line,
     read_json,
 )
@@ -565,6 +568,8 @@ class TriagePlan:
     """The rows the checks ran on: :attr:`rows` and :attr:`checked`."""
     skipped_checked: int = 0
     """Rows not reviewed because a check labeled them, without ``checks``."""
+    skipped_carried: int = 0
+    """Rows not reviewed because they hold a drop a pull carried (none with ``agreement``)."""
     stale_check_labels: list[str] = field(default_factory=list)
     """Rows the checks ran on whose ``by: check`` label every check now passes."""
     checks_to_label: int = 0
@@ -720,6 +725,8 @@ class TriagePlan:
         }
         if self.skipped_checked:
             preview["rows"]["skipped_checked"] = self.skipped_checked
+        if self.skipped_carried:
+            preview["rows"]["skipped_carried"] = self.skipped_carried
         if self.checks is not None:
             preview["notes"] = [
                 f"{display_path(self.checks.path)} is Python you wrote: its checks run in this "
@@ -899,16 +906,20 @@ def plan_triage(
     reviewable: list[TrainingRow] = []
     references: dict[str, Label] = {}
     judge_labels: dict[str, Label] = {}
-    skipped = skipped_checked = 0
+    skipped = skipped_checked = skipped_carried = 0
     for row in stored_rows:
         label = labels.get(row.id)
         if only is not None and row.id not in only:
             if label is not None and label.by == "judge":
                 judge_labels[row.id] = label
             continue
+        if label is not None and label.carried_from is not None:
+            if not agreement:
+                skipped_carried += 1
+            continue
         if label is not None and label.by == "manual":
-            references[row.id] = label
             if agreement:
+                references[row.id] = label
                 reviewable.append(row)
             else:
                 skipped += 1
@@ -983,6 +994,7 @@ def plan_triage(
         checked=checked,
         rows_checked=len(rows) if checks is not None else 0,
         skipped_checked=skipped_checked,
+        skipped_carried=skipped_carried,
         stale_check_labels=stale_checked,
         checks_to_label=sum(
             1
@@ -1104,15 +1116,15 @@ def _check_frozen(dataset: DatasetDir, settings: Mapping[str, Any], votes: int) 
     if not votes or not settings_path.exists():
         return
     stored = read_json(settings_path)
-    if isinstance(stored, dict):
-        stored.pop(CHECKS_FILE_KEY, None)
-    if canonical_json(stored) == canonical_json(settings):
+    if not isinstance(stored, dict):
+        raise StateError(
+            f"{settings_path}: expected a JSON object",
+            hint="fix or remove the file, or pass --reset-triage to discard the votes",
+        )
+    stored.pop(CHECKS_FILE_KEY, None)
+    changed = identity_changes(stored, settings)
+    if not changed:
         return
-    changed = sorted(
-        key
-        for key in set(stored) | set(settings)
-        if canonical_json(stored.get(key)) != canonical_json(settings.get(key))
-    )
     raise SettingsConflict(
         f"{dataset.path} holds {votes} triage votes cast under other settings "
         f"({', '.join(changed)} changed)",

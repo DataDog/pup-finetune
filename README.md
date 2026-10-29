@@ -346,16 +346,23 @@ result leads with its `headline`:
 
 ```json
 "headline": {
-  "judge_pass_rate": {"base": 0.0, "tuned": 0.25, "delta": 0.25, "ci95": [0.0, 0.5]},
+  "judge_pass_rate": {
+    "base": 0.0, "tuned": 0.25, "judged_cases": {"base": 4, "tuned": 4},
+    "common_pass_rate": {"tuned": 0.25, "base": 0.0}, "common_cases": 4,
+    "delta": 0.25, "ci95": [0.0, 0.5]
+  },
   "paired": {"wins": 1, "regressions": 0, "ties": 3},
   "cases": 4,
   "trajectories": 2
 }
 ```
 
-`delta` is the tuned pass rate minus the base one. When its interval `ci95` includes 0, the
-evaluation has not shown that the models differ. The tools are never run, so the scores measure
-agreement with the recorded behavior, not task success.
+`delta` is the tuned pass rate minus the base one, on the `common_cases` where the judge
+graded both models, and `common_pass_rate` holds those two rates. `base` and `tuned` are
+each model's rate on every case it was graded on, `judged_cases`, so they differ from
+`common_pass_rate` when a case ended in an error for one model. When the interval `ci95`
+includes 0, the evaluation has not shown that the models differ. The tools are never run, so
+the scores measure agreement with the recorded behavior, not task success.
 
 An answer cut off at `--max-tokens` fails, and `headline.truncated` counts those per model. A
 reasoning base model can spend its whole budget thinking and make the delta look larger than it
@@ -441,8 +448,9 @@ the envelope and `--no-envelope`.
 Exit code `0` means the command finished. `2` means a preview, or a mistake you can fix in the
 command or the directory. `1` means something outside failed, or local state is broken. An error
 prints nothing on stdout. It prints `Error [<code>]: <message>` on stderr, and a hint when there
-is one. A command that returns a result still prints it on stdout when it exits `1`. Two
-examples are `doctor` when a required check fails and `deploy` when its smoke test fails.
+is one. Each of the error's notes follows as a `warning:` line, such as a resource a Ctrl-C may
+have left running. A command that returns a result still prints it on stdout when it exits `1`.
+Two examples are `doctor` when a required check fails and `deploy` when its smoke test fails.
 
 [Exit codes and errors](docs/commands.md#exit-codes-and-errors) lists every error code.
 `pup finetune help <COMMAND>` prints a command's help.

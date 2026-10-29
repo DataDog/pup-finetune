@@ -349,11 +349,16 @@ def triage_rows(
     hint = template_hint if refused is not None else None
     if refused is None and not plan.rows and not plan.checks_to_label:
         among = "row --rows names" if rows is not None else "accepted row"
-        refused = "there is no row to review: " + (
+        labeled = (
             f"every {among} is labeled by you, the agent or a check"
             if plan.skipped_checked or plan.checked
             else f"every {among} is labeled by you or the agent"
-            if plan.skipped_labeled
+        )
+        refused = "there is no row to review: " + (
+            f"{labeled}, or holds a drop a pull carried from a row it retired"
+            if plan.skipped_carried
+            else labeled
+            if plan.skipped_labeled or plan.skipped_checked or plan.checked
             else "the dataset has no accepted rows"
         )
         preview["refused"] = refused
@@ -376,6 +381,7 @@ def triage_rows(
         "rows_reviewed": len(plan.rows),
         "rows_skipped_labeled": plan.skipped_labeled + report.skipped_labeled,
         **({"rows_skipped_checked": plan.skipped_checked} if plan.skipped_checked else {}),
+        **({"rows_skipped_carried": plan.skipped_carried} if plan.skipped_carried else {}),
         **({"checks": _checks(plan, report)} if plan.checks is not None else {}),
         "kept": counts["keep"],
         "dropped": counts["drop"],
@@ -491,6 +497,7 @@ def _checks_result(
         "dataset_dir": display_path(dataset.path),
         "mode": "checks",
         "rows_skipped_labeled": plan.skipped_labeled + report.skipped_labeled,
+        **({"rows_skipped_carried": plan.skipped_carried} if plan.skipped_carried else {}),
         "checks": _checks(plan, report),
         "stale_check_labels": len(stale),
         "stale_check_label_ids": stale[: triage.FAILURES_SHOWN],

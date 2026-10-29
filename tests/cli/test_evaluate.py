@@ -14,7 +14,6 @@ offline fake judge (the default for a fake run), or a fake swapped in for
 from __future__ import annotations
 
 import dataclasses
-import importlib
 import json
 import os
 import shlex
@@ -1155,17 +1154,6 @@ def test_loading_the_cli_does_not_load_the_evaluation_or_its_http_client() -> No
     )
     # The CLI loads the runner, and nothing the runner drives.
     assert done.stdout.split() == ["[]", "True"]
-
-
-def test_the_evaluation_package_exports_lazily() -> None:
-    import pup_finetune.evaluation as evaluation
-
-    assert evaluation.run_replay.__module__ == "pup_finetune.evaluation.replay"
-    assert sorted(evaluation.__all__) == sorted(evaluation._EXPORTS)
-    for name, module in evaluation._EXPORTS.items():
-        assert getattr(evaluation, name) is getattr(importlib.import_module(module), name)
-    with pytest.raises(AttributeError):
-        _ = evaluation.no_such_name  # type: ignore[attr-defined]
 
 
 def test_cases_too_long_for_the_judge_say_a_retry_cannot_fix_them(

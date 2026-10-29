@@ -41,7 +41,9 @@ LabelSource = Literal["manual", "judge", "check"]
 """How the decision was made: ``manual`` when recorded with ``dataset label`` (by the user or
 their coding agent), ``judge`` when the judge council of ``dataset triage`` decided, ``check``
 when one of its ``--checks`` failed the row. Labels written before ``manual`` and ``judge``
-existed say ``agent`` or ``human``, and are read as ``manual``."""
+existed say ``agent`` or ``human``, and are read as ``manual``. A drop a pull carried from a
+row it retired (:attr:`Label.carried_from`) says ``manual`` too, whoever dropped that row:
+triage never relabels it, so the turns it drops stay out of training."""
 
 _LEGACY_SOURCES = frozenset({"agent", "human"})
 
@@ -61,6 +63,9 @@ class Label(BaseModel):
     by: LabelSource = "manual"
     at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
     """When the decision was made; stored in UTC."""
+    carried_from: Annotated[str, Field(min_length=1)] | None = None
+    """For a drop a pull carried to this row, the id of the dropped row it retired into this
+    one: the decision was made on that row, not on this one. Written only when set."""
 
     @field_validator("reason")
     @classmethod
@@ -85,10 +90,12 @@ class Label(BaseModel):
     def _a_drop_has_a_reason(self) -> Self:
         if not self.keep and not self.reason.strip():
             raise ValueError("a reason is required when keep is false")
+        if self.carried_from is not None and (self.keep or self.by != "manual"):
+            raise ValueError("a carried label is a drop by manual")
         return self
 
     def to_json(self) -> dict[str, Any]:
-        return self.model_dump(mode="json")
+        return self.model_dump(mode="json", exclude_none=True)
 
 
 def parse_labels(
