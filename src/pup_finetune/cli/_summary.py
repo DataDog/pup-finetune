@@ -214,8 +214,10 @@ def status_line(
         return f"{line} ({_kind(remote.get('backend'))} {remote.get('state')})"
     worker = data.get("worker")
     state = worker.get("state") if isinstance(worker, Mapping) else None
-    if data["phase"] == "training" and state not in {"running", "starting"}:
-        pid = worker.get("pid") if isinstance(worker, Mapping) else None
+    pid = worker.get("pid") if isinstance(worker, Mapping) else None
+    if state == "starting":
+        line += f" ({f'worker pid {pid}' if pid is not None else 'its worker'} starting)"
+    elif data["phase"] == "training" and state != "running":
         line += f" ({f'pid {pid}' if pid is not None else 'its process'} not running)"
     return line
 

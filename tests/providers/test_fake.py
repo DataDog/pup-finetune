@@ -12,6 +12,7 @@ import dataclasses
 import json
 import time
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -351,6 +352,23 @@ def test_step_delay_holds_results_back() -> None:
         assert session.optim_step(ADAM).result() is None
 
 
+def test_hold_from_step_holds_steps_from_that_one_on(tmp_path: Path) -> None:
+    hold = tmp_path / "hold"
+    hold.touch()
+    backend = FakeBackend(FakeOptions(hold_file=str(hold), hold_from_step=2))
+    with backend.open_session(FAKE_PROFILE, LORA, **SESSION) as session:
+        assert session.forward_backward([_example()]).result(timeout=1).weight == 2.0
+        assert session.optim_step(ADAM).result(timeout=1) is None
+        assert session.forward([_example()]).result(timeout=1).weight == 2.0
+        step_2, applied = session.forward_backward([_example()]), session.optim_step(ADAM)
+        for pending in (step_2, applied):
+            with pytest.raises(TimeoutError):
+                pending.result(timeout=0.05)
+        hold.unlink()
+        assert step_2.result(timeout=1).weight == 2.0
+        assert applied.result(timeout=1) is None
+
+
 def test_sampler_checkpoints_expire_with_their_session(backend: FakeBackend) -> None:
     with backend.open_session(FAKE_PROFILE, LORA, **SESSION) as session:
         _epoch(session)
@@ -630,6 +648,8 @@ def test_validate_options_returns_only_what_was_given() -> None:
         ({"fail_at_step": "0"}, "fail_at_step"),
         ({"fail_at_step": "true"}, "fail_at_step"),
         ({"prefix_stable": "1"}, "prefix_stable"),
+        ({"hold_from_step": "0"}, "hold_from_step"),
+        ({"hold_from_step": "2"}, "hold_from_step"),
     ],
 )
 def test_invalid_options_are_usage_errors(options: dict[str, Any], match: str) -> None:

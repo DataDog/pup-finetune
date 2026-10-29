@@ -14,14 +14,16 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import shlex
 import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +67,16 @@ def dataset(tmp_path: Path) -> Path:
     return path
 
 
+@pytest.fixture
+def hold(tmp_path: Path) -> Iterator[Path]:
+    """The fake provider's ``hold_file``, there before the test starts its run and removed
+    however the test ends, so no held worker outlives it."""
+    path = tmp_path / "hold"
+    path.touch()
+    yield path
+    path.unlink(missing_ok=True)
+
+
 def train_args(dataset: Path, run_dir: Path, *extra: str) -> list[str]:
     return [
         "train",
@@ -103,9 +115,16 @@ def watch(run_dir: Path) -> dict[str, Any]:
     *progress, summary = watched.stderr.splitlines()
     # Off a terminal each progress line starts with the time of day; the closing summary,
     # the run's status line and the next command, comes last and is the only line that
-    # says how the run ended.
+    # says how the run ended. Until a resumed run's worker begins, its state is still how
+    # the last attempt ended, and the line says the worker is starting.
     for line in progress:
-        assert re.fullmatch(r"\d\d:\d\d:\d\d (training|created): epoch .*", line), line
+        training = re.fullmatch(r"\d\d:\d\d:\d\d (training|created): epoch .*", line)
+        starting = re.fullmatch(
+            r"\d\d:\d\d:\d\d (created|interrupted|failed|cancelled)( \([a-z_]+\))?: "
+            r"epoch .* \(worker pid \d+ starting\)",
+            line,
+        )
+        assert training or starting, line
     assert summary.startswith(f"{final['phase']}: epoch "), summary
     assert summary.endswith(f". Next: {final['next_command']}"), summary
     return final
@@ -155,11 +174,26 @@ def test_a_detached_run_completes_and_status_watch_follows_it(
         assert SECRET not in path.read_text(errors="replace"), path.name
 
 
-def test_cancel_stops_a_slow_worker_gracefully_and_promotes(dataset: Path, tmp_path: Path) -> None:
+def test_cancel_stops_a_detached_worker_gracefully_and_promotes(
+    dataset: Path, tmp_path: Path, hold: Path
+) -> None:
     run_dir = tmp_path / "run"
-    slow = ("--batch-size", "1", "--provider-option", "step_delay_s=0.2")
+    # One step per row. The worker holds itself at its second epoch's first step while the
+    # hold file exists, so it is still training when the cancel arrives, however slowly the
+    # commands below start, and its first epoch's best checkpoint is there to promote.
+    planned = cli(*train_args(dataset, run_dir, "--batch-size", "1"))
+    assert planned.returncode == 2, planned.stderr
+    second_epoch = one_json(planned.stdout)["preview"]["rows"]["train"] + 1
+    held = (
+        "--batch-size",
+        "1",
+        "--provider-option",
+        f"hold_file={json.dumps(str(hold))}",
+        "--provider-option",
+        f"hold_from_step={second_epoch}",
+    )
     # The --detach preview's next_command runs as written: it starts the worker.
-    previewed = cli(*train_args(dataset, run_dir, *slow, "--detach"))
+    previewed = cli(*train_args(dataset, run_dir, *held, "--detach"))
     assert previewed.returncode == 2, previewed.stderr
     detach = shlex.split(one_json(previewed.stdout)["next_command"])
     assert detach[:2] == ["pup", "finetune"] and detach[-1] == "--confirm"
@@ -167,7 +201,6 @@ def test_cancel_stops_a_slow_worker_gracefully_and_promotes(dataset: Path, tmp_p
     started = cli(*detach[2:])
     assert started.returncode == 0, started.stderr
     pid = one_json(started.stdout)["pid"]
-    # Wait until the first epoch's best checkpoint exists, so there is something to promote.
     wait_until(lambda: state(run_dir).get("epochs", 0) >= 1, "the first epoch")
     # Its command line carries no secret: exactly our module, the run and the mode.
     command = command_line(pid)
@@ -187,6 +220,7 @@ def test_cancel_stops_a_slow_worker_gracefully_and_promotes(dataset: Path, tmp_p
     assert cancelled.returncode == 0, cancelled.stderr
     assert one_json(cancelled.stdout)["status"] == "cancelling"
 
+    hold.unlink()
     final = watch(run_dir)
     assert final["phase"] == "cancelled"
     assert final["stopped_reason"] == "cancelled"
@@ -197,12 +231,33 @@ def test_cancel_stops_a_slow_worker_gracefully_and_promotes(dataset: Path, tmp_p
     assert "finished: the run is cancelled" in (run_dir / "worker.log").read_text()
 
 
-def _progress_line(stream: Any) -> str:
-    """The first progress line ``stream`` (a watch's stderr) prints, skipping anything else."""
-    while line := stream.readline():
-        if re.match(r"\d\d:\d\d:\d\d training: epoch ", line):
-            return str(line)
-    raise AssertionError("the watch ended before printing a progress line")
+def _first_line(stream: Any, pattern: str) -> str:
+    """The first line ``stream`` (a process's stderr) prints that ``pattern`` matches at its
+    start, skipping anything else, within :data:`TIMEOUT_S`.
+
+    A thread reads up to that line. ``communicate`` then reads the pipe itself, not the
+    stream's buffer, so lines ``readline`` read ahead past the match are lost to it.
+    """
+    lines: queue.Queue[str] = queue.Queue()
+
+    def read() -> None:
+        while line := stream.readline():
+            lines.put(line)
+            if re.match(pattern, line):
+                return
+        lines.put("")
+
+    threading.Thread(target=read, daemon=True).start()
+    deadline = time.monotonic() + TIMEOUT_S
+    while True:
+        try:
+            line = lines.get(timeout=max(deadline - time.monotonic(), 0))
+        except queue.Empty:
+            raise AssertionError(f"no line matching {pattern!r} in {TIMEOUT_S:g}s") from None
+        if not line:
+            raise AssertionError(f"the process ended before printing a line matching {pattern!r}")
+        if re.match(pattern, line):
+            return line
 
 
 def _ignore_sigint() -> None:
@@ -211,13 +266,11 @@ def _ignore_sigint() -> None:
 
 @pytest.mark.parametrize("sigint_ignored", [False, True], ids=["default", "inherited-ignored"])
 def test_ctrl_c_stops_watching_a_detached_run_but_never_its_training(
-    dataset: Path, tmp_path: Path, sigint_ignored: bool
+    dataset: Path, tmp_path: Path, hold: Path, sigint_ignored: bool
 ) -> None:
     run_dir = tmp_path / "run"
-    # Every step's result is held while this file exists, so the run is still training
+    # Every step's result is held while the hold file exists, so the run is still training
     # whenever the watch is interrupted, however slowly the processes start.
-    hold = tmp_path / "hold"
-    hold.touch()
     slow = ("--batch-size", "1", "--provider-option", f"hold_file={json.dumps(str(hold))}")
     # The --detach preview's next_command runs as written: it starts the worker.
     previewed = cli(*train_args(dataset, run_dir, *slow, "--detach"))
@@ -250,7 +303,7 @@ def test_ctrl_c_stops_watching_a_detached_run_but_never_its_training(
     )
     try:
         assert watcher.stderr is not None
-        first = _progress_line(watcher.stderr)  # the watch is under way
+        first = _first_line(watcher.stderr, r"\d\d:\d\d:\d\d training: epoch ")  # under way
         watcher.send_signal(signal.SIGINT)
         stdout, rest = watcher.communicate(timeout=TIMEOUT_S)
         stderr = first + rest
@@ -296,9 +349,23 @@ def test_ctrl_c_cancels_a_foreground_run_gracefully(dataset: Path, tmp_path: Pat
     assert "cancel requested" in stderr
 
 
-def test_a_second_ctrl_c_stops_at_once_with_a_resume_hint(dataset: Path, tmp_path: Path) -> None:
+def test_a_second_ctrl_c_stops_at_once_with_a_resume_hint(
+    dataset: Path, tmp_path: Path, hold: Path
+) -> None:
     run_dir = tmp_path / "run"
-    args = train_args(dataset, run_dir, "--batch-size", "1", "--provider-option", "step_delay_s=2")
+    # Every step from the second on is held while the hold file exists, and a cancel waits
+    # for the steps in flight: once the first step is recorded, with the second already
+    # sent, the run cannot end before the hold is let go, however slowly this test runs.
+    args = train_args(
+        dataset,
+        run_dir,
+        "--batch-size",
+        "1",
+        "--provider-option",
+        f"hold_file={json.dumps(str(hold))}",
+        "--provider-option",
+        "hold_from_step=2",
+    )
     process = subprocess.Popen(  # noqa: S603 - our own interpreter and module, list args
         [sys.executable, "-m", "pup_finetune", *args, "--confirm"],
         stdout=subprocess.PIPE,
@@ -307,13 +374,17 @@ def test_a_second_ctrl_c_stops_at_once_with_a_resume_hint(dataset: Path, tmp_pat
         env=_env(),
     )
     try:
-        # After the first step, not when training starts: a cancel asked for before the first
-        # step stops at once, so the second Ctrl-C would come too late on a busy machine. The
-        # second step has just begun, and the cancel waits for its 2s to end.
         wait_until(lambda: state(run_dir).get("step", 0) >= 1, "the first step")
+        # The second step is sent before the first one's result is read only with more than
+        # one step in flight.
+        assert RunDir(run_dir).spec().pipeline_depth > 1
         process.send_signal(signal.SIGINT)
-        time.sleep(0.3)  # well within the 2s step it waits for
+        # Two Ctrl-Cs sent before the process next runs arrive as one: send the second only
+        # once the first is handled.
+        assert process.stderr is not None
+        _first_line(process.stderr, "cancel requested")
         process.send_signal(signal.SIGINT)
+        hold.unlink()
         stdout, stderr = process.communicate(timeout=TIMEOUT_S)
     finally:
         if process.poll() is None:

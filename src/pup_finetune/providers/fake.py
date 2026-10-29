@@ -51,7 +51,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Final, Literal, NoReturn
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, PositiveInt
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt, ValidationInfo, field_validator
 
 from pup_finetune.errors import FinetuneError, UsageError
 from pup_finetune.providers.base import (
@@ -477,7 +477,9 @@ class FakeOptions(BaseModel):
     configures the renderer; ``max_seq_len`` caps the profile's context, as the real
     providers' option does (``train --max-seq-len``); ``hold_file`` holds every pending
     result while that file exists, so a test can keep a run training for as long as it
-    needs and then let it finish (by removing the file).
+    needs and then let it finish (by removing the file); ``hold_from_step`` holds only the
+    results of that global step (1-based) and later ones, validation after them included,
+    so a test that creates the file before the run starts holds it at a point it chose.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
@@ -493,11 +495,20 @@ class FakeOptions(BaseModel):
     prefix_stable: bool = True
     max_seq_len: PositiveInt | None = None
     hold_file: str | None = None
+    hold_from_step: PositiveInt | None = None
 
-    @property
-    def hold(self) -> Path | None:
-        """The file whose existence holds every pending result, if any."""
-        return None if self.hold_file is None else Path(self.hold_file)
+    @field_validator("hold_from_step")
+    @classmethod
+    def _holds_with_a_file(cls, step: int | None, info: ValidationInfo) -> int | None:
+        if step is not None and info.data.get("hold_file") is None:
+            raise ValueError("needs hold_file")
+        return step
+
+    def hold_at(self, step: int) -> Path | None:
+        """The file whose existence holds the results of global step ``step``, if any."""
+        if self.hold_file is None or step < (self.hold_from_step or 0):
+            return None
+        return Path(self.hold_file)
 
     @classmethod
     def parse(cls, options: Mapping[str, Any]) -> FakeOptions:
@@ -781,22 +792,24 @@ class FakeSession:
         if step == self._options.fail_at_step and not self._resumed:
             self._crashed = True
             crash = FakeCrash(f"simulated crash at step {step} (fail_at_step)")
-            return _Pending(_raises(crash), self._options.step_delay_s, self._options.hold)
+            return _Pending(_raises(crash), self._options.step_delay_s, self._options.hold_at(step))
         for example in batch:
             for key in self._observations(example):
                 state.policy[key] = state.policy.get(key, 0) + 1
-        return self._metrics(batch, _at(self._options.loss_curve, state.epoch))
+        return self._metrics(batch, _at(self._options.loss_curve, state.epoch), step)
 
     def forward(self, batch: Sequence[TokenizedExample]) -> PendingResult[StepMetrics]:
         self._require_open()
         self._state.ended = True
-        return self._metrics(batch, _at(self._options.val_curve, self._state.trained))
+        val_loss = _at(self._options.val_curve, self._state.trained)
+        return self._metrics(batch, val_loss, self._state.step)
 
     def optim_step(self, adam: AdamConfig) -> PendingResult[None]:
         self._require_open()
         self._state.step += 1
         self._state.trained = self._state.epoch
-        return _Pending(lambda: None, self._options.step_delay_s, self._options.hold)
+        hold = self._options.hold_at(self._state.step)
+        return _Pending(lambda: None, self._options.step_delay_s, hold)
 
     def save_training_checkpoint(self, name: str, *, epoch: int, step: int) -> CheckpointRef:
         self._require_open()
@@ -906,11 +919,14 @@ class FakeSession:
                 start = None
         return keys
 
-    def _metrics(self, batch: Sequence[TokenizedExample], mean: float) -> _Pending[StepMetrics]:
+    def _metrics(
+        self, batch: Sequence[TokenizedExample], mean: float, step: int
+    ) -> _Pending[StepMetrics]:
         weight = sum(sum(example.weights) for example in batch)
         tokens = sum(example.num_tokens for example in batch)
         metrics = StepMetrics(loss_sum=mean * weight, weight=weight, tokens=tokens)
-        return _Pending(lambda: metrics, self._options.step_delay_s, self._options.hold)
+        hold = self._options.hold_at(step)
+        return _Pending(lambda: metrics, self._options.step_delay_s, hold)
 
     def _save(
         self, kind: Literal["training", "sampler"], name: str, *, epoch: int, step: int

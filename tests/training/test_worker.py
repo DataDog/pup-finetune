@@ -143,7 +143,7 @@ def test_a_training_run_is_running_while_its_heartbeat_is_fresh(tmp_path: Path) 
     assert (gone.alive, gone.running) == (False, False)
 
 
-def test_a_worker_started_after_the_last_state_change_is_starting(tmp_path: Path) -> None:
+def test_a_worker_is_starting_until_the_state_names_it(tmp_path: Path) -> None:
     run_dir = new_run(tmp_path / "run")
     atomic_write_json(
         run_dir.worker_path, {"pid": os.getpid(), "mode": "train", "started_at": at(1)}
@@ -152,7 +152,7 @@ def test_a_worker_started_after_the_last_state_change_is_starting(tmp_path: Path
         run_dir, phase="created", pid=None, heartbeat_at=at(0), now=lambda: NOW
     )
     assert (starting.pid, starting.starting, starting.running) == (os.getpid(), True, True)
-    # Once the state changed after the worker started, it is no longer starting.
+    # Once the worker saved the state as the run's training process, it is no longer starting.
     done = worker_status(
         run_dir, phase="completed", pid=os.getpid(), heartbeat_at=at(5), now=lambda: NOW
     )
@@ -270,16 +270,25 @@ def test_a_worker_that_ends_before_its_launch_is_recorded_keeps_its_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     run_dir = new_run(tmp_path / "run")
+    workers: list[threading.Thread] = []
 
     class EndsAtOnce:
-        """Starts a "worker" (this process) that fails and records its exit at once."""
+        """Starts a "worker" (this process, on a thread) that fails and records its exit at
+        once, given time to try before its launch is recorded."""
 
         def __init__(self, args: list[str], **kwargs: Any) -> None:
             self.pid = os.getpid()
-            record_worker_exit(run_dir, "train", StateError("no credentials"), now=lambda: NOW)
+            error = StateError("no credentials")
+            worker = threading.Thread(
+                target=lambda: record_worker_exit(run_dir, "train", error, now=lambda: NOW)
+            )
+            worker.start()
+            workers.append(worker)
+            worker.join(timeout=0.2)
 
     monkeypatch.setattr(subprocess, "Popen", EndsAtOnce)
     assert spawn_worker(run_dir, "train", now=lambda: NOW) == os.getpid()
+    workers[0].join(timeout=10)
     launched = read_json(run_dir.worker_path)
     assert launched["pid"] == os.getpid()
     assert launched["started_at"] == NOW.isoformat(timespec="seconds")
@@ -313,6 +322,22 @@ def test_record_worker_exit_notes_the_error(tmp_path: Path) -> None:
     assert launched["started_at"] == at(0)
     assert launched["ended_at"] == NOW.isoformat()
     assert launched["exit_error"]["message"] == "no credentials"
+
+
+def test_record_worker_exit_leaves_the_launch_of_another_live_worker(tmp_path: Path) -> None:
+    run_dir = new_run(tmp_path / "run")
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        launch = {"pid": other.pid, "mode": "resume", "started_at": at(0)}
+        atomic_write_json(run_dir.worker_path, launch)
+        # This worker lost the run to the one launched after it, which is still alive.
+        record_worker_exit(run_dir, "resume", StateError("the run is locked"), now=lambda: NOW)
+        assert read_json(run_dir.worker_path) == launch
+    finally:
+        other.kill()
+        other.wait()
+    record_worker_exit(run_dir, "resume", StateError("the run is locked"), now=lambda: NOW)
+    assert read_json(run_dir.worker_path)["pid"] == os.getpid()
 
 
 def test_record_worker_exit_writes_nothing_outside_a_run(tmp_path: Path) -> None:

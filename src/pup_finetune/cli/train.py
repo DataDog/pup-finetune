@@ -144,9 +144,10 @@ from pup_finetune.training.worker import (
     WorkerStatus,
     cancel_training,
     cancellable_pid,
-    lock_held,
     record_worker_exit,
     require_detach_supported,
+    require_no_worker_starting,
+    require_not_training,
     run_in_dir,
     spawn_worker,
     worker_status,
@@ -1224,20 +1225,11 @@ def _with_source(result: Mapping[str, Any], source: str) -> dict[str, Any]:
 
 def _resume_mode(run: RunDir, state: RunState) -> WorkerMode:
     """What resuming ``run`` does; raises when it cannot be resumed now."""
-    worker = worker_status(run, phase=state.phase, pid=state.pid, heartbeat_at=state.heartbeat_at)
-    if worker.starting:
-        raise WrongPhase(
-            f"a worker for the run in {run.path} is starting (process {worker.pid})",
-            hint=f"follow it with `pup finetune status {_q(run.path)} --watch`",
-        )
+    require_no_worker_starting(run, state)
     if state.phase == "created":
         return "train"  # it never started (e.g. its worker failed to start): start it
     if state.phase == "training":
-        if lock_held(run):
-            raise WrongPhase(
-                f"the run in {run.path} is still training (process {state.pid})",
-                hint=f"wait for it, or cancel it with `pup finetune cancel {_q(run.path)}`",
-            )
+        require_not_training(run, state)
     else:
         require_resumable(state)
     return "finalize" if state.resume_mode == "finalize_only" else "resume"
@@ -1515,6 +1507,16 @@ def _timing(summary: Mapping[str, Any], *, live_s: float) -> dict[str, Any]:
     return timing
 
 
+def _observed(run: RunDir, sync: RemoteSync | None) -> tuple[dict[str, Any], WorkerStatus]:
+    """``run.status()``, then the process training the run."""
+    summary = run.status()
+    if sync is not None and sync.worker is not None:
+        return summary, sync.worker
+    return summary, worker_status(
+        run, phase=summary["phase"], pid=summary["pid"], heartbeat_at=summary["heartbeat_at"]
+    )
+
+
 def run_status(run: RunDir, *, source: str = "given") -> dict[str, Any]:
     """What `status` measures for ``run``; every number finite or ``None``.
 
@@ -1522,19 +1524,14 @@ def run_status(run: RunDir, *, source: str = "given") -> dict[str, Any]:
     prints is :func:`~pup_finetune.cli._views.status_view` of this. ``source`` is how the
     command found the run (``run_dir_source``: ``given``, ``run id`` or ``newest under
     ./runs``). ``evaluation`` is the run's recorded evaluation
-    (:func:`~pup_finetune.evaluation.runner.recorded_evaluation`), or ``None``.
+    (:func:`~pup_finetune.evaluation.runner.recorded_evaluation`), or ``None``. The worker
+    saves its state before it records its exit, so when it is not running both are read
+    again: a read made after the worker is seen gone is final.
     """
     sync = _remote_sync(run)
-    summary = run.status()
-    if sync is not None and sync.worker is not None:
-        worker = sync.worker
-    else:
-        worker = worker_status(
-            run,
-            phase=summary["phase"],
-            pid=summary["pid"],
-            heartbeat_at=summary["heartbeat_at"],
-        )
+    summary, worker = _observed(run, sync)
+    if not worker.running:
+        summary, worker = _observed(run, sync)
     best = summary["best"] or {}
     stale_alive = worker.stale and worker.alive
     warnings = list(summary["warnings"])
@@ -1542,7 +1539,7 @@ def run_status(run: RunDir, *, source: str = "given") -> dict[str, Any]:
         warnings += sync.warnings
     if worker.problem is not None:
         warnings.append(worker.problem)
-    live = summary["phase"] == "training" and worker.running
+    live = summary["phase"] == "training" and worker.running and not worker.starting
     live_s = (worker.heartbeat_age_s or 0.0) if live else 0.0
     data: dict[str, Any] = finite_json(
         {
@@ -1653,9 +1650,7 @@ def _stopped_watching(data: Mapping[str, Any], why: str, again: str) -> tuple[st
         return f"{why}; the run keeps training in {job_name(remote)}. Watch again: {again}", again
     if worker.running:
         pid = f" (pid {worker.pid})" if worker.pid is not None else ""
-        what = (
-            "the run keeps training" if data["phase"] == "training" else "its worker keeps starting"
-        )
+        what = "its worker is still starting" if worker.starting else "the run keeps training"
         return f"{why}; {what}{pid}. Watch again: {again}", again
     next_command = str(data["next_command"])
     return (

@@ -12,6 +12,7 @@ detached worker is covered by ``test_train_detach.py``.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
@@ -29,7 +30,7 @@ from typer.testing import CliRunner, Result
 from pup_finetune.cli import app
 from pup_finetune.cli import train as train_module
 from pup_finetune.data.dataset_dir import DatasetDir
-from pup_finetune.runs import RunDir
+from pup_finetune.runs import RunDir, RunState
 from pup_finetune.storage import atomic_write_json
 from pup_finetune.training import worker as worker_module
 
@@ -536,6 +537,132 @@ def test_a_worker_starting_for_too_long_is_stale(trained: Path) -> None:
     assert any("has not begun training" in w for w in data["warnings"])
 
 
+def test_status_says_a_worker_is_starting_to_resume_a_stopped_run(trained: Path) -> None:
+    # Right after `resume --detach`, until the worker begins: the state is still the crash's.
+    crash = {"type": "FakeCrash", "code": "external", "message": "simulated crash", "notes": []}
+    _set_state(trained, phase="interrupted", pid=_dead_pid(), heartbeat_at=_ago(30), error=crash)
+    atomic_write_json(
+        trained / "worker.json", {"pid": os.getpid(), "mode": "resume", "started_at": _ago(1)}
+    )
+    result = invoke("status", str(trained))
+    assert output(result)["worker"]["state"] == "starting"
+    headline = result.stderr.splitlines()[-1].split("; ")[0]
+    assert headline.startswith("interrupted (external): epoch 2/2 after step 2/2 "), headline
+    assert headline.endswith(f" (worker pid {os.getpid()} starting)"), headline
+
+
+def test_status_says_a_worker_is_starting_to_resume_a_killed_run(trained: Path) -> None:
+    # A SIGKILL leaves the run training under a dead process; `resume --detach` has just
+    # started a worker, which has not taken the run over yet.
+    _set_state(trained, phase="training", pid=_dead_pid(), heartbeat_at=_ago(120))
+    atomic_write_json(
+        trained / "worker.json", {"pid": os.getpid(), "mode": "resume", "started_at": _ago(1)}
+    )
+    trained_s = json.loads((trained / "state.json").read_text())["elapsed_seconds"]
+    result = invoke("status", str(trained))
+    data = output(result)
+    assert (data["worker"]["pid"], data["worker"]["state"]) == (os.getpid(), "starting")
+    assert data["next_command"] == f"pup finetune status {trained} --watch"
+    assert data["elapsed_seconds"] == round(trained_s)  # nothing trained since the kill
+    headline = result.stderr.splitlines()[-1].split(". Next: ")[0]
+    assert headline.endswith(f" (worker pid {os.getpid()} starting)"), headline
+    # A second worker would race the first for the run.
+    resumed = invoke("resume", str(trained), "--confirm")
+    assert resumed.exit_code == 2
+    assert "is starting" in resumed.stderr
+
+
+def test_status_reports_a_run_its_worker_finished_in_the_second_it_started(
+    trained: Path,
+) -> None:
+    # The worker saved the run's last state in the second it was started, and has not yet
+    # recorded that it ended.
+    now = _ago(0)
+    _set_state(trained, pid=os.getpid(), heartbeat_at=now)
+    atomic_write_json(
+        trained / "worker.json", {"pid": os.getpid(), "mode": "train", "started_at": now}
+    )
+    result = invoke("status", str(trained))
+    data = output(result)
+    assert (data["phase"], data["worker"]["state"]) == ("completed", "exited")
+    assert data["next_command"] == f"pup finetune evaluate {trained}"
+    assert "starting" not in result.stderr
+
+
+@pytest.mark.parametrize("phase", ["training", "completed"])
+def test_status_does_not_report_a_hung_worker_a_foreground_resume_replaced(
+    trained: Path, phase: str
+) -> None:
+    # `resume --detach` started a worker that hangs before it begins; a foreground `resume`
+    # (this process) took the run over after it.
+    hung = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        atomic_write_json(
+            trained / "worker.json", {"pid": hung.pid, "mode": "resume", "started_at": _ago(300)}
+        )
+        _set_state(trained, phase=phase, pid=os.getpid(), heartbeat_at=_ago(5))
+        data = output(invoke("status", str(trained)))
+    finally:
+        hung.kill()
+        hung.wait()
+    assert data["warnings"] == []
+    assert data["worker"]["state"] != "stale"
+
+
+def test_status_calls_a_worker_taking_over_a_killed_run_running_from_its_first_write(
+    trained: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A SIGKILL left the run training under a dead process; this process is the worker
+    # `resume --detach` started for it, seconds before it takes the run over.
+    _set_state(trained, phase="training", pid=_dead_pid(), heartbeat_at=_ago(120))
+    launch = {"pid": os.getpid(), "mode": "resume", "started_at": _ago(5)}
+    atomic_write_json(trained / "worker.json", launch)
+    written: list[dict[str, Any]] = []
+    real_save = RunState.save
+
+    def save(self: RunState) -> None:
+        real_save(self)
+        written.append(json.loads((trained / "state.json").read_text()))
+
+    monkeypatch.setattr(RunState, "save", save)
+    assert invoke("_worker", str(trained), "--mode", "resume").exit_code == 0
+    # What a `status` reading the run right after the worker's first write sees.
+    atomic_write_json(trained / "state.json", written[0])
+    atomic_write_json(trained / "worker.json", launch)
+    data = output(invoke("status", str(trained)))
+    assert (data["worker"]["pid"], data["worker"]["state"]) == (os.getpid(), "running")
+    assert data["next_command"] == f"pup finetune status {trained} --watch"
+
+
+def test_status_shows_how_a_run_ended_when_its_worker_ends_while_status_reads(
+    trained: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    completed = json.loads((trained / "state.json").read_text())
+    _set_state(trained, phase="interrupted", heartbeat_at=_ago(30))
+    atomic_write_json(
+        trained / "worker.json", {"pid": os.getpid(), "mode": "resume", "started_at": _ago(1)}
+    )
+    real = train_module.worker_status
+    ends: list[int] = []
+
+    def worker_ends_first(run: RunDir, **state: Any) -> worker_module.WorkerStatus:
+        # The resumed worker finishes after status read the state and before it looks at the
+        # worker: it saves its last state, then records that it ended.
+        if not ends:
+            ends.append(_dead_pid())
+            atomic_write_json(trained / "state.json", {**completed, "heartbeat_at": _ago(0)})
+            worker = {"pid": ends[0], "mode": "resume", "started_at": _ago(1)}
+            atomic_write_json(
+                trained / "worker.json", {**worker, "ended_at": _ago(0), "exit_error": None}
+            )
+        return real(run, **state)
+
+    monkeypatch.setattr(train_module, "worker_status", worker_ends_first)
+    data = output(invoke("status", str(trained)))
+    assert data["phase"] == "completed"
+    assert data["next_command"] == f"pup finetune evaluate {trained}"
+
+
 # --- status: progress numbers and a bounded watch -------------------------------------
 
 
@@ -731,6 +858,27 @@ def test_ctrl_c_stops_only_the_watch_and_prints_the_status(
     )
 
 
+def test_ctrl_c_while_a_worker_resumes_a_killed_run_says_the_worker_is_starting(
+    trained: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_state(trained, phase="training", pid=_dead_pid(), heartbeat_at=_ago(120))
+    atomic_write_json(
+        trained / "worker.json", {"pid": os.getpid(), "mode": "resume", "started_at": _ago(1)}
+    )
+
+    def interrupted(seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(train_module.time, "sleep", interrupted)
+    result = invoke("status", str(trained), "--watch", "--timeout", "10m")
+    assert result.exit_code == 0, result.stderr
+    again = f"pup finetune status {trained} --watch --timeout 10m"
+    assert (
+        f"stopped watching; its worker is still starting (pid {os.getpid()}). "
+        f"Watch again: {again}" in result.stderr
+    )
+
+
 def test_ctrl_c_after_training_stopped_says_so_and_points_at_the_next_step(
     trained: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -806,6 +954,13 @@ def test_the_watch_line_says_when_the_training_process_is_gone() -> None:
     assert _line(phase="completed", worker=gone).endswith("eta ~6m")
     # A completed run without a worker prints none.
     assert _line(phase="completed", worker=None).endswith("eta ~6m")
+
+
+def test_the_watch_line_says_when_a_worker_is_starting() -> None:
+    starting = {"pid": 7, "state": "starting", "heartbeat_age_s": 300.0, "log": None}
+    assert _line(worker=starting).endswith("(worker pid 7 starting)")
+    assert _line(phase="interrupted", worker=starting).endswith("(worker pid 7 starting)")
+    assert _line(worker={**starting, "pid": None}).endswith("(its worker starting)")
 
 
 @pytest.mark.parametrize(
@@ -945,7 +1100,7 @@ def test_resume_refuses_a_run_that_is_still_training(trained: Path) -> None:
 
 
 def test_resume_refuses_while_a_worker_is_starting(trained: Path) -> None:
-    _set_state(trained, phase="interrupted", heartbeat_at=_ago(30))
+    _set_state(trained, phase="interrupted", pid=_dead_pid(), heartbeat_at=_ago(30))
     atomic_write_json(
         trained / "worker.json", {"pid": os.getpid(), "mode": "resume", "started_at": _ago(1)}
     )
@@ -953,6 +1108,78 @@ def test_resume_refuses_while_a_worker_is_starting(trained: Path) -> None:
     assert result.exit_code == 2
     assert "Error [wrong_phase]: " in result.stderr
     assert "is starting" in result.stderr
+
+
+def test_of_two_detached_resumes_at_once_only_one_starts_a_worker(
+    trained: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_state(trained, phase="interrupted", pid=_dead_pid(), heartbeat_at=_ago(30))
+    real_popen = subprocess.Popen
+    workers: list[subprocess.Popen[bytes]] = []
+
+    def not_begun(args: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
+        # A worker that has started and not yet begun training the run.
+        workers.append(real_popen([sys.executable, "-c", "import time; time.sleep(60)"]))
+        return workers[-1]
+
+    real_spawn = train_module.spawn_worker
+
+    def after_the_other_resume(run: RunDir, mode: worker_module.WorkerMode) -> int:
+        # The other resume passed the same checks and launched its worker first.
+        real_spawn(run, mode)
+        return real_spawn(run, mode)
+
+    monkeypatch.setattr(subprocess, "Popen", not_begun)
+    monkeypatch.setattr(train_module, "spawn_worker", after_the_other_resume)
+    try:
+        resumed = invoke("resume", str(trained), "--detach", "--confirm")
+        data = output(invoke("status", str(trained)))
+    finally:
+        for worker in workers:
+            worker.kill()
+            worker.wait()
+    assert resumed.exit_code == 2
+    assert "is starting" in resumed.stderr
+    assert len(workers) == 1
+    assert (data["worker"]["pid"], data["worker"]["state"]) == (workers[0].pid, "starting")
+
+
+def test_a_detached_resume_refuses_once_the_other_resumes_worker_has_begun(
+    trained: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_state(trained, phase="interrupted", pid=_dead_pid(), heartbeat_at=_ago(30))
+    real_popen = subprocess.Popen
+    workers: list[subprocess.Popen[bytes]] = []
+
+    def launched(args: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
+        workers.append(real_popen([sys.executable, "-c", "import time; time.sleep(60)"]))
+        return workers[-1]
+
+    real_spawn = train_module.spawn_worker
+    with contextlib.ExitStack() as held:
+
+        def after_the_other_worker_began(run: RunDir, mode: worker_module.WorkerMode) -> int:
+            # The other resume's worker, this process, has taken the run and begun training.
+            held.enter_context(RunDir(trained).lock())
+            launch = {"pid": os.getpid(), "mode": "resume", "started_at": _ago(2)}
+            atomic_write_json(trained / "worker.json", launch)
+            _set_state(trained, phase="training", pid=os.getpid(), heartbeat_at=_ago(0))
+            return real_spawn(run, mode)
+
+        monkeypatch.setattr(subprocess, "Popen", launched)
+        monkeypatch.setattr(train_module, "spawn_worker", after_the_other_worker_began)
+        try:
+            resumed = invoke("resume", str(trained), "--detach", "--confirm")
+            data = output(invoke("status", str(trained)))
+        finally:
+            for worker in workers:
+                worker.kill()
+                worker.wait()
+    assert resumed.exit_code == 2
+    assert "Error [wrong_phase]: " in resumed.stderr
+    assert "is still training" in resumed.stderr
+    assert workers == []
+    assert (data["worker"]["pid"], data["worker"]["state"]) == (os.getpid(), "running")
 
 
 def test_resume_refuses_a_changed_renderer(trained: Path) -> None:
@@ -1026,6 +1253,20 @@ def test_cancel_refuses_a_dead_process(trained: Path) -> None:
     assert result.exit_code == 2
     assert "Error [wrong_phase]: " in result.stderr
     assert "no longer running" in result.stderr
+
+
+@pytest.mark.parametrize("phase", ["created", "training", "interrupted", "failed", "cancelled"])
+def test_cancel_points_to_the_watch_while_a_worker_is_starting(trained: Path, phase: str) -> None:
+    _set_state(trained, phase=phase, pid=_dead_pid(), heartbeat_at=_ago(120))
+    atomic_write_json(
+        trained / "worker.json", {"pid": os.getpid(), "mode": "resume", "started_at": _ago(1)}
+    )
+    result = invoke("cancel", str(trained), "--confirm")
+    assert result.exit_code == 2
+    assert "Error [wrong_phase]: " in result.stderr
+    assert f"is starting (process {os.getpid()})" in result.stderr
+    assert f"`pup finetune status {trained} --watch`" in result.stderr
+    assert "resume" not in result.stderr
 
 
 def test_cancel_refuses_a_live_process_that_does_not_hold_the_lock(trained: Path) -> None:
