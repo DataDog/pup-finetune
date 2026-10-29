@@ -29,7 +29,7 @@ from typer.testing import CliRunner, Result
 from pup_finetune.cli import app
 from pup_finetune.cli import train as train_module
 from pup_finetune.data.dataset_dir import DatasetDir
-from pup_finetune.runs import RunDir
+from pup_finetune.runs import RunDir, RunState
 from pup_finetune.storage import atomic_write_json
 from pup_finetune.training import worker as worker_module
 
@@ -606,6 +606,31 @@ def test_status_does_not_report_a_hung_worker_a_foreground_resume_replaced(
         hung.wait()
     assert data["warnings"] == []
     assert data["worker"]["state"] != "stale"
+
+
+def test_status_calls_a_worker_taking_over_a_killed_run_running_from_its_first_write(
+    trained: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A SIGKILL left the run training under a dead process; this process is the worker
+    # `resume --detach` started for it, seconds before it takes the run over.
+    _set_state(trained, phase="training", pid=_dead_pid(), heartbeat_at=_ago(120))
+    launch = {"pid": os.getpid(), "mode": "resume", "started_at": _ago(5)}
+    atomic_write_json(trained / "worker.json", launch)
+    written: list[dict[str, Any]] = []
+    real_save = RunState.save
+
+    def save(self: RunState) -> None:
+        real_save(self)
+        written.append(json.loads((trained / "state.json").read_text()))
+
+    monkeypatch.setattr(RunState, "save", save)
+    assert invoke("_worker", str(trained), "--mode", "resume").exit_code == 0
+    # What a `status` reading the run right after the worker's first write sees.
+    atomic_write_json(trained / "state.json", written[0])
+    atomic_write_json(trained / "worker.json", launch)
+    data = output(invoke("status", str(trained)))
+    assert (data["worker"]["pid"], data["worker"]["state"]) == (os.getpid(), "running")
+    assert data["next_command"] == f"pup finetune status {trained} --watch"
 
 
 def test_status_shows_how_a_run_ended_when_its_worker_ends_while_status_reads(
