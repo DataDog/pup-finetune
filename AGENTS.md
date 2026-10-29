@@ -137,8 +137,9 @@ like a budget-capped run, a cancelled run is evaluated by `evaluate` on request 
 epoch; one cancelled before any epoch has nothing to evaluate). Evaluating a real run is paid
 and needs the judge's key (the default judge follows the keys there are; see below); the
 preview is free and allowed with `PUP_READ_ONLY` set, evaluating is not (an offline one, on the
-fake provider and judge and not published, is allowed: nothing leaves the machine; `train` and
-`resume` on the fake provider likewise). A changed `--max-tokens`, judge, seed or cap needs a
+fake provider and judge and not published, is allowed: nothing leaves the machine; `train`,
+`resume`, `deploy` and `undeploy` on the fake provider likewise). A changed `--max-tokens`,
+judge, seed or cap needs a
 new `--out-dir`. An evaluation whose pairs ended in errors (a sampler or judge outage) reports
 `complete_with_errors` with an error count and a `next_command` that retries them, and exits
 1 when a target has no verdict at all; a cancelled one reports `partial`. `evaluator_errors`
@@ -438,7 +439,7 @@ Source lives under `src/pup_finetune/`.
   never in Typer's box);
   `default_note` writes a default the option itself cannot hold. `tests/cli/test_help_layout.py`
   holds every `--help` to 80 columns with nothing cut off and at most 60 lines (`train`, with
-  37 options in six panels, 65), and parses every example against the app.
+  37 options in six panels, 66), and parses every example against the app.
 - `skill.py` - the bundled agent skill: `bundled_skills_dir` (the package's `_skills/`, else
   the repository's `skills/`), `npx_argv`, `npx_env` (the environment without
   `datadog/pup.py`'s `SECRET_ENV` and every registered provider key variable) and
@@ -474,15 +475,24 @@ Source lives under `src/pup_finetune/`.
   `Interrupted` is a Ctrl-C or SIGTERM, and every conversion of a `KeyboardInterrupt` into it
   passes `interrupt=` so it keeps the interrupt's notes (e.g. a Loops sampler a Ctrl-C cut
   while it was created may remain). The `--confirm` and read-only guards
-  (`require_confirm(..., read_only=...)` adds `read_only` to a preview and offers no
-  `--confirm`), `READ_ONLY_HINT`, and `install_hint` / `reinstall_hint`, the one wording of
-  how to install an extra (`uv sync --all-extras`, never a bare `uv sync --extra X`).
+  (`require_approval`, the gate of every paid or remote-changing command that
+  `PUP_READ_ONLY` refuses: with `--confirm`, `require_writable` refuses it under
+  `PUP_READ_ONLY` unless it runs `offline`; without, `require_confirm` previews it with
+  `offline` in the preview, adding `read_only` and offering no `--confirm` when read-only
+  mode would refuse it; see Conventions for the commands outside it), `READ_ONLY_HINT`, and
+  `install_hint` / `reinstall_hint`, the one wording of how to install an extra (`uv sync
+  --all-extras`, never a bare `uv sync --extra X`).
   `tests/test_hint_commands.py` parses every backticked `pup finetune ...` in a string in
   `src/` with the app and holds every backticked `uv ...` to an allowlist.
 - `next_steps.py` - the `next_command` rule (see Conventions): `command` (every word quoted),
   `template` (a `next_steps` command, `<UPPER_CASE>` placeholders left as they are), `step`
   and `problems`, which checks a result against the rule (the test conftest runs it on every
   emitted result; tests that break it on purpose are marked `any_next_command`).
+- `billing.py` - a preview's `billing` and `paid_billing`: `BillingPart`, one part's
+  sentence and whether it runs offline, which every function that writes a billing sentence
+  returns (`judges.billing`, the registry's `training_billing` and `sampling_billing`, which
+  read `ProviderInfo.offline`); `billing_fields` builds both fields and `merge_billing`
+  adds a sub-preview's to its parent's, so the two are always written together.
 - `display.py` - how values read in results and hints: `display_path` (relative to the
   current directory when inside it, else absolute; `next_steps.command` and the hints'
   `quoted`, the shell-quoted `word`,
@@ -1200,12 +1210,23 @@ Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds can
   conftest checks every emitted result against the rule.
 - A preview is the approval: `action` (one sentence of what `--confirm` does), `billing`
   (the provider's sentence: what it bills for and the usage counted, never a dollar figure
-  we cannot compute), `data_recipients`, `rows`, `settings` (the resolved values that will
-  be used, each value a default resolved to with its source, e.g. `rank_source`),
-  `defaults_used` and `warnings`.
+  we cannot compute; `paid_billing` lists its parts that bill, none of an offline provider
+  or judge, and `billing.py`'s `billing_fields` builds both), `data_recipients`,
+  `rows`, `settings` (the resolved values that will be used, each value a default resolved
+  to with its source, e.g. `rank_source`), `defaults_used`, `warnings` and `offline`
+  (whether nothing it does leaves the machine). The cards read `offline` and
+  `paid_billing`, never the billing sentence or the provider's name.
 - Honor `PUP_READ_ONLY`: reject every remote write and paid run when it is set. Previews still
   run (they make no remote write) and say so: `"read_only"` in the preview and `next_command`
   null. A run that never leaves the machine (the offline fake provider and judge) is allowed.
+  Every such command goes through `errors.require_approval`, with `offline` from one source
+  each: `ProviderInfo.offline` for a provider and `JudgeConfig.offline` for a judge, which
+  an evaluation's and a benchmark's plan combine (`tests/cli/test_approval_gate.py` runs
+  each command against the rule). Outside it: `dataset triage` is paid but writes nothing
+  to Datadog, so `PUP_READ_ONLY` allows its `--confirm` and it calls `require_confirm`
+  alone; publishing an evaluation's experiments calls `require_writable` again right before
+  it writes (the evaluation's approval already counts it, so it is never offline); and the
+  hidden `_worker` checks `require_writable` for the run `train` or `resume` approved.
 - Never ignore what the user asked: an option that does nothing without another one is a
   usage error (add it to its command's table for `_flags.require_enablers`), and a preview
   names every recipient of the data it would send in `data_recipients`.

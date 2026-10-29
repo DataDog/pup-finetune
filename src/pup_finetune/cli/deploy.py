@@ -62,8 +62,7 @@ from pup_finetune.errors import (
     FinetuneError,
     UsageError,
     WrongPhase,
-    require_confirm,
-    require_writable,
+    require_approval,
 )
 from pup_finetune.next_steps import PROGRAM, command, step
 from pup_finetune.providers import (
@@ -109,6 +108,7 @@ DEPLOY_DOC = CommandDoc(
         confirm="creates it (billed while it runs)",
         paid=True,
         read_only="confirm_refused",
+        offline_with="the fake provider",
     ),
     panel=EVALUATE_AND_SHIP,
 )
@@ -127,6 +127,7 @@ UNDEPLOY_DOC = CommandDoc(
         without="previews the delete",
         confirm="deletes the deployment",
         read_only="confirm_refused",
+        offline_with="the fake provider",
     ),
     panel=EVALUATE_AND_SHIP,
 )
@@ -188,8 +189,6 @@ def deploy(
         rerun += ["--shape", shape]
     if timeout_minutes != DEFAULT_TIMEOUT_MINUTES:
         rerun += ["--timeout-minutes", f"{timeout_minutes:g}"]
-    if confirm:
-        require_writable(runtime, "deploy")
     settings = {
         "deployment_id": options.deployment_id,
         "shape": options.shape,
@@ -206,16 +205,18 @@ def deploy(
     ]
     # The preview is built from the run alone (no provider call), so it is allowed under
     # PUP_READ_ONLY.
-    require_confirm(
-        confirm,
-        {
+    require_approval(
+        runtime,
+        "deploy",
+        confirm=confirm,
+        offline=offline,
+        preview={
             **with_settings(
                 deploy_preview(target, options, offline=offline), settings, defaults_used
             ),
             **by_id,
         },
-        shlex.join([*rerun, "--confirm"]),
-        read_only=runtime.read_only,
+        rerun=shlex.join([*rerun, "--confirm"]),
     )
     provider = get_provider(target.provider, runtime)
     receipt, smoke_ok = execute_deploy(provider, target, options)
@@ -227,6 +228,7 @@ def deploy(
         **by_id,
         "receipt_file": display_path(run.deployment_path),
         "billing": deploy_billing(offline=offline),
+        "offline": offline,
         "usage": usage,
         "undeploy_command": undeploy_command(run),
         "next_command": None,
@@ -290,18 +292,19 @@ def undeploy(
         )
     deleted_before = receipt.get("deleted_at")
     if not deleted_before:
+        provider_name = str(receipt.get("provider"))
         # What the preview can know fails here, as for deploy: the delete goes through the
         # same packages.
-        require_packages(str(receipt.get("provider")), runtime, "deploy")
-        if confirm:
-            require_writable(runtime, "undeploy")
-        require_confirm(
-            confirm,
-            {**undeploy_preview(run, receipt), **by_id},
-            command("undeploy", run_dir, "--confirm"),
-            read_only=runtime.read_only,
+        require_packages(provider_name, runtime, "deploy")
+        require_approval(
+            runtime,
+            "undeploy",
+            confirm=confirm,
+            offline=provider_info(provider_name, runtime).offline,
+            preview={**undeploy_preview(run, receipt), **by_id},
+            rerun=command("undeploy", run_dir, "--confirm"),
         )
-        provider = get_provider(str(receipt.get("provider")), runtime)
+        provider = get_provider(provider_name, runtime)
         receipt = execute_undeploy(provider, run)
     data: dict[str, Any] = {
         "deployment_id": receipt.get("deployment_id"),

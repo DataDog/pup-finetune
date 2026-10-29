@@ -65,7 +65,7 @@ These print text on stdout instead of one JSON document: `help` (alone or with a
 
 ## Safety
 
-What each command does without and with `--confirm`, where its data goes, and what `PUP_READ_ONLY` allows. `--confirm` is never implied by `PUP_AUTO_APPROVE` or agent mode. Every preview runs with `PUP_READ_ONLY` set; `--confirm` is refused where the table says so: training, evaluating and remote writes (`dataset triage` writes nothing remote, so its paid `--confirm` is allowed, and a training or evaluation that stays offline, on the fake provider and judge, is allowed too). Each command's help ends with the same facts in one line.
+What each command does without and with `--confirm`, where its data goes, and what `PUP_READ_ONLY` allows. `--confirm` is never implied by `PUP_AUTO_APPROVE` or agent mode. Every preview runs with `PUP_READ_ONLY` set; `--confirm` is refused where the table says so: training, evaluating and remote writes (`dataset triage` writes nothing remote, so its paid `--confirm` is allowed, and a run that stays offline, on the fake provider and, where it judges, the fake judge, is allowed too). Each command's help ends with the same facts in one line.
 
 | Command | Without `--confirm` | With `--confirm` | Data goes to | `PUP_READ_ONLY` |
 | --- | --- | --- | --- | --- |
@@ -89,11 +89,11 @@ What each command does without and with `--confirm`, where its data goes, and wh
 | `pup finetune train` | previews the run | trains (paid) | the training provider; with --remote, also Baseten storage (the job's upload); with --evaluate, also the judge's provider and Datadog (experiments, when the dataset was pushed) | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider and judge) |
 | `pup finetune status` | shows the run | no `--confirm` | nowhere: it reads a remote run's Baseten job and its logs | allowed |
 | `pup finetune runs` | lists the runs | no `--confirm` | nowhere: local files | allowed |
-| `pup finetune resume` | previews where it resumes | resumes training (paid) | the training provider | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider and judge) |
+| `pup finetune resume` | previews where it resumes | resumes training (paid) | the training provider | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider) |
 | `pup finetune cancel` | previews which process gets the signal | sends it SIGTERM | nowhere: a signal to a local process | allowed |
 | `pup finetune evaluate` | previews the calls | evaluates (paid) and publishes the experiments | the training provider, the judge's provider, the compare model's provider (with --compare-model), Datadog (experiments) | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider and judge) |
-| `pup finetune deploy` | previews the deployment | creates it (billed while it runs) | the provider: a deployment of the model | preview allowed; `--confirm` refused |
-| `pup finetune undeploy` | previews the delete | deletes the deployment | the provider: the delete request | preview allowed; `--confirm` refused |
+| `pup finetune deploy` | previews the deployment | creates it (billed while it runs) | the provider: a deployment of the model | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider) |
+| `pup finetune undeploy` | previews the delete | deletes the deployment | the provider: the delete request | preview allowed; `--confirm` refused, except a run that stays offline (the fake provider) |
 
 ## `pup finetune doctor`
 
@@ -594,7 +594,7 @@ pup finetune train [OPTIONS]
 | `--dataset` | `DIR` | required | The dataset directory to train on. |
 | `--model` | `MODEL` | required | Model, e.g. glm-5p3-flash; see models list. |
 | **Run** | | | |
-| `--provider` | `NAME` | from --model | Provider: baseten or fireworks. |
+| `--provider` | `NAME` | from --model when only one provider offers it | Provider: baseten or fireworks. |
 | `--run-dir` | `DIR` | runs/RUN_ID | A new or empty run directory. |
 | `--run-id` | `ID` | generated | Run and model id. |
 | `--detach` |  |  | Train in a background worker; see status. |
@@ -814,7 +814,7 @@ pup finetune deploy run
 pup finetune deploy run --timeout-minutes 45
 ```
 
-Safety: Paid with --confirm · creates a deployment that bills until undeploy · PUP_READ_ONLY: preview only.
+Safety: Paid with --confirm · creates a deployment that bills until undeploy · PUP_READ_ONLY: preview only unless offline.
 
 ## `pup finetune undeploy`
 
@@ -839,4 +839,4 @@ pup finetune undeploy run
 pup finetune undeploy ft-20261007183443-a8b181
 ```
 
-Safety: Free · --confirm deletes the deployment · PUP_READ_ONLY: preview only.
+Safety: Free · --confirm deletes the deployment · PUP_READ_ONLY: preview only unless offline.

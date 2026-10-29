@@ -49,6 +49,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal, cast
 
 from pup_finetune import credentials, providers
+from pup_finetune.billing import BillingPart
 from pup_finetune.errors import ExternalError, UsageError, install_hint
 from pup_finetune.http_common import bearer_key
 from pup_finetune.inference import (
@@ -349,7 +350,7 @@ def recipient(config: JudgeConfig) -> str:
 
 def billing(
     config: JudgeConfig, calls: int, *, input_tokens: int | None = None, what: str = "judge"
-) -> str:
+) -> BillingPart:
     """What ``calls`` calls to ``config``'s model bill, in one sentence for a preview: the
     provider bills per token at its own rates, which pup-finetune does not know.
 
@@ -358,13 +359,16 @@ def billing(
     """
     sent = f", about {input_tokens:,} input tokens in all (approximate)" if input_tokens else ""
     counted = f"{calls:,} calls{sent}, at most {config.max_tokens:,} output tokens each"
-    if config.provider == "fake":
+    if config.offline:
         model = "compare model" if what == "compare-model" else "judge"
-        return f"the fake {model} is offline and bills nothing: {counted}"
+        return BillingPart(
+            f"the fake {model} is offline and bills nothing: {counted}", offline=True
+        )
     name, _ = _name_and_host(config)
-    return (
+    return BillingPart(
         f"{name} bills each {what} call per token at its own rates, which pup-finetune does "
-        f"not know: {counted}"
+        f"not know: {counted}",
+        offline=False,
     )
 
 
@@ -401,7 +405,7 @@ def require_key(
     is refused the same way, as opening its client would refuse it. With ``warnings`` (a
     read-only preview, which offers no ``--confirm`` to fail), the error is appended there
     instead."""
-    if config.provider == "fake":
+    if config.offline:
         return
     found = credentials.key_source(config.credential)
     hint = (

@@ -38,8 +38,16 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Final, Literal
 
+from pup_finetune.billing import BillingPart
 from pup_finetune.errors import ExternalError, FinetuneError, UsageError, install_hint
-from pup_finetune.providers.base import Provider, RemoteJobs, SupportsRemote, selects
+from pup_finetune.providers.base import (
+    Provider,
+    RemoteJobs,
+    SamplingUsage,
+    SupportsRemote,
+    TrainingUsage,
+    selects,
+)
 from pup_finetune.redaction import redact
 from pup_finetune.runtime import Runtime
 
@@ -69,6 +77,8 @@ __all__ = [
     "require_packages",
     "require_remote",
     "require_supported_flags",
+    "sampling_billing",
+    "training_billing",
 ]
 
 Step = Literal["train", "evaluate", "deploy"]
@@ -335,15 +345,21 @@ def require_key(
     warnings.append(f"{error.message}: {error.hint}")
 
 
-def require_supported_flags(name: str, runtime: Runtime, values: Mapping[str, Any]) -> None:
+def require_supported_flags(
+    name: str,
+    runtime: Runtime,
+    values: Mapping[str, Any],
+    *,
+    hint: Callable[[str], str] = lambda flag: f"drop {flag}",
+) -> None:
     """Raise :class:`UsageError` when ``values`` (``TrainSpec`` fields) set a flag provider
     ``name`` refuses, e.g. ``--lora-alpha is not supported on baseten: Baseten sets the LoRA
-    alpha itself``."""
+    alpha itself``, with ``hint`` of the refused flag as its hint."""
     for refused in provider_info(name, runtime).refuses:
         if values.get(refused.field) is not None:
             raise UsageError(
                 f"{refused.flag} is not supported on {name}: {refused.reason}",
-                hint=f"drop {refused.flag}",
+                hint=hint(refused.flag),
             )
 
 
@@ -433,6 +449,21 @@ def get_provider(name: str, runtime: Runtime) -> Provider:
     if not isinstance(provider, Provider):
         raise FinetuneError(f"provider {name!r} ({entry.target}) did not build a Provider")
     return provider
+
+
+def training_billing(provider: Provider, runtime: Runtime, usage: TrainingUsage) -> BillingPart:
+    """What training on ``usage`` bills on ``provider``, offline as its registry entry is."""
+    return BillingPart(
+        provider.training_billing(usage), provider_info(provider.name, runtime).offline
+    )
+
+
+def sampling_billing(name: str, runtime: Runtime, usage: SamplingUsage) -> BillingPart:
+    """What generating ``usage`` bills on the provider ``name``, offline as its registry
+    entry is."""
+    return BillingPart(
+        get_provider(name, runtime).sampling_billing(usage), provider_info(name, runtime).offline
+    )
 
 
 def _visible(entry: ProviderInfo, runtime: Runtime) -> bool:

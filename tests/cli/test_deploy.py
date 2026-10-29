@@ -141,6 +141,8 @@ def test_deploy_previews_then_deploys_and_undeploys(fake_run: Path) -> None:
     result = output(deployed)
     assert result["state"] == "READY"
     assert result["billing"].startswith("the fake provider is offline and bills nothing")
+    assert result["offline"] is True
+    assert "it bills nothing (offline); delete it with: " in deployed.stderr
     # Each fact once: how to call it is in usage, what the create sent in the receipt file.
     assert not {"inference_model", "url", "api_key_env", "request", "model_id"} & set(result)
     assert result["smoke_test"]["ok"] is True
@@ -261,45 +263,6 @@ def _no_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(deploy_module, "get_provider", refuse)
 
 
-def test_deploy_is_refused_read_only_but_previews(
-    fake_run: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("PUP_READ_ONLY", "1")
-    _no_provider(monkeypatch)
-    refused = invoke("deploy", str(fake_run), "--confirm")
-    assert refused.exit_code == 2
-    assert refused.stdout == ""
-    assert "PUP_READ_ONLY" in refused.stderr
-    assert "pup --read-only" in refused.stderr
-    preview = invoke("deploy", str(fake_run))
-    assert preview.exit_code == 2, preview.stderr
-    data = output(preview)
-    assert data["next_command"] is None
-    assert data["preview"]["read_only"] == "--confirm is refused while PUP_READ_ONLY is set"
-    assert data["preview"]["deployment_id"] == model_id_for_run(RUN_ID)
-    assert "Next:" not in preview.stderr
-    assert not RunDir(fake_run).deployment_path.exists()
-
-
-def test_undeploy_is_refused_read_only_but_previews(
-    fake_run: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    assert invoke("deploy", str(fake_run), "--confirm").exit_code == 0
-    receipt = RunDir(fake_run).deployment_path.read_text()
-    monkeypatch.setenv("PUP_READ_ONLY", "true")
-    _no_provider(monkeypatch)
-    refused = invoke("undeploy", str(fake_run), "--confirm")
-    assert refused.exit_code == 2
-    assert "PUP_READ_ONLY" in refused.stderr
-    preview = invoke("undeploy", str(fake_run))
-    assert preview.exit_code == 2, preview.stderr
-    data = output(preview)
-    assert data["next_command"] is None
-    assert data["preview"]["read_only"] == "--confirm is refused while PUP_READ_ONLY is set"
-    assert data["preview"]["action"].startswith("delete the deployment")
-    assert RunDir(fake_run).deployment_path.read_text() == receipt
-
-
 def test_auto_approve_does_not_confirm(fake_run: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PUP_AUTO_APPROVE", "true")
     assert invoke("deploy", str(fake_run)).exit_code == 2
@@ -412,6 +375,8 @@ def test_fireworks_deploy_reports_the_inference_model(
     assert data["usage"]["model"] == f"accounts/{ACCOUNT}/deployments/{model_id}"
     assert data["usage"]["base_url"] == "https://api.fireworks.ai/inference/v1"
     assert data["smoke_test"]["ok"] is True
+    assert data["offline"] is False
+    assert "it bills while a replica runs; delete it with: " in result.stderr
     assert data["next_command"] is None
     assert data["undeploy_command"] == f"pup finetune undeploy {fireworks_run}"
     inference = data["usage"]["model"]
@@ -438,6 +403,45 @@ def test_fireworks_deploy_reports_the_inference_model(
     assert removed.exit_code == 0, removed.stderr
     assert world.sdk.deleted == [model_id]
     assert output(removed)["already_deleted"] is False
+
+
+def test_deploy_is_refused_read_only_but_previews(
+    fireworks_run: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PUP_READ_ONLY", "1")
+    _no_provider(monkeypatch)
+    refused = invoke("deploy", str(fireworks_run), "--confirm")
+    assert refused.exit_code == 2
+    assert refused.stdout == ""
+    assert "PUP_READ_ONLY" in refused.stderr
+    assert "pup --read-only" in refused.stderr
+    preview = invoke("deploy", str(fireworks_run))
+    assert preview.exit_code == 2, preview.stderr
+    data = output(preview)
+    assert data["next_command"] is None
+    assert data["preview"]["read_only"] == "--confirm is refused while PUP_READ_ONLY is set"
+    assert data["preview"]["deployment_id"] == model_id_for_run(RUN_ID)
+    assert "Next:" not in preview.stderr
+    assert not RunDir(fireworks_run).deployment_path.exists()
+
+
+def test_undeploy_is_refused_read_only_but_previews(
+    fireworks_run: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert invoke("deploy", str(fireworks_run), "--confirm").exit_code == 0
+    receipt = RunDir(fireworks_run).deployment_path.read_text()
+    monkeypatch.setenv("PUP_READ_ONLY", "true")
+    _no_provider(monkeypatch)
+    refused = invoke("undeploy", str(fireworks_run), "--confirm")
+    assert refused.exit_code == 2
+    assert "PUP_READ_ONLY" in refused.stderr
+    preview = invoke("undeploy", str(fireworks_run))
+    assert preview.exit_code == 2, preview.stderr
+    data = output(preview)
+    assert data["next_command"] is None
+    assert data["preview"]["read_only"] == "--confirm is refused while PUP_READ_ONLY is set"
+    assert data["preview"]["action"].startswith("delete the deployment")
+    assert RunDir(fireworks_run).deployment_path.read_text() == receipt
 
 
 def test_a_read_only_fireworks_deploy_preview_makes_no_call(

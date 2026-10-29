@@ -89,6 +89,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
+from pup_finetune.billing import billing_fields
 from pup_finetune.concurrency import DaemonPool
 from pup_finetune.curation.labels import Label, LabelReport, apply_labels
 from pup_finetune.data.dataset_dir import DatasetDir
@@ -689,7 +690,7 @@ class TriagePlan:
             action = f"label {which} the checks fail (free), {action}"
         preview: dict[str, Any] = {
             "action": action,
-            "billing": "; ".join(
+            **billing_fields(
                 billing(
                     config,
                     sum(pending[spec] for spec in group),

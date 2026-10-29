@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 from pydantic import SecretStr
 
+from pup_finetune.billing import BillingPart
 from pup_finetune.errors import SettingsConflict, UsageError
 from pup_finetune.evaluation import compare
 from pup_finetune.evaluation.cases import ReplayCase
@@ -172,13 +173,16 @@ def test_the_judge_must_not_be_the_compare_model() -> None:
 def test_the_compare_billing_names_its_calls() -> None:
     target = resolve_compare("anthropic/claude-opus-5-5", None, runtime=DEV)
     assert target is not None
-    assert target.billing(3) == (
+    assert target.billing(3) == BillingPart(
         "Anthropic bills each compare-model call per token at its own rates, which "
-        "pup-finetune does not know: 3 calls, at most 16,000 output tokens each"
+        "pup-finetune does not know: 3 calls, at most 16,000 output tokens each",
+        offline=False,
     )
     fake = resolve_compare("fake-compare", None, runtime=DEV)
     assert fake is not None
-    assert fake.billing(2).startswith("the fake compare model is offline and bills nothing")
+    bill = fake.billing(2)
+    assert bill.offline
+    assert bill.sentence.startswith("the fake compare model is offline and bills nothing")
 
 
 def identity_of(spec: str) -> dict[str, Any]:

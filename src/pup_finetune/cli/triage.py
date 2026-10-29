@@ -257,7 +257,7 @@ def triage_rows(
     checks_only = checks is not None and rubric is None and not rules
     if checks_only:
         _refuse_judge_flags()
-    rubric_text = rubric.read_text(encoding="utf-8") if rubric is not None else None
+    rubric_text = _read_text(rubric) if rubric is not None else None
     criteria = None if checks_only else triage.Criteria.build(rubric_text, rules)
     template_task = None
     if rubric is not None and rubric_text is not None and triage.has_template_task(rubric_text):
@@ -570,9 +570,18 @@ def _council_after_checks(
 
 def _row_ids(path: Path) -> frozenset[str]:
     """The row ids in ``path``, one per line; blank lines are ignored."""
-    return frozenset(
-        line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
-    )
+    return frozenset(line.strip() for line in _read_text(path).splitlines() if line.strip())
+
+
+def _read_text(path: Path) -> str:
+    """The text of a file the user gave; a :class:`UsageError` naming the first line that
+    is not valid UTF-8."""
+    data = path.read_bytes()
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        line = data.count(b"\n", 0, exc.start) + 1
+        raise UsageError(f"{path}:{line}: not valid UTF-8", hint="save it as UTF-8") from None
 
 
 def _agreement_result(

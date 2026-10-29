@@ -20,6 +20,7 @@ from typer.testing import CliRunner
 
 from pup_finetune.cli import app
 from pup_finetune.cli._common import prog_name, run_app
+from pup_finetune.providers import known_models, providers_for_model
 from pup_finetune.runtime import Runtime
 
 runner = CliRunner()
@@ -175,3 +176,17 @@ def test_other_programs_keep_the_dash_dash_help_hint() -> None:
     result = runner.invoke(other, ["run", "--count", "x"], prog_name="other")
     assert result.exit_code == 2
     assert "Try 'other run --help' for help." in plain(result.stderr)
+
+
+def test_train_help_infers_the_provider_only_from_a_model_one_provider_offers() -> None:
+    runtime = Runtime()
+    shared = {
+        alias
+        for models in known_models(runtime).values()
+        for alias in models
+        if len(providers_for_model(alias, runtime)) > 1
+    }
+    assert shared, "no model several providers offer; the default note needs no condition"
+    result = runner.invoke(app, ["help", "train"])
+    text = " ".join(plain(result.stdout).replace("│", " ").split())
+    assert "[default: from --model when only one provider offers it]" in text

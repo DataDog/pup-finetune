@@ -330,10 +330,9 @@ def render_commands() -> str:
         "`PUP_READ_ONLY` allows. `--confirm` is never implied by `PUP_AUTO_APPROVE` or agent "
         "mode. Every preview runs with `PUP_READ_ONLY` set; `--confirm` is refused where the "
         "table says so: training, evaluating and remote writes (`dataset triage` writes "
-        "nothing remote, so its paid `--confirm` is allowed, and a training or evaluation that "
-        "stays offline, on the fake provider and judge, is allowed too). Each command's help "
-        "ends with "
-        "the same facts in one line.",
+        "nothing remote, so its paid `--confirm` is allowed, and a run that stays offline, "
+        "on the fake provider and, where it judges, the fake judge, is allowed too). Each "
+        "command's help ends with the same facts in one line.",
         "",
         *render_safety_table([name for name, _ in commands]),
         "",

@@ -130,9 +130,9 @@ class Safety:
     all, for a command without one) and ``confirm`` what ``--confirm`` does, ``None`` when the
     command has no ``--confirm``. ``paid`` is whether ``--confirm`` runs something billed.
     ``read_only`` is ``allowed`` (nothing it does is refused with ``PUP_READ_ONLY``) or
-    ``confirm_refused`` (its preview runs, its ``--confirm`` is refused); ``offline_allowed``
-    says its ``--confirm`` is still allowed when nothing leaves the machine (the offline
-    fake provider and judge).
+    ``confirm_refused`` (its preview runs, its ``--confirm`` is refused); ``offline_with``
+    names what keeps a run on the machine (``the fake provider``, or ``the fake provider
+    and judge`` for a command that judges), whose ``--confirm`` is still allowed.
     """
 
     data: str
@@ -141,22 +141,22 @@ class Safety:
     confirm: str | None = None
     paid: bool = False
     read_only: ReadOnly = "allowed"
-    offline_allowed: bool = False
+    offline_with: str | None = None
 
     def __post_init__(self) -> None:
         if self.paid and self.confirm is None:
             raise ValueError("a paid command takes --confirm")
         if self.read_only == "confirm_refused" and self.confirm is None:
             raise ValueError("only --confirm can be refused under PUP_READ_ONLY")
-        if self.offline_allowed and self.read_only != "confirm_refused":
-            raise ValueError("offline_allowed qualifies a refused --confirm")
+        if self.offline_with is not None and self.read_only != "confirm_refused":
+            raise ValueError("offline_with qualifies a refused --confirm")
 
     def footer(self) -> str:
         """One line, e.g. ``Free · reads Datadog · PUP_READ_ONLY: allowed``."""
         cost = "Paid with --confirm" if self.paid else "Free"
         refused = self.read_only == "confirm_refused"
         read_only = "preview only" if refused else "allowed"
-        if self.offline_allowed:
+        if self.offline_with is not None:
             read_only += " unless offline"
         return " · ".join([cost, self.data, f"PUP_READ_ONLY: {read_only}"])
 
@@ -165,8 +165,8 @@ class Safety:
         where data goes, and ``PUP_READ_ONLY``."""
         refused = self.read_only == "confirm_refused"
         read_only = "preview allowed; `--confirm` refused" if refused else "allowed"
-        if self.offline_allowed:
-            read_only += ", except a run that stays offline (the fake provider and judge)"
+        if self.offline_with is not None:
+            read_only += f", except a run that stays offline ({self.offline_with})"
         with_confirm = self.confirm if self.confirm is not None else "no `--confirm`"
         return self.without, with_confirm, self.recipients, read_only
 

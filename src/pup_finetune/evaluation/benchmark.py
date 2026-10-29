@@ -46,6 +46,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
+from pup_finetune.billing import billing_fields
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.display import display_path, joined
 from pup_finetune.errors import ExternalError, SettingsConflict, UsageError
@@ -80,6 +81,7 @@ from pup_finetune.providers import (
     provider_info,
     providers_for_model,
     require_packages,
+    sampling_billing,
 )
 from pup_finetune.providers import require_key as require_provider_key
 from pup_finetune.providers.base import (
@@ -223,8 +225,11 @@ class BenchmarkPlan:
         """Whether nothing leaves the machine: the fake provider generates, the fake judge
         judges. ``PUP_READ_ONLY`` allows such a run."""
         return (
-            self.judge.provider == "fake"
-            and all(candidate.provider == "fake" for candidate in self.candidates)
+            self.judge.offline
+            and all(
+                provider_info(candidate.provider, self.runtime).offline
+                for candidate in self.candidates
+            )
             and (self.evaluators is None or self.evaluators.offline)
         )
 
@@ -477,7 +482,7 @@ class BenchmarkPlan:
 
         judge = (
             "the offline fake judge (judge; nothing is sent)"
-            if self.judge.provider == "fake"
+            if self.judge.offline
             else f"{recipient(self.judge)} (judge)"
         )
         generate = f"{', '.join(providers)} (generate), " if providers else ""
@@ -551,8 +556,10 @@ class BenchmarkPlan:
         if judge_calls + calibration:
             require_key(self.judge, warnings=soft)
         billing = [
-            get_provider(name, self.runtime).sampling_billing(
-                SamplingUsage(calls=calls, max_tokens_per_call=settings.max_tokens)
+            sampling_billing(
+                name,
+                self.runtime,
+                SamplingUsage(calls=calls, max_tokens_per_call=settings.max_tokens),
             )
             for name, calls in calls_by_provider.items()
         ]
@@ -585,7 +592,7 @@ class BenchmarkPlan:
         judge_name = "the fake judge" if self.judge.provider == "fake" else self.judge.spec
         judged_at = (
             "the offline fake judge (nothing is sent)"
-            if self.judge.provider == "fake"
+            if self.judge.offline
             else destination(self.judge)
         )
         sampled = "" if self.sampled_from is None else f" (of {self.sampled_from}, --max-rows)"
@@ -602,7 +609,7 @@ class BenchmarkPlan:
                 f"left with {judge_name}"
             )
             + (f", and score each with {joined(scoring)}" if scoring else ""),
-            "billing": "; ".join(billing),
+            **billing_fields(billing),
             "dataset": display_path(self.dataset_dir),
             "out_dir": display_path(self.out_dir),
             "rows": {
@@ -773,7 +780,7 @@ def plan_benchmark(
         candidates.append(candidate)
     if not candidates:
         raise UsageError("--models names no model", hint="pass --models MODEL,MODEL")
-    offline = all(candidate.provider == "fake" for candidate in candidates)
+    offline = all(provider_info(candidate.provider, runtime).offline for candidate in candidates)
     judge_warnings: list[str] = []
     judge, judge_source = resolve_judge(
         settings.judge_model,

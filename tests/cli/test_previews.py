@@ -231,11 +231,12 @@ def test_a_read_only_card_says_confirm_is_refused_and_never_cuts_the_cost(
         "bills",
         "cost",
     ]
+    # Only the judge bills, but that makes the run paid, so the cost row offers the spend cap.
     assert lines[-2] == (
         "  bills     Anthropic bills each judge call per token at its own rates "
         "(pup-finetune does not know the rates)"
     )
-    assert lines[-1] == "  cost      nothing: the fake provider runs offline"
+    assert lines[-1] == "  cost      no spend cap (add --max-spend-usd with --hourly-rate-usd)"
     assert "Next: " not in result.stderr
 
 
@@ -263,6 +264,10 @@ def test_a_remote_train_card_says_where_the_loop_runs() -> None:
         ],
         "billing": "Baseten bills the trainer at its own rates: while it runs; Baseten bills "
         "the CPU job at its own rates: from the job's start until training ends",
+        "paid_billing": [
+            "Baseten bills the trainer at its own rates: while it runs",
+            "Baseten bills the CPU job at its own rates: from the job's start until training ends",
+        ],
     }
     lines = preview_card("train", preview)
     assert len(lines) == CARD_LINES
@@ -499,6 +504,19 @@ def completed(dataset: Path, tmp_path: Path) -> Path:
     result = invoke(*train_args(dataset, run_dir, "--max-epochs", "1", "--confirm"))
     assert result.exit_code == 0, result.stderr
     return run_dir
+
+
+@pytest.mark.usefixtures("all_judge_keys")
+def test_an_evaluate_card_bills_only_what_leaves_the_machine(completed: Path) -> None:
+    judge = ("--judge-model", "anthropic/claude-opus-5-5", "--no-publish")
+    result = invoke("evaluate", str(completed), *judge)
+    assert result.exit_code == 2, result.stderr
+    assert output(result)["preview"]["offline"] is False
+    bills = [line for line in card(result) if line.split()[0] == "bills"]
+    assert bills == [
+        "  bills     Anthropic bills each judge call per token at its own rates "
+        "(pup-finetune does not know the rates)"
+    ]
 
 
 def test_the_evaluate_preview_has_the_shape(completed: Path) -> None:

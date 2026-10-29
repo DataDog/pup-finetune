@@ -536,7 +536,7 @@ with an undeploy hint. It is updated once the deployment serves, with the
 `smoke_test` result, and with `deleted_at` by `undeploy`. A run has one deployment at a time.
 `undeploy` is idempotent and keeps the model. Both are remote writes: they preview without
 `--confirm`, from the run directory alone (no provider call), and with `PUP_READ_ONLY` set
-only their `--confirm` is refused.
+only their `--confirm` is refused, unless the provider is offline (the fake one).
 
 On Baseten, [`providers/baseten/deploy.py`](../src/pup_finetune/providers/baseten/deploy.py)
 serves the run's deployable checkpoint as a dedicated Baseten model named after the deployment

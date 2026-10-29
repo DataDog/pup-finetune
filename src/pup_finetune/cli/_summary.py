@@ -853,7 +853,7 @@ def deploy_summary(result: Mapping[str, Any]) -> Summary:
         details += [call, "example request: usage.example in the result"]
         brief.append(call)
     if undeploy := result.get("undeploy_command"):
-        offline = "bills nothing" in str(result.get("billing") or "")
+        offline = result.get("offline") is True
         bills = "it bills nothing (offline)" if offline else "it bills while a replica runs"
         stop = f"{bills}; delete it with: {undeploy}"
         details.append(stop)
@@ -1092,17 +1092,18 @@ OFFLINE: Final = "nothing: the fake provider runs offline"
 """The cost row of a run on the offline fake provider, which bills nothing."""
 
 
-def _bills(billing: object) -> str | None:
-    """Who bills what, from a preview's billing sentence: the head (before ``: ``) of each
-    ``; ``-separated part that has one, each once, without what bills nothing (an offline
-    fake) and with "at rates pup-finetune does not know" said once."""
-    if not isinstance(billing, str):
+def _bills(preview: Mapping[str, Any]) -> str | None:
+    """Who bills what, from the parts of a preview's billing that bill (``paid_billing``):
+    the head (before ``: ``) of each part that has one, each once, with "at rates
+    pup-finetune does not know" said once."""
+    parts = preview.get("paid_billing")
+    if not isinstance(parts, list):
         return None
     heads: list[str] = []
     unknown = False
-    for part in billing.split("; "):
+    for part in map(str, parts):
         head, sep, _ = part.partition(": ")
-        if not sep or "bills nothing" in head:
+        if not sep:
             continue
         unknown = unknown or head.endswith(UNKNOWN_RATES)
         head = head.removesuffix(UNKNOWN_RATES)
@@ -1114,7 +1115,7 @@ def _bills(billing: object) -> str | None:
 
 
 def _offline(preview: Mapping[str, Any]) -> bool:
-    return preview.get("provider") == "fake"
+    return preview.get("offline") is True
 
 
 def _spend(preview: Mapping[str, Any], *, resumed: bool = False) -> str:
@@ -1135,7 +1136,7 @@ def _billing_rows(preview: Mapping[str, Any], *, resumed: bool = False) -> list[
     """A training preview's ``bills`` row (who bills what) and ``cost`` row (the spend guard;
     on the offline fake provider, that it bills nothing)."""
     return [
-        _row("bills", _bills(preview.get("billing"))),
+        _row("bills", _bills(preview)),
         _row("cost", _spend(preview, resumed=resumed)),
     ]
 
@@ -1238,7 +1239,7 @@ def _evaluate_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
         _row("publishes", publishes),
         _row(
             "bills",
-            _bills(preview.get("billing")) or "nothing: the fake provider and judge run offline",
+            _bills(preview) or "nothing: the fake provider and judge run offline",
         ),
     ]
     return headline, rows
@@ -1262,7 +1263,7 @@ def _benchmark_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
         _row("sends", _sends(preview)),
         _row(
             "bills",
-            _bills(preview.get("billing")) or "nothing: the fake provider and judge run offline",
+            _bills(preview) or "nothing: the fake provider and judge run offline",
         ),
     ]
     return headline, rows
@@ -1291,7 +1292,7 @@ def _triage_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
         if isinstance(checks, Mapping)
         else None,
         _row("sends", _sends(preview)),
-        _row("bills", _bills(preview.get("billing")) or "nothing: the judges run offline"),
+        _row("bills", _bills(preview) or "nothing: the judges run offline"),
     ]
 
 

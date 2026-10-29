@@ -45,6 +45,7 @@ from typing import Annotated, Any, Final
 import typer
 from pydantic import ValidationError
 
+from pup_finetune.billing import BillingPart, billing_fields, merge_billing
 from pup_finetune.cli._common import (
     CommandResult,
     current_context,
@@ -80,6 +81,7 @@ from pup_finetune.errors import (
     NotARunDir,
     UsageError,
     WrongPhase,
+    require_approval,
     require_confirm,
     require_writable,
 )
@@ -99,6 +101,7 @@ from pup_finetune.providers import (
     require_packages,
     require_remote,
     require_supported_flags,
+    training_billing,
 )
 from pup_finetune.providers.base import (
     MAX_SEQ_LEN_FLAG,
@@ -447,6 +450,7 @@ def _preview(
     provider_source: str,
     defaults_used: Sequence[str],
     max_seq_len_flag: str,
+    runtime: Runtime,
 ) -> dict[str, Any]:
     warnings = []
     if not inputs.validation_rows:
@@ -463,7 +467,7 @@ def _preview(
     max_steps = spec.max_steps(len(inputs.train_rows))
     return {
         "action": _action(profile, spec, rows),
-        "billing": provider.training_billing(usage),
+        **billing_fields([training_billing(provider, runtime, usage)]),
         "provider": provider.name,
         "provider_source": provider_source,
         "model": profile.alias,
@@ -605,7 +609,7 @@ def _add_remote_preview(
         f", in a Baseten CPU job in team {plan.team} that runs the training loop, so training "
         "continues while this machine sleeps"
     )
-    preview["billing"] += f"; {plan.billing}"
+    merge_billing(preview, billing_fields([plan.billing]))
     preview["data_destination"] += (
         "; the train and validation rows, their split assignments, the run files and "
         "pup-finetune's source are uploaded to Baseten storage for the job"
@@ -703,7 +707,7 @@ def train(
         typer.Option(
             "--provider",
             metavar="NAME",
-            help=f"Provider: {provider_choices()}. {default_note('from --model')}",
+            help=f"Provider: {provider_choices()}. {default_note('from --model when only one provider offers it')}",
             show_default=False,
             rich_help_panel=RUN,
         ),
@@ -1025,6 +1029,7 @@ def train(
         provider_source=provider_source,
         defaults_used=defaults_used,
         max_seq_len_flag=seq_flag,
+        runtime=runtime,
     )
     rplan: RemotePlan | None = None
     if remote:
@@ -1066,7 +1071,7 @@ def train(
         )
         preview["action"] += f", then {preview['evaluation']['action']}"
         # Each part names who bills it, so the card can say who bills what.
-        preview["billing"] += f"; {preview['evaluation']['billing']}"
+        merge_billing(preview, preview["evaluation"])
         # The consent fields name every recipient, the evaluation's judge included.
         preview["data_destination"] += f"; {preview['evaluation']['data_destination']}"
         preview["data_recipients"] += preview["evaluation"]["data_recipients"]
@@ -1089,16 +1094,14 @@ def train(
         rerun += ["--remote", "--team", rplan.team]
     if plan is not None:
         rerun += plan.train_flags()
-    # PUP_READ_ONLY refuses paid and remote runs; one that never leaves the machine (the
-    # offline fake provider, and an evaluation that is offline too) is allowed.
-    offline = provider.name == "fake" and (plan is None or plan.offline)
-    if confirm and not offline:
-        require_writable(runtime, f"training on {provider.name}", what=PAID_RUN)
-    require_confirm(
-        confirm,
-        preview,
-        shlex.join([*rerun, "--confirm"]),
-        read_only=runtime.read_only and not offline,
+    require_approval(
+        runtime,
+        f"training on {provider.name}",
+        what=PAID_RUN,
+        confirm=confirm,
+        offline=provider_info(provider.name, runtime).offline and (plan is None or plan.offline),
+        preview=preview,
+        rerun=shlex.join([*rerun, "--confirm"]),
     )
     # A new ./runs gets a .gitignore: runs hold trace-derived rows.
     notes = ignore_new_parent(run_dir)
@@ -1264,15 +1267,21 @@ def _run_settings(run: RunDir, manifest: Mapping[str, Any]) -> dict[str, Any]:
     return run.spec().resolved_settings(run.profile())
 
 
-def _resume_billing(provider: Provider, mode: WorkerMode, usage: TrainingUsage) -> str:
-    if mode == "finalize":
-        if provider.name == "fake":
-            return f"{OFFLINE_BILLING}: it trains nothing, only promotes the best checkpoint"
-        return (
-            f"{provider.name} bills the session that promotes the best checkpoint at its own "
-            "rates, which pup-finetune does not know: it trains nothing"
+def _resume_billing(
+    provider: Provider, runtime: Runtime, mode: WorkerMode, usage: TrainingUsage
+) -> BillingPart:
+    if mode != "finalize":
+        return training_billing(provider, runtime, usage)
+    if provider_info(provider.name, runtime).offline:
+        return BillingPart(
+            f"{OFFLINE_BILLING}: it trains nothing, only promotes the best checkpoint",
+            offline=True,
         )
-    return provider.training_billing(usage)
+    return BillingPart(
+        f"{provider.name} bills the session that promotes the best checkpoint at its own "
+        "rates, which pup-finetune does not know: it trains nothing",
+        offline=False,
+    )
 
 
 @run_command
@@ -1296,19 +1305,20 @@ def resume(
     manifest = run.manifest()
     state = run.load_state()
     mode = _resume_mode(run, state)
+    provider_name = str(manifest["provider"])
     # Before the provider loads: a missing SDK fails the preview, not the worker.
-    require_packages(str(manifest["provider"]), runtime, "train")
-    try:
-        require_supported_flags(str(manifest["provider"]), runtime, run.spec().model_dump())
-    except UsageError as exc:
-        # A resume takes no training flags: the run recorded the one refused.
-        flag = exc.message.partition(" ")[0]
-        exc.hint = (
-            f"the run was recorded with {flag}, and a resume trains with its recorded "
-            f"settings: start a new run without {flag} (`pup finetune train --provider "
+    require_packages(provider_name, runtime, "train")
+    # A resume takes no training flags: the run recorded the one refused.
+    require_supported_flags(
+        provider_name,
+        runtime,
+        run.spec().model_dump(),
+        hint=lambda flag: (
+            f"the run was recorded with {flag}, and a resume trains with its "
+            f"recorded settings: start a new run without {flag} (`pup finetune train --provider "
             "<PROVIDER> --dataset <DIR> --model <MODEL>`)"
-        )
-        raise
+        ),
+    )
     provider, inputs = load_run_inputs(run, runtime, finalize_only=mode == "finalize")
     action, resume_from = _resume_action(mode, state)
     spec = run.spec()
@@ -1318,7 +1328,7 @@ def resume(
     rows = _rows(inputs)
     preview = {
         "action": action,
-        "billing": _resume_billing(provider, mode, usage),
+        **billing_fields([_resume_billing(provider, runtime, mode, usage)]),
         "run_id": manifest["run_id"],
         "run_dir": display_path(run_dir),
         **_by_id(source),
@@ -1351,14 +1361,14 @@ def resume(
             "deleted"
         )
     rerun = [*PROGRAM, "resume", str(run_dir), *(["--detach"] if detach else [])]
-    offline = provider.name == "fake"
-    if confirm and not offline:
-        require_writable(runtime, f"training on {provider.name}", what=PAID_RUN)
-    require_confirm(
-        confirm,
-        preview,
-        shlex.join([*rerun, "--confirm"]),
-        read_only=runtime.read_only and not offline,
+    require_approval(
+        runtime,
+        f"training on {provider.name}",
+        what=PAID_RUN,
+        confirm=confirm,
+        offline=provider_info(provider_name, runtime).offline,
+        preview=preview,
+        rerun=shlex.join([*rerun, "--confirm"]),
     )
     if detach:
         return _with_source(
@@ -1839,8 +1849,12 @@ def worker(
             # It runs what `train --confirm` or `resume --confirm` already allowed, but is a
             # command of its own: PUP_READ_ONLY must stop it too.
             provider_name = str(run.manifest()["provider"])
-            if provider_name != "fake":
-                require_writable(runtime, f"training on {provider_name}", what=PAID_RUN)
+            require_writable(
+                runtime,
+                f"training on {provider_name}",
+                what=PAID_RUN,
+                offline=provider_info(provider_name, runtime).offline,
+            )
             info(f"worker {os.getpid()} started: {mode} {run_dir}")
             provider, inputs = load_run_inputs(run, runtime, finalize_only=mode == "finalize")
             result = run_in_dir(provider, run, mode, inputs, on_event=TrainingProgress())
@@ -1901,7 +1915,7 @@ TRAIN_DOC = CommandDoc(
         confirm="trains (paid)",
         paid=True,
         read_only="confirm_refused",
-        offline_allowed=True,
+        offline_with="the fake provider and judge",
     ),
     panel=TRAIN_PANEL,
 )
@@ -1924,7 +1938,7 @@ RESUME_DOC = CommandDoc(
         confirm="resumes training (paid)",
         paid=True,
         read_only="confirm_refused",
-        offline_allowed=True,
+        offline_with="the fake provider",
     ),
     panel=TRAIN_PANEL,
 )

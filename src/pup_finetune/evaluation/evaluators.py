@@ -238,7 +238,7 @@ class EvaluatorSet:
 
     @property
     def offline(self) -> bool:
-        return all(judge.config.provider == "fake" for judge in self.judges)
+        return all(judge.config.offline for judge in self.judges)
 
     @property
     def pinned(self) -> Path | None:

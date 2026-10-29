@@ -669,6 +669,18 @@ def test_rows_naming_an_id_that_is_no_accepted_row_is_a_usage_error(
     assert chat.requests == []
 
 
+@pytest.mark.parametrize("flag", ["--rubric", "--rows"])
+def test_a_file_that_is_not_utf8_is_a_usage_error(
+    dataset: Path, chat: FakeChatApi, tmp_path: Path, flag: str
+) -> None:
+    latin1 = tmp_path / "latin-1.txt"
+    latin1.write_bytes("row-weather-001\nr\xe9sum\xe9\n".encode("latin-1"))
+    result = invoke("dataset", "triage", str(dataset), "--rule", "x", flag, str(latin1))
+    assert result.exit_code == 2
+    assert result.stderr.startswith(f"Error [usage]: {latin1}:2: not valid UTF-8\n")
+    assert chat.requests == []
+
+
 def test_agreement_on_rows_none_of_which_you_labeled_is_a_usage_error(
     dataset: Path, chat: FakeChatApi, tmp_path: Path
 ) -> None:

@@ -34,6 +34,7 @@ from pydantic import (
     model_validator,
 )
 
+from pup_finetune.billing import BillingPart
 from pup_finetune.errors import ExternalError, FinetuneError, StateError, UsageError
 from pup_finetune.redaction import redact
 from pup_finetune.rendering.base import ChatMessage, Renderer, ToolSpec
@@ -767,7 +768,7 @@ class RemotePlan:
 
     ``root`` is the job's working directory, ``extra`` the extra the job installs, ``cli`` the
     provider CLI that submits it, ``secret`` the name of the secret the job reads its API key
-    from (never the key), ``billing`` what the job bills, for the preview's billing sentence,
+    from (never the key), ``billing`` what the job bills, for the preview's billing fields,
     and ``warnings`` what the preview must say.
     """
 
@@ -781,7 +782,7 @@ class RemotePlan:
     compute: Mapping[str, Any]
     secret: str
     tool_versions: Mapping[str, str]
-    billing: str
+    billing: BillingPart
     warnings: tuple[str, ...]
 
     def preview(self, uploads: Mapping[str, Any]) -> dict[str, Any]:
