@@ -374,4 +374,4 @@ def test_an_evaluate_preview_says_why_a_malformed_key_s_provider_is_passed_over(
     preview = output(result)["preview"]
     assert preview["judge_model"] == "openai/gpt-5.4-mini"
     assert "ANTHROPIC_API_KEY) is malformed" in preview["judge_source"]
-    assert [w for w in preview["warnings"] if "ANTHROPIC_API_KEY" in w and "malformed" in w]
+    assert any("ANTHROPIC_API_KEY" in w and "malformed" in w for w in preview["warnings"])
