@@ -726,7 +726,6 @@ def test_each_comparison_carries_both_rates_on_the_cases_it_pairs() -> None:
         results[("compare", case.id)] = ok("compare", case, passed)
     replays = {"base": CASES, "tuned": CASES, "compare": sent}
     summary = summarize(CASES, results, {}, seed=0, replays=replays)
-    # On its own cases tuned passes 4/6 and compare 3/4; both pass more on the cases paired.
     assert summary["targets"]["tuned"]["judge_pass"]["rate"] == pytest.approx(4 / 6)
     assert summary["targets"]["compare"]["judge_pass"]["rate"] == 0.75
     versus_base = summary["tuned_minus_base"]

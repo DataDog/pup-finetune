@@ -565,8 +565,6 @@ def test_cases_the_compare_model_s_api_refuses_are_skipped(
     assert data["errors"] == {"base": 0, "tuned": 0, "compare": 0}
     assert len(model.calls) == len(cases) - skipped + 1
     assert data["headline"]["tuned_minus_compare"]["skipped"] == skipped
-    # Each delta sits beside both rates on the cases it pairs; each target's own rate keeps
-    # its own count.
     rates = data["headline"]["judge_pass_rate"]
     assert rates["judged_cases"] == {
         "base": len(cases),

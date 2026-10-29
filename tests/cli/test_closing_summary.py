@@ -550,7 +550,7 @@ PAIRED_ON_FOUR = {
     "delta": 0.5,
     "ci95": [0.0, 1.0],
 }
-"""Base ended in an error on 2 of 6 cases: tuned passes 4 of its 6 but every case paired."""
+"""Base ended in an error on 2 of 6 cases; tuned passes 4 of its 6, each of the 4 paired."""
 
 
 def test_a_delta_is_shown_beside_the_rates_of_the_cases_it_pairs() -> None:
