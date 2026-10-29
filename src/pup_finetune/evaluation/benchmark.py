@@ -196,6 +196,8 @@ class BenchmarkPlan:
     judge: JudgeConfig
     judge_source: str
     """Where the judge came from (see :func:`~pup_finetune.evaluation.runner.resolve_judge`)."""
+    judge_warnings: tuple[str, ...] = ()
+    """What the preview warns about the default judge, such as a malformed key passed over."""
     settings: BenchmarkSettings
     runtime: Runtime
     sampled_from: int | None = None
@@ -528,7 +530,11 @@ class BenchmarkPlan:
             idle = "" if remaining["generate"] else " (no session for it)"
             names.append(f"{candidate.target}{idle}")
         calibration = self.calibration_calls()
-        warnings = [*self.split_warnings(), *(() if self.reuse is None else self.reuse.warnings)]
+        warnings = [
+            *self.judge_warnings,
+            *self.split_warnings(),
+            *(() if self.reuse is None else self.reuse.warnings),
+        ]
         for candidate in self.candidates:
             if (remote := candidate.profile.remote_code_warning()) is not None:
                 warnings.append(remote)
@@ -775,11 +781,13 @@ def plan_benchmark(
     if not candidates:
         raise UsageError("--models names no model", hint="pass --models MODEL,MODEL")
     offline = all(provider_info(candidate.provider, runtime).offline for candidate in candidates)
+    judge_warnings: list[str] = []
     judge, judge_source = resolve_judge(
         settings.judge_model,
         provider="fake" if offline else candidates[0].provider,
         runtime=runtime,
         stored=_stored_judge(settings.out_dir, candidates),
+        warnings=judge_warnings,
     )
     for candidate in candidates:
         check_judge_differs(judge, candidate.profile.base_model)
@@ -789,6 +797,7 @@ def plan_benchmark(
         cases=cases,
         judge=judge,
         judge_source=judge_source,
+        judge_warnings=tuple(judge_warnings),
         settings=settings,
         runtime=runtime,
         sampled_from=sampled_from,
@@ -937,7 +946,7 @@ def _base_sampler(plan: BenchmarkPlan, candidate: Candidate) -> Iterator[Sampler
             try:
                 sampler.close()
             except Exception as exc:  # its work is done: only note it
-                info(f"closing the {candidate.target} sampler failed: {redact(str(exc))}")
+                info(f"closing the {candidate.target} sampler failed: {exc}")
 
 
 def _prompt_length(renderer: Renderer, case: ReplayCase) -> int:
@@ -1105,7 +1114,7 @@ def _replay_model(
             with _base_sampler(plan, candidate) as sampler:
                 replay({candidate.target: sampler})
         except ExternalError as exc:
-            info(f"{candidate.target} could not be benchmarked: {redact(exc.message)}")
+            info(f"{candidate.target} could not be benchmarked: {exc.message}")
             return error_json(exc)
     _share(plan, candidate, inputs, warnings)
     return None

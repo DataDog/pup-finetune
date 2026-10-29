@@ -27,6 +27,7 @@ from pup_finetune.data.schema import TrainingRow, split_key, validate_row
 from pup_finetune.data.split import SplitParams
 from pup_finetune.errors import Interrupted, StateError, UsageError
 from pup_finetune.providers.base import (
+    CheckpointRef,
     JobState,
     JobStatus,
     LogLine,
@@ -42,6 +43,7 @@ from pup_finetune.runs import RunDir, RunState, dataset_content_hash, rows_conte
 from pup_finetune.runtime import Runtime
 from pup_finetune.storage import DirectoryLock
 from pup_finetune.training.inputs import load_run_inputs
+from pup_finetune.training.records import EpochMetrics, ResumePoint
 from pup_finetune.training.remote import (
     SourceTree,
     package_source,
@@ -329,7 +331,15 @@ class FakeJobs:
     def logs_command(self, job_id: str) -> str:
         return f"logs {job_id}"
 
-    def report(self, run: RunDir, seq: int, *, final: bool = False, **state: Any) -> None:
+    def report(
+        self,
+        run: RunDir,
+        seq: int,
+        *,
+        final: bool = False,
+        epochs: Sequence[dict[str, Any]] = (),
+        **state: Any,
+    ) -> None:
         """Log a state report of the job's copy of ``run``, 30 s ago."""
         fields: dict[str, Any] = {"phase": "training", "step": 5, "pid": 7, **state}
         copy = RunState(run, heartbeat_at=(NOW - timedelta(seconds=40)).isoformat(), **fields)
@@ -338,7 +348,7 @@ class FakeJobs:
             seq=seq,
             at=(NOW - timedelta(seconds=30)).isoformat(timespec="seconds"),
             final=final,
-            files={"state.json": copy.to_json(), "epochs.json": [], "result.json": None},
+            files={"state.json": copy.to_json(), "epochs.json": list(epochs), "result.json": None},
             exit_error={"type": "SettingsConflict", "message": "changed"} if final else None,
         )
         start = int((NOW - timedelta(seconds=30)).timestamp() * 1e9)
@@ -571,6 +581,49 @@ def test_a_read_failure_keeps_the_last_copy(run: RunDir) -> None:
         "the last copy from 2026-10-09T11:50:00+00:00"
     ]
     assert run.read_remote() == before
+
+
+def test_an_out_of_date_report_is_skipped_with_a_warning(run: RunDir) -> None:
+    record(run)
+    jobs = FakeJobs()
+    jobs.status = jobs.job_status("RUNNING", "running")
+    jobs.report(run, 0)
+    synced(run, jobs)
+    # Epoch 1's checkpoint, read with epochs.json after epoch 2 finished.
+    ckpt = CheckpointRef(
+        kind="training", name="t1s2", uri="fake://t1s2", epoch=1, step=2, created_in_session="s"
+    )
+    point = ResumePoint(
+        checkpoint=ckpt,
+        epoch=1,
+        step=2,
+        steps_in_epoch=2,
+        epoch_loss_sum=2.0,
+        epoch_weight=2.0,
+        epoch_tokens=8,
+        train_tokens=8,
+        elapsed_seconds=60.0,
+    )
+    epochs = [
+        EpochMetrics(
+            epoch=epoch,
+            steps=2,
+            train_loss=1.0,
+            val_loss=None,
+            train_tokens=8,
+            new_best=epoch == 1,
+            training_ckpt=None,
+            sampler_ckpt=None,
+        ).to_json()
+        for epoch in (1, 2)
+    ]
+    jobs.report(run, 1, step=4, resume_point=point.to_json(), epochs=epochs)
+    _, _, warnings = synced(run, jobs)
+    assert warnings == [
+        "the state report of Baseten job j1 is out of date (its last training checkpoint, at "
+        "epoch 1 step 2, does not follow its 2 finished epoch(s)); the next one replaces it"
+    ]
+    assert run.load_state().step == 5
 
 
 def test_an_auth_failure_propagates(run: RunDir) -> None:

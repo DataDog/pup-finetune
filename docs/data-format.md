@@ -31,7 +31,9 @@ The messages follow these rules:
   repaired: a row that breaks a rule is excluded with a code.
 
 `source` holds `trace_id`, `span_id`, `ml_app`, `model_name`, `start_ns` (the span's start in
-nanoseconds), `evaluations` (the span's evaluations by name) and `tags`.
+nanoseconds), `evaluations` (the span's evaluations by name) and `tags`. A later pull that
+reads a stored row's span again keeps the stored `source`: the row id fixes the trace and span,
+and the rest (such as evaluations or tags added since) is not updated.
 
 A synthetic example, formatted over several lines here (a file holds one row per line):
 
@@ -174,7 +176,7 @@ content. Keep it out of version control.
 | `settings.json` | The source (`import`, `datadog`, or `datadog_dataset` for `dataset fetch`, which freezes the dataset's project, name, id and version) and its settings, such as the span filter and time window, plus the split settings. Frozen on first use: later runs may leave a flag out (it takes the frozen value), but may not pass another value (later imports pass the same split settings). |
 | `rows.jsonl` | The accepted rows, one canonical row per line. Never rewritten by labeling. |
 | `excluded.jsonl` | One `{"code", "detail", "row_id", "trace_id", "span_id", "line_sha256"}` per excluded row (fields that do not apply are left out). |
-| `labels.jsonl` | Keep/drop decisions appended by `dataset label` and `dataset triage`: `{"id", "keep", "reason", "by", "at"}`, where `by` is `manual` (recorded with `dataset label`), `judge` (decided by the `dataset triage` council) or `check` (a row one of `dataset triage --checks` failed, with the reason `check <name>: <reason>`); triage never relabels a manual row. Older files that say `agent` or `human` read as `manual`. The last label of an id wins, a reason is required to drop, and a dropped row never trains and is never pushed. |
+| `labels.jsonl` | Keep/drop decisions appended by `dataset label`, `dataset triage` and `dataset pull`: `{"id", "keep", "reason", "by", "at"}`, plus `"carried_from"` on a drop a pull carried, where `by` is `manual` (recorded with `dataset label`), `judge` (decided by the `dataset triage` council) or `check` (a row one of `dataset triage --checks` failed, with the reason `check <name>: <reason>`); triage never relabels a manual row. Older files that say `agent` or `human` read as `manual`. The last label of an id wins, a reason is required to drop, and a dropped row never trains and is never pushed. When a later pull retires a dropped row into a row that holds its conversation (a longer one of its trace, or one it now repeats, followed to the row that survives when the pull retires that one too), the pull appends a drop for that row with `"carried_from": "<id>"`, the reason `carried from row '<id>', which this row absorbed: <reason>` and `by` `manual` whoever dropped that row, so triage never relabels it (and `--agreement` does not compare with it, as the decision was made on the other row), unless that row is labeled `manual` already, or a person kept a row the pull retired into it on the way (a judge's or a check's label, even a drop, is replaced, as triage reviews those again). A person's keep on such a row stands, and the pull warns and lists the drop it refused in `pull.drops_not_carried` (`row_id`, the row that now holds the conversation; `kept_on`, the row the keep is on; `kept`; `from`; `dropped`), since the dropped turns then train. A keep does not carry. `dataset label --file` refuses a line naming `carried_from`. |
 | `splits.json` | The split of every trace (one per group of traces and copies of one request) and the frozen seed and fractions. A trace never changes split once assigned. |
 | `summary.json` | Counts, splits and warnings, rewritten after every change. |
 | `split_conflicts.jsonl` | While a group of copies has kept rows in more than one split, a drop label (`{"id", "keep": false, "reason"}`) for each kept row outside the split holding most of the group, for `dataset label --file`; rewritten with `summary.json`, and removed once there are none. |
@@ -272,10 +274,14 @@ the target's own model, `judge` for the judge),
 `truncated` (generations cut off at their limit), `refused` (answers the provider refused)
 and `reused` (`{"generations", "verdicts"}` copied from the dataset's `replay_cache`).
 With base and tuned, `paired` and `tuned_minus_base`; with a compare target,
-`tuned_minus_compare` (`judge_pass_rate`, `ci95`, `n_cases`, `n_trajectories`, `resamples`,
-`seed`, and its own `paired` counts), over the cases the compare model was sent. Each target
-also has `skipped`, the cases it did not replay, in none of its rates: `0` for base and
-tuned, and for the compare model the cases whose conversation its API refuses every time.
+`tuned_minus_compare` (`judge_pass_rate`, `ci95`, `common_pass_rate`, `n_cases`,
+`n_trajectories`, `resamples`, `seed`, and its own `paired` counts), over the cases the
+compare model was sent. `judge_pass_rate` there is the delta, over the `n_cases` both
+targets have a judged result for, and `common_pass_rate` is each target's pass rate on those
+same cases, while a target's own rate under `targets` counts every case it was judged on.
+Each target also has `skipped`, the cases it did not replay, in none of its rates: `0` for
+base and tuned, and for the compare model the cases whose conversation its API refuses every
+time.
 The `evaluate` preview counts those by reason under `compare.skipped_by_reason`:
 `no_messages` (nothing to send before the action), `starts_on_assistant` (on Anthropic, a
 conversation whose first turn is the assistant's), `unanswered_tool_call` (a tool call with
@@ -312,11 +318,11 @@ elsewhere take its `file` paths. Each line of `results.jsonl` gains
 its examples. `summary.json` gains, per target, `evaluators.<name>` and `evaluators.all`
 (`{"pass": {"rate", "passed", "n"}, "not_applicable", "no_verdict", "errors", "pending"}`),
 and at the top `evaluators` (`{"headline", "names", "tuned_minus_base", "tuned_minus_compare"}`,
-each by name: `{"delta", "ci95", "n_cases", "n_trajectories", "wins", "regressions", "ties",
-"both_error", "one_error", "pending", "not_applicable"}`). `all` passes a case when the
-judge passes it and every evaluator passes or does not apply; a case with an evaluator error
-is left out of it. `published.json` keeps, after a span's digest, `+` and the evaluators it
-was sent with.
+each by name: `{"delta", "ci95", "common_pass_rate", "n_cases", "n_trajectories", "wins",
+"regressions", "ties", "both_error", "one_error", "pending", "not_applicable"}`). `all`
+passes a case when the judge passes it and every evaluator passes or does not apply; a case
+with an evaluator error is left out of it. `published.json` keeps, after a span's digest, `+`
+and the evaluators it was sent with.
 
 ## Row checks
 
@@ -385,7 +391,7 @@ is:
 | --- | --- | --- |
 | `train`, `resume` | How the run ended (`status`), the best epoch and its validation loss, each epoch's losses (`best: true` on the best one), the promoted model, the deployable checkpoint's name, the elapsed seconds and what next. | `files.result` (`result.json`: every checkpoint with its URI, and each epoch's checkpoints and tokens) and `files.epochs` (`epochs.json`). |
 | `status` | The phase, epoch and step against their maximums, the last training loss, the validation losses, the best epoch, the elapsed time and ETA, the promoted model, what next; `resume_mode` only for a resumable run, and `worker` (`pid`, `state`: `running`, `starting`, `stale` or `exited`, `heartbeat_age_s`, `log`) only when the run has a worker or is training. | `files.state` (`state.json`), `files.epochs` and `files.result` (`null` until the run has one). |
-| `evaluate` | `judge_model` and `compare_model` (`null` without one), `headline` (the judge pass rate of `base` and `tuned`, and `compare` with a compare target, their `delta` with its `ci95`, the paired `wins`, `regressions` and `ties`, `tuned_minus_compare` with a compare target, with the cases it `skipped`, with `--evaluators` the headline `evaluator` and each one's rates and deltas under `evaluators`, and the numbers of `cases` and `trajectories`), each metric's rate per target, the errors per target, `reused` (the targets that took answers or verdicts from the store, with how many), the publication and the caveat. | `files.summary` (`summary.json`: per target the judge's passes, every metric's `n`, `passed` and `rate`, the agreement per trajectory, tokens and errors by stage; the paired counts; the bootstrap's resamples and seed) and `files.results` (`results.jsonl`, one line per judged pair). |
+| `evaluate` | `judge_model` and `compare_model` (`null` without one), `headline` (the judge pass rate of `base` and `tuned`, and `compare` with a compare target, each on its own `judged_cases`; tuned minus base, `delta`, with its `ci95`, beside both pass rates on the `common_cases` it pairs, `common_pass_rate`; the paired `wins`, `regressions` and `ties`; `tuned_minus_compare` with a compare target, the same way, with the cases it `skipped`; with `--evaluators` the headline `evaluator` and each one's rates on its `scored_cases` and deltas beside their `common_pass_rate` on the `n` cases paired, under `evaluators`; and the numbers of `cases` and `trajectories`), each metric's rate per target, the errors per target, `reused` (the targets that took answers or verdicts from the store, with how many), the publication and the caveat. | `files.summary` (`summary.json`: per target the judge's passes, every metric's `n`, `passed` and `rate`, the agreement per trajectory, tokens and errors by stage; the paired counts; the bootstrap's resamples and seed) and `files.results` (`results.jsonl`, one line per judged pair). |
 
 On Pup 2.0 and later, JSON and YAML output wrap the result in Pup's envelope,
 `{"status", "data", "metadata"}`, with the result as `data`. With `--jq`, the filtered value

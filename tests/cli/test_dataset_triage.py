@@ -29,6 +29,7 @@ from pup_finetune.cli import app
 from pup_finetune.cli import triage as triage_cli
 from pup_finetune.curation.triage import JUDGMENTS_FILE, rubric_template
 from pup_finetune.data.dataset_dir import DatasetDir
+from pup_finetune.data.labels import Label
 from pup_finetune.display import display_path
 from pup_finetune.inference import ChatClient, ChatCompleter
 from pup_finetune.judge_models import FIREWORKS_JUDGES as DEFAULT_JUDGES
@@ -211,8 +212,8 @@ def test_triage_labels_rows_and_is_allowed_read_only(
     assert data["calls_made"] == rows * 3
     assert data["next_command"] is None
     assert [step["command"] for step in data["next_steps"]] == [
-        "pup finetune models list",
         f"pup finetune dataset push {dataset} --name <NAME>",
+        "pup finetune models list",
     ]
     assert data["stale_judge_labels"] == 0
     assert data["dataset"]["dropped"] == data["dropped"]
@@ -288,6 +289,21 @@ def test_a_changed_rubric_needs_a_reset(dataset: Path, chat: FakeChatApi) -> Non
     reset = invoke(*base, "--rule", "second", "--reset-triage", "--confirm")
     assert reset.exit_code == 0, reset.stderr
     assert output(reset)["rows_reviewed"] == 2
+
+
+def test_triage_settings_that_are_not_an_object_are_a_state_error_a_reset_recovers(
+    dataset: Path, chat: FakeChatApi
+) -> None:
+    base = ["dataset", "triage", str(dataset), "--max-rows", "2", "--judges", "fireworks/j1"]
+    assert invoke(*base, "--rule", "first", "--confirm").exit_code == 0
+    (dataset / "triage.json").write_text("[]\n", encoding="utf-8")
+    broken = invoke(*base, "--rule", "first")
+    assert broken.exit_code == 1
+    assert "Error [state]: " in broken.stderr
+    assert "--reset-triage" in broken.stderr
+    preview = invoke(*base, "--rule", "first", "--reset-triage")
+    assert preview.exit_code == 2, preview.stderr
+    assert output(preview)["preview"]["reset"]["votes_discarded"] == 2
 
 
 JUDGE_J1 = ["--judges", "fireworks/j1", "--confirm"]
@@ -612,6 +628,26 @@ def test_rows_naming_only_rows_you_labeled_offers_no_confirm(
     assert data["preview"]["refused"] == (
         "there is no row to review: every row --rows names is labeled by you or the agent"
     )
+    assert chat.requests == []
+
+
+def test_rows_naming_only_a_row_holding_a_carried_drop_says_so(
+    dataset: Path, chat: FakeChatApi, tmp_path: Path
+) -> None:
+    carried = Label(
+        id="row-weather-001",
+        keep=False,
+        reason="carried from row 'synthetic-gone', which this row absorbed: wrong",
+        carried_from="synthetic-gone",
+    )
+    DatasetDir(dataset).append_labels([carried])
+    subset = row_file(tmp_path, "row-weather-001")
+    result = invoke("dataset", "triage", str(dataset), "--rule", "x", "--rows", str(subset))
+    assert result.exit_code == 2
+    preview = output(result)["preview"]
+    assert preview["rows"] == {"to_review": 0, "skipped_labeled": 0, "skipped_carried": 1}
+    assert "agreement_note" not in preview
+    assert "carried" in preview["refused"]
     assert chat.requests == []
 
 

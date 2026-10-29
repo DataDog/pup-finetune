@@ -19,6 +19,7 @@ import httpx
 from pydantic import SecretStr
 
 from pup_finetune import __version__
+from pup_finetune.credentials import KEY_SHAPE, well_formed
 from pup_finetune.errors import UsageError
 from pup_finetune.redaction import redact, register_secret
 
@@ -34,27 +35,19 @@ def bearer_key(api_key: SecretStr, *, label: str, hint: str) -> str:
     """The value of ``api_key``, registered for redaction, once it is safe to send.
 
     ``label`` names the key in errors (``"the Fireworks API key"``) and ``hint`` says how to
-    fix it. Raises :class:`UsageError` for an empty key, or one that is not one word of
-    printable ASCII. A malformed key is refused before it reaches a header: the HTTP layer
-    would echo an illegal header value in its error, escaped, so redaction could not mask it
-    whole.
+    fix it. Raises :class:`UsageError` for an empty key, or one that is not
+    :data:`~pup_finetune.credentials.KEY_SHAPE`. A malformed key is refused before it reaches
+    a header: the HTTP layer would echo an illegal header value in its error, escaped, so
+    redaction could not mask it whole, and redaction never masks a key shorter than
+    :data:`~pup_finetune.redaction.MIN_SECRET_LENGTH`.
     """
     secret = api_key.get_secret_value()
     if not secret:
         raise UsageError(f"{label} is empty", hint=hint)
-    if not _is_token(secret):
-        raise UsageError(
-            f"{label} is malformed: it must be one word of printable ASCII, "
-            "with no spaces or line breaks",
-            hint=hint,
-        )
+    if not well_formed(secret):
+        raise UsageError(f"{label} is malformed: it must be {KEY_SHAPE}", hint=hint)
     register_secret(secret)
     return secret
-
-
-def _is_token(secret: str) -> bool:
-    """Whether ``secret`` is one word of printable ASCII, safe to send in a header."""
-    return secret.isascii() and secret.isprintable() and not any(c.isspace() for c in secret)
 
 
 def exception_reason(exc: BaseException) -> str:

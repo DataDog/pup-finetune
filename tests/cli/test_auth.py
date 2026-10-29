@@ -20,7 +20,6 @@ from pydantic import SecretStr
 from typer.testing import CliRunner, Result
 
 from pup_finetune import credentials, redaction
-from pup_finetune import doctor as doctor_registry
 from pup_finetune.cli import app
 from pup_finetune.cli import auth as auth_cli
 from pup_finetune.credentials import CredentialSpec
@@ -42,7 +41,6 @@ runner = CliRunner()
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
     monkeypatch.setattr(credentials, "_REGISTRY", {})
-    monkeypatch.setattr(doctor_registry, "_REGISTRY", {})
     for name in ("ACME_API_KEY", "BETA_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     home = tmp_path / "home"
@@ -159,6 +157,18 @@ def test_status_reports_a_locked_keychain_without_failing(
     assert entry["configured"] is False
     assert entry["source"] is None
     assert "could not read the acme key" in entry["error"]
+
+
+def test_status_reports_a_malformed_key_without_masking_the_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    credentials.register(ACME)
+    monkeypatch.setenv("ACME_API_KEY", "acme")
+    result = invoke("status")
+    assert result.exit_code == 0, result.stderr
+    [entry] = json.loads(result.stdout)["providers"]
+    assert (entry["provider"], entry["configured"], entry["source"]) == ("acme", False, "env")
+    assert "acme API key (source: env) is malformed" in entry["error"]
 
 
 def test_status_redacts_a_provider_config_error(keychain: MemoryKeyring) -> None:

@@ -22,6 +22,7 @@ import pytest
 from pup_finetune import redaction
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.providers.base import (
+    SMOKE_PROMPT,
     DeploymentNotReady,
     DeploymentRequest,
     DeployOptions,
@@ -32,7 +33,7 @@ from pup_finetune.providers.base import (
 )
 from pup_finetune.providers.baseten import client
 from pup_finetune.providers.baseten.client import DeploymentRejected
-from pup_finetune.providers.baseten.deploy import POLL_INTERVAL_S, SMOKE_PROMPT
+from pup_finetune.providers.baseten.deploy import POLL_INTERVAL_S
 from pup_finetune.providers.baseten.provider import PROFILES, BasetenProvider
 from pup_finetune.runtime import Runtime
 from tests.fakes.baseten import FakeLoops, FakeModel, instance_type

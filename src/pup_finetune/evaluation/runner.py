@@ -452,13 +452,6 @@ class EvalWork:
     def judge_calls(self) -> int:
         return sum(int(counts["judge"]) for counts in self.by_target.values()) + self.calibration
 
-    @property
-    def trained(self) -> int:
-        """The generations base and tuned make, in the training provider's session."""
-        from pup_finetune.evaluation.replay import TARGETS
-
-        return sum(self.by_target[target]["generate"] for target in TARGETS)
-
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class EvalPlan:
@@ -473,6 +466,8 @@ class EvalPlan:
     judge: JudgeConfig
     judge_source: str
     """Where the judge came from (see :func:`resolve_judge`)."""
+    judge_warnings: tuple[str, ...] = ()
+    """What the preview warns about the default judge, such as a malformed key passed over."""
     settings: EvalSettings
     publishing: Publishing
     runtime: Runtime
@@ -798,7 +793,7 @@ class EvalPlan:
         from pup_finetune.evaluation.replay import CAVEAT, COMPARE, TARGETS, EvalDir
 
         settings = self.settings
-        warnings = self.exclusion_warnings()
+        warnings = [*self.judge_warnings, *self.exclusion_warnings()]
         if (remote := self.profile.remote_code_warning()) is not None:
             warnings.append(remote)
         warnings += [] if self.reuse is None else self.reuse.warnings
@@ -1251,12 +1246,13 @@ def resolve_judge(
     provider: str,
     runtime: Runtime,
     stored: str | None = None,
+    warnings: list[str] | None = None,
 ) -> tuple[JudgeConfig, str]:
     """The judge for ``--judge-model`` and where it came from (``judge_source``): the judge
     the spec names (:func:`pup_finetune.judges.parse_judge`); without one, ``stored`` (the
     judge an evaluation directory froze, so a rerun keeps it), for a ``fake`` run the fake
     judge, else the default by the credentials that resolve
-    (:data:`~pup_finetune.judge_models.EVALUATE_DEFAULTS`).
+    (:data:`~pup_finetune.judge_models.EVALUATE_DEFAULTS`), whose warnings go to ``warnings``.
 
     :data:`~pup_finetune.evaluation.fake_judge.FAKE_JUDGE_MODEL` is the offline judge, for
     development mode only. Raises :class:`UsageError` for an empty spec or an empty model
@@ -1279,7 +1275,7 @@ def resolve_judge(
             )
         return fake_judge_config(), source
     if judge_model is None:
-        (judge_model,), source = default_judges(EVALUATE_DEFAULTS)
+        (judge_model,), source = default_judges(EVALUATE_DEFAULTS, warnings=warnings)
     config = parse_judge(judge_model)
     check_available(config)
     return config, source
@@ -1334,11 +1330,13 @@ def plan_evaluation(
     from pup_finetune.evaluation.replay import EvalDir, remaining_work
     from pup_finetune.evaluation.reuse import ReuseIndex, Wanted, generation_key, key_inputs
 
+    judge_warnings: list[str] = []
     judge_config, judge_source = resolve_judge(
         settings.judge_model,
         provider=provider,
         runtime=runtime,
         stored=_stored(EvalDir(settings.out_dir)),
+        warnings=judge_warnings,
     )
     compare = resolve_compare(
         settings.compare_model,
@@ -1389,6 +1387,7 @@ def plan_evaluation(
         excluded=excluded,
         judge=judge_config,
         judge_source=judge_source,
+        judge_warnings=tuple(judge_warnings),
         settings=settings,
         publishing=plan_publishing(dataset, enabled=settings.publish, no_publish=no_publish),
         runtime=runtime,
@@ -2130,9 +2129,10 @@ def _ci(value: object) -> list[Any] | None:
 
 
 def headline(summary: Mapping[str, Any]) -> dict[str, Any]:
-    """An evaluation summary's headline: the judge pass rate per target, tuned minus base
-    with its 95% CI, the paired verdicts and the cases; with a compare target, tuned minus
-    compare too."""
+    """An evaluation summary's headline: the judge pass rate per target on its own judged
+    cases (``judged_cases``), tuned minus base with its 95% CI beside both pass rates on the
+    cases it pairs (``common_pass_rate`` on ``common_cases``), the paired verdicts and the
+    cases; with a compare target, tuned minus compare too."""
     from pup_finetune.evaluation.replay import COMPARE
 
     targets: Mapping[str, Any] = summary.get("targets") or {}
@@ -2140,16 +2140,17 @@ def headline(summary: Mapping[str, Any]) -> dict[str, Any]:
     paired: Mapping[str, Any] = summary.get("paired") or {}
     verdicts = ("wins", "regressions", "ties")
 
-    def rate(name: str) -> Any:
+    def judged(name: str) -> Mapping[str, Any]:
         found = (targets.get(name) or {}).get("judge_pass")
-        return found.get("rate") if isinstance(found, Mapping) else None
+        return found if isinstance(found, Mapping) else {}
 
-    rates = {"base": rate("base"), "tuned": rate("tuned")}
-    if COMPARE in targets:
-        rates[COMPARE] = rate(COMPARE)
+    names = ("base", "tuned", COMPARE) if COMPARE in targets else ("base", "tuned")
     found: dict[str, Any] = {
         "judge_pass_rate": {
-            **rates,
+            **{name: judged(name).get("rate") for name in names},
+            "judged_cases": {name: judged(name).get("n") for name in names},
+            "common_pass_rate": difference.get("common_pass_rate"),
+            "common_cases": difference.get("n_cases"),
             "delta": difference.get("judge_pass_rate"),
             "ci95": _ci(difference.get("ci95")),
         },
@@ -2159,6 +2160,8 @@ def headline(summary: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(versus, Mapping):
         against: Mapping[str, Any] = versus.get("paired") or {}
         found["tuned_minus_compare"] = {
+            "common_pass_rate": versus.get("common_pass_rate"),
+            "common_cases": versus.get("n_cases"),
             "delta": versus.get("judge_pass_rate"),
             "ci95": _ci(versus.get("ci95")),
             **{key: against.get(key, 0) for key in verdicts},
@@ -2180,18 +2183,23 @@ def headline(summary: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _evaluator_rates(targets: Mapping[str, Any], evaluators: Mapping[str, Any]) -> dict[str, Any]:
-    """Each evaluator's and ``all``'s pass rate per target, and tuned minus base (and
-    minus compare) with its CI and the cases paired."""
+    """Each evaluator's and ``all``'s pass rate per target on its own scored cases
+    (``scored_cases``), and tuned minus base (and minus compare) with its CI beside both
+    pass rates on the ``n`` cases paired."""
     from pup_finetune.evaluation.evaluators import ALL
 
     found: dict[str, Any] = {}
     for name in [*(evaluators.get("names") or []), ALL]:
         entry: dict[str, Any] = {}
+        scored: dict[str, Any] = {}
         for target, values in targets.items():
             rate = ((values.get("evaluators") or {}).get(name) or {}).get("pass") or {}
             entry[target] = rate.get("rate")
+            scored[target] = rate.get("n")
         base = (evaluators.get("tuned_minus_base") or {}).get(name) or {}
         entry |= {
+            "scored_cases": scored,
+            "common_pass_rate": base.get("common_pass_rate"),
             "delta": base.get("delta"),
             "ci95": _ci(base.get("ci95")),
             "n": base.get("n_cases"),
@@ -2199,6 +2207,7 @@ def _evaluator_rates(targets: Mapping[str, Any], evaluators: Mapping[str, Any]) 
         versus = (evaluators.get("tuned_minus_compare") or {}).get(name)
         if isinstance(versus, Mapping):
             entry["tuned_minus_compare"] = {
+                "common_pass_rate": versus.get("common_pass_rate"),
                 "delta": versus.get("delta"),
                 "ci95": _ci(versus.get("ci95")),
                 "n": versus.get("n_cases"),
@@ -2693,11 +2702,12 @@ class StandaloneEvaluation:
                     result = self._replay(client, compare, cancel, report, scoring)
                 record_evaluation(plan, result)
                 return result
-            except KeyboardInterrupt:
+            except KeyboardInterrupt as exc:
                 raise Interrupted(
                     f"evaluation stopped at once (Ctrl-C); what finished is kept in {display_path(plan.out_dir)}",
                     hint=f"preview what is left with `{shlex.join(plan.evaluate_command())}`; "
                     "its next_command continues it",
+                    interrupt=exc,
                 ) from None
 
     def _open_compare(self, stack: ExitStack, work: EvalWork) -> Sampler | None:

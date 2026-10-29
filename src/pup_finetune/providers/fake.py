@@ -53,7 +53,7 @@ from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt
 
-from pup_finetune.errors import FinetuneError, StateError, UsageError
+from pup_finetune.errors import FinetuneError, UsageError
 from pup_finetune.providers.base import (
     MODEL_ID_PATTERN,
     OFFLINE_BILLING,
@@ -64,6 +64,7 @@ from pup_finetune.providers.base import (
     Endpoint,
     Generation,
     LoraConfig,
+    ModelIdTaken,
     ModelProfile,
     ModelRef,
     SamplingUsage,
@@ -820,7 +821,12 @@ class FakeSession:
         self._state.policy = dict(state.policy)
 
     def promote(
-        self, ckpt: CheckpointRef, model_id: str, *, adopt_since: datetime | None = None
+        self,
+        ckpt: CheckpointRef,
+        model_id: str,
+        *,
+        adopt_since: datetime | None = None,
+        on_sending: Callable[[], None] | None = None,
     ) -> ModelRef:
         # The fake promotes the same weights to a model id again as the model it promoted them
         # to before, so it has nothing to adopt; other weights under a taken id are refused.
@@ -835,13 +841,15 @@ class FakeSession:
                 hint="use 1 to 63 lowercase letters, digits and dashes, starting with a letter "
                 "and not ending with a dash",
             )
+        if on_sending is not None:
+            on_sending()
         if self._backend.fail_promotions > 0:
             self._backend.fail_promotions -= 1
             error = self._backend.promotion_error
             raise error or FakeCrash(f"simulated failure promoting {ckpt.name!r} (fail_promotions)")
         held = self._backend.models.setdefault(model_id, weights)
         if held != weights:
-            raise StateError(
+            raise ModelIdTaken(
                 f"the fake model {model_id!r} already holds other weights, so "
                 f"{ckpt.name!r} cannot be promoted to it"
             )

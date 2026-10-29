@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 import re
 import sys
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,10 @@ from typer.testing import CliRunner, Result
 from pup_finetune import output
 from pup_finetune.cli import app
 from pup_finetune.cli._summary import CAVEAT, MAX_LINES, SUMMARIES, format_duration, summarize
+from pup_finetune.errors import ExternalError
+from pup_finetune.evaluation import runner as runner_module
+from pup_finetune.evaluation.fake_judge import FakeJudge
+from pup_finetune.inference import ChatCompleter, ChatCompletion, JudgeConfig
 
 ROWS = Path(__file__).resolve().parent.parent / "fixtures" / "rows" / "tool_use.jsonl"
 
@@ -243,6 +249,49 @@ def test_on_a_terminal_train_shows_every_step_and_a_few_summary_lines(
         f"next: {data['next_command']}",
     ]
     assert lines[-3].startswith(f"run {data['run_id']} completed in ")
+
+
+class DownForUntooledAnswers(FakeJudge):
+    """The offline judge, unreachable for a text answer where the reference calls a tool:
+    base's answers to the tool-call cases end in errors, so base is graded on fewer cases."""
+
+    def complete(self, messages: Sequence[Mapping[str, Any]], **kwargs: Any) -> ChatCompletion:
+        found = super().complete(messages, **kwargs)
+        if "the reference calls a tool and the candidate does not" in found.message["content"]:
+            raise ExternalError("the judge endpoint is unreachable", source="judge")
+        return found
+
+
+@pytest.mark.usefixtures("terminal")
+def test_the_agreement_row_shows_the_rates_the_result_holds(
+    run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    @contextmanager
+    def opened(config: JudgeConfig, **options: Any) -> Iterator[ChatCompleter]:
+        yield DownForUntooledAnswers()
+
+    monkeypatch.setattr(runner_module, "open_judge_client", opened)
+    result = invoke("evaluate", str(run_dir), "--skip-calibration", "--no-publish", "--confirm")
+    data = output_of(result)
+    assert data["status"] == "complete_with_errors", result.stderr
+    rates = data["headline"]["judge_pass_rate"]
+    assert rates["judged_cases"] == {"base": 2, "tuned": 4}
+    assert rates["common_cases"] == 2
+    base, tuned = (
+        f"{round(rates[name] * 100)}% of {rates['judged_cases'][name]}"
+        for name in ("base", "tuned")
+    )
+    common = {name: f"{round(rate * 100)}%" for name, rate in rates["common_pass_rate"].items()}
+    lines = result.stderr.splitlines()
+    row = next(line for line in lines if line.startswith("judge agreement"))
+    assert row == f"{'judge agreement':<21}{base:<11}{tuned}"
+    delta = next(line for line in lines if line.startswith("tuned - base: 0 pts"))
+    assert delta.endswith(
+        f" on 2 of 4 cases, tuned {common['tuned']} vs base {common['base']}; 0 wins, "
+        "0 regressions, 2 ties, 2 errors"
+    )
+    status = invoke("status", str(run_dir)).stderr
+    assert f"judge agreement base {base}, tuned {tuned}, tuned - base 0 pts" in status
 
 
 @pytest.mark.usefixtures("terminal")
@@ -490,6 +539,96 @@ def test_each_comparison_counts_the_errors_of_its_own_two_targets() -> None:
     (compare_line,) = [line for line in found.lines if line.startswith("tuned - compare")]
     assert base_line.endswith("3 ties, 3 errors")
     assert compare_line.endswith("3 ties, 6 errors")
+
+
+PAIRED_ON_FOUR = {
+    "base": 0.5,
+    "tuned": 0.6667,
+    "judged_cases": {"base": 4, "tuned": 6},
+    "common_pass_rate": {"tuned": 1.0, "base": 0.5},
+    "common_cases": 4,
+    "delta": 0.5,
+    "ci95": [0.0, 1.0],
+}
+"""Base ended in an error on 2 of 6 cases; tuned passes 4 of its 6, each of the 4 paired."""
+
+
+def test_a_delta_is_shown_beside_the_rates_of_the_cases_it_pairs() -> None:
+    polite = {
+        "base": 0.25,
+        "tuned": 0.5,
+        "scored_cases": {"base": 4, "tuned": 6},
+        "common_pass_rate": {"tuned": 0.75, "base": 0.25},
+        "delta": 0.5,
+        "ci95": None,
+        "n": 4,
+    }
+    result = {
+        "status": "complete_with_errors",
+        "judge_model": "j",
+        "calibration": {"ok": True},
+        "errors": {"base": 2, "tuned": 0},
+        "headline": {
+            "judge_pass_rate": PAIRED_ON_FOUR,
+            "paired": {"wins": 2, "regressions": 0, "ties": 2},
+            "evaluator": "polite",
+            "evaluators": {"polite": polite},
+            "cases": 6,
+            "trajectories": 3,
+        },
+    }
+    found = summarize("evaluate", result)
+    assert found is not None
+    assert found.lines[1:5] == (
+        "headline polite: base 25% of 4, tuned 50% of 6, tuned - base +50 pts on 4 of 6 cases, "
+        "tuned 75% vs base 25%",
+        f"{'':<21}{'base':<11}tuned",
+        f"{'judge agreement':<21}{'50% of 4':<11}67% of 6",
+        "tuned - base: +50 pts (95% CI 0 to +100) on 4 of 6 cases, tuned 100% vs base 50%; "
+        "2 wins, 0 regressions, 2 ties, 2 errors",
+    )
+    assert (
+        "judge agreement: base 50% of 4, tuned 67% of 6, tuned - base +50 pts (95% CI 0 to +100) "
+        "on 4 of 6 cases, tuned 100% vs base 50%; 2 wins"
+    ) in found.line
+
+
+def test_with_a_compare_target_each_delta_names_the_rates_of_the_cases_it_pairs() -> None:
+    result = {
+        "status": "complete_with_errors",
+        "judge_model": "j",
+        "calibration": {"ok": True},
+        "errors": {"base": 2, "tuned": 0, "compare": 0},
+        "headline": {
+            "judge_pass_rate": {
+                **PAIRED_ON_FOUR,
+                "compare": 0.75,
+                "judged_cases": {"base": 4, "tuned": 6, "compare": 4},
+            },
+            "paired": {"wins": 2, "regressions": 0, "ties": 2},
+            "tuned_minus_compare": {
+                "common_pass_rate": {"tuned": 1.0, "compare": 0.75},
+                "common_cases": 4,
+                "delta": 0.25,
+                "ci95": None,
+                "wins": 1,
+                "regressions": 0,
+                "ties": 3,
+                "skipped": 2,
+            },
+            "cases": 6,
+            "trajectories": 3,
+        },
+    }
+    found = summarize("evaluate", result)
+    assert found is not None
+    assert found.lines[1:4] == (
+        "judge agreement: base 50% of 4, tuned 67% of 6, compare 75% of 4",
+        "tuned - base: +50 pts (95% CI 0 to +100) on 4 of 6 cases, tuned 100% vs base 50%; "
+        "2 wins, 0 regressions, 2 ties, 2 errors",
+        "tuned - compare: +25 pts on 4 of 6 cases, tuned 100% vs compare 75%; 1 win, "
+        "0 regressions, 3 ties, 0 errors",
+    )
 
 
 def test_a_published_comparison_lists_its_three_experiments_as_a_sentence() -> None:

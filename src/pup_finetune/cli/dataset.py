@@ -45,6 +45,7 @@ from pup_finetune.data.convert import ReasoningMode
 from pup_finetune.data.dataset_dir import (
     DatasetDir,
     DatasetSettings,
+    RefusedDrop,
     read_import_file,
 )
 from pup_finetune.data.exclusions import explain
@@ -467,7 +468,7 @@ def dataset_next(
     judge council, are the steps (labels a check wrote count as none while rows are
     unlabeled: no review decided them); a fetched dataset (``dataset fetch``) was curated in
     Datadog, so its rows go straight to training. A triage that is not complete gets a step
-    to finish it. Once rows are labeled, the push is a step
+    to finish it. Once rows are labeled, the push is a step, before ``models list``
     (:meth:`~pup_finetune.curation.pipeline.Pipeline.push_gap`). Training (and
     benchmarking) is a step only once every kept row is pushed as it is now. Kept copies of
     a request outside their group's split come first: a ``dataset label`` step with the drop
@@ -572,6 +573,8 @@ def _next_by_state(
     steps += triage_steps
     if not state.kept:
         return {"next_command": None, "next_steps": steps}
+    if push_step is not None:
+        steps.append(push_step)
     steps.append(step(command("models", "list"), "see the models a provider can fine-tune"))
     if push_step is None:
         steps += [
@@ -594,8 +597,6 @@ def _next_by_state(
                 "provider with the user (`models list` shows them; the run goes in runs/RUN_ID)",
             ),
         ]
-    else:
-        steps.append(push_step)
     return {"next_command": None, "next_steps": steps}
 
 
@@ -1024,10 +1025,11 @@ def pull_rows(
         "splits": summary["splits"],
         "split_groups": summary["split_groups"],
         "split_conflicts": summary["split_conflicts"],
-        "notes": notes.notes,
+        "notes": [*notes.notes, *_carried_notes(added.carried)],
         "warnings": [
             *notes.warnings,
             *_collection_warnings(collection, options),
+            *_not_carried_warnings(added.not_carried),
             *summary["warnings"],
             *pipeline_warnings,
         ],
@@ -1043,6 +1045,19 @@ def pull_rows(
             "excluded": added.excluded,
             "retired": added.retired,
             "updated": added.updated,
+            "carried_drops": [
+                {"row_id": row_id, "from": retired} for row_id, retired in added.carried.items()
+            ],
+            "drops_not_carried": [
+                {
+                    "row_id": refused.row_id,
+                    "kept_on": refused.keep.id,
+                    "kept": refused.keep.reason,
+                    "from": refused.drop.id,
+                    "dropped": refused.drop.reason,
+                }
+                for refused in added.not_carried
+            ],
             **collection.stats(),
         },
         **following,
@@ -1053,6 +1068,54 @@ def pull_rows(
             "dataset label`"
         ),
     }
+
+
+def _carried_notes(carried: Mapping[str, str]) -> list[str]:
+    """The note that rows took the drop label of a dropped row this pull retired into them."""
+    if not carried:
+        return []
+    row_id, retired = next(iter(carried.items()))
+    one = len(carried) == 1
+    return [
+        f"{counted(len(carried), 'row')} now {'holds' if one else 'hold'} the conversation of "
+        f"a dropped row this pull retired, so {'it takes' if one else 'they take'} its drop "
+        f"label (e.g. {row_id!r} from {retired!r}; see pull.carried_drops)"
+    ]
+
+
+def _not_carried_warnings(not_carried: Sequence[RefusedDrop]) -> list[str]:
+    """The warning that rows hold the conversation of a dropped row this pull retired, and of a
+    row a person kept, so the keeps stand and the dropped turns train."""
+    if not not_carried:
+        return []
+    first = not_carried[0]
+    keep, drop, held = first.keep, first.drop, first.row_id
+    dropped = f"row {drop.id!r} ({_decision(drop)})"
+    pair = (
+        f"row {held!r} ({_decision(keep)}) now holds the conversation of {dropped}, which "
+        "this pull retired"
+        if keep.id == held
+        else f"row {held!r} now holds the conversation of {dropped} and of row {keep.id!r} "
+        f"({_decision(keep)}), which this pull retired"
+    )
+    if len(not_carried) == 1:
+        return [
+            f"{pair}; your keep stands, so the turns dropped on {drop.id!r} train: drop "
+            f"{held!r} with `dataset label` if they should not"
+        ]
+    rows = len({refused.row_id for refused in not_carried})
+    one = rows == 1
+    return [
+        f"{counted(rows, 'row')} now {'holds' if one else 'hold'} the conversations of "
+        f"{len(not_carried)} dropped rows this pull retired, and your keeps stand, so the "
+        f"dropped turns train (e.g. {pair}; see pull.drops_not_carried): drop "
+        f"{'it' if one else 'those rows'} with `dataset label` if they should not"
+    ]
+
+
+def _decision(label: Label) -> str:
+    decision = "kept" if label.keep else "dropped"
+    return f"{decision}: {label.reason!r}" if label.reason else decision
 
 
 def _with_frozen(dataset: DatasetDir, directory: Path, values: Mapping[str, Any]) -> dict[str, Any]:
@@ -1332,7 +1395,8 @@ def _read_label_file(path: Path, *, at: datetime) -> list[Label]:
     """The labels in ``path``, all ``manual``; ``at`` fills in lines that leave it out.
 
     A line claiming ``"by": "judge"`` or ``"check"`` is refused: those labels come only from
-    ``dataset triage``."""
+    ``dataset triage``. So is one naming ``carried_from``: carried drops come only from
+    ``dataset pull``."""
     labels = parse_labels(
         path,
         defaults={"at": at},
@@ -1348,6 +1412,13 @@ def _read_label_file(path: Path, *, at: datetime) -> list[Label]:
             f"{path} labels {claimed.id!r} as decided by {by}",
             hint='leave "by" out: `dataset label` records your decisions, and judge and check '
             "labels come only from `pup finetune dataset triage`",
+        )
+    carried = next((label for label in labels if label.carried_from is not None), None)
+    if carried is not None:
+        raise UsageError(
+            f"{path} labels {carried.id!r} as carried from row {carried.carried_from!r}",
+            hint='leave "carried_from" out: `dataset label` records your decisions on the '
+            "rows themselves, and carried drops come only from `pup finetune dataset pull`",
         )
     return labels
 

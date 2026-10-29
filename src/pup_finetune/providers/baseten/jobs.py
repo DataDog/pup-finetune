@@ -40,7 +40,7 @@ from typing import Any, Final, Protocol
 from pydantic import SecretStr
 
 from pup_finetune.billing import BillingPart
-from pup_finetune.credentials import login_hint
+from pup_finetune.credentials import key_fix
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.http_common import bearer_key
 from pup_finetune.providers.base import (
@@ -202,7 +202,7 @@ def _signal_group(process: subprocess.Popen[str], signum: int) -> None:
 def exec_env(environ: Mapping[str, str], key: SecretStr) -> dict[str, str]:
     """The ``baseten`` CLI's environment: ``environ`` without secrets or overrides that would
     send the job elsewhere, plus the API key."""
-    secret = bearer_key(key, label="the Baseten API key", hint=login_hint(CREDENTIALS))
+    secret = bearer_key(key, label="the Baseten API key", hint=key_fix(CREDENTIALS, env=environ))
     env = {
         name: value
         for name, value in npx_env(environ).items()

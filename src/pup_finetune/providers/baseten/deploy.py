@@ -50,10 +50,10 @@ from pup_finetune.providers.base import (
     DeployOptions,
     Endpoint,
     ModelRef,
-    ProviderAuthError,
     ProviderCapacityError,
     SmokeTest,
     TransientError,
+    run_smoke_test,
 )
 from pup_finetune.providers.baseten import ENV_VAR, PROVIDER_NAME
 from pup_finetune.providers.baseten.client import (
@@ -99,8 +99,6 @@ BAD_STATES: Final = frozenset(
         "INACTIVE",
     }
 )
-SMOKE_PROMPT: Final = "Reply with the single word OK."
-SMOKE_MAX_TOKENS: Final = 16
 
 _SHAPE: Final = re.compile(r"([A-Z][A-Z0-9_]*):([1-9][0-9]*)")
 _NAME: Final = re.compile(r"models/([A-Za-z0-9_-]{1,128})/deployments/([A-Za-z0-9_-]{1,128})")
@@ -450,32 +448,15 @@ def smoke_test(
         url = inference_url(endpoint.url or "")
     except ExternalError as exc:
         return SmokeTest(ok=False, detail=redact(str(exc)))
-    deadline = clock() + timeout_s
-    attempts = 0
     with chat(url) as client:
-        while True:
-            attempts += 1
-            started = clock()
-            try:
-                client.complete(
-                    [{"role": "user", "content": SMOKE_PROMPT}],
-                    model=endpoint.inference_model,
-                    temperature=0.0,
-                    max_tokens=SMOKE_MAX_TOKENS,
-                )
-            except ProviderAuthError:
-                raise
-            except (TransientError, ProviderCapacityError) as exc:
-                detail = redact(str(exc))
-            except ExternalError as exc:
-                return SmokeTest(ok=False, attempts=attempts, detail=redact(str(exc)))
-            else:
-                latency = max(0.0, clock() - started)
-                return SmokeTest(ok=True, latency_s=round(latency, 3), attempts=attempts)
-            remaining = deadline - clock()
-            if remaining <= 0:
-                return SmokeTest(ok=False, attempts=attempts, detail=detail)
-            sleep(min(poll_interval_s, remaining))
+        return run_smoke_test(
+            client,
+            endpoint.inference_model,
+            clock=clock,
+            sleep=sleep,
+            poll_interval_s=poll_interval_s,
+            timeout_s=timeout_s,
+        )
 
 
 def _named_model(http: BasetenHTTP, name: str) -> dict[str, Any] | None:

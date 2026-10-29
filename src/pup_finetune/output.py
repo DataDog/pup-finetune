@@ -260,7 +260,8 @@ def emit_error(
     command: str | None = None,
     card: Sequence[str] = (),
 ) -> None:
-    """Report an expected failure: ``Error [<error_code>]: <message>`` and its hint on stderr.
+    """Report an expected failure: ``Error [<error_code>]: <message>`` and its hint on stderr,
+    then ``warning: <note>`` for each of its notes (e.g. a resource that may remain).
 
     A :class:`ConfirmRequired` emits its preview as the stdout result (:func:`emit_preview`)
     and then ``card`` and the rest on stderr (:func:`echo_preview`).
@@ -271,11 +272,12 @@ def emit_error(
         emit_preview(err, runtime=runtime, runner=runner, command=command)
         echo_preview(err, runtime=runtime, card=card)
     else:
-        error_line(str(err), err.error_code, err.hint)
+        error_line(str(err), err.error_code, err.hint, getattr(err, "__notes__", ()))
 
 
-def error_line(message: str, code: str, hint: str | None = None) -> None:
-    """Print ``Error [code]: message`` and, with a ``hint``, ``Hint: hint`` on stderr, redacted.
+def error_line(message: str, code: str, hint: str | None = None, notes: Sequence[str] = ()) -> None:
+    """Print ``Error [code]: message``, with a ``hint`` ``Hint: hint``, then ``warning: note``
+    for each of ``notes`` on stderr, redacted.
 
     The one format of every error: ours, Click's usage errors and unexpected exceptions.
     """
@@ -283,6 +285,8 @@ def error_line(message: str, code: str, hint: str | None = None) -> None:
     if hint:
         print(redact(f"Hint: {hint}"), file=sys.stderr)
     sys.stderr.flush()
+    for note in notes:
+        warn(redact(note))
 
 
 WARNING_PATHS: tuple[tuple[str, ...], ...] = (
@@ -375,10 +379,11 @@ def stderr_is_terminal() -> bool:
 
 
 def info(message: str) -> None:
-    """Write one progress line to stderr; off a terminal it starts with :func:`timestamp`."""
+    """Write one progress line to stderr, redacted; off a terminal it starts with
+    :func:`timestamp`."""
     console = stderr_console()
-    line = message if console.is_terminal else f"{timestamp()} {message}"
-    console.print(line, markup=False)
+    text = redact(message)
+    console.print(text if console.is_terminal else f"{timestamp()} {text}", markup=False)
 
 
 def note(message: str) -> None:

@@ -35,13 +35,16 @@ from pydantic import (
 )
 
 from pup_finetune.billing import BillingPart
-from pup_finetune.errors import ExternalError, UsageError
+from pup_finetune.errors import ExternalError, FinetuneError, StateError, UsageError
+from pup_finetune.redaction import redact
 from pup_finetune.rendering.base import ChatMessage, Renderer, ToolSpec
 from pup_finetune.rendering.hf import COMMIT_SHA
 from pup_finetune.rendering.tokens import TokenizedExample
 
 if TYPE_CHECKING:
     from concurrent.futures import Future
+
+    from pup_finetune.inference import ChatCompleter
 
 # --- Models and training configuration ---------------------------------------------------
 
@@ -465,6 +468,19 @@ class ProviderAuthError(ExternalError):
     error_code: ClassVar[str] = "provider_auth"
 
 
+class ModelIdTaken(StateError):
+    """:meth:`TrainingSession.promote` found its model id taken by a model it does not adopt:
+    another run's, or one it cannot tell is this run's. ``hint`` names the ways out, since a
+    resume fails the same way while that model holds the id."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(
+            message,
+            hint="train a new run under another run id, or delete that model and then resume "
+            "this run",
+        )
+
+
 # --- Results the seam returns ------------------------------------------------------------
 
 
@@ -637,6 +653,50 @@ class SmokeTest:
             "attempts": self.attempts,
             "detail": self.detail,
         }
+
+
+SMOKE_PROMPT: Final = "Reply with the single word OK."
+SMOKE_MAX_TOKENS: Final = 16
+
+
+def run_smoke_test(
+    client: ChatCompleter,
+    model: str,
+    *,
+    clock: Callable[[], float],
+    sleep: Callable[[float], None],
+    poll_interval_s: float,
+    timeout_s: float,
+) -> SmokeTest:
+    """One chat completion of ``model`` through ``client``, retried every ``poll_interval_s``
+    seconds for up to ``timeout_s`` while the deployment scales up (a :class:`TransientError`
+    or :class:`ProviderCapacityError`). Never raises for a failed answer, only when the API
+    key is rejected; any other failure fails it at once."""
+    deadline = clock() + timeout_s
+    attempts = 0
+    while True:
+        attempts += 1
+        started = clock()
+        try:
+            client.complete(
+                [{"role": "user", "content": SMOKE_PROMPT}],
+                model=model,
+                temperature=0.0,
+                max_tokens=SMOKE_MAX_TOKENS,
+            )
+        except ProviderAuthError:
+            raise
+        except (TransientError, ProviderCapacityError) as exc:
+            detail = redact(str(exc))
+        except ExternalError as exc:
+            return SmokeTest(ok=False, attempts=attempts, detail=redact(str(exc)))
+        else:
+            latency = max(0.0, clock() - started)
+            return SmokeTest(ok=True, latency_s=round(latency, 3), attempts=attempts)
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return SmokeTest(ok=False, attempts=attempts, detail=detail)
+        sleep(min(poll_interval_s, remaining))
 
 
 class DeploymentNotReady(ExternalError):
@@ -851,7 +911,12 @@ class TrainingSession(Protocol):
         ...
 
     def promote(
-        self, ckpt: CheckpointRef, model_id: str, *, adopt_since: datetime | None = None
+        self,
+        ckpt: CheckpointRef,
+        model_id: str,
+        *,
+        adopt_since: datetime | None = None,
+        on_sending: Callable[[], None] | None = None,
     ) -> ModelRef:
         """Turn a sampler checkpoint into a deployable model named ``model_id``.
 
@@ -861,12 +926,15 @@ class TrainingSession(Protocol):
         accepts. The returned :class:`ModelRef` carries ``model_id`` as given and the
         provider's fully qualified name for the model as ``uri``.
 
-        A promotion can succeed on the provider while its response is lost, and a retry then
-        finds ``model_id`` taken. ``adopt_since`` (shortly before the run first asked for a
-        promotion) lets a provider that can look models up return such a model instead: one
-        named ``model_id``, of the same base model, created no earlier than ``adopt_since``, so
-        it is this run's and not another run's that used the same id. A provider that cannot
-        tell ignores it.
+        ``on_sending`` is called right before the promotion is sent, after every lookup it
+        needs, so the caller records that a model under ``model_id`` may be the run's only
+        once one can be. A promotion can succeed on the provider while its response is lost,
+        and a retry then finds ``model_id`` taken. ``adopt_since`` (shortly before the run sent
+        that promotion) lets a provider that can look models up return such a model instead:
+        one named ``model_id``, of the same base model, created no earlier than
+        ``adopt_since``, so it is this run's and not another run's that used the same id. A
+        provider that cannot tell ignores it. A model it finds under ``model_id`` and does not
+        adopt raises :class:`ModelIdTaken`.
         """
         ...
 
@@ -915,9 +983,42 @@ class TrainingBackend(Protocol):
         session will train on, at most ``profile.max_seq_len``; a provider may size its
         trainer from them. Resuming needs :attr:`supports_resume`. Leaving the context ends
         the session and releases what it holds on the provider, whether training finished,
-        stopped early or failed.
+        stopped early or failed, and raises what :func:`raise_session_failure` picks.
         """
         ...
+
+
+BODY_FAILED_FIRST = "the session failed first"
+
+
+def raise_session_failure(body: BaseException | None, closing: Sequence[BaseException]) -> None:
+    """Raise what a closed session ends with: ``body`` is what its body raised (``None``
+    after a normal exit) and ``closing`` every failure to close it, most important first.
+
+    The first interrupt (a :class:`BaseException` that is not an :class:`Exception`, such as
+    ``KeyboardInterrupt``), from the body or from closing, wins, so the command reports it as
+    interrupted; else the body's error; else the first failure to close. Every other one, and
+    its own notes, become notes on it, so nothing is lost. Returns when nothing failed.
+    """
+    failures = [*([] if body is None else [body]), *closing]
+    if not failures:
+        return
+    raised = next((exc for exc in failures if not isinstance(exc, Exception)), failures[0])
+    for other in failures:
+        if other is raised:
+            continue
+        label = BODY_FAILED_FIRST if other is body else "ending the session also failed"
+        raised.add_note(f"{label}: {_described(other)}")
+        for note in getattr(other, "__notes__", ()):
+            raised.add_note(note)
+    raise raised
+
+
+def _described(error: BaseException) -> str:
+    detail = str(error)
+    hint = error.hint if isinstance(error, FinetuneError) else None
+    text = f"{type(error).__name__}{': ' + detail if detail else ''}"
+    return redact("; ".join(filter(None, (text, hint))))
 
 
 @runtime_checkable

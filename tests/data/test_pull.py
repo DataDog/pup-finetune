@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ import pytest
 from pup_finetune.data import dataset_dir, jsonl
 from pup_finetune.data.dataset_dir import DatasetDir
 from pup_finetune.data.exclusions import Exclusion, ExclusionCode
+from pup_finetune.data.labels import Label
 from pup_finetune.data.pull import (
     LIMITS_FILE,
     Collection,
@@ -336,6 +338,56 @@ def test_a_stored_prefix_of_a_duplicate_of_an_accepted_row_is_retired(tmp_path: 
     assert "synthetic-trace-b:synthetic-span-b1" in detail
 
 
+PREFIX_A1 = "synthetic-trace-a:synthetic-span-a1"
+ACCEPTED_B1 = "synthetic-trace-b:synthetic-span-b1"
+
+
+@pytest.mark.parametrize(
+    ("own", "carried"),
+    [
+        (None, True),
+        (Label(id=ACCEPTED_B1, keep=True, by="judge"), True),
+        # Triage reviews these again, and a council keep would let A1 train.
+        (Label(id=ACCEPTED_B1, keep=False, reason="off topic", by="judge"), True),
+        (Label(id=ACCEPTED_B1, keep=False, reason="check first: too long", by="check"), True),
+        (Label(id=ACCEPTED_B1, keep=True), False),
+    ],
+    ids=[
+        "unlabeled",
+        "kept-by-the-judge",
+        "dropped-by-the-judge",
+        "dropped-by-a-check",
+        "kept-by-a-person",
+    ],
+)
+def test_a_drop_carries_to_the_accepted_row_a_prefix_retires_into_unless_a_person_kept_it(
+    tmp_path: Path, own: Label | None, carried: bool
+) -> None:
+    pages = [page([b_long(), a_prefix()], after="cursor-2"), page([a_long()])]
+    dataset = DatasetDir(tmp_path / "ds")
+
+    def pull_pages(**options: Any) -> Any:
+        api = FakeExportApi(pages)
+        pup = api.install(FakePup()).client()
+        query = SpanQuery(ml_app="synthetic")
+        return pull(pup, PullOptions(query, **options), dataset, SplitParams())
+
+    pull_pages(target_count=2)
+    dropped = Label(id=PREFIX_A1, keep=False, reason="A1 is wrong")
+    dataset.append_labels([dropped] if own is None else [own, dropped])
+    _, added = pull_pages()
+
+    assert added.retired == 1
+    assert [row.id for row in dataset.kept_rows()] == ([] if carried else [ACCEPTED_B1])
+    label = dataset.labels()[ACCEPTED_B1]
+    if carried:
+        assert (label.keep, label.by, label.carried_from) == (False, "manual", PREFIX_A1)
+        assert PREFIX_A1 in label.reason and "A1 is wrong" in label.reason
+    else:
+        assert label == own
+    assert added.carried == ({ACCEPTED_B1: PREFIX_A1} if carried else {})
+
+
 def test_a_lower_target_count_does_not_add_back_a_prefix_retired_into_a_duplicate(
     tmp_path: Path,
 ) -> None:
@@ -543,6 +595,26 @@ def test_a_lower_target_count_does_not_add_back_a_retired_prefix(tmp_path: Path)
     assert (summary["accepted"], summary["excluded"]) == (1, 1)
 
 
+def test_a_span_read_again_with_new_evaluations_and_tags_keeps_its_stored_row(
+    tmp_path: Path,
+) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+
+    def pull_span(**attributes: Any) -> Any:
+        pages = [page([item("synthetic-span-1", [SYSTEM, Q1, A1], **attributes)])]
+        pup = FakeExportApi(pages).install(FakePup()).client()
+        return pull(pup, PullOptions(SpanQuery(ml_app="synthetic")), dataset, SplitParams())
+
+    pull_span()
+    stored = dataset.rows_path.read_bytes()
+    # Without the page cache (a broken one's hint says to delete it), the span is read again,
+    # evaluated and tagged since.
+    shutil.rmtree(dataset.raw_path)
+    _, added = pull_span(evaluation={"quality": 0.9}, tags=["reviewed:yes"])
+    assert (added.added, added.unchanged, added.updated) == (0, 1, 0)
+    assert dataset.rows_path.read_bytes() == stored
+
+
 def test_contained_leaves_out_new_rows_a_kept_stored_row_contains() -> None:
     pages = [page([item("synthetic-span-1", [SYSTEM, Q1, A1])])]
     collection, _ = collected(pages)
@@ -693,16 +765,15 @@ def test_a_re_run_reading_more_reasoning_updates_the_stored_row(tmp_path: Path) 
     assert stored_reasoning(dataset) == [None, None, "Think one.", None, None]
 
 
-def test_reasoning_that_makes_two_stored_rows_one_conversation_retires_the_repeat(
-    tmp_path: Path,
-) -> None:
-    def in_trace(trace_id: str, entry: dict[str, Any]) -> dict[str, Any]:
-        entry["attributes"]["trace_id"] = trace_id
-        return entry
+def in_trace(trace_id: str, entry: dict[str, Any]) -> dict[str, Any]:
+    entry["attributes"]["trace_id"] = trace_id
+    return entry
 
-    # Two traces of the same text. Trace A reads its reasoning only on page 2; trace B has it
-    # on page 1 already, so the first pull stores the two as different conversations.
-    pages = [
+
+def repeat_once_a_reads_its_reasoning() -> list[dict[str, Any]]:
+    """Two traces of the same text. Trace A reads its reasoning only on page 2; trace B has it
+    on page 1 already, so a pull stopping on page 1 stores the two as different conversations."""
+    return [
         page(
             [
                 item("synthetic-span-a2", [SYSTEM, Q1, A1, Q2, A2], trace_id="synthetic-trace-a"),
@@ -722,16 +793,53 @@ def test_reasoning_that_makes_two_stored_rows_one_conversation_retires_the_repea
         ),
     ]
 
+
+def repeat_once_b_takes_a_s_reasoning() -> list[dict[str, Any]]:
+    """Two traces of the same text. A pull stopping on page 1 stores A with reasoning "One."
+    and B with none. Page 2 gives A a later "Two." (the latest donor wins) and B "One.", so
+    that conversion yields two different conversations, and conversion flags no duplicate.
+    But stored reasoning is never replaced: A keeps "One." and B takes it, making the two
+    one."""
+
+    def thought(trace: str, span_id: str, text: str) -> dict[str, Any]:
+        return in_trace(f"synthetic-trace-{trace}", thinking_item(span_id, [SYSTEM, Q1, A1], text))
+
+    return [
+        page(
+            [
+                item("synthetic-span-a2", [SYSTEM, Q1, A1, Q2, A2], trace_id="synthetic-trace-a"),
+                thought("a", "synthetic-span-a1", "One."),
+                item("synthetic-span-b2", [SYSTEM, Q1, A1, Q2, A2], trace_id="synthetic-trace-b"),
+            ],
+            after="cursor-2",
+        ),
+        page(
+            [thought("a", "synthetic-span-a0", "Two."), thought("b", "synthetic-span-b1", "One.")]
+        ),
+    ]
+
+
+REPEATED_A = "synthetic-trace-a:synthetic-span-a2"
+REPEAT_B = "synthetic-trace-b:synthetic-span-b2"
+
+
+def pull_repeats(dataset: DatasetDir, pages: list[dict[str, Any]], **options: Any) -> Any:
+    pup = FakeExportApi(pages).install(FakePup()).client()
+    query = SpanQuery(ml_app="synthetic")
+    return pull(pup, PullOptions(query, reasoning="preserve", **options), dataset, SplitParams())
+
+
+def test_reasoning_that_makes_two_stored_rows_one_conversation_retires_the_repeat(
+    tmp_path: Path,
+) -> None:
+    pages = repeat_once_a_reads_its_reasoning()
+
     def run(**options: Any) -> Any:
-        pup = FakeExportApi(pages).install(FakePup()).client()
-        query = SpanQuery(ml_app="synthetic")
-        return pull(
-            pup, PullOptions(query, reasoning="preserve", **options), dataset, SplitParams()
-        )
+        return pull_repeats(dataset, pages, **options)
 
     dataset = DatasetDir(tmp_path / "ds")
     _, first = run(target_count=2)
-    a, b = "synthetic-trace-a:synthetic-span-a2", "synthetic-trace-b:synthetic-span-b2"
+    a, b = REPEATED_A, REPEAT_B
     assert first.added == 2
 
     # Page 2 fills in A's reasoning, which makes it B's conversation: B is retired.
@@ -753,40 +861,13 @@ def test_reasoning_that_makes_two_stored_rows_one_conversation_retires_the_repea
 def test_reasoning_filled_in_to_repeat_a_row_that_keeps_its_own_retires_the_repeat(
     tmp_path: Path,
 ) -> None:
-    def in_trace(trace_id: str, entry: dict[str, Any]) -> dict[str, Any]:
-        entry["attributes"]["trace_id"] = trace_id
-        return entry
-
-    def thought(trace: str, span_id: str, text: str) -> dict[str, Any]:
-        return in_trace(f"synthetic-trace-{trace}", thinking_item(span_id, [SYSTEM, Q1, A1], text))
-
-    # Two traces of the same text. The first pull stores A with reasoning "One." and B with
-    # none. Page 2 gives A a later "Two." (the latest donor wins) and B "One.", so this
-    # conversion yields two different conversations, and conversion flags no duplicate. But
-    # stored reasoning is never replaced: A keeps "One." and B takes it, making the two one.
-    pages = [
-        page(
-            [
-                item("synthetic-span-a2", [SYSTEM, Q1, A1, Q2, A2], trace_id="synthetic-trace-a"),
-                thought("a", "synthetic-span-a1", "One."),
-                item("synthetic-span-b2", [SYSTEM, Q1, A1, Q2, A2], trace_id="synthetic-trace-b"),
-            ],
-            after="cursor-2",
-        ),
-        page(
-            [thought("a", "synthetic-span-a0", "Two."), thought("b", "synthetic-span-b1", "One.")]
-        ),
-    ]
+    pages = repeat_once_b_takes_a_s_reasoning()
 
     def run(**options: Any) -> Any:
-        pup = FakeExportApi(pages).install(FakePup()).client()
-        query = SpanQuery(ml_app="synthetic")
-        return pull(
-            pup, PullOptions(query, reasoning="preserve", **options), dataset, SplitParams()
-        )
+        return pull_repeats(dataset, pages, **options)
 
     dataset = DatasetDir(tmp_path / "ds")
-    a, b = "synthetic-trace-a:synthetic-span-a2", "synthetic-trace-b:synthetic-span-b2"
+    a, b = REPEATED_A, REPEAT_B
     _, first = run(target_count=2)
     assert first.added == 2
 
@@ -813,6 +894,137 @@ def test_reasoning_filled_in_to_repeat_a_row_that_keeps_its_own_retires_the_repe
     _, more = run()
     assert (more.added, more.updated, more.retired) == (0, 0, 1)
     assert [row.id for row in dataset.rows()] == [a]
+
+
+@pytest.mark.parametrize(
+    "pages",
+    [repeat_once_a_reads_its_reasoning, repeat_once_b_takes_a_s_reasoning],
+    ids=["flagged-by-conversion", "made-by-filling-in"],
+)
+def test_a_drop_carries_to_the_stored_row_a_dropped_repeat_is_retired_into(
+    tmp_path: Path, pages: Any
+) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    pull_repeats(dataset, pages(), target_count=2)
+    dataset.append_labels([Label(id=REPEAT_B, keep=False, reason="B is wrong")])
+
+    _, added = pull_repeats(dataset, pages())
+    assert added.retired == 1
+    assert dataset.kept_rows() == []
+    label = dataset.labels()[REPEATED_A]
+    assert REPEAT_B in label.reason and "B is wrong" in label.reason
+    assert added.carried == {REPEATED_A: REPEAT_B}
+
+
+@pytest.mark.parametrize(
+    "pages",
+    [repeat_once_a_reads_its_reasoning, repeat_once_b_takes_a_s_reasoning],
+    ids=["flagged-by-conversion", "made-by-filling-in"],
+)
+def test_a_person_s_keep_on_the_row_a_dropped_repeat_is_retired_into_is_reported(
+    tmp_path: Path, pages: Any
+) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    pull_repeats(dataset, pages(), target_count=2)
+    keep = Label(id=REPEATED_A, keep=True, reason="A is right")
+    drop = Label(id=REPEAT_B, keep=False, reason="B is wrong")
+    dataset.append_labels([keep, drop])
+
+    _, added = pull_repeats(dataset, pages())
+    assert added.retired == 1
+    assert [row.id for row in dataset.kept_rows()] == [REPEATED_A]
+    assert added.carried == {}
+    assert [(r.row_id, r.keep, r.drop) for r in added.not_carried] == [(REPEATED_A, keep, drop)]
+
+
+CHAIN_PREFIX = "synthetic-trace-p:synthetic-span-p1"
+
+
+def retirement_chain_pages() -> list[dict[str, Any]]:
+    """Trace P's prefix continues on page 2 into a repeat of B, so the prefix is retired into
+    B; the same pull fills in B's reasoning, which retires B into A."""
+    pages = repeat_once_b_takes_a_s_reasoning()
+    pages[0]["data"].append(
+        item("synthetic-span-p1", [SYSTEM, Q1, A1], trace_id="synthetic-trace-p")
+    )
+    pages[1]["data"] += [
+        item("synthetic-span-p2", [SYSTEM, Q1, A1, Q2, A2], trace_id="synthetic-trace-p"),
+        in_trace("synthetic-trace-p", thinking_item("synthetic-span-p0", [SYSTEM, Q1, A1], "One.")),
+    ]
+    return pages
+
+
+def test_a_drop_carries_along_retirements_to_the_row_that_survives_them(tmp_path: Path) -> None:
+    pages = retirement_chain_pages()
+    dataset = DatasetDir(tmp_path / "ds")
+    pull_repeats(dataset, pages, target_count=3)
+    assert [row.id for row in dataset.rows()] == [REPEATED_A, REPEAT_B, CHAIN_PREFIX]
+    dataset.append_labels([Label(id=CHAIN_PREFIX, keep=False, reason="A1 is wrong")])
+
+    _, added = pull_repeats(dataset, pages)
+    assert added.retired == 2
+    assert [row.id for row in dataset.rows()] == [REPEATED_A]
+    assert dataset.kept_rows() == []
+    assert "A1 is wrong" in dataset.labels()[REPEATED_A].reason
+    assert added.carried == {REPEATED_A: CHAIN_PREFIX}
+
+
+def test_a_person_s_keep_along_retirements_refuses_the_drop_and_is_reported(
+    tmp_path: Path,
+) -> None:
+    pages = retirement_chain_pages()
+    dataset = DatasetDir(tmp_path / "ds")
+    pull_repeats(dataset, pages, target_count=3)
+    keep = Label(id=REPEAT_B, keep=True, reason="B is right")
+    drop = Label(id=CHAIN_PREFIX, keep=False, reason="A1 is wrong")
+    dataset.append_labels([drop, keep])
+
+    _, added = pull_repeats(dataset, pages)
+    assert added.retired == 2
+    assert added.carried == {}
+    assert [row.id for row in dataset.kept_rows()] == [REPEATED_A]
+    assert [(r.row_id, r.keep, r.drop) for r in added.not_carried] == [(REPEATED_A, keep, drop)]
+
+
+def test_a_person_s_drop_on_the_row_that_survives_retirements_wins_over_a_keep_along_them(
+    tmp_path: Path,
+) -> None:
+    pages = retirement_chain_pages()
+    dataset = DatasetDir(tmp_path / "ds")
+    pull_repeats(dataset, pages, target_count=3)
+    dataset.append_labels(
+        [
+            Label(id=CHAIN_PREFIX, keep=False, reason="A1 is wrong"),
+            Label(id=REPEAT_B, keep=True, reason="B is right"),
+            Label(id=REPEATED_A, keep=False, reason="A is wrong"),
+        ]
+    )
+
+    _, added = pull_repeats(dataset, pages)
+    assert added.retired == 2
+    assert dataset.kept_rows() == []
+    assert added.carried == {}
+    assert added.not_carried == []
+
+
+def test_a_person_s_keep_on_the_row_that_survives_reports_every_drop_it_refuses(
+    tmp_path: Path,
+) -> None:
+    pages = retirement_chain_pages()
+    dataset = DatasetDir(tmp_path / "ds")
+    pull_repeats(dataset, pages, target_count=3)
+    prefix_drop = Label(id=CHAIN_PREFIX, keep=False, reason="A1 is wrong")
+    middle_drop = Label(id=REPEAT_B, keep=False, reason="B is wrong")
+    keep = Label(id=REPEATED_A, keep=True, reason="A is right")
+    dataset.append_labels([prefix_drop, middle_drop, keep])
+
+    _, added = pull_repeats(dataset, pages)
+    assert added.retired == 2
+    assert [row.id for row in dataset.kept_rows()] == [REPEATED_A]
+    assert added.carried == {}
+    refused = {r.drop.id: (r.row_id, r.keep) for r in added.not_carried}
+    assert len(added.not_carried) == 2
+    assert refused == {CHAIN_PREFIX: (REPEATED_A, keep), REPEAT_B: (REPEATED_A, keep)}
 
 
 def test_a_re_run_reading_less_reasoning_keeps_two_stored_rows_that_still_differ(
@@ -994,8 +1206,6 @@ def test_dropped_rows_do_not_count_toward_the_target() -> None:
 
 
 def test_a_rerun_after_a_review_reads_on_to_replace_the_dropped_rows(tmp_path: Path) -> None:
-    from pup_finetune.data.labels import Label
-
     dataset = DatasetDir(tmp_path / "ds")
 
     def pull_three() -> Any:

@@ -430,6 +430,13 @@ def test_progress_lines_do_not_wrap(capsys: pytest.CaptureFixture[str]) -> None:
     assert capsys.readouterr().err == f"18:03:16 {long}\n"
 
 
+def test_progress_lines_are_redacted(
+    registered_secret: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    info(f"retrying: upstream said {registered_secret}")
+    assert capsys.readouterr().err == "18:03:16 retrying: upstream said ***\n"
+
+
 def _terminal(monkeypatch: pytest.MonkeyPatch) -> io.StringIO:
     """Make stderr a terminal (a rich console writing to the returned buffer)."""
     buffer = io.StringIO()

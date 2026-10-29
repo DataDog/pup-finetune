@@ -19,9 +19,7 @@ def test_empty_env_gives_defaults() -> None:
     assert runtime == Runtime()
     assert runtime.output_format is None
     assert runtime.jq_filter is None
-    assert runtime.dd_site is None
     assert not runtime.read_only
-    assert not runtime.auto_approve
     assert not runtime.agent_mode
     assert not runtime.agent_env
     assert not runtime.under_agent
@@ -36,9 +34,7 @@ def test_full_env_is_parsed() -> None:
             "PUP_OUTPUT": "table",
             "PUP_FILTER": ".id",
             "PUP_READ_ONLY": "true",
-            "PUP_AUTO_APPROVE": "true",
             "PUP_AGENT_MODE": "true",
-            "DD_SITE": "datadoghq.eu",
             "PUP_FINETUNE_DEV": "1",
             "PUP_FINETUNE_DEBUG": "1",
         }
@@ -47,9 +43,7 @@ def test_full_env_is_parsed() -> None:
         output_format="table",
         jq_filter=".id",
         read_only=True,
-        auto_approve=True,
         agent_mode=True,
-        dd_site="datadoghq.eu",
         dev_mode=True,
         debug=True,
     )
@@ -57,10 +51,8 @@ def test_full_env_is_parsed() -> None:
 
 
 @pytest.mark.parametrize("value", ["1", "TRUE", "True", "yes", ""])
-def test_pup_approval_flags_require_exact_true(value: str) -> None:
-    runtime = Runtime.from_env({"PUP_AUTO_APPROVE": value, "PUP_AGENT_MODE": value})
-    assert not runtime.auto_approve
-    assert not runtime.agent_mode
+def test_pup_agent_mode_requires_exact_true(value: str) -> None:
+    assert not Runtime.from_env({"PUP_AGENT_MODE": value}).agent_mode
 
 
 @pytest.mark.parametrize("value", ["true", "TRUE", "1", "yes", "On", " true "])

@@ -869,6 +869,24 @@ def test_cancellation_at_an_epoch_boundary_keeps_the_epochs_checkpoint() -> None
     assert [ref.kind for ref in session.saved] == ["training", "sampler"]
 
 
+@pytest.mark.parametrize(
+    ("max_epochs", "options", "epochs"),
+    [(1, None, [1]), (3, curve(1.0, 2.0), [1, 2])],
+    ids=["last_epoch", "early_stop"],
+)
+def test_a_cancel_during_the_final_validation_ends_the_run_cancelled(
+    max_epochs: int, options: FakeOptions | None, epochs: list[int]
+) -> None:
+    # Asked once the epoch's last step finished: its validation still runs to the end.
+    state = MemoryState(cancel_after_steps=2 * len(epochs))
+    spec = make_spec(max_epochs=max_epochs, batch_size=1, pipeline_depth=1, patience=1)
+    with recording(options) as session:
+        result = train(session, spec, rows=row_examples(2), state=state)
+    assert result.stopped_reason == "cancelled"
+    assert [e.epoch for e in result.epochs] == epochs
+    assert result.best_epoch == 1
+
+
 # --- time-based checkpoints and resume ---------------------------------------------------
 
 
@@ -1340,6 +1358,27 @@ def test_a_resume_point_that_does_not_follow_the_epochs_is_refused() -> None:
     early = state.resume_points[0]  # epoch 1, but three epochs finished
     with recording() as session, pytest.raises(StateError, match="does not follow"):
         train(session, spec, rows=row_examples(2), resume=Resume(point=early, epochs=state.epochs))
+
+
+def test_a_checkpoint_from_within_the_last_finished_epoch_is_refused() -> None:
+    # A timed checkpoint partway through epoch 2 does not hold epoch 2's last steps.
+    spec = make_spec(max_epochs=3, batch_size=1, pipeline_depth=1, checkpoint_every_minutes=10)
+    clock = Clock()
+    state = MemoryState()
+    with recording() as session:
+        train(
+            session,
+            spec,
+            rows=row_examples(4),
+            state=state,
+            clock=clock,
+            on_event=ticking(clock, 4),
+        )
+    within = next(p for p in state.resume_points if p.epoch == 2 and p.steps_in_epoch < 4)
+    resume = Resume(point=within, epochs=state.epochs[:2])
+    with recording() as session, pytest.raises(StateError, match="does not follow"):
+        train(session, spec, rows=row_examples(4), resume=resume)
+    assert session.calls == []
 
 
 def test_warnings_are_not_repeated_on_resume() -> None:

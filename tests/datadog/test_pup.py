@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,18 @@ USER_ENV = {
     "PUP_OUTPUT": "table",
     "DD_ACCESS_TOKEN": FAKE_TOKEN,
     "DD_SITE": "datadoghq.com",
+}
+PROVIDER_SECRETS = {
+    "FIREWORKS_API_KEY": "fw-synthetic-0000-test-key",
+    "BASETEN_API_KEY": "bt-synthetic-0000-test-key",
+    "ANTHROPIC_API_KEY": "sk-ant-synthetic-0000-test-key",
+    "ANTHROPIC_AUTH_TOKEN": "sk-ant-synthetic-0000-auth-token",
+    "ANTHROPIC_IDENTITY_TOKEN": "synthetic-identity-token-0000",
+    "OPENAI_API_KEY": "sk-synthetic-0000-openai-key",
+}
+DATADOG_KEYS = {
+    "DD_API_KEY": "synthetic-dd-api-key-0000",
+    "DD_APP_KEY": "synthetic-dd-app-key-0000",
 }
 
 
@@ -145,6 +158,31 @@ def test_child_env_drops_output_settings_and_the_access_token() -> None:
     assert env["HOME"] == "/home/someone"
 
 
+def test_child_env_drops_every_provider_secret_and_keeps_datadog_s_keys() -> None:
+    fake = FakePup().on("auth", "status", json={"authenticated": True})
+    fake.client({**USER_ENV, **PROVIDER_SECRETS, **DATADOG_KEYS}).run_json(["auth", "status"])
+    env = fake.last.env
+    assert not PROVIDER_SECRETS.keys() & env.keys()
+    assert {name: env[name] for name in DATADOG_KEYS} == DATADOG_KEYS
+
+
+def test_a_process_that_imports_only_the_pup_client_drops_every_provider_secret() -> None:
+    code = (
+        "import json, sys; from pup_finetune.datadog.pup import child_env; "
+        "print(json.dumps(sorted(child_env(json.load(sys.stdin)))))"
+    )
+    completed = subprocess.run(  # noqa: S603 - our own interpreter and code
+        [sys.executable, "-c", code],
+        input=json.dumps({**USER_ENV, **PROVIDER_SECRETS}),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    names = set(json.loads(completed.stdout))
+    assert not PROVIDER_SECRETS.keys() & names
+    assert {"DD_SITE", "HOME"} <= names
+
+
 def test_keep_dd_token_override_passes_the_token_through() -> None:
     environ = {**USER_ENV, "PUP_FINETUNE_KEEP_DD_TOKEN": "1"}
     env = child_env(environ)
@@ -199,7 +237,7 @@ def test_error_detail_falls_back_to_stdout_when_stderr_is_empty() -> None:
         fake.client(USER_ENV).api("GET", "v2/thing")
     err = info.value
     assert err.message == (
-        "`pup api v2/thing` failed (exit 1): Error: 401 Unauthorized: not logged in token=[redacted]"
+        "`pup api v2/thing` failed (exit 1): Error: 401 Unauthorized: not logged in token=***"
     )
     assert err.hint is not None
     assert "pup auth login" in err.hint
@@ -220,7 +258,7 @@ def test_error_message_never_echoes_secrets() -> None:
     err = info.value
     assert FAKE_TOKEN not in err.message
     assert "abc.def.ghi" not in err.message
-    assert "[redacted]" in err.message
+    assert "***" in err.message
     assert err.hint is not None
     assert "pup auth login" in err.hint
     assert ".data[0]" not in err.message  # no env values
@@ -474,6 +512,19 @@ def test_run_pup_uses_list_args_stdin_and_inherited_env(
     completed = run_pup(["format"], '{"a": 1}')
     assert completed.returncode == 0
     assert completed.stdout == 'format|yaml|{"a": 1}'
+
+
+def test_run_pup_drops_every_provider_secret_and_keeps_the_output_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _executable(tmp_path, script="#!/bin/sh\nenv\n")
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}")
+    for name, value in {**PROVIDER_SECRETS, **DATADOG_KEYS, "PUP_OUTPUT": "yaml"}.items():
+        monkeypatch.setenv(name, value)
+    completed = run_pup(["format"], "{}")
+    names = {line.partition("=")[0] for line in completed.stdout.splitlines()}
+    assert not PROVIDER_SECRETS.keys() & names
+    assert {"PUP_OUTPUT", *DATADOG_KEYS} <= names
 
 
 def test_run_pup_honors_the_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

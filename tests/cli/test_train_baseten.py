@@ -5,7 +5,9 @@
 # This product includes software developed at Datadog (https://www.datadoghq.com/).
 # Copyright 2026-present Datadog, Inc.
 """`train --provider baseten` end to end on the Loops fake: the preview, a confirmed run, then
-`deploy` and `undeploy` of the checkpoint it records, and their receipt's failures.
+`deploy` and `undeploy` of the checkpoint it records, and their receipt's failures; and what a
+Ctrl-C or an unexpected error while a command creates a Loops trainer or sampler says may
+remain.
 
 The provider is the real :class:`BasetenProvider` with the Loops fake, its HTTP routes, the
 fake tokenizer and a fake clock injected. Each command builds a new provider, as a new process
@@ -30,12 +32,14 @@ from pup_finetune import providers, redaction
 from pup_finetune.cli import app
 from pup_finetune.cli import deploy as deploy_module
 from pup_finetune.cli import train as train_module
+from pup_finetune.evaluation import benchmark as benchmark_module
+from pup_finetune.evaluation import runner as eval_module
 from pup_finetune.providers.base import Provider
 from pup_finetune.providers.baseten import client
 from pup_finetune.runs import RunDir, model_id_for_run
 from pup_finetune.runtime import Runtime
 from pup_finetune.training import inputs as inputs_module
-from tests.fakes.baseten import FakeDeployment, FakeLoops
+from tests.fakes.baseten import Answer, FakeDeployment, FakeLoops
 from tests.fakes.fireworks_deploy import FakeClock
 from tests.fakes.pushed import mark_pushed
 from tests.fakes.tokenizer import FakeChatTokenizer
@@ -56,18 +60,30 @@ def clock() -> FakeClock:
     return FakeClock()
 
 
+@pytest.fixture
+def routes() -> dict[str, Answer]:
+    """Baseten HTTP routes the next command's provider answers before the fake's own."""
+    return {}
+
+
 @pytest.fixture(autouse=True)
-def _baseten(monkeypatch: pytest.MonkeyPatch, loops: FakeLoops, clock: FakeClock) -> Iterator[None]:
+def _baseten(
+    monkeypatch: pytest.MonkeyPatch, loops: FakeLoops, clock: FakeClock, routes: dict[str, Answer]
+) -> Iterator[None]:
     for name in (*client._REJECTED_ENV, "LOOPS_BASE_URL", "BASETEN_API_KEY"):
         monkeypatch.delenv(name, raising=False)
 
     def get_provider(name: str, runtime: Runtime) -> Provider:
         assert name == "baseten"
-        return provider_on(loops, FakeChatTokenizer(merge_newlines=True), clock=clock)
+        return provider_on(
+            loops, FakeChatTokenizer(merge_newlines=True), clock=clock, routes=routes
+        )
 
     monkeypatch.setattr(train_module, "get_provider", get_provider)
     monkeypatch.setattr(inputs_module, "get_provider", get_provider)
     monkeypatch.setattr(deploy_module, "get_provider", get_provider)
+    monkeypatch.setattr(eval_module, "get_provider", get_provider)
+    monkeypatch.setattr(benchmark_module, "get_provider", get_provider)
     yield
     redaction.clear_secrets()
 
@@ -261,6 +277,111 @@ def test_a_ctrl_c_while_creating_leaves_a_requested_receipt(
     assert removed.exit_code == 0, removed.stderr
     assert output(removed)["already_deleted"] is False
     assert loops.deleted == ["dmodel1"]
+
+
+def left(what: str, session: str) -> str:
+    return f"a {what} may remain in Loops session {session}; deactivate it in the Baseten UI"
+
+
+def warned(result: Result, text: str) -> bool:
+    return any(line.startswith("warning: ") and text in line for line in result.stderr.splitlines())
+
+
+def evaluate(run_dir: Path) -> Result:
+    return invoke(
+        "evaluate",
+        str(run_dir),
+        "--judge-model",
+        "fake-judge",
+        "--no-publish",
+        "--skip-calibration",
+        "--confirm",
+    )
+
+
+def test_a_ctrl_c_while_training_creates_its_trainer_says_the_run_may_remain(
+    loops: FakeLoops, dataset: Path, tmp_path: Path
+) -> None:
+    loops.lost["trainer"] = KeyboardInterrupt()
+    result = train(dataset, tmp_path / "run", "--confirm")
+    assert result.exit_code == 1, result.stderr
+    assert "Error [interrupted]: training stopped at once" in result.stderr
+    assert warned(result, left("run", "session1"))
+
+
+def test_a_ctrl_c_while_train_evaluate_creates_a_sampler_says_it_may_remain(
+    loops: FakeLoops, dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PUP_FINETUNE_DEV", "1")
+    loops.lost["sampler"] = KeyboardInterrupt()
+    result = train(
+        dataset,
+        tmp_path / "run",
+        "--evaluate",
+        "--eval-judge-model",
+        "fake-judge",
+        "--eval-skip-calibration",
+        "--confirm",
+    )
+    assert result.exit_code == 1, result.stderr
+    assert output(result)["status"] == "completed"
+    assert warned(result, left("sampler", "session1"))
+
+
+def test_a_ctrl_c_while_evaluate_creates_a_sampler_says_it_may_remain(
+    loops: FakeLoops, run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PUP_FINETUNE_DEV", "1")
+    loops.lost["sampler"] = KeyboardInterrupt()
+    result = evaluate(run_dir)
+    assert result.exit_code == 1, result.stderr
+    assert "Error [interrupted]: evaluation stopped at once" in result.stderr
+    assert warned(result, left("sampler", "session2"))
+
+
+def test_a_ctrl_c_while_evaluate_creates_a_sampler_wins_over_a_failed_deactivation(
+    loops: FakeLoops, routes: dict[str, Answer], run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PUP_FINETUNE_DEV", "1")
+    loops.lost["sampler"] = KeyboardInterrupt()
+    routes["POST /v1/loops/runs/run2/deactivate"] = (500, {})
+    result = evaluate(run_dir)
+    assert result.exit_code == 1, result.stderr
+    assert "Error [interrupted]: evaluation stopped at once" in result.stderr
+    assert warned(result, left("sampler", "session2"))
+    assert warned(result, "could not deactivate Baseten run run2")
+
+
+def test_an_unexpected_error_while_evaluate_creates_a_sampler_says_it_may_remain(
+    loops: FakeLoops, run_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PUP_FINETUNE_DEV", "1")
+    loops.lost["sampler"] = RuntimeError("the connection broke")
+    result = evaluate(run_dir)
+    assert result.exit_code == 1, result.stderr
+    assert "Error [unexpected]: RuntimeError: the connection broke" in result.stderr
+    assert warned(result, left("sampler", "session2"))
+
+
+def test_a_ctrl_c_while_benchmark_creates_a_sampler_says_it_may_remain(
+    loops: FakeLoops, dataset: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PUP_FINETUNE_DEV", "1")
+    monkeypatch.setenv("BASETEN_API_KEY", KEY.get_secret_value())
+    loops.lost["sampler"] = KeyboardInterrupt()
+    result = invoke(
+        "benchmark",
+        str(dataset),
+        "--models",
+        "qwen3p5-9b",
+        "--judge-model",
+        "fake-judge",
+        "--skip-calibration",
+        "--confirm",
+    )
+    assert result.exit_code == 1, result.stderr
+    assert "Error [interrupted]: stopped by Ctrl-C" in result.stderr
+    assert warned(result, left("sampler", "session1"))
 
 
 def test_a_refused_create_leaves_no_receipt(loops: FakeLoops, run_dir: Path) -> None:

@@ -73,7 +73,7 @@ from pup_finetune.storage import (
     read_json,
 )
 from pup_finetune.training.inputs import NEW_RUN_HINT
-from pup_finetune.training.report import Snapshot, apply_snapshot, newest_snapshot
+from pup_finetune.training.report import Snapshot, StaleReport, apply_snapshot, newest_snapshot
 from pup_finetune.training.worker import WorkerMode, WorkerStatus
 
 __all__ = [
@@ -345,13 +345,14 @@ def submit_remote(
         except (RemoteJobRejected, ProviderAuthError, ProviderCapacityError):
             _roll_back(run, created_dir)
             raise
-        except KeyboardInterrupt:
+        except KeyboardInterrupt as exc:
             if not submitting:
                 _roll_back(run, created_dir)
                 raise
             raise Interrupted(
                 f"the submit of run {run.run_id} stopped (Ctrl-C); the job may exist",
                 hint=f"`{status}` looks for the job",
+                interrupt=exc,
             ) from None
         except BaseException as exc:
             if not submitting:
@@ -641,6 +642,11 @@ def sync_remote(run: RunDir, jobs: RemoteJobs, *, now: Clock = utcnow) -> Remote
         }
         try:
             busy = not _apply(run, snapshot, fresh)
+        except StaleReport as exc:
+            warnings.append(
+                f"the state report of {name} is out of date ({exc.message}); the next one "
+                "replaces it"
+            )
         except StateError as exc:
             warnings.append(f"the state report of {name} is not a run's ({exc.message})")
         else:

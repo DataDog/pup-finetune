@@ -27,7 +27,7 @@ from typing import Any, Final, Self
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
-from pup_finetune.credentials import login_hint
+from pup_finetune.credentials import key_fix, login_hint
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.http_common import CLIENT_SOURCE, bearer_key, error_detail, exception_reason
 from pup_finetune.providers.base import ProviderAuthError
@@ -238,4 +238,4 @@ def checked_key(api_key: SecretStr) -> str:
     Raises :class:`UsageError` for an empty or malformed key (see
     :func:`~pup_finetune.http_common.bearer_key`).
     """
-    return bearer_key(api_key, label="the Fireworks API key", hint=login_hint(CREDENTIALS))
+    return bearer_key(api_key, label="the Fireworks API key", hint=key_fix(CREDENTIALS))

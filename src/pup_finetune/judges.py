@@ -120,7 +120,10 @@ JUDGE_PACKAGES: Final[dict[str, Package]] = {
 
 
 def default_judges(
-    table: Sequence[JudgeDefault], *, env: Mapping[str, str] = os.environ
+    table: Sequence[JudgeDefault],
+    *,
+    env: Mapping[str, str] = os.environ,
+    warnings: list[str] | None = None,
 ) -> tuple[tuple[str, ...], str]:
     """The judges of the first row of ``table`` whose providers all have a credential and
     the package their judges need, and where the default came from, for a preview:
@@ -128,15 +131,20 @@ def default_judges(
 
     Resolving makes no network call: the environment variable, the OS keychain, or the
     Anthropic SDK's own login (:func:`~pup_finetune.credentials.key_source`), and the
-    package found, never imported. A keychain that cannot be read counts as no credential,
-    so the default falls to the next row.
+    package found, never imported. A keychain that cannot be read, or a malformed key, counts
+    as no credential, so the default falls to the next row, as ``doctor``'s readiness does.
+    Each malformed key passed over is also a warning, appended to ``warnings``.
     """
     from pup_finetune import credentials
 
     uninstalled: dict[str, str] = {}
+    malformed: dict[str, credentials.KeyMalformed] = {}
 
     def source(name: str) -> str | None:
         found = credentials.key_source(name, env=env)
+        if isinstance(found, credentials.KeyMalformed):
+            malformed[name] = found
+            return None
         if not isinstance(found, str):
             return None
         package = JUDGE_PACKAGES.get(name)
@@ -148,7 +156,16 @@ def default_judges(
         return found
 
     row, found = pick_default(table, source)
-    return row.judges, _default_source(found, uninstalled)
+    if warnings is not None:
+        for name, key in malformed.items():
+            spec = credentials.get_spec(name)
+            warnings.append(
+                f"the {spec.label} key ({credentials.shown_source(spec, key.source)}) is "
+                f"malformed, so no {spec.label} judge is used and the default is "
+                f"{' and '.join(row.judges)}; {key.fix}"
+            )
+    sources = {name: key.source for name, key in malformed.items()}
+    return row.judges, _default_source(found, uninstalled, sources)
 
 
 def pick_default(
@@ -163,10 +180,12 @@ def pick_default(
     raise ValueError("a judge default table ends with a row that needs no credential")
 
 
-def _default_source(found: Mapping[str, str | None], uninstalled: Mapping[str, str]) -> str:
+def _default_source(
+    found: Mapping[str, str | None], uninstalled: Mapping[str, str], malformed: Mapping[str, str]
+) -> str:
     """Where a default came from: the credentials ``found`` (provider to source), and the
     ones passed over in ``uninstalled`` (provider to the package its judges need, which is
-    not installed)."""
+    not installed) and ``malformed`` (provider to where its malformed key is)."""
     from pup_finetune import credentials
 
     parts = []
@@ -177,7 +196,7 @@ def _default_source(found: Mapping[str, str | None], uninstalled: Mapping[str, s
         f"default: {' and '.join(parts)}"
         if parts
         else "default: no Anthropic or OpenAI credential found"
-        if not uninstalled
+        if not uninstalled and not malformed
         else "default: no Anthropic or OpenAI judge available"
     )
     for name, package in uninstalled.items():
@@ -185,6 +204,12 @@ def _default_source(found: Mapping[str, str | None], uninstalled: Mapping[str, s
         shown += (
             f"; the {label} credential is not used, as {label} judges need the "
             f"'{package}' package, which is not installed"
+        )
+    for name, where in malformed.items():
+        spec = credentials.get_spec(name)
+        shown += (
+            f"; the {spec.label} credential is not used, as its key "
+            f"({credentials.shown_source(spec, where)}) is malformed"
         )
     return shown
 
@@ -382,8 +407,10 @@ def require_key(
     instead."""
     if config.offline:
         return
-    hint = login_hint(config.credential)
     found = credentials.key_source(config.credential)
+    hint = (
+        found.fix if isinstance(found, credentials.KeyMalformed) else login_hint(config.credential)
+    )
     if isinstance(found, credentials.KeyUnreadable):
         raise ExternalError(found.detail, hint=found.fix, source="the OS keychain")
     error: UsageError | None = None

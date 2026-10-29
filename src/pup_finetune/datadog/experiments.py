@@ -321,8 +321,8 @@ class PublishSettings:
     each test row id to its dataset record (``input``, ``expected_output``, ``metadata``),
     as pushed. ``compare`` is the compare model, when the evaluation has one: its experiment
     comes last (:attr:`targets`) and records that model; base and tuned are described the
-    same way with or without it. ``replays`` holds the cases each target replayed, when not
-    every one (the compare model skips those its API refuses).
+    same way with or without it. ``replays`` holds the cases each target replayed (the
+    compare model skips those its API refuses).
     """
 
     eval_key: str
@@ -334,8 +334,8 @@ class PublishSettings:
     max_tokens: int
     push: PushState
     records: Mapping[str, Mapping[str, Any]]
+    replays: Replays
     compare: JudgeConfig | None = None
-    replays: Replays = field(default_factory=dict)
     evaluators: tuple[str, ...] = ()
     """The user's evaluators: each is one boolean metric per case span."""
     headline: str | None = None
@@ -346,8 +346,9 @@ class PublishSettings:
         return (*TARGETS, COMPARE) if self.compare is not None else TARGETS
 
     def replayed(self, target: str, cases: Sequence[ReplayCase]) -> Sequence[ReplayCase]:
-        """The cases ``target`` replayed: its :attr:`replays`, else every one of ``cases``."""
-        return self.replays.get(target, cases)
+        """Those of ``cases`` that ``target`` replayed, in its :attr:`replays`."""
+        allowed = {case.id for case in self.replays[target]}
+        return [case for case in cases if case.id in allowed]
 
     @property
     def dataset_id(self) -> str:
