@@ -220,6 +220,9 @@ file as `checks_file`, which a dataset's step to finish the triage passes again 
 exists. With `--checks` alone it calls no
 judge and labels at once, without `--confirm` (refusing `--judges`, `--concurrency` and
 `--reset-triage`), reporting `stale_check_labels`; `dataset label --file` refuses `by: check`.
+Rows holding a drop a pull carried are never reviewed and are counted apart from the user's
+labels (`skipped_carried`), so neither `--agreement` nor the preview's note about it counts
+them.
 Tests replace the judges' clients (`cli/triage.py`'s `open_clients`) with a fake.
 
 Judges can run on Anthropic or OpenAI too: `--judge-model`, `--eval-judge-model` and each
@@ -650,6 +653,18 @@ Source lives under `src/pup_finetune/`.
   re-run reads more reasoning for is updated in place, never losing reasoning it has
   (`reasoning_updates`, `DatasetDir.add(updated=...)`), and a stored row that update makes
   repeat another stored row is retired as `duplicate_conversation` (`repeat_retirements`).
+  A stored row read again with another `source` keeps its stored source: the id fixes the
+  trace and span, and evaluations or tags attached since are not updated. A drop in force on
+  a retired row carries to the stored row that now holds its conversation (`Exclusion.into`,
+  followed through the rows the same pull retires): `DatasetDir.add` appends, under its lock
+  and before the rows, a `by: manual` drop whose `Label.carried_from` names the retired id,
+  so triage never relabels it, `--agreement` does not compare with it and `dataset label
+  --file` refuses a line naming `carried_from`; the pull lists them in `pull.carried_drops`.
+  It replaces a judge's or a check's label, even a drop (triage would review those again),
+  but not a person's label on that row. A person's keep there, or on a row the pull retired
+  into it on the way, stands: the pull lists the drop it refused in `pull.drops_not_carried`
+  (`RefusedDrop`) and warns, as the dropped turns now train. A keep does not carry: the
+  longer row has turns nobody reviewed.
   `fetch.py` is `dataset fetch`: an Agent Observability dataset's current records back into
   rows (input messages plus expected output, the split from metadata or tags), frozen per
   dataset version, with the dataset's `push.json` so evaluations publish onto it.

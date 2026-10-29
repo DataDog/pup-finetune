@@ -440,6 +440,67 @@ def test_an_add_stopped_before_its_rows_leaves_the_retired_row_in_place(
     assert dataset.excluded() == [retire(short).to_json()]
 
 
+def test_a_drop_whose_retirements_end_at_a_row_the_add_excludes_carries_nowhere(
+    tmp_path: Path,
+) -> None:
+    # Nothing trains a row the dataset does not hold, so the dropped turns are out already.
+    dataset = DatasetDir(tmp_path / "ds")
+    short, middle, long = (make_row(row_id, row_id) for row_id in ("short", "middle", "long"))
+    dataset.add([short, middle], settings=IMPORT)
+    dataset.append_labels([Label(id="short", keep=False, reason="short is wrong")])
+    code = ExclusionCode.CONTAINED_CONVERSATION
+    retired = [
+        Exclusion.for_row(short, code, "a prefix of row 'middle'", into="middle"),
+        Exclusion.for_row(middle, code, "a prefix of row 'long'", into="long"),
+    ]
+    capped = Exclusion.for_row(long, ExclusionCode.TRACE_ROW_CAP, "past the cap")
+    added = dataset.add([], [capped], settings=IMPORT, retired=retired)
+    assert dataset.rows() == []
+    assert added.carried == {}
+    assert list(dataset.labels()) == ["short"]
+
+
+def test_a_drop_a_keep_refuses_is_not_reported_when_another_drop_drops_the_row(
+    tmp_path: Path,
+) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    prefix, middle, other, long = (
+        make_row(row_id, row_id) for row_id in ("prefix", "middle", "other", "long")
+    )
+    dataset.add([prefix, middle, other, long], settings=IMPORT)
+    dataset.append_labels(
+        [
+            Label(id="prefix", keep=False, reason="prefix is wrong"),
+            Label(id="middle", keep=True, reason="middle is right"),
+            Label(id="other", keep=False, reason="other is wrong"),
+        ]
+    )
+    code = ExclusionCode.CONTAINED_CONVERSATION
+    retired = [
+        Exclusion.for_row(prefix, code, "a prefix of row 'middle'", into="middle"),
+        Exclusion.for_row(middle, code, "a prefix of row 'long'", into="long"),
+        Exclusion.for_row(other, code, "a prefix of row 'long'", into="long"),
+    ]
+    added = dataset.add([], settings=IMPORT, retired=retired)
+    assert dataset.kept_rows() == []
+    assert added.carried == {"long": "other"}
+    assert added.not_carried == []
+
+
+def test_retirements_that_form_a_cycle_are_refused(tmp_path: Path) -> None:
+    dataset = DatasetDir(tmp_path / "ds")
+    first, second = make_row("first", "one"), make_row("second", "two")
+    dataset.add([first, second], settings=IMPORT)
+    code = ExclusionCode.DUPLICATE_CONVERSATION
+    retired = [
+        Exclusion.for_row(first, code, "same conversation as row 'second'", into="second"),
+        Exclusion.for_row(second, code, "same conversation as row 'first'", into="first"),
+    ]
+    with pytest.raises(ValueError, match="retirements form a cycle at 'first'"):
+        dataset.add([], settings=IMPORT, retired=retired)
+    assert [row.id for row in dataset.rows()] == ["first", "second"]
+
+
 def with_reasoning(row: TrainingRow, text: str) -> TrainingRow:
     """``row`` with ``text`` as the reasoning of its last (assistant) message."""
     *before, last = row.messages

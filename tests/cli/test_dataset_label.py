@@ -84,8 +84,8 @@ def test_label_applies_labels_and_emits_the_report(dataset: Path, tmp_path: Path
     quoted = shlex.quote(str(dataset))
     assert data["next_command"] is None
     assert [step["command"] for step in data["next_steps"]] == [
-        "pup finetune models list",
         f"pup finetune dataset push {quoted} --name <NAME>",
+        "pup finetune models list",
     ]
     assert FIXTURE_IDS[0] not in {row.id for row in DatasetDir(dataset).kept_rows()}
     show = output_json(invoke("show", str(dataset)))
@@ -123,6 +123,14 @@ def test_a_label_file_cannot_claim_the_judge_council_or_a_check(
     result = label(dataset, file)
     assert result.exit_code == 2
     assert f"as decided by {claim}" in result.stderr
+    assert not (dataset / "labels.jsonl").exists()
+
+
+def test_a_label_file_cannot_claim_a_drop_a_pull_carried(dataset: Path, tmp_path: Path) -> None:
+    line = {"id": FIXTURE_IDS[0], "keep": False, "reason": "x", "carried_from": FIXTURE_IDS[1]}
+    result = label(dataset, label_file(tmp_path, line))
+    assert result.exit_code == 2
+    assert f"as carried from row {FIXTURE_IDS[1]!r}" in result.stderr
     assert not (dataset / "labels.jsonl").exists()
 
 
