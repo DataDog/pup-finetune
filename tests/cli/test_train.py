@@ -1255,8 +1255,9 @@ def test_cancel_refuses_a_dead_process(trained: Path) -> None:
     assert "no longer running" in result.stderr
 
 
-def test_cancel_points_to_the_watch_while_a_worker_resumes_a_killed_run(trained: Path) -> None:
-    _set_state(trained, phase="training", pid=_dead_pid(), heartbeat_at=_ago(120))
+@pytest.mark.parametrize("phase", ["created", "training", "interrupted", "failed", "cancelled"])
+def test_cancel_points_to_the_watch_while_a_worker_is_starting(trained: Path, phase: str) -> None:
+    _set_state(trained, phase=phase, pid=_dead_pid(), heartbeat_at=_ago(120))
     atomic_write_json(
         trained / "worker.json", {"pid": os.getpid(), "mode": "resume", "started_at": _ago(1)}
     )
