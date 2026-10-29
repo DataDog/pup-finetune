@@ -287,6 +287,18 @@ def warned(result: Result, text: str) -> bool:
     return any(line.startswith("warning: ") and text in line for line in result.stderr.splitlines())
 
 
+def evaluate(run_dir: Path) -> Result:
+    return invoke(
+        "evaluate",
+        str(run_dir),
+        "--judge-model",
+        "fake-judge",
+        "--no-publish",
+        "--skip-calibration",
+        "--confirm",
+    )
+
+
 def test_a_ctrl_c_while_training_creates_its_trainer_says_the_run_may_remain(
     loops: FakeLoops, dataset: Path, tmp_path: Path
 ) -> None:
@@ -321,15 +333,7 @@ def test_a_ctrl_c_while_evaluate_creates_a_sampler_says_it_may_remain(
 ) -> None:
     monkeypatch.setenv("PUP_FINETUNE_DEV", "1")
     loops.lost["sampler"] = KeyboardInterrupt()
-    result = invoke(
-        "evaluate",
-        str(run_dir),
-        "--judge-model",
-        "fake-judge",
-        "--no-publish",
-        "--skip-calibration",
-        "--confirm",
-    )
+    result = evaluate(run_dir)
     assert result.exit_code == 1, result.stderr
     assert "Error [interrupted]: evaluation stopped at once" in result.stderr
     assert warned(result, left("sampler", "session2"))
@@ -341,15 +345,7 @@ def test_a_ctrl_c_while_evaluate_creates_a_sampler_wins_over_a_failed_deactivati
     monkeypatch.setenv("PUP_FINETUNE_DEV", "1")
     loops.lost["sampler"] = KeyboardInterrupt()
     routes["POST /v1/loops/runs/run2/deactivate"] = (500, {})
-    result = invoke(
-        "evaluate",
-        str(run_dir),
-        "--judge-model",
-        "fake-judge",
-        "--no-publish",
-        "--skip-calibration",
-        "--confirm",
-    )
+    result = evaluate(run_dir)
     assert result.exit_code == 1, result.stderr
     assert "Error [interrupted]: evaluation stopped at once" in result.stderr
     assert warned(result, left("sampler", "session2"))
@@ -361,15 +357,7 @@ def test_an_unexpected_error_while_evaluate_creates_a_sampler_says_it_may_remain
 ) -> None:
     monkeypatch.setenv("PUP_FINETUNE_DEV", "1")
     loops.lost["sampler"] = RuntimeError("the connection broke")
-    result = invoke(
-        "evaluate",
-        str(run_dir),
-        "--judge-model",
-        "fake-judge",
-        "--no-publish",
-        "--skip-calibration",
-        "--confirm",
-    )
+    result = evaluate(run_dir)
     assert result.exit_code == 1, result.stderr
     assert "Error [unexpected]: RuntimeError: the connection broke" in result.stderr
     assert warned(result, left("sampler", "session2"))

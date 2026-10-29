@@ -293,10 +293,9 @@ Baseten Loops through `providers/baseten/client.py`, the only module that loads 
   after an error or Ctrl-C, then the samplers, the session and the client are closed. What
   the session raises is picked as on every provider (see How a new provider plugs in); of
   two failures to close, a failure to close the session (which may leave it billing) comes
-  first. With no capacity, nothing is left running. The
-  `max_seq_len` provider option cuts the profile's context (`training_profile`), so longer
-  rows are left out when the rows are rendered; the session also refuses a longer sequence
-  length, as a backstop.
+  first. With no capacity, nothing is left running. The `max_seq_len` provider option cuts
+  the profile's context (`training_profile`), so longer rows are left out when the rows are
+  rendered; the session also refuses a longer sequence length, as a backstop.
 - **Losses.** `forward_backward` reports Fireworks' `loss:sum` over `response_tokens`.
   Fireworks' forward pass returns no loss, only per-token logprobs, so the validation loss is
   `-sum(logprob * weight)` over every target token, after checking that the logprobs match

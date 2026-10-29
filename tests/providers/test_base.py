@@ -319,12 +319,7 @@ def test_step_metrics_mean_loss_is_nan_without_weight(weight: float) -> None:
     assert math.isnan(StepMetrics(loss_sum=3.0, weight=weight, tokens=5).mean_loss)
 
 
-# --- raise_session_failure -------------------------------------------------------------------
-
-
-def _failure(name: str) -> BaseException:
-    """``ctrl-c...`` is an interrupt, anything else an error named ``name``."""
-    return KeyboardInterrupt() if name.startswith("ctrl-c") else ExternalError(name, source="x")
+# --- raise_session_failure -----------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -347,7 +342,10 @@ def _failure(name: str) -> BaseException:
 def test_a_session_ends_with_the_first_interrupt_else_the_body_error_else_a_close_failure(
     body: str | None, closing: list[str], raised: str, noted: list[str]
 ) -> None:
-    failures = {name: _failure(name) for name in [*([body] if body else []), *closing]}
+    failures: dict[str, BaseException] = {
+        name: KeyboardInterrupt() if name.startswith("ctrl-c") else ExternalError(name, source="x")
+        for name in [*([body] if body else []), *closing]
+    }
     with pytest.raises(BaseException) as caught:
         raise_session_failure(
             failures[body] if body else None, [failures[name] for name in closing]
