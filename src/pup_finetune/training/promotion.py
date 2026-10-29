@@ -141,10 +141,8 @@ class Promotion:
     before :meth:`~pup_finetune.providers.base.TrainingSession.promote` the request for the
     best checkpoint is looked up, or recorded under ``model_id`` (the run's first) or
     :func:`model_id_for_checkpoint` (a later one), and ``promote`` gets its model id and, once
-    the request was sent, its time less :data:`ADOPT_CLOCK_ALLOWANCE` as ``adopt_since``, so
-    that a model an earlier attempt of this run promoted from that checkpoint is adopted;
-    ``promote``'s ``on_sending`` marks a request not yet sent as sent from then (a sent one
-    keeps its time, so a model the first send created stays adoptable), and a
+    the request was sent, its time less :data:`ADOPT_CLOCK_ALLOWANCE` as ``adopt_since``;
+    ``promote``'s ``on_sending`` marks a request not yet sent as sent, and a
     :class:`~pup_finetune.providers.base.ModelIdTaken` marks it contested. Without
     ``requests`` the checkpoint is promoted to ``model_id`` and no existing model is adopted.
     The returned result carries ``promoted_model`` (``None`` without promotion) and

@@ -469,11 +469,10 @@ class ModelIdTaken(StateError):
     another run's, or one it cannot tell is this run's. ``hint`` names the ways out, since a
     resume fails the same way while that model holds the id."""
 
-    def __init__(self, message: str, *, hint: str | None = None) -> None:
+    def __init__(self, message: str) -> None:
         super().__init__(
             message,
-            hint=hint
-            or "train a new run under another run id, or delete that model and then resume "
+            hint="train a new run under another run id, or delete that model and then resume "
             "this run",
         )
 
