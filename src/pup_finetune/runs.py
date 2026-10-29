@@ -138,8 +138,6 @@ _RUN_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 
 _MODEL_ID_HASHED_PREFIX = MAX_MODEL_ID_LEN - 9  # room for a dash and 8 hex digits
 
-STALE_TRAINING = "the training process stopped without recording why (it may have been killed)"
-
 
 def resume_command(run_dir: Path) -> str:
     """The command that resumes the run in ``run_dir`` (a free preview first)."""
@@ -1289,7 +1287,7 @@ def execute_run(
     calling :func:`~pup_finetune.training.loop.run_training` in it. A new run must be
     ``created``. With ``resume`` it must be interrupted, failed or cancelled
     (:class:`WrongPhase` otherwise), or ``training`` with no process holding the lock: that
-    process died without recording it, and the run is first marked ``interrupted``.
+    process died without recording it, and this one takes the run over in one write.
 
     The phase becomes ``completed`` or ``cancelled`` from the result. Any error during
     training makes it ``interrupted``, resumable from the last training checkpoint; a
@@ -1319,7 +1317,8 @@ def execute_run(
         if resume:
             if state.phase == "training":
                 # We hold the lock, so the process that was training has died (e.g. SIGKILL).
-                state.transition("interrupted", error=StateError(STALE_TRAINING))
+                # Taken over in one write, so no reader sees the run stopped under this worker.
+                state.phase = "interrupted"
             state.resume()
         else:
             state.start()
