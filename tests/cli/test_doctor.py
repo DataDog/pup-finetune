@@ -22,12 +22,10 @@ import pytest
 from typer.testing import CliRunner, Result
 
 from pup_finetune import __version__, providers, readiness, redaction
-from pup_finetune import doctor as registry
 from pup_finetune.cli import app
 from pup_finetune.cli import doctor as doctor_cli
 from pup_finetune.datadog.pup import Pup
-from pup_finetune.doctor import CheckOutcome
-from pup_finetune.errors import UsageError, install_hint
+from pup_finetune.errors import ExternalError, UsageError, install_hint
 from pup_finetune.providers.base import Provider
 from pup_finetune.providers.fireworks.models import PROFILES as FIREWORKS_PROFILES
 from pup_finetune.providers.fireworks.provider import FireworksProvider
@@ -59,6 +57,8 @@ CHECKS = [
 
 UsePup = Callable[[Pup], None]
 
+SECRET = "zq9Xsynthetic0000keyVALUEw7Pm"  # noqa: S105 - synthetic test value
+
 
 @pytest.fixture
 def use_pup(monkeypatch: pytest.MonkeyPatch) -> UsePup:
@@ -72,8 +72,7 @@ def use_pup(monkeypatch: pytest.MonkeyPatch) -> UsePup:
 
 @pytest.fixture(autouse=True)
 def _known_setup(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """No registered extra checks, no keys, every package installed, a fixed checkout."""
-    monkeypatch.setattr(registry, "_REGISTRY", {})
+    """No keys, every package installed, a fixed checkout."""
     no_provider_keys(monkeypatch, tmp_path / "home")
     installed_packages(monkeypatch, ALL_PACKAGES)
     monkeypatch.setattr(doctor_cli, "checkout_commit", lambda: "cd9cc2e")
@@ -571,6 +570,48 @@ def test_a_provider_that_cannot_be_loaded_fails_the_check(
     assert ready["evaluate on fireworks"]["blocked_by"] == ["fireworks:models"]
 
 
+@pytest.mark.parametrize(
+    ("error", "env", "detail"),
+    [
+        (
+            ExternalError(f"provider said {SECRET}", source="acme", hint=f"key {SECRET}"),
+            {},
+            "provider said ***; key ***",
+        ),
+        (
+            RuntimeError(f"crashed with {SECRET}\nsecond line"),
+            {},
+            "check failed unexpectedly (RuntimeError: crashed with ***)"
+            " (set PUP_FINETUNE_DEBUG=1 for a traceback)",
+        ),
+        (
+            RuntimeError(f"crashed with {SECRET}\nsecond line"),
+            {"PUP_FINETUNE_DEBUG": "1"},
+            "check failed unexpectedly (RuntimeError: crashed with ***)",
+        ),
+    ],
+)
+def test_a_check_that_raises_is_reported_redacted(
+    error: Exception,
+    env: dict[str, str],
+    detail: str,
+    use_pup: UsePup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken(name: str, runtime: Runtime) -> Provider:
+        raise error
+
+    redaction.register_secret(SECRET)
+    monkeypatch.setattr(readiness, "get_provider", broken)
+    monkeypatch.setenv("FIREWORKS_API_KEY", API_KEY)
+    use_pup(healthy_pup().client())
+    result = runner.invoke(app, ["doctor", "--provider", "fireworks", "--check"], env=env)
+    assert result.exit_code == 1
+    assert checks_of(result)["fireworks:models"]["detail"] == detail
+    assert SECRET not in result.stdout + result.stderr
+    assert ("Traceback" in result.stderr) == bool(env)
+
+
 def test_check_skips_the_preflight_without_a_key(
     use_pup: UsePup, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -779,83 +820,6 @@ def test_quiet_mode_prints_no_checklist(use_pup: UsePup, monkeypatch: pytest.Mon
     monkeypatch.setenv("PUP_FINETUNE_QUIET", "1")
     use_pup(healthy_pup().client())
     assert invoke().stderr == ""
-
-
-# --- registered checks ---------------------------------------------------------------------
-
-
-def test_registered_checks_are_reported_and_gate_the_exit_code(use_pup: UsePup) -> None:
-    use_pup(healthy_pup().client())
-    registry.register_check("extra", lambda: CheckOutcome(True, "fine"))
-    registry.register_check("tokenizer", lambda: CheckOutcome(False, "offline"), required=False)
-    result = invoke()
-    assert result.exit_code == 0
-    checks = report_of(result)["checks"]
-    assert [c["name"] for c in checks] == [*CHECKS, "extra", "tokenizer"]
-    assert checks[-1] == {
-        "name": "tokenizer",
-        "status": "optional",
-        "detail": "offline",
-        "needed_for": None,
-        "fix": None,
-        "label": "offline",
-        "ok": False,
-        "required": False,
-    }
-
-    registry.register_check("provider", lambda: CheckOutcome(False, "no key"))
-    result = invoke()
-    assert result.exit_code == 1
-    assert report_of(result)["status"] == "not_ready"
-    assert checks_of(result)["provider"]["status"] == "fail"
-
-
-def test_a_crashing_check_fails_without_crashing_doctor(use_pup: UsePup) -> None:
-    use_pup(healthy_pup().client())
-
-    def boom() -> CheckOutcome:
-        raise RuntimeError("kaboom\nsecond line")
-
-    def usage() -> CheckOutcome:
-        raise UsageError("bad config", hint="fix it")
-
-    registry.register_check("boom", boom)
-    registry.register_check("usage", usage)
-    result = invoke()
-    assert result.exit_code == 1
-    checks = checks_of(result)
-    assert checks["boom"]["detail"] == (
-        "check failed unexpectedly (RuntimeError: kaboom) (set PUP_FINETUNE_DEBUG=1 for a traceback)"
-    )
-    assert checks["usage"]["detail"] == "bad config; fix it"
-    assert checks["usage"]["fix"] == "fix it"
-    assert "Traceback" not in result.stderr
-
-
-def test_a_crashing_check_prints_its_traceback_in_debug(use_pup: UsePup) -> None:
-    use_pup(healthy_pup().client())
-
-    def boom() -> CheckOutcome:
-        raise RuntimeError("kaboom")
-
-    registry.register_check("boom", boom)
-    result = runner.invoke(app, ["doctor"], env={"PUP_FINETUNE_DEBUG": "1"})
-    assert result.exit_code == 1
-    assert checks_of(result)["boom"]["detail"] == "check failed unexpectedly (RuntimeError: kaboom)"
-    assert "Traceback" in result.stderr
-
-
-def test_register_check_rejects_conflicts() -> None:
-    def fn() -> CheckOutcome:
-        return CheckOutcome(True, "")
-
-    registry.register_check("a", fn)
-    registry.register_check("a", fn)  # idempotent
-    with pytest.raises(ValueError, match="already registered"):
-        registry.register_check("a", lambda: CheckOutcome(True, ""))
-    with pytest.raises(ValueError, match="needs a name"):
-        registry.register_check("", fn)
-    assert [check.name for check in registry.run_registered_checks()] == ["a"]
 
 
 # --- the version ---------------------------------------------------------------------------
