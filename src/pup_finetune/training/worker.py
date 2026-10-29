@@ -19,9 +19,9 @@ its arguments, extra environment variables or files; it resolves the provider's 
 again itself. When it ends, it notes that in ``worker.json`` (:func:`record_worker_exit`),
 with the error it ended with, so ``status`` can tell a worker that failed before training.
 Both updates of ``worker.json`` happen under a lock on ``.worker.lock``: the launcher holds
-it from its check that no other worker is starting until it has recorded the new one, and a
-worker's exit merges into its own record and never replaces the record of another live
-worker.
+it from its check that no other worker is starting or training until it has recorded the new
+one, and a worker's exit merges into its own record and never replaces the record of another
+live worker.
 
 :func:`worker_status` tells whether a run's training process is alive (its pid, and how old
 the heartbeat is); :func:`cancel_training` sends SIGTERM to it after checking that the
@@ -67,6 +67,7 @@ __all__ = [
     "record_worker_exit",
     "require_detach_supported",
     "require_no_worker_starting",
+    "require_not_training",
     "run_in_dir",
     "spawn_worker",
     "worker_status",
@@ -148,17 +149,22 @@ def spawn_worker(run_dir: RunDir, mode: WorkerMode, *, now: Clock = utcnow) -> i
     every path absolute (:data:`~pup_finetune.display.ABSOLUTE_PATHS_ENV`), since a path
     relative to the run directory would not name the run for whoever reads the log. Its pid,
     mode and start time go to ``worker.json``. Raises :class:`WrongPhase` while an earlier
-    worker is starting (:func:`require_no_worker_starting`); that check, the start and the
-    record are made under the lock on ``worker.json``, so of two launches at once the second
-    sees the first. Raises :class:`StateError` when ``worker.log`` is not a regular file of
-    this user's (e.g. a symlink).
+    worker is starting (:func:`require_no_worker_starting`) or a process trains in the run
+    (:func:`require_not_training`); those checks, the start and the record are made under the
+    lock on ``.worker.lock``, so of two launches at once the second sees the first. Raises
+    :class:`StateError` when ``worker.log`` is not a regular file of this user's (e.g. a
+    symlink).
     """
     require_detach_supported()
     if mode not in WORKER_MODES:
         raise ValueError(f"unknown worker mode {mode!r}")
     path = run_dir.path.resolve()
     with _worker_record_lock(run_dir):
-        require_no_worker_starting(run_dir, run_dir.load_state())
+        state = run_dir.load_state()
+        require_no_worker_starting(run_dir, state)
+        # After that check, so this probe, which takes the run's lock for an instant, never
+        # races a starting worker for it.
+        require_not_training(run_dir, state)
         log_fd = _open_log(run_dir)
         try:
             process = subprocess.Popen(  # noqa: S603 - our own interpreter and module, no shell
@@ -472,6 +478,15 @@ def require_no_worker_starting(run_dir: RunDir, state: RunState) -> None:
         raise WrongPhase(
             f"a worker for the run in {run_dir.path} is starting (process {worker.pid})",
             hint=f"follow it with `{command('status', run_dir.path, '--watch')}`",
+        )
+
+
+def require_not_training(run_dir: RunDir, state: RunState) -> None:
+    """Raise :class:`WrongPhase` while a process holds ``run_dir``'s lock, i.e. trains in it."""
+    if lock_held(run_dir):
+        raise WrongPhase(
+            f"the run in {run_dir.path} is still training (process {state.pid})",
+            hint=f"wait for it, or cancel it with `{command('cancel', run_dir.path)}`",
         )
 
 

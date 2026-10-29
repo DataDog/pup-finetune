@@ -144,10 +144,10 @@ from pup_finetune.training.worker import (
     WorkerStatus,
     cancel_training,
     cancellable_pid,
-    lock_held,
     record_worker_exit,
     require_detach_supported,
     require_no_worker_starting,
+    require_not_training,
     run_in_dir,
     spawn_worker,
     worker_status,
@@ -1228,11 +1228,7 @@ def _resume_mode(run: RunDir, state: RunState) -> WorkerMode:
     if state.phase == "created":
         return "train"  # it never started (e.g. its worker failed to start): start it
     if state.phase == "training":
-        if lock_held(run):
-            raise WrongPhase(
-                f"the run in {run.path} is still training (process {state.pid})",
-                hint=f"wait for it, or cancel it with `pup finetune cancel {_q(run.path)}`",
-            )
+        require_not_training(run, state)
     else:
         require_resumable(state)
     return "finalize" if state.resume_mode == "finalize_only" else "resume"
