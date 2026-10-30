@@ -1013,10 +1013,18 @@ def train(
     require_supported_flags(provider.name, runtime, flags)
     limit = provider.preflight(profile)
     seq_flag = MAX_SEQ_LEN_FLAG if max_seq_len is not None else MAX_SEQ_LEN_OPTION_FLAG
-    if limit is not None and limit < profile.max_seq_len and MAX_SEQ_LEN_OPTION not in raw_options:
+    if (
+        limit is not None
+        and limit < profile.max_seq_len
+        and options.get(MAX_SEQ_LEN_OPTION) is None
+    ):
         # Default capacity can train a model on less than its context: train at that limit.
         max_seq_len = limit
-        raw_options = _with_max_seq_len(provider.name, raw_options, limit)
+        raw_options = _with_max_seq_len(
+            provider.name,
+            {key: value for key, value in raw_options.items() if key != MAX_SEQ_LEN_OPTION},
+            limit,
+        )
         options = provider.validate_options(raw_options)
         seq_flag = PROVIDER_LIMIT
     # What the run trains with: an option may narrow the profile (e.g. cap its context),
