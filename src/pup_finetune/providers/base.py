@@ -178,6 +178,10 @@ max_seq_len`` is :data:`MAX_SEQ_LEN_OPTION_FLAG`."""
 
 MAX_SEQ_LEN_OPTION_FLAG: Final = "--provider-option max_seq_len"
 
+PROVIDER_LIMIT: Final = "the provider's limit for this account"
+"""The source of a context cut to the longest the provider trains the model on for the account
+(what :meth:`Provider.preflight` returns), when no flag cut it."""
+
 DEFAULT_SPEND_RESERVE_FRACTION = 0.1
 """The share of ``max_spend_usd`` kept back for the checkpoint saved when training stops."""
 
@@ -1048,8 +1052,9 @@ class Provider(Protocol):
         (:func:`find_profile`)."""
         ...
 
-    def preflight(self, profile: ModelProfile) -> None:
-        """Confirm with the provider that ``profile`` can be trained right now."""
+    def preflight(self, profile: ModelProfile) -> int | None:
+        """Confirm with the provider that ``profile`` can be trained right now: the longest
+        sequence it trains ``profile`` on for this account, or ``None`` when it reports none."""
         ...
 
     def renderer(self, profile: ModelProfile) -> Renderer:

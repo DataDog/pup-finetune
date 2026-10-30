@@ -107,6 +107,7 @@ from pup_finetune.providers.base import (
     MAX_SEQ_LEN_FLAG,
     MAX_SEQ_LEN_OPTION_FLAG,
     OFFLINE_BILLING,
+    PROVIDER_LIMIT,
     ModelProfile,
     Provider,
     RemotePlan,
@@ -991,9 +992,6 @@ def train(
                 hint=f"pass --max-seq-len N with N at most {profile.max_seq_len}",
             )
     options = provider.validate_options(raw_options)
-    # What the run trains with: an option may narrow the profile (e.g. cap its context),
-    # so rows are rendered, previewed and recorded against the narrowed one.
-    profile = provider.training_profile(profile)
     flags: dict[str, Any] = {
         "max_epochs": max_epochs,
         "patience": patience,
@@ -1013,12 +1011,21 @@ def train(
         "microbatch_token_budget": microbatch_token_budget,
     }
     require_supported_flags(provider.name, runtime, flags)
+    limit = provider.preflight(profile)
+    seq_flag = MAX_SEQ_LEN_FLAG if max_seq_len is not None else MAX_SEQ_LEN_OPTION_FLAG
+    if limit is not None and limit < profile.max_seq_len and MAX_SEQ_LEN_OPTION not in raw_options:
+        # Default capacity can train a model on less than its context: train at that limit.
+        max_seq_len = limit
+        raw_options = _with_max_seq_len(provider.name, raw_options, limit)
+        options = provider.validate_options(raw_options)
+        seq_flag = PROVIDER_LIMIT
+    # What the run trains with: an option may narrow the profile (e.g. cap its context),
+    # so rows are rendered, previewed and recorded against the narrowed one.
+    profile = provider.training_profile(profile)
     spec = _spec(flags, options)
-    provider.preflight(profile)
     renderer = provider.renderer(profile)
     inputs = build_inputs(dataset, renderer, profile, by_split)
     defaults_used = _defaults_used(ctx, raw_options)
-    seq_flag = MAX_SEQ_LEN_FLAG if max_seq_len is not None else MAX_SEQ_LEN_OPTION_FLAG
     preview = _preview(
         provider,
         run_dir,
@@ -1893,7 +1900,9 @@ TRAIN_DOC = CommandDoc(
         "and --eval-out-dir checked before training starts, so a failed calibration trains "
         "nothing; --detach is refused with it; and the evaluation stops, partial, at "
         "--max-spend-usd. --max-seq-len caps the context (and so the cost): longer rows "
-        "are left out, as the preview shows (exceeds_context). "
+        "are left out, as the preview shows (exceeds_context). Without it, a provider that "
+        "trains the model on less than its context for your account (Baseten's default "
+        "capacity) sets the cap, which the preview names and its next_command pins. "
         "--remote (Baseten only) runs the training loop in a Baseten CPU job, so training "
         "continues while this machine sleeps; --team names the team (default: your only or "
         "default team). It needs the baseten CLI and uv on PATH, a source checkout of "

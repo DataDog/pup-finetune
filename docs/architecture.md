@@ -264,8 +264,9 @@ release.
 Baseten Loops through `providers/baseten/client.py`, the only module that loads the Loops SDK:
 
 - **Preflight.** Read only: the SDK loads, and Loops' capabilities must offer and enable the
-  model to the workspace with a limit of at least the `max_seq_len` option, else the
-  profile's context. Nothing is paid before `--confirm`.
+  model to the workspace with a limit of at least the `max_seq_len` option. It returns the
+  limit, so a workspace whose default capacity is under the profile's context trains at the
+  limit when no `max_seq_len` is set. Nothing is paid before `--confirm`.
 - **Sessions.** `open_session` opens a Loops session and a dedicated LoRA trainer whose
   context is the next power of two over the session's longest example (at least 1024 tokens,
   at most the profile's). Leaving the context always deactivates the run and every sampler

@@ -77,13 +77,16 @@ def profile_entry(
 
 def _preflight(provider: Provider, profile: ModelProfile) -> dict[str, Any]:
     try:
-        provider.preflight(profile)
+        limit = provider.preflight(profile)
     except FinetuneError as exc:
         result: dict[str, Any] = {"ok": False, "error": redact(str(exc))}
         if exc.hint:
             result["hint"] = redact(exc.hint)
         return result
-    return {"ok": True}
+    if limit is None or limit >= profile.max_seq_len:
+        return {"ok": True}
+    # Under the model's context (e.g. default capacity): train trains at this limit.
+    return {"ok": True, "max_seq_len": limit}
 
 
 @models_app.command(**LIST_DOC.typer())

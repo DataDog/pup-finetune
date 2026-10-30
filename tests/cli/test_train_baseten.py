@@ -34,12 +34,12 @@ from pup_finetune.cli import deploy as deploy_module
 from pup_finetune.cli import train as train_module
 from pup_finetune.evaluation import benchmark as benchmark_module
 from pup_finetune.evaluation import runner as eval_module
-from pup_finetune.providers.base import Provider
+from pup_finetune.providers.base import PROVIDER_LIMIT, Provider
 from pup_finetune.providers.baseten import client
 from pup_finetune.runs import RunDir, model_id_for_run
 from pup_finetune.runtime import Runtime
 from pup_finetune.training import inputs as inputs_module
-from tests.fakes.baseten import Answer, FakeDeployment, FakeLoops
+from tests.fakes.baseten import Answer, FakeDeployment, FakeLoops, capabilities
 from tests.fakes.fireworks_deploy import FakeClock
 from tests.fakes.pushed import mark_pushed
 from tests.fakes.tokenizer import FakeChatTokenizer
@@ -138,6 +138,36 @@ def test_the_preview_asks_baseten_nothing_paid(
     assert shlex.split(data["next_command"])[-1] == "--confirm"
     assert not run_dir.exists()
     assert loops.calls == []
+
+
+def test_a_workspace_limit_under_the_model_s_context_is_trained_at(
+    dataset: Path, tmp_path: Path, routes: dict[str, Answer]
+) -> None:
+    routes["GET /v1/loops/capabilities"] = (
+        200,
+        capabilities("Qwen/Qwen3.5-9B", max_enabled_seq_len=32_768),
+    )
+    run_dir = tmp_path / "run"
+    result = train(dataset, run_dir)
+    assert result.exit_code == 2, result.stderr
+    data = output(result)
+    preview = data["preview"]
+    assert preview["profile"]["max_seq_len"] == 32_768
+    settings = preview["settings"]
+    assert (settings["max_seq_len"], settings["max_seq_len_source"]) == (32_768, PROVIDER_LIMIT)
+    assert "max_seq_len" not in preview["defaults_used"]
+    assert "context 32,768 (the provider's limit for this account)" in result.stderr
+    # Pinned, so the run trains at the context the preview showed.
+    words = shlex.split(data["next_command"])
+    assert words[words.index("--max-seq-len") + 1] == "32768"
+
+    confirmed = invoke(*words[2:])
+    assert confirmed.exit_code == 0, confirmed.stderr
+    assert RunDir(run_dir).profile().max_seq_len == 32_768
+
+    over = train(dataset, tmp_path / "over", "--max-seq-len", "65536")
+    assert over.exit_code == 2
+    assert "at most 32768 tokens in this workspace, shorter than the 65536" in over.stderr
 
 
 def test_a_confirmed_run_trains_leaves_nothing_running_and_deploys_its_checkpoint(

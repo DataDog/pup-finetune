@@ -275,18 +275,23 @@ def test_preflight_refuses_a_model_the_workspace_cannot_train(
     assert caught.value.hint
 
 
-@pytest.mark.parametrize("option", [None, "65536"], ids=["profile", "option"])
-def test_preflight_refuses_a_context_over_the_workspace_limit(option: str | None) -> None:
+def test_preflight_refuses_a_max_seq_len_over_the_workspace_limit() -> None:
     caps = capabilities(QWEN.base_model, max_enabled_seq_len=32_768)
     provider, _ = provider_for(caps=(200, caps))
-    provider.validate_options({} if option is None else {"max_seq_len": option})
-    needed = option or str(QWEN.max_seq_len)
-    with pytest.raises(UsageError, match=f"at most 32768 tokens .* the {needed} to train at") as e:
+    provider.validate_options({"max_seq_len": "65536"})
+    with pytest.raises(UsageError, match=r"at most 32768 tokens .* the 65536 to train at") as e:
         provider.preflight(provider.training_profile(QWEN))
     assert e.value.hint == "pass --max-seq-len N with N at most 32768"
     provider.validate_options({"max_seq_len": "32768"})
-    provider.preflight(provider.training_profile(QWEN))
-    provider.preflight(QWEN)  # the option, not the uncut profile, is what trains
+    assert provider.preflight(provider.training_profile(QWEN)) == 32_768
+
+
+def test_preflight_returns_a_workspace_limit_under_the_model_s_context() -> None:
+    # Default capacity can be under the profile's context; train then trains at the limit.
+    caps = capabilities(QWEN.base_model, max_enabled_seq_len=32_768)
+    provider, _ = provider_for(caps=(200, caps))
+    provider.validate_options({})
+    assert provider.preflight(QWEN) == 32_768
 
 
 def test_the_remediation_baseten_gives_is_the_hint() -> None:
