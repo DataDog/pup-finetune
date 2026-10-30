@@ -25,10 +25,13 @@ from pup_finetune import redaction
 from pup_finetune.cli import app
 from pup_finetune.cli import models as models_cli
 from pup_finetune.providers.base import ModelProfile, Provider
+from pup_finetune.providers.baseten.provider import PROFILES as BASETEN_PROFILES
 from pup_finetune.providers.fireworks.models import PROFILES
 from pup_finetune.providers.fireworks.provider import FireworksProvider
 from pup_finetune.runtime import Runtime
+from tests.fakes.baseten import FakeLoops, capabilities
 from tests.fakes.fireworks_api import API_KEY, FakeFireworksApi
+from tests.providers.baseten.test_baseten_provider import provider_on
 
 runner = CliRunner()
 
@@ -194,6 +197,25 @@ def test_a_failed_check_is_reported_and_exits_1(fake: FakeFireworksApi) -> None:
     assert preflight["ok"] is False
     assert "its state is DEPLOYING, not READY" in preflight["error"]
     assert "models list --provider fireworks --check" in preflight["hint"]
+
+
+def test_check_reports_a_baseten_workspace_limit_under_a_model_s_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Default capacity trains the 27B on 131072 of its 262144 tokens; train uses that limit.
+    caps = capabilities(*(profile.base_model for profile in BASETEN_PROFILES))
+    loops = FakeLoops()
+
+    def provider(name: str, runtime: Runtime) -> Provider:
+        return provider_on(loops, routes={"GET /v1/loops/capabilities": (200, caps)})
+
+    monkeypatch.setattr(models_cli, "get_provider", provider)
+    result = invoke("--provider", "baseten", "--check")
+    assert result.exit_code == 0, result.stderr
+    preflights = {model["alias"]: model["preflight"] for model in output(result)["models"]}
+    assert preflights["qwen3p8-27b"] == {"ok": True, "max_seq_len": 131_072}
+    assert preflights["qwen3p5-9b"] == {"ok": True}
+    redaction.clear_secrets()
 
 
 class _TwoProfileProvider(FireworksProvider):

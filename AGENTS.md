@@ -318,7 +318,10 @@ user's explicit authorization. Always `undeploy` what you deploy while developin
 `--max-seq-len <n>` (the `max_seq_len` provider option, which `--provider-option
 max_seq_len=<n>` still sets; at least 1024 on Baseten) cuts the profile's context to `n`
 tokens: the run records the cut profile, and the preview already leaves longer rows out
-(`exceeds_context`). The fake provider takes it too.
+(`exceeds_context`). The fake provider takes it too. Without it, `train` caps the context at
+what `Provider.preflight` returns when that is under the profile's (a Baseten workspace's
+default capacity trains `qwen3p8-27b` on 131072 of its 262144 tokens): the preview's
+`max_seq_len_source` is `PROVIDER_LIMIT`, and its `next_command` pins `--max-seq-len`.
 
 Add `--detach` to train in a background worker (output in `/tmp/run/worker.log`) and follow it
 with `status /tmp/run --watch`. `--timeout DURATION` (`90s`, `10m`, `2h` or seconds; 90s by
@@ -1085,8 +1088,9 @@ Source lives under `src/pup_finetune/`.
   profiles, each
   with its own context (tokenizer pins from
   their families), a read-only `preflight` (the SDK loads, and Loops' capabilities offer and
-  enable the model with a limit of at least the `max_seq_len` option, else the profile's
-  context), the family's HF renderer and the `max_seq_len` option (at least 1024; it
+  enable the model with a limit of at least the `max_seq_len` option; it returns the limit,
+  which `models list --check` shows when it is under the profile's context), the family's
+  HF renderer and the `max_seq_len` option (at least 1024; it
   cuts the training profile, so it also sizes the samplers and an evaluation's trainer);.
   `baseten/deploy.py` has what its `deploy`, `smoke_test`, `owns_deployment` and `undeploy`
   run: lookups first (the checkpoint record, synced and of a served model; the instance type

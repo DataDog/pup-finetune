@@ -278,27 +278,29 @@ class BasetenProvider:
     def resolve_model(self, alias_or_id: str) -> ModelProfile:
         return find_profile(PROFILES, alias_or_id, provider=PROVIDER_NAME)
 
-    def preflight(self, profile: ModelProfile) -> None:
-        """Confirm, read only, that this workspace can train ``profile`` on Baseten Loops.
+    def preflight(self, profile: ModelProfile) -> int:
+        """Confirm, read only, that this workspace can train ``profile`` on Baseten Loops, and
+        return the longest sequence it trains it on (:func:`training_limit`).
 
         Loads the Loops SDK (refusing the environment overrides the client refuses) and asks
-        Baseten's capabilities whether the model is offered and enabled, with a limit
-        (:func:`training_limit`) of at least the context to train at: the ``max_seq_len``
-        option, else the profile's. Raises :class:`UsageError`, or :class:`ExternalError` when
-        Baseten fails. Needs the API key.
+        Baseten's capabilities whether the model is offered and enabled. The limit can be
+        under the profile's context (a workspace's default capacity), which ``train`` then
+        trains at; a ``max_seq_len`` option over it is refused. Raises :class:`UsageError`, or
+        :class:`ExternalError` when Baseten fails. Needs the API key.
         """
         self._own(profile)
         loops_sdk(self._loops)
         with self._http() as http:
             capabilities = http.capabilities()
         limit = training_limit(capabilities, profile.base_model)
-        max_seq_len = self.options.max_seq_len or profile.max_seq_len
-        if limit < max_seq_len:
+        max_seq_len = self.options.max_seq_len
+        if max_seq_len is not None and limit < max_seq_len:
             raise UsageError(
                 f"Baseten trains {profile.base_model} on at most {limit} tokens in this "
                 f"workspace, shorter than the {max_seq_len} to train at",
                 hint=f"pass --max-seq-len N with N at most {limit}",
             )
+        return limit
 
     def renderer(self, profile: ModelProfile) -> HFChatTemplateRenderer:
         """The family's chat-template renderer; its tokenizer loads on first use."""

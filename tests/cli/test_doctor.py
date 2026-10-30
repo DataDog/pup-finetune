@@ -26,14 +26,19 @@ from pup_finetune.cli import app
 from pup_finetune.cli import doctor as doctor_cli
 from pup_finetune.datadog.pup import Pup
 from pup_finetune.errors import ExternalError, UsageError, install_hint
+from pup_finetune.providers import provider_info
 from pup_finetune.providers.base import Provider
+from pup_finetune.providers.baseten.provider import PROFILES as BASETEN_PROFILES
 from pup_finetune.providers.fireworks.models import PROFILES as FIREWORKS_PROFILES
 from pup_finetune.providers.fireworks.provider import FireworksProvider
+from pup_finetune.readiness import preflight_checks
 from pup_finetune.runtime import Runtime
+from tests.fakes.baseten import FakeLoops, capabilities
 from tests.fakes.fireworks_api import API_KEY, FakeFireworksApi
 from tests.fakes.keyring import CRASHED_HOLDING, CrashingKeyring, LockedKeyring, MemoryKeyring
 from tests.fakes.pup import FAKE_BINARY, FakePup
 from tests.fakes.setup import ALL_PACKAGES, healthy_pup, installed_packages, no_provider_keys
+from tests.providers.baseten.test_baseten_provider import provider_on
 
 runner = CliRunner()
 
@@ -907,3 +912,22 @@ def test_the_checkout_ignores_a_repository_named_in_the_environment(
 def test_doctor_is_listed_in_help() -> None:
     result = runner.invoke(app, ["--help"])
     assert "doctor" in result.output
+
+
+def test_a_baseten_preflight_names_a_workspace_limit_under_the_model_s_context() -> None:
+    caps = capabilities(*(profile.base_model for profile in BASETEN_PROFILES))
+    loops = FakeLoops()
+    checks = preflight_checks(
+        provider_info("baseten", Runtime()),
+        Runtime(),
+        [],
+        factory=lambda name, runtime: provider_on(
+            loops, routes={"GET /v1/loops/capabilities": (200, caps)}
+        ),
+    )
+    by_name = {check.name: check for check in checks}
+    big = by_name["baseten:model:qwen3p8-27b"]
+    assert big.status == "pass"
+    assert big.detail.endswith("on at most 131072 of its 262144 tokens")
+    assert by_name["baseten:model:qwen3p5-9b"].detail.endswith("Qwen/Qwen3.5-9B now")
+    redaction.clear_secrets()

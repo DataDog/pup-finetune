@@ -251,7 +251,7 @@ def preflight_checks(
             )
             continue
         try:
-            provider.preflight(profile)
+            limit = provider.preflight(profile)
         except FinetuneError as exc:
             checks.append(
                 CheckResult(
@@ -279,7 +279,12 @@ def preflight_checks(
             CheckResult(
                 name=name,
                 status="pass",
-                detail=f"{info.label} can fine-tune {profile.base_model} now",
+                detail=f"{info.label} can fine-tune {profile.base_model} now"
+                + (
+                    f", on at most {limit} of its {profile.max_seq_len} tokens"
+                    if limit is not None and limit < profile.max_seq_len
+                    else ""
+                ),
                 label=f"{profile.alias} can be fine-tuned on {info.label}",
                 needed_for=needed_for,
             )
