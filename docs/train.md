@@ -43,6 +43,13 @@ run that a cap or a cancel stopped is not evaluated in its training session. Run
 `--max-seq-len` caps the context, and with it the cost. Rows longer than the cap are left out,
 and the preview counts them as `exceeds_context`. On Baseten, the cap is at least 1024 tokens.
 
+On Baseten, a run without `--max-seq-len` trains at the longest context your workspace is
+enabled for, when that is shorter than the model's. The preview and the run then print a
+`note:` that names both, the run records the context with the source `the provider's limit
+for this account`, and the preview's `next_command` pins it. A `--max-seq-len` over the workspace's limit is refused, with the limit in the hint.
+`pup finetune doctor --provider baseten --check` shows each model's limit, and
+`--max-seq-len N` with it checks a context of your own.
+
 ## Decay the learning rate
 
 The learning rate stays constant unless `--lr-schedule linear` or `cosine` decays it:

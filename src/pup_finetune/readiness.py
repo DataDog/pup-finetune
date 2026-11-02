@@ -26,7 +26,15 @@ from pup_finetune.doctor import CheckResult, error_detail, status_of, unexpected
 from pup_finetune.errors import FinetuneError
 from pup_finetune.judge_models import EVALUATE_DEFAULTS, TRIAGE_DEFAULTS, JudgeDefault
 from pup_finetune.providers import Package, ProviderInfo, get_provider, provider_infos
-from pup_finetune.providers.base import Provider
+from pup_finetune.providers.base import (
+    MAX_SEQ_LEN_FLAG,
+    MAX_SEQ_LEN_OPTION,
+    ModelProfile,
+    Provider,
+    TrainingContext,
+    fitted_context,
+    under_profile_context,
+)
 from pup_finetune.redaction import redact
 from pup_finetune.runtime import Runtime
 
@@ -206,17 +214,39 @@ def judge_checks(runtime: Runtime) -> list[CheckResult]:
 ProviderFactory = Callable[[str, Runtime], Provider]
 
 
+def preflight_context(
+    provider: Provider, profile: ModelProfile, max_seq_len: int | None = None
+) -> TrainingContext | None:
+    """Preflight ``profile`` at the context a run would train it at, and return that context
+    with its source when it is not the profile's own: ``max_seq_len``, else the provider's
+    limit when that is shorter (:func:`fitted_context`). Raises like
+    :meth:`~Provider.preflight`, so a ``max_seq_len`` over the provider's limit or the
+    profile's context is refused. Leaves the provider's options as it found them: none.
+    """
+    try:
+        if max_seq_len is not None:
+            provider.validate_options({MAX_SEQ_LEN_OPTION: str(max_seq_len)})
+        limit = provider.preflight(provider.training_profile(profile))
+    finally:
+        provider.validate_options({})
+    if max_seq_len is not None:
+        return TrainingContext(max_seq_len=max_seq_len, source=MAX_SEQ_LEN_FLAG)
+    return fitted_context(profile, limit)
+
+
 def preflight_checks(
     info: ProviderInfo,
     runtime: Runtime,
     offline: Sequence[CheckResult],
     *,
     factory: ProviderFactory | None = None,
+    max_seq_len: int | None = None,
 ) -> list[CheckResult]:
     """``doctor --provider NAME --check``: the provider's live, read-only preflight of each
-    model profile (what ``models list --check`` runs). Skipped when one of its ``offline``
-    checks (the key and what training needs installed) did not pass. ``factory`` builds the
-    provider (default: the registry's)."""
+    model profile (what ``models list --check`` runs), at the context a run would train it at
+    (:func:`preflight_context`). Skipped when one of its ``offline`` checks (the key and what
+    training needs installed) did not pass. ``factory`` builds the provider (default: the
+    registry's)."""
     blockers = [check.name for check in offline if not check.ok]
     try:
         provider = (factory or get_provider)(info.name, runtime)
@@ -251,7 +281,7 @@ def preflight_checks(
             )
             continue
         try:
-            limit = provider.preflight(profile)
+            context = preflight_context(provider, profile, max_seq_len)
         except FinetuneError as exc:
             checks.append(
                 CheckResult(
@@ -275,17 +305,16 @@ def preflight_checks(
                 )
             )
             continue
+        at = "" if context is None else f" at {context.max_seq_len} tokens ({context.source})"
+        detail = f"{info.label} can fine-tune {profile.base_model}{at} now"
+        if context is not None and context.fitted:
+            detail += f", {under_profile_context(profile)}"
         checks.append(
             CheckResult(
                 name=name,
                 status="pass",
-                detail=f"{info.label} can fine-tune {profile.base_model} now"
-                + (
-                    f", on at most {limit} of its {profile.max_seq_len} tokens"
-                    if limit is not None and limit < profile.max_seq_len
-                    else ""
-                ),
-                label=f"{profile.alias} can be fine-tuned on {info.label}",
+                detail=detail,
+                label=f"{profile.alias} can be fine-tuned on {info.label}{at}",
                 needed_for=needed_for,
             )
         )

@@ -101,7 +101,9 @@ from typing import Any, Literal
 
 import httpx
 
+from pup_finetune.providers.base import ModelProfile
 from pup_finetune.providers.baseten.client import MAX_CHECKPOINT_NAME_LEN
+from pup_finetune.providers.baseten.provider import PROFILES
 from tests.fakes.chat_api import completion
 
 Answer = tuple[int, Any] | httpx.Response | Callable[[httpx.Request], httpx.Response]
@@ -997,6 +999,29 @@ def capabilities(*base_models: str, **fields: Any) -> dict[str, Any]:
         "enablement_details": None,
     }
     return {"supported_models": [{"model_name": name, **entry, **fields} for name in base_models]}
+
+
+SHORT_PROFILE: ModelProfile = next(profile for profile in PROFILES if profile.alias == "qwen3p5-9b")
+"""The model a short workspace (:func:`short_capabilities`) trains on less than its context."""
+
+WORKSPACE_LIMIT = 32_768
+"""What a short workspace trains :data:`SHORT_PROFILE` on: under the profile's context."""
+
+OVER_WORKSPACE_LIMIT = 2 * WORKSPACE_LIMIT
+WITHIN_WORKSPACE_LIMIT = WORKSPACE_LIMIT // 2
+
+
+def short_capabilities(body: Mapping[str, Any]) -> dict[str, Any]:
+    """``body`` with :data:`SHORT_PROFILE`'s model enabled for :data:`WORKSPACE_LIMIT` only."""
+    return {
+        **body,
+        "supported_models": [
+            {**entry, "max_enabled_seq_len": WORKSPACE_LIMIT}
+            if entry["model_name"] == SHORT_PROFILE.base_model
+            else entry
+            for entry in body["supported_models"]
+        ],
+    }
 
 
 # --- Training jobs (train --remote) ------------------------------------------------------

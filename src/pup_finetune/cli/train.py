@@ -87,7 +87,7 @@ from pup_finetune.errors import (
 )
 from pup_finetune.evaluation import runner as evaluation
 from pup_finetune.next_steps import PROGRAM, command, step, template
-from pup_finetune.output import info
+from pup_finetune.output import info, note
 from pup_finetune.progress import TrainingProgress
 from pup_finetune.providers import (
     get_provider,
@@ -105,6 +105,7 @@ from pup_finetune.providers import (
 )
 from pup_finetune.providers.base import (
     MAX_SEQ_LEN_FLAG,
+    MAX_SEQ_LEN_OPTION,
     MAX_SEQ_LEN_OPTION_FLAG,
     OFFLINE_BILLING,
     PROVIDER_LIMIT,
@@ -113,6 +114,7 @@ from pup_finetune.providers.base import (
     RemotePlan,
     TrainingUsage,
     TrainSpec,
+    fitted_context_note,
 )
 from pup_finetune.rendering.base import Renderer
 from pup_finetune.runs import (
@@ -215,9 +217,6 @@ ADVANCED = "Advanced"
 """``train``'s option panels. Every option of :data:`EVALUATE` needs ``--evaluate``."""
 
 _THE_MODELS = default_note("the model's")
-
-MAX_SEQ_LEN_OPTION = "max_seq_len"
-"""The provider option ``--max-seq-len`` sets."""
 
 
 def provider_choices() -> str:
@@ -1027,6 +1026,7 @@ def train(
         )
         options = provider.validate_options(raw_options)
         seq_flag = PROVIDER_LIMIT
+        note(fitted_context_note(provider, profile, limit))
     # What the run trains with: an option may narrow the profile (e.g. cap its context),
     # so rows are rendered, previewed and recorded against the narrowed one.
     profile = provider.training_profile(profile)

@@ -109,6 +109,7 @@ pup finetune doctor [OPTIONS]
 | --- | --- | --- | --- |
 | `--provider` | `NAME` |  | Require this provider's checks too: baseten or fireworks. |
 | `--check` |  |  | With --provider: also preflight its models live (read-only; needs its key). |
+| `--max-seq-len` | `N (x>=1)` | the model's, cut to Baseten's workspace limit | With --check: preflight at this context. |
 
 Examples:
 
@@ -199,6 +200,7 @@ pup finetune models list [OPTIONS]
 | --- | --- | --- | --- |
 | `--provider` | `NAME` | every provider | Only this provider: baseten or fireworks. |
 | `--check` |  |  | Preflight each model with its provider (needs its API key). |
+| `--max-seq-len` | `N (x>=1)` | the model's, cut to Baseten's workspace limit | With --check: preflight at this context. |
 
 Examples:
 

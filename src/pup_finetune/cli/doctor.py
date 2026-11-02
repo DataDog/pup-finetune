@@ -32,10 +32,10 @@ import pup_finetune
 from pup_finetune import __version__, credentials, readiness
 from pup_finetune.cli._common import CommandResult, get_runtime, run_command
 from pup_finetune.cli._flags import require_enablers
-from pup_finetune.cli._presentation import SET_UP, CommandDoc, Safety, describe
+from pup_finetune.cli._presentation import SET_UP, CommandDoc, Safety, default_note, describe
 from pup_finetune.datadog.pup import MIN_PUP_VERSION, Pup, format_version
 from pup_finetune.doctor import CheckResult, error_detail
-from pup_finetune.errors import ExternalError
+from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.next_steps import command, step, template
 from pup_finetune.providers import ProviderInfo, provider_info, provider_infos, registered_providers
 from pup_finetune.runtime import Runtime
@@ -255,9 +255,15 @@ def _next(
 
 
 def build_report(
-    pup: Pup, runtime: Runtime, *, provider: str | None = None, live: bool = False
+    pup: Pup,
+    runtime: Runtime,
+    *,
+    provider: str | None = None,
+    live: bool = False,
+    max_seq_len: int | None = None,
 ) -> dict[str, Any]:
-    """The doctor report: ``status`` is ``ready`` when every required check passed."""
+    """The doctor report: ``status`` is ``ready`` when every required check passed;
+    ``max_seq_len`` is the context the live preflight checks each model at."""
     named = provider_info(provider, runtime) if provider is not None else None
     pup_version, pup_found, pup_check = _check_pup(pup)
     checks = [pup_check, _check_auth(pup, pup_found=pup_found)]
@@ -266,7 +272,7 @@ def build_report(
         offline = readiness.provider_checks(info, required=required)
         checks += offline
         if required and live:
-            checks += readiness.preflight_checks(info, runtime, offline)
+            checks += readiness.preflight_checks(info, runtime, offline, max_seq_len=max_seq_len)
     checks += readiness.judge_checks(runtime)
     ready = readiness.ready_map(checks, runtime)
     is_ready = all(check.ok for check in checks if check.required)
@@ -339,10 +345,25 @@ def doctor(
             help="With --provider: also preflight its models live (read-only; needs its key).",
         ),
     ] = False,
+    max_seq_len: Annotated[
+        int | None,
+        typer.Option(
+            "--max-seq-len",
+            min=1,
+            metavar="N",
+            help="With --check: preflight at this context. "
+            f"{default_note("the model's, cut to Baseten's workspace limit")}",
+            show_default=False,
+        ),
+    ] = None,
 ) -> CommandResult:
     """Print the doctor report, and exit 1 when a required check fails."""
+    if max_seq_len is not None and not check:
+        raise UsageError("--max-seq-len needs --check", hint="add --provider NAME --check")
     require_enablers(DOCTOR_NEEDS)
-    report = build_report(Pup(), get_runtime(), provider=provider_name, live=check)
+    report = build_report(
+        Pup(), get_runtime(), provider=provider_name, live=check, max_seq_len=max_seq_len
+    )
     return CommandResult(report, exit_code=0 if report["status"] == "ready" else 1)
 
 

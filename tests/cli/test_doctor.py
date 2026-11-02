@@ -27,18 +27,33 @@ from pup_finetune.cli import doctor as doctor_cli
 from pup_finetune.datadog.pup import Pup
 from pup_finetune.errors import ExternalError, UsageError, install_hint
 from pup_finetune.providers import provider_info
-from pup_finetune.providers.base import Provider
+from pup_finetune.providers.base import (
+    PROVIDER_LIMIT,
+    Provider,
+    under_profile_context,
+)
 from pup_finetune.providers.baseten.provider import PROFILES as BASETEN_PROFILES
 from pup_finetune.providers.fireworks.models import PROFILES as FIREWORKS_PROFILES
 from pup_finetune.providers.fireworks.provider import FireworksProvider
 from pup_finetune.readiness import preflight_checks
 from pup_finetune.runtime import Runtime
-from tests.fakes.baseten import FakeLoops, capabilities
+from tests.fakes.baseten import (
+    OVER_WORKSPACE_LIMIT,
+    SHORT_PROFILE,
+    WITHIN_WORKSPACE_LIMIT,
+    WORKSPACE_LIMIT,
+    FakeLoops,
+    capabilities,
+    short_capabilities,
+)
 from tests.fakes.fireworks_api import API_KEY, FakeFireworksApi
 from tests.fakes.keyring import CRASHED_HOLDING, CrashingKeyring, LockedKeyring, MemoryKeyring
 from tests.fakes.pup import FAKE_BINARY, FakePup
 from tests.fakes.setup import ALL_PACKAGES, healthy_pup, installed_packages, no_provider_keys
+from tests.providers.baseten.test_baseten_provider import CAPABILITIES as BASETEN_CAPABILITIES
+from tests.providers.baseten.test_baseten_provider import KEY as BASETEN_KEY
 from tests.providers.baseten.test_baseten_provider import provider_on
+from tests.providers.baseten.test_baseten_provider import provider_on as baseten_provider_on
 
 runner = CliRunner()
 
@@ -535,6 +550,54 @@ def test_check_preflights_the_named_provider_s_models(
     assert API_KEY not in result.stdout + result.stderr
 
 
+@pytest.fixture
+def short_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Serve `doctor --check` a Baseten workspace that trains Qwen3.5 9B on fewer tokens
+    than its profile's context, with the key in the env."""
+    caps = short_capabilities(BASETEN_CAPABILITIES)
+    monkeypatch.setenv("BASETEN_API_KEY", BASETEN_KEY.get_secret_value())
+
+    def provider(name: str, runtime: Runtime) -> Provider:
+        assert name == "baseten"
+        return baseten_provider_on(FakeLoops(), routes={"GET /v1/loops/capabilities": (200, caps)})
+
+    monkeypatch.setattr(readiness, "get_provider", provider)
+
+
+@pytest.mark.usefixtures("short_workspace")
+def test_check_passes_a_model_fitted_to_the_workspace_limit(use_pup: UsePup) -> None:
+    use_pup(healthy_pup().client())
+    result = invoke("--provider", "baseten", "--check")
+    assert result.exit_code == 0, result.stderr
+    model = checks_of(result)["baseten:model:qwen3p5-9b"]
+    assert model["status"] == "pass"
+    assert model["label"] == (
+        f"qwen3p5-9b can be fine-tuned on Baseten at {WORKSPACE_LIMIT} tokens ({PROVIDER_LIMIT})"
+    )
+    assert under_profile_context(SHORT_PROFILE) in model["detail"]
+    assert checks_of(result)["baseten:model:qwen3p8-27b"]["label"] == (
+        "qwen3p8-27b can be fine-tuned on Baseten"
+    )
+
+
+@pytest.mark.usefixtures("short_workspace")
+def test_check_at_a_context_over_the_workspace_limit_fails_doctor(use_pup: UsePup) -> None:
+    use_pup(healthy_pup().client())
+    result = invoke("--provider", "baseten", "--check", "--max-seq-len", str(OVER_WORKSPACE_LIMIT))
+    assert result.exit_code == 1
+    model = checks_of(result)["baseten:model:qwen3p5-9b"]
+    assert model["status"] == "fail"
+    assert f"shorter than the {OVER_WORKSPACE_LIMIT} to train at" in model["detail"]
+    assert model["fix"] == f"pass --max-seq-len N with N at most {WORKSPACE_LIMIT}"
+
+
+def test_max_seq_len_needs_check_in_doctor(use_pup: UsePup) -> None:
+    use_pup(healthy_pup().client())
+    result = invoke("--provider", "baseten", "--max-seq-len", str(WITHIN_WORKSPACE_LIMIT))
+    assert result.exit_code == 2
+    assert "--max-seq-len needs --check" in result.stderr
+
+
 def test_a_failed_preflight_fails_doctor(use_pup: UsePup, fireworks_api: FakeFireworksApi) -> None:
     fireworks_api.models["qwen3p8-27b"]["state"] = "DEPLOYING"
     use_pup(healthy_pup().client())
@@ -926,8 +989,9 @@ def test_a_baseten_preflight_names_a_workspace_limit_under_the_model_s_context()
         ),
     )
     by_name = {check.name: check for check in checks}
-    big = by_name["baseten:model:qwen3p8-27b"]
+    big_profile = next(p for p in BASETEN_PROFILES if p.alias == "qwen3p8-27b")
+    big = by_name[f"baseten:model:{big_profile.alias}"]
     assert big.status == "pass"
-    assert big.detail.endswith("on at most 131072 of its 262144 tokens")
+    assert big.detail.endswith(under_profile_context(big_profile))
     assert by_name["baseten:model:qwen3p5-9b"].detail.endswith("Qwen/Qwen3.5-9B now")
     redaction.clear_secrets()

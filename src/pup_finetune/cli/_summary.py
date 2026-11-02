@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from pup_finetune.display import joined, loss_text
+from pup_finetune.providers.base import MAX_SEQ_LEN_OPTION
 from pup_finetune.redaction import redact
 from pup_finetune.runtime import Runtime
 
@@ -1153,9 +1154,6 @@ def _token_data(preview: Mapping[str, Any]) -> str:
     if preview.get("validation_tokens"):
         text += f" (+{_count(preview['validation_tokens'])} validation per epoch)"
     return text
-
-
-MAX_SEQ_LEN_OPTION: Final = "max_seq_len"
 
 
 def _training_settings(settings: Mapping[str, Any]) -> str:
