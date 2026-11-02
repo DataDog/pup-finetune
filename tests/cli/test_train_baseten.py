@@ -34,12 +34,27 @@ from pup_finetune.cli import deploy as deploy_module
 from pup_finetune.cli import train as train_module
 from pup_finetune.evaluation import benchmark as benchmark_module
 from pup_finetune.evaluation import runner as eval_module
-from pup_finetune.providers.base import PROVIDER_LIMIT, Provider
+from pup_finetune.providers.base import (
+    MAX_SEQ_LEN_FLAG,
+    PROVIDER_LIMIT,
+    Provider,
+    under_profile_context,
+)
 from pup_finetune.providers.baseten import client
 from pup_finetune.runs import RunDir, model_id_for_run
 from pup_finetune.runtime import Runtime
 from pup_finetune.training import inputs as inputs_module
-from tests.fakes.baseten import Answer, FakeDeployment, FakeLoops, capabilities
+from tests.fakes.baseten import (
+    OVER_WORKSPACE_LIMIT,
+    SHORT_PROFILE,
+    WITHIN_WORKSPACE_LIMIT,
+    WORKSPACE_LIMIT,
+    Answer,
+    FakeDeployment,
+    FakeLoops,
+    capabilities,
+    short_capabilities,
+)
 from tests.fakes.fireworks_deploy import FakeClock
 from tests.fakes.pushed import mark_pushed
 from tests.fakes.tokenizer import FakeChatTokenizer
@@ -140,34 +155,80 @@ def test_the_preview_asks_baseten_nothing_paid(
     assert loops.calls == []
 
 
-def test_a_workspace_limit_under_the_model_s_context_is_trained_at(
-    dataset: Path, tmp_path: Path, routes: dict[str, Answer]
-) -> None:
+@pytest.fixture
+def short_workspace(routes: dict[str, Answer]) -> None:
+    """A workspace that trains Qwen3.5 9B on fewer tokens than its profile's context."""
     routes["GET /v1/loops/capabilities"] = (
         200,
-        capabilities("Qwen/Qwen3.5-9B", max_enabled_seq_len=32_768),
+        short_capabilities(capabilities(SHORT_PROFILE.base_model)),
     )
+
+
+@pytest.mark.usefixtures("short_workspace")
+def test_a_workspace_limit_under_the_model_s_context_is_trained_at_and_noted(
+    dataset: Path, tmp_path: Path
+) -> None:
     run_dir = tmp_path / "run"
     result = train(dataset, run_dir)
     assert result.exit_code == 2, result.stderr
+    assert (
+        f"note: baseten trains {SHORT_PROFILE.base_model} on at most {WORKSPACE_LIMIT} tokens "
+        f"for this account, {under_profile_context(SHORT_PROFILE)}"
+    ) in result.stderr
     data = output(result)
     preview = data["preview"]
-    assert preview["profile"]["max_seq_len"] == 32_768
+    assert preview["profile"]["max_seq_len"] == WORKSPACE_LIMIT
     settings = preview["settings"]
-    assert (settings["max_seq_len"], settings["max_seq_len_source"]) == (32_768, PROVIDER_LIMIT)
+    assert (settings["max_seq_len"], settings["max_seq_len_source"]) == (
+        WORKSPACE_LIMIT,
+        PROVIDER_LIMIT,
+    )
     assert "max_seq_len" not in preview["defaults_used"]
-    assert "context 32,768 (the provider's limit for this account)" in result.stderr
+    assert f"context {WORKSPACE_LIMIT:,} ({PROVIDER_LIMIT})" in result.stderr
     # Pinned, so the run trains at the context the preview showed.
     words = shlex.split(data["next_command"])
-    assert words[words.index("--max-seq-len") + 1] == "32768"
+    assert words[words.index("--max-seq-len") + 1] == str(WORKSPACE_LIMIT)
 
     confirmed = invoke(*words[2:])
     assert confirmed.exit_code == 0, confirmed.stderr
-    assert RunDir(run_dir).profile().max_seq_len == 32_768
+    assert RunDir(run_dir).profile().max_seq_len == WORKSPACE_LIMIT
 
-    over = train(dataset, tmp_path / "over", "--max-seq-len", "65536")
-    assert over.exit_code == 2
-    assert "at most 32768 tokens in this workspace, shorter than the 65536" in over.stderr
+
+@pytest.mark.usefixtures("short_workspace")
+def test_a_context_flag_within_the_workspace_limit_is_kept_as_given(
+    dataset: Path, tmp_path: Path
+) -> None:
+    result = train(dataset, tmp_path / "run", "--max-seq-len", str(WITHIN_WORKSPACE_LIMIT))
+    assert result.exit_code == 2, result.stderr
+    assert "note:" not in result.stderr
+    settings = output(result)["preview"]["settings"]
+    assert (settings["max_seq_len"], settings["max_seq_len_source"]) == (
+        WITHIN_WORKSPACE_LIMIT,
+        MAX_SEQ_LEN_FLAG,
+    )
+
+
+@pytest.mark.usefixtures("short_workspace")
+@pytest.mark.parametrize(
+    "flag",
+    [
+        ["--max-seq-len", str(OVER_WORKSPACE_LIMIT)],
+        ["--provider-option", f"max_seq_len={OVER_WORKSPACE_LIMIT}"],
+    ],
+)
+def test_a_context_flag_over_the_workspace_limit_is_refused(
+    dataset: Path, tmp_path: Path, loops: FakeLoops, flag: list[str]
+) -> None:
+    run_dir = tmp_path / "run"
+    result = train(dataset, run_dir, *flag)
+    assert result.exit_code == 2
+    assert (
+        f"at most {WORKSPACE_LIMIT} tokens in this workspace, shorter than the {OVER_WORKSPACE_LIMIT} to train at"
+        in result.stderr
+    )
+    assert f"pass --max-seq-len N with N at most {WORKSPACE_LIMIT}" in result.stderr
+    assert not run_dir.exists()
+    assert loops.calls == []
 
 
 def test_a_confirmed_run_trains_leaves_nothing_running_and_deploys_its_checkpoint(

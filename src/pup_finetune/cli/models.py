@@ -14,9 +14,10 @@ import typer
 
 from pup_finetune.cli._common import CommandResult, get_runtime, run_command
 from pup_finetune.cli._presentation import SET_UP, CommandDoc, Safety, default_note, group
-from pup_finetune.errors import FinetuneError
+from pup_finetune.errors import FinetuneError, UsageError
 from pup_finetune.providers import get_provider, provider_info, provider_infos, registered_providers
 from pup_finetune.providers.base import ModelProfile, Provider
+from pup_finetune.readiness import preflight_context
 from pup_finetune.redaction import redact
 
 models_app = group(
@@ -75,18 +76,19 @@ def profile_entry(
     return entry
 
 
-def _preflight(provider: Provider, profile: ModelProfile) -> dict[str, Any]:
+def _preflight(
+    provider: Provider, profile: ModelProfile, max_seq_len: int | None
+) -> dict[str, Any]:
     try:
-        limit = provider.preflight(profile)
+        context = preflight_context(provider, profile, max_seq_len)
     except FinetuneError as exc:
         result: dict[str, Any] = {"ok": False, "error": redact(str(exc))}
         if exc.hint:
             result["hint"] = redact(exc.hint)
         return result
-    if limit is None or limit >= profile.max_seq_len:
+    if context is None:
         return {"ok": True}
-    # Under the model's context (e.g. default capacity): train trains at this limit.
-    return {"ok": True, "max_seq_len": limit}
+    return {"ok": True, "max_seq_len": context.max_seq_len, "max_seq_len_source": context.source}
 
 
 @models_app.command(**LIST_DOC.typer())
@@ -106,7 +108,20 @@ def list_models(
         bool,
         typer.Option("--check", help="Preflight each model with its provider (needs its API key)."),
     ] = False,
+    max_seq_len: Annotated[
+        int | None,
+        typer.Option(
+            "--max-seq-len",
+            min=1,
+            metavar="N",
+            help="With --check: preflight at this context. "
+            f"{default_note("the model's, cut to Baseten's workspace limit")}",
+            show_default=False,
+        ),
+    ] = None,
 ) -> dict[str, Any] | CommandResult:
+    if max_seq_len is not None and not check:
+        raise UsageError("--max-seq-len needs --check", hint="add --check")
     runtime = get_runtime()
     infos = (
         [provider_info(provider_name, runtime)]
@@ -119,7 +134,7 @@ def list_models(
         for profile in provider.models():
             entry = profile_entry(profile, info.options, internals=check)
             if check:
-                entry["preflight"] = _preflight(provider, profile)
+                entry["preflight"] = _preflight(provider, profile, max_seq_len)
             entries.append(entry)
     result: dict[str, Any] = {"provider": provider_name, "models": entries}
     if not check:

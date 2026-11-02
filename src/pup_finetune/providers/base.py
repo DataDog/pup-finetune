@@ -176,6 +176,9 @@ MAX_SEQ_LEN_FLAG: Final = "--max-seq-len"
 """The source of a context cut with ``--max-seq-len``; one cut with ``--provider-option
 max_seq_len`` is :data:`MAX_SEQ_LEN_OPTION_FLAG`."""
 
+MAX_SEQ_LEN_OPTION: Final = "max_seq_len"
+"""The provider option that caps a run's context; ``--max-seq-len`` sets it."""
+
 MAX_SEQ_LEN_OPTION_FLAG: Final = "--provider-option max_seq_len"
 
 PROVIDER_LIMIT: Final = "the provider's limit for this account"
@@ -1146,6 +1149,42 @@ class Provider(Protocol):
         this call deleted it.
         """
         ...
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TrainingContext:
+    """A context a run trains at that is not its profile's own, and what set it:
+    :data:`MAX_SEQ_LEN_FLAG` or :data:`PROVIDER_LIMIT`."""
+
+    max_seq_len: int
+    source: str
+
+    @property
+    def fitted(self) -> bool:
+        """Whether the provider's limit set it, rather than the user."""
+        return self.source == PROVIDER_LIMIT
+
+
+def fitted_context(profile: ModelProfile, limit: int | None) -> TrainingContext | None:
+    """The context a run of ``profile`` is cut to when no flag set one: ``limit`` (what
+    :meth:`Provider.preflight` returned) when it is under the profile's context."""
+    if limit is None or limit >= profile.max_seq_len:
+        return None
+    return TrainingContext(max_seq_len=limit, source=PROVIDER_LIMIT)
+
+
+def under_profile_context(profile: ModelProfile) -> str:
+    """How a fitted context is set against the profile's own, in notes and checks."""
+    return f"under the {profile.max_seq_len}-token context of {profile.alias}"
+
+
+def fitted_context_note(provider: Provider, profile: ModelProfile, context: int) -> str:
+    """What a run says when the provider's limit cut ``profile``'s context to ``context``."""
+    return (
+        f"{provider.name} trains {profile.base_model} on at most {context} tokens for this "
+        f"account, {under_profile_context(profile)}: training at {context} ({PROVIDER_LIMIT}); "
+        f"pass --max-seq-len N to set another, at most {context}"
+    )
 
 
 class RemoteJobs(Protocol):

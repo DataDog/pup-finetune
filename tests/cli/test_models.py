@@ -24,14 +24,28 @@ from typer.testing import CliRunner, Result
 from pup_finetune import redaction
 from pup_finetune.cli import app
 from pup_finetune.cli import models as models_cli
-from pup_finetune.providers.base import ModelProfile, Provider
+from pup_finetune.providers.base import (
+    MAX_SEQ_LEN_FLAG,
+    PROVIDER_LIMIT,
+    ModelProfile,
+    Provider,
+)
 from pup_finetune.providers.baseten.provider import PROFILES as BASETEN_PROFILES
 from pup_finetune.providers.fireworks.models import PROFILES
 from pup_finetune.providers.fireworks.provider import FireworksProvider
 from pup_finetune.runtime import Runtime
-from tests.fakes.baseten import FakeLoops, capabilities
+from tests.fakes.baseten import (
+    OVER_WORKSPACE_LIMIT,
+    WITHIN_WORKSPACE_LIMIT,
+    WORKSPACE_LIMIT,
+    FakeLoops,
+    capabilities,
+    short_capabilities,
+)
 from tests.fakes.fireworks_api import API_KEY, FakeFireworksApi
+from tests.providers.baseten.test_baseten_provider import CAPABILITIES as BASETEN_CAPABILITIES
 from tests.providers.baseten.test_baseten_provider import provider_on
+from tests.providers.baseten.test_baseten_provider import provider_on as baseten_provider_on
 
 runner = CliRunner()
 
@@ -213,7 +227,11 @@ def test_check_reports_a_baseten_workspace_limit_under_a_model_s_context(
     result = invoke("--provider", "baseten", "--check")
     assert result.exit_code == 0, result.stderr
     preflights = {model["alias"]: model["preflight"] for model in output(result)["models"]}
-    assert preflights["qwen3p8-27b"] == {"ok": True, "max_seq_len": 131_072}
+    assert preflights["qwen3p8-27b"] == {
+        "ok": True,
+        "max_seq_len": 131_072,
+        "max_seq_len_source": PROVIDER_LIMIT,
+    }
     assert preflights["qwen3p5-9b"] == {"ok": True}
     redaction.clear_secrets()
 
@@ -252,6 +270,68 @@ def test_check_reports_every_profile_on_its_own(
         "/v1/accounts/fireworks/models/qwen-missing",
         *MODEL_ROUTES,
     ]
+
+
+@pytest.fixture
+def short_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Serve `models list` a Baseten workspace that trains Qwen3.5 9B on fewer tokens than
+    its profile's context, and every other model on its whole context."""
+    caps = short_capabilities(BASETEN_CAPABILITIES)
+
+    def provider(name: str, runtime: Runtime) -> Provider:
+        assert name == "baseten"
+        return baseten_provider_on(FakeLoops(), routes={"GET /v1/loops/capabilities": (200, caps)})
+
+    monkeypatch.setattr(models_cli, "get_provider", provider)
+
+
+def _preflight_of(result: Result, alias: str) -> dict[str, Any]:
+    entry = next(model for model in output(result)["models"] if model["alias"] == alias)
+    preflight: dict[str, Any] = entry["preflight"]
+    return preflight
+
+
+@pytest.mark.usefixtures("short_workspace")
+def test_check_fits_a_model_to_the_workspace_limit() -> None:
+    result = invoke("--provider", "baseten", "--check")
+    assert result.exit_code == 0, result.stderr
+    assert _preflight_of(result, "qwen3p5-9b") == {
+        "ok": True,
+        "max_seq_len": WORKSPACE_LIMIT,
+        "max_seq_len_source": PROVIDER_LIMIT,
+    }
+    assert _preflight_of(result, "qwen3p8-27b") == {"ok": True}
+
+
+@pytest.mark.usefixtures("short_workspace")
+def test_check_at_a_context_over_the_workspace_limit_fails() -> None:
+    result = invoke("--provider", "baseten", "--check", "--max-seq-len", str(OVER_WORKSPACE_LIMIT))
+    assert result.exit_code == 1
+    preflight = _preflight_of(result, "qwen3p5-9b")
+    assert preflight["ok"] is False
+    assert f"at most {WORKSPACE_LIMIT} tokens" in preflight["error"]
+    assert f"shorter than the {OVER_WORKSPACE_LIMIT} to train at" in preflight["error"]
+    assert preflight["hint"] == f"pass --max-seq-len N with N at most {WORKSPACE_LIMIT}"
+    assert _preflight_of(result, "qwen3p8-27b")["max_seq_len"] == OVER_WORKSPACE_LIMIT
+
+
+@pytest.mark.usefixtures("short_workspace")
+def test_check_at_a_context_within_the_workspace_limit_passes() -> None:
+    result = invoke(
+        "--provider", "baseten", "--check", "--max-seq-len", str(WITHIN_WORKSPACE_LIMIT)
+    )
+    assert result.exit_code == 0, result.stderr
+    assert _preflight_of(result, "qwen3p5-9b") == {
+        "ok": True,
+        "max_seq_len": WITHIN_WORKSPACE_LIMIT,
+        "max_seq_len_source": MAX_SEQ_LEN_FLAG,
+    }
+
+
+def test_max_seq_len_needs_check() -> None:
+    result = invoke("--provider", "baseten", "--max-seq-len", str(WITHIN_WORKSPACE_LIMIT))
+    assert result.exit_code == 2
+    assert "--max-seq-len needs --check" in result.stderr
 
 
 def test_a_rejected_key_is_reported_without_the_key(fake: FakeFireworksApi) -> None:
