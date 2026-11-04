@@ -44,6 +44,7 @@ from tests.fakes.baseten import (
     WORKSPACE_LIMIT,
     FakeLoops,
     capabilities,
+    serverless_capabilities,
     short_capabilities,
 )
 from tests.fakes.fireworks_api import API_KEY, FakeFireworksApi
@@ -578,6 +579,27 @@ def test_check_passes_a_model_fitted_to_the_workspace_limit(use_pup: UsePup) -> 
     assert checks_of(result)["baseten:model:qwen3p8-27b"]["label"] == (
         "qwen3p8-27b can be fine-tuned on Baseten"
     )
+
+
+def test_check_says_which_models_the_workspace_runs_serverless(
+    use_pup: UsePup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    caps = serverless_capabilities(BASETEN_CAPABILITIES)
+    monkeypatch.setenv("BASETEN_API_KEY", BASETEN_KEY.get_secret_value())
+
+    def provider(name: str, runtime: Runtime) -> Provider:
+        return baseten_provider_on(FakeLoops(), routes={"GET /v1/loops/capabilities": (200, caps)})
+
+    monkeypatch.setattr(readiness, "get_provider", provider)
+    use_pup(healthy_pup().client())
+    result = invoke("--provider", "baseten", "--check")
+    assert result.exit_code == 0, result.stderr
+    serverless = checks_of(result)["baseten:model:qwen3p5-9b"]
+    assert serverless["label"] == "qwen3p5-9b can be fine-tuned on Baseten (serverless)"
+    assert serverless["detail"].endswith(", expected on serverless capacity (else dedicated)")
+    dedicated = checks_of(result)["baseten:model:glm-5p3-flash"]
+    assert dedicated["label"] == "glm-5p3-flash can be fine-tuned on Baseten"
+    assert "serverless" not in dedicated["detail"]
 
 
 @pytest.mark.usefixtures("short_workspace")

@@ -25,8 +25,10 @@ from pup_finetune import redaction
 from pup_finetune.cli import app
 from pup_finetune.cli import models as models_cli
 from pup_finetune.providers.base import (
+    DEDICATED,
     MAX_SEQ_LEN_FLAG,
     PROVIDER_LIMIT,
+    SERVERLESS,
     ModelProfile,
     Provider,
 )
@@ -36,10 +38,12 @@ from pup_finetune.providers.fireworks.provider import FireworksProvider
 from pup_finetune.runtime import Runtime
 from tests.fakes.baseten import (
     OVER_WORKSPACE_LIMIT,
+    SHORT_PROFILE,
     WITHIN_WORKSPACE_LIMIT,
     WORKSPACE_LIMIT,
     FakeLoops,
     capabilities,
+    serverless_capabilities,
     short_capabilities,
 )
 from tests.fakes.fireworks_api import API_KEY, FakeFireworksApi
@@ -48,6 +52,8 @@ from tests.providers.baseten.test_baseten_provider import provider_on
 from tests.providers.baseten.test_baseten_provider import provider_on as baseten_provider_on
 
 runner = CliRunner()
+DEDICATED_PREFLIGHT = {"expected_placement": DEDICATED}
+"""What a Baseten preflight adds for a model its workspace has no serverless Loops for."""
 
 QWEN = {
     "alias": "qwen3p8-27b",
@@ -231,8 +237,29 @@ def test_check_reports_a_baseten_workspace_limit_under_a_model_s_context(
         "ok": True,
         "max_seq_len": 131_072,
         "max_seq_len_source": PROVIDER_LIMIT,
+        **DEDICATED_PREFLIGHT,
     }
-    assert preflights["qwen3p5-9b"] == {"ok": True}
+    assert preflights["qwen3p5-9b"] == {"ok": True, **DEDICATED_PREFLIGHT}
+    redaction.clear_secrets()
+
+
+def test_check_reports_a_model_baseten_serves_serverless(monkeypatch: pytest.MonkeyPatch) -> None:
+    caps = serverless_capabilities(BASETEN_CAPABILITIES)
+
+    def provider(name: str, runtime: Runtime) -> Provider:
+        return provider_on(FakeLoops(), routes={"GET /v1/loops/capabilities": (200, caps)})
+
+    monkeypatch.setattr(models_cli, "get_provider", provider)
+    result = invoke("--provider", "baseten", "--check")
+    assert result.exit_code == 0, result.stderr
+    placements = {
+        model["alias"]: model["preflight"]["expected_placement"]
+        for model in output(result)["models"]
+    }
+    assert placements == {
+        profile.alias: SERVERLESS if profile.alias == SHORT_PROFILE.alias else DEDICATED
+        for profile in BASETEN_PROFILES
+    }
     redaction.clear_secrets()
 
 
@@ -299,8 +326,9 @@ def test_check_fits_a_model_to_the_workspace_limit() -> None:
         "ok": True,
         "max_seq_len": WORKSPACE_LIMIT,
         "max_seq_len_source": PROVIDER_LIMIT,
+        **DEDICATED_PREFLIGHT,
     }
-    assert _preflight_of(result, "qwen3p8-27b") == {"ok": True}
+    assert _preflight_of(result, "qwen3p8-27b") == {"ok": True, **DEDICATED_PREFLIGHT}
 
 
 @pytest.mark.usefixtures("short_workspace")
@@ -325,6 +353,7 @@ def test_check_at_a_context_within_the_workspace_limit_passes() -> None:
         "ok": True,
         "max_seq_len": WITHIN_WORKSPACE_LIMIT,
         "max_seq_len_source": MAX_SEQ_LEN_FLAG,
+        **DEDICATED_PREFLIGHT,
     }
 
 

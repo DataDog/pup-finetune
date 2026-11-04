@@ -377,7 +377,7 @@ wheels = [
 
 [[package]]
 name = "baseten-loops"
-version = "0.28.0"
+version = "0.33.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "baseten-bdn" },
@@ -392,9 +392,9 @@ dependencies = [
     { name = "transformers" },
     { name = "wandb" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/98/39/58b54daac93ceec2669302903ec3cd9a4a3a83b125286cbbdf18ffeb7c3f/baseten_loops-0.28.0.tar.gz", hash = "sha256:59636732723f7ca189f0beeef2950406497a2bb266964a3181c147752efba234", size = 320265, upload-time = "2026-10-08T18:01:09.286Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/32/49/1383a77746dc2b9e06cc017f7fa0d2c8d48694db76ebb325d6d332f3e036/baseten_loops-0.33.0.tar.gz", hash = "sha256:d6eab2f7a4c02ff5c57d3d6355e78eeaa6d45b0b0f81710b2ff70faf99a492bf", size = 394205, upload-time = "2026-11-04T19:24:45.072Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/69/f0/b966c447583569e02efb2fba4d7cd5cdcc7e6968db0fbf3e88507bdfec03/baseten_loops-0.28.0-py3-none-any.whl", hash = "sha256:bd01330006bd4527aa5362872d54f19ff57bf91b7cd4bb8df221bcad65550cce", size = 84721, upload-time = "2026-10-08T18:01:07.772Z" },
+    { url = "https://files.pythonhosted.org/packages/02/6a/2fbf726f9130bfae110d9f3349e4608dad342700ca70ad53689493046f51/baseten_loops-0.33.0-py3-none-any.whl", hash = "sha256:16a16d9ed8f9f17e98bdb5d013e669ea3f42f5e49f110ac4f8567052db50ffab", size = 119379, upload-time = "2026-11-04T19:24:43.511Z" },
 ]
 
 [[package]]
@@ -2444,7 +2444,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=1,<2" },
-    { name = "baseten-loops", marker = "extra == 'baseten'", specifier = "==0.28.0" },
+    { name = "baseten-loops", marker = "extra == 'baseten'", specifier = "==0.33.0" },
     { name = "fireworks-ai", extras = ["training-sdk"], marker = "extra == 'fireworks'", specifier = ">=1.2.19,<1.3" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "huggingface-hub", marker = "extra == 'baseten'", specifier = ">=0.34" },

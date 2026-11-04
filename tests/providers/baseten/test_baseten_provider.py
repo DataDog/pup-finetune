@@ -27,6 +27,8 @@ from pup_finetune import redaction
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.providers import get_provider, known_providers
 from pup_finetune.providers.base import (
+    DEDICATED,
+    SERVERLESS,
     DeployOptions,
     LoraConfig,
     ModelProfile,
@@ -39,6 +41,7 @@ from pup_finetune.providers.baseten.provider import (
     MAX_SEQ_LEN,
     PROFILES,
     BasetenProvider,
+    offers_serverless,
     training_limit,
 )
 from pup_finetune.providers.fake import FAKE_PROFILE
@@ -117,7 +120,7 @@ def provider_for(
     loops: FakeLoops | None = None,
     *,
     env: dict[str, str] | None = None,
-    caps: Answer = (200, CAPABILITIES),
+    caps: Answer | list[Answer] = (200, CAPABILITIES),
 ) -> tuple[BasetenProvider, BasetenTransport]:
     fake = loops or FakeLoops()
     transport = fake.transport({CAPABILITIES_ROUTE: caps})
@@ -239,12 +242,13 @@ def test_an_unknown_model_lists_the_known_aliases() -> None:
 # --- preflight ---------------------------------------------------------------------------
 
 
-def test_preflight_only_reads_the_capabilities() -> None:
+def test_preflight_and_placement_read_the_capabilities_once_per_provider() -> None:
     loops = FakeLoops()
     provider, transport = provider_for(loops)
     for profile in PROFILES:
         provider.preflight(profile)
-    assert transport.calls == [CAPABILITIES_ROUTE] * len(PROFILES)
+        provider.expected_placement(profile)
+    assert transport.calls == [CAPABILITIES_ROUTE]
     assert transport.requests[0].headers["authorization"] == f"Bearer {KEY.get_secret_value()}"
     assert loops.calls == []  # no session, nothing paid
 
@@ -292,6 +296,33 @@ def test_preflight_returns_a_workspace_limit_under_the_model_s_context() -> None
     provider, _ = provider_for(caps=(200, caps))
     provider.validate_options({})
     assert provider.preflight(QWEN) == 32_768
+
+
+@pytest.mark.parametrize(
+    ("fields", "placement"),
+    [({"serverless": True}, SERVERLESS), ({"serverless": False}, DEDICATED), ({}, DEDICATED)],
+    # Baseten leaves the flag out for a workspace without serverless Loops.
+    ids=["serverless", "not-serverless", "flag-left-out"],
+)
+def test_the_placement_follows_the_serverless_flag(fields: dict[str, Any], placement: str) -> None:
+    caps = capabilities(QWEN.base_model, **fields)
+    assert offers_serverless(caps, QWEN.base_model) is (placement == SERVERLESS)
+    provider, _ = provider_for(caps=(200, caps))
+    assert provider.expected_placement(QWEN) == placement
+
+
+def test_an_invalid_serverless_flag_is_baseten_s_fault() -> None:
+    caps = capabilities(QWEN.base_model, serverless="yes")
+    with pytest.raises(ExternalError, match="invalid serverless flag"):
+        offers_serverless(caps, QWEN.base_model)
+
+
+def test_a_failed_capabilities_read_is_not_kept() -> None:
+    provider, transport = provider_for(caps=[(503, {}), (200, CAPABILITIES)])
+    with pytest.raises(ExternalError):
+        provider.preflight(QWEN)
+    assert provider.expected_placement(QWEN) == DEDICATED
+    assert transport.calls == [CAPABILITIES_ROUTE] * 2
 
 
 def test_the_remediation_baseten_gives_is_the_hint() -> None:

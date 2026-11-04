@@ -7,13 +7,14 @@
 """The ``baseten`` provider: model profiles, preflight, rendering, options and training.
 
 :class:`BasetenProvider` serves :data:`PROFILES`, checks with Baseten, read only, that the
-workspace can train a model before anything is paid (:meth:`~BasetenProvider.preflight`),
-renders each profile with its model family's Hugging Face chat template, and trains through
-:class:`~.backend.BasetenBackend`. It deploys a run's sampler checkpoint as a dedicated Baseten
-model, smoke-tests it and deletes it (:mod:`.deploy`: :meth:`~BasetenProvider.deploy`,
-:meth:`~BasetenProvider.smoke_test`, :meth:`~BasetenProvider.undeploy`), and runs a run's
-training loop in a Baseten training job for ``train --remote``
-(:meth:`~BasetenProvider.remote_jobs`, :mod:`.jobs`).
+workspace can train a model before anything is paid (:meth:`~BasetenProvider.preflight`) and
+whether it trains it on serverless Loops (:meth:`~BasetenProvider.expected_placement`), from
+one read of Loops' capabilities per provider, renders each profile with its model family's
+Hugging Face chat template, and trains through :class:`~.backend.BasetenBackend`. It deploys
+a run's sampler checkpoint as a dedicated Baseten model, smoke-tests it and deletes it
+(:mod:`.deploy`: :meth:`~BasetenProvider.deploy`, :meth:`~BasetenProvider.smoke_test`,
+:meth:`~BasetenProvider.undeploy`), and runs a run's training loop in a Baseten training job
+for ``train --remote`` (:meth:`~BasetenProvider.remote_jobs`, :mod:`.jobs`).
 
 Building the provider is cheap: the Loops SDK is imported by preflight and when a session
 opens, ``transformers`` when a renderer first loads its tokenizer. The API key
@@ -40,11 +41,14 @@ from pup_finetune import credentials
 from pup_finetune.errors import ExternalError, UsageError
 from pup_finetune.inference import ChatClient
 from pup_finetune.providers.base import (
+    DEDICATED,
+    SERVERLESS,
     DeploymentRequest,
     DeployOptions,
     Endpoint,
     ModelProfile,
     ModelRef,
+    Placement,
     SamplingUsage,
     SmokeTest,
     TrainingUsage,
@@ -76,7 +80,7 @@ from pup_finetune.runtime import Runtime
 if TYPE_CHECKING:
     import httpx
 
-    from pup_finetune.providers.base import Provider, SupportsRemote
+    from pup_finetune.providers.base import Provider, SupportsPlacement, SupportsRemote
     from pup_finetune.providers.baseten.jobs import BasetenJobs, CliRunner
 
 __all__ = [
@@ -85,10 +89,11 @@ __all__ = [
     "PROFILES",
     "BasetenOptions",
     "BasetenProvider",
+    "offers_serverless",
     "training_limit",
 ]
 
-LOOPS_VERSION: Final = "0.28.0"
+LOOPS_VERSION: Final = "0.33.0"
 """The ``baseten-loops`` version the ``baseten`` extra pins and the client is tested with."""
 
 
@@ -183,13 +188,8 @@ def _is_int(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def training_limit(capabilities: Mapping[str, Any], base_model: str) -> int:
-    """The longest sequence Baseten Loops trains ``base_model`` on in this workspace, in tokens.
-
-    ``capabilities`` is what ``GET /v1/loops/capabilities`` returned. Raises
-    :class:`UsageError` when the model is not offered or not enabled, or its limit is under
-    :data:`MIN_SEQ_LEN`, and :class:`ExternalError` when Baseten reports no valid limit.
-    """
+def _model_entry(capabilities: Mapping[str, Any], base_model: str) -> Mapping[str, Any]:
+    """``base_model``'s entry in ``capabilities``; :class:`UsageError` when it has none."""
     models = capabilities.get("supported_models")
     matches = [
         entry
@@ -201,7 +201,17 @@ def training_limit(capabilities: Mapping[str, Any], base_model: str) -> int:
             f"Baseten Loops does not offer {base_model} to this workspace",
             hint="choose another --model, or ask Baseten to enable this one",
         )
-    entry = matches[0]
+    return matches[0]
+
+
+def training_limit(capabilities: Mapping[str, Any], base_model: str) -> int:
+    """The longest sequence Baseten Loops trains ``base_model`` on in this workspace, in tokens.
+
+    ``capabilities`` is what ``GET /v1/loops/capabilities`` returned. Raises
+    :class:`UsageError` when the model is not offered or not enabled, or its limit is under
+    :data:`MIN_SEQ_LEN`, and :class:`ExternalError` when Baseten reports no valid limit.
+    """
+    entry = _model_entry(capabilities, base_model)
     context = entry.get("max_context_length")
     enabled_limit = entry.get("max_enabled_seq_len", context)
     if entry.get("enabled") is False or enabled_limit == 0:
@@ -225,6 +235,22 @@ def training_limit(capabilities: Mapping[str, Any], base_model: str) -> int:
             hint="choose another --model, or ask Baseten to raise the limit",
         )
     return limit
+
+
+def offers_serverless(capabilities: Mapping[str, Any], base_model: str) -> bool:
+    """Whether this workspace can run ``base_model`` on serverless Loops (Baseten's shared
+    capacity), from ``capabilities`` as for :func:`training_limit`.
+
+    Baseten reports ``serverless`` only to workspaces in its early access and leaves it out
+    for the rest, so a missing flag is ``False``. Raises :class:`UsageError` when the model
+    is not offered and :class:`ExternalError` for a flag that is not a boolean.
+    """
+    flag = _model_entry(capabilities, base_model).get("serverless", False)
+    if not isinstance(flag, bool):
+        raise ExternalError(
+            f"Baseten returned an invalid serverless flag for {base_model}", source=SOURCE
+        )
+    return flag
 
 
 class BasetenProvider:
@@ -267,6 +293,7 @@ class BasetenProvider:
         self._which = which
         self._job_root = job_root
         self._api_key: SecretStr | None = None
+        self._capabilities: dict[str, Any] | None = None
 
     @property
     def name(self) -> str:
@@ -290,9 +317,7 @@ class BasetenProvider:
         """
         self._own(profile)
         loops_sdk(self._loops)
-        with self._http() as http:
-            capabilities = http.capabilities()
-        limit = training_limit(capabilities, profile.base_model)
+        limit = training_limit(self._read_capabilities(), profile.base_model)
         max_seq_len = self.options.max_seq_len
         if max_seq_len is not None and limit < max_seq_len:
             raise UsageError(
@@ -301,6 +326,18 @@ class BasetenProvider:
                 hint=f"pass --max-seq-len N with N at most {limit}",
             )
         return limit
+
+    def expected_placement(self, profile: ModelProfile) -> Placement:
+        """``serverless`` when Loops' capabilities say this workspace can run ``profile`` on
+        serverless Loops, else ``dedicated``. From the capabilities :meth:`preflight` read.
+
+        A forecast: no scope is sent, so Baseten still runs a trainer on a dedicated
+        deployment when no shared pool fits its LoRA rank and context, and says nothing of
+        it; only a sampler reports where it went (see :mod:`.backend`).
+        """
+        self._own(profile)
+        serverless = offers_serverless(self._read_capabilities(), profile.base_model)
+        return SERVERLESS if serverless else DEDICATED
 
     def renderer(self, profile: ModelProfile) -> HFChatTemplateRenderer:
         """The family's chat-template renderer; its tokenizer loads on first use."""
@@ -330,16 +367,19 @@ class BasetenProvider:
             )
         return dataclasses.replace(profile, max_seq_len=cap)
 
+    # Previews are built before any trainer or sampler exists, so they name both placements.
     def training_billing(self, usage: TrainingUsage) -> str:
         return (
-            "Baseten bills the training job's GPUs for the time they run, at its own rates, "
-            f"which pup-finetune does not know: it trains on {training_usage_text(usage)}"
+            "Baseten bills a trainer on serverless Loops by the token and one on a dedicated "
+            "deployment for its GPUs' time, at its own rates, which pup-finetune does not "
+            f"know: it trains on {training_usage_text(usage)}"
         )
 
     def sampling_billing(self, usage: SamplingUsage) -> str:
         return (
-            "Baseten bills each sampler's GPU for the time it runs, at its own rates, which "
-            f"pup-finetune does not know: {sampling_usage_text(usage)}"
+            "Baseten bills a sampler on serverless Loops by the token and one on a dedicated "
+            "deployment for its GPU's time, at its own rates, which pup-finetune does not "
+            f"know: {sampling_usage_text(usage)}"
         )
 
     def backend(self) -> BasetenBackend:
@@ -444,6 +484,15 @@ class BasetenProvider:
     def _http(self) -> BasetenHTTP:
         return BasetenHTTP(self._key(), transport=self._transport)
 
+    def _read_capabilities(self) -> dict[str, Any]:
+        """Loops' capabilities for this workspace, read once per provider: a ``doctor
+        --check`` preflights every model, and ``train`` asks for the limit and the
+        placement."""
+        if self._capabilities is None:
+            with self._http() as http:
+                self._capabilities = http.capabilities()
+        return self._capabilities
+
     def _chat(self, base_url: str) -> ChatClient:
         # One attempt per call: the smoke test retries on its own clock while it scales up.
         return ChatClient(
@@ -461,4 +510,7 @@ if TYPE_CHECKING:
         return provider
 
     def _runs_remotely(provider: BasetenProvider) -> SupportsRemote:
+        return provider
+
+    def _places(provider: BasetenProvider) -> SupportsPlacement:
         return provider

@@ -19,6 +19,7 @@ a key is looked up (never read out), a package is found (never imported). Only
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Final
 
 from pup_finetune import credentials, providers
@@ -29,9 +30,12 @@ from pup_finetune.providers import Package, ProviderInfo, get_provider, provider
 from pup_finetune.providers.base import (
     MAX_SEQ_LEN_FLAG,
     MAX_SEQ_LEN_OPTION,
+    SERVERLESS,
     ModelProfile,
+    Placement,
     Provider,
     TrainingContext,
+    expected_placement,
     fitted_context,
     under_profile_context,
 )
@@ -234,6 +238,25 @@ def preflight_context(
     return fitted_context(profile, limit)
 
 
+@dataclass(frozen=True, slots=True)
+class ModelPreflight:
+    """What a live preflight of one model found: the context a run would train it at when it
+    is not the profile's own (:func:`preflight_context`), and where the provider expects to
+    run it (``None`` for a provider that does not say)."""
+
+    context: TrainingContext | None
+    placement: Placement | None
+
+
+def preflight_model(
+    provider: Provider, profile: ModelProfile, max_seq_len: int | None = None
+) -> ModelPreflight:
+    """:func:`preflight_context` and :func:`~pup_finetune.providers.base.expected_placement`
+    of ``profile``; raises like :meth:`~Provider.preflight`."""
+    context = preflight_context(provider, profile, max_seq_len)
+    return ModelPreflight(context=context, placement=expected_placement(provider, profile))
+
+
 def preflight_checks(
     info: ProviderInfo,
     runtime: Runtime,
@@ -244,9 +267,9 @@ def preflight_checks(
 ) -> list[CheckResult]:
     """``doctor --provider NAME --check``: the provider's live, read-only preflight of each
     model profile (what ``models list --check`` runs), at the context a run would train it at
-    (:func:`preflight_context`). Skipped when one of its ``offline`` checks (the key and what
-    training needs installed) did not pass. ``factory`` builds the provider (default: the
-    registry's)."""
+    (:func:`preflight_model`), naming where the provider expects to run it. Skipped when one
+    of its ``offline`` checks (the key and what training needs installed) did not pass.
+    ``factory`` builds the provider (default: the registry's)."""
     blockers = [check.name for check in offline if not check.ok]
     try:
         provider = (factory or get_provider)(info.name, runtime)
@@ -281,7 +304,7 @@ def preflight_checks(
             )
             continue
         try:
-            context = preflight_context(provider, profile, max_seq_len)
+            found = preflight_model(provider, profile, max_seq_len)
         except FinetuneError as exc:
             checks.append(
                 CheckResult(
@@ -305,16 +328,23 @@ def preflight_checks(
                 )
             )
             continue
+        context, placement = found.context, found.placement
         at = "" if context is None else f" at {context.max_seq_len} tokens ({context.source})"
         detail = f"{info.label} can fine-tune {profile.base_model}{at} now"
         if context is not None and context.fitted:
             detail += f", {under_profile_context(profile)}"
+        # Dedicated is what a provider without serverless always does, so only serverless
+        # is news; models list --check reports the placement either way.
+        serverless = placement == SERVERLESS
+        if serverless:
+            detail += ", expected on serverless capacity (else dedicated)"
+        on = " (serverless)" if serverless else ""
         checks.append(
             CheckResult(
                 name=name,
                 status="pass",
                 detail=detail,
-                label=f"{profile.alias} can be fine-tuned on {info.label}{at}",
+                label=f"{profile.alias} can be fine-tuned on {info.label}{on}{at}",
                 needed_for=needed_for,
             )
         )

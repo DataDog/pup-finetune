@@ -19,7 +19,10 @@ from pydantic import SecretStr
 from pup_finetune.errors import ExternalError
 from pup_finetune.providers.baseten.client import (
     MAX_CHECKPOINT_NAME_LEN,
+    SERVERLESS_URL,
     BasetenHTTP,
+    CreatedDeployment,
+    LoopsSampler,
     loops_service,
     to_loops_datum,
 )
@@ -39,6 +42,7 @@ from tests.fakes.baseten import (
     FakeSamplerTerminatedError,
     FakeSamplingParams,
     FakeSaveWeightsResponse,
+    FakeServerlessDeployment,
     FakeServerShutdownError,
     FakeTensorData,
     FakeTrainingClient,
@@ -223,34 +227,52 @@ def test_a_failed_trainer_creation_creates_no_run() -> None:
     assert loops.runs == {}
 
 
-def sampler(loops: FakeLoops, **target: str) -> tuple[BasetenHTTP, dict[str, Any]]:
+def sampler(loops: FakeLoops, **target: str) -> tuple[BasetenHTTP, LoopsSampler]:
     http = BasetenHTTP(KEY, transport=loops.transport())
     session = loops_service(KEY, loops=loops).session_id
     target = target or {"base_model": "Qwen/Qwen3.5-9B"}
     return http, http.create_sampler(session_id=session, max_seq_len=16, **target)
 
 
-def sampling_client(loops: FakeLoops, created: dict[str, Any], path: str | None = None) -> Any:
-    deployment = FakeBasetenDeployment(
-        created["base_url"], created["model_id"], created["deployment_id"], "https://x"
+def sampling_client(loops: FakeLoops, created: LoopsSampler, path: str | None = None) -> Any:
+    deployment = loops.samplers[created.sampler_id].deployment()
+    return loops.SamplingClient(
+        deployment=deployment, sampler_id=created.sampler_id, checkpoint_path=path
     )
-    return loops.SamplingClient(deployment=deployment, checkpoint_path=path)
 
 
 def test_a_sampler_is_a_deployment_that_reads_active_until_deactivated() -> None:
     loops = FakeLoops()
     http, created = sampler(loops)
-    assert created == {
-        "id": "sampler1",
-        "model_id": "model1",
-        "deployment_id": "dep1",
-        "base_url": "https://model-model1.api.baseten.co/deployment/dep1/sync",
-    }
+    url = "https://model-model1.api.baseten.co/deployment/dep1/sync"
+    assert created == LoopsSampler("sampler1", url, CreatedDeployment("model1", "dep1"))
     deployment = http.get_deployment("model1", "dep1")
     assert deployment == {"id": "dep1", "model_id": "model1", "status": "ACTIVE"}
     http.deactivate_deployment("model1", "dep1")
     assert http.get_deployment("model1", "dep1") == {**deployment, "status": "INACTIVE"}
     assert http.get_deployment("model1", "dep9") is None
+
+
+def test_a_serverless_sampler_has_no_deployment_and_deactivates_as_a_sampler() -> None:
+    loops = FakeLoops(serverless=True)
+    http, created = sampler(loops)
+    assert created == LoopsSampler("sampler1", SERVERLESS_URL, None)
+    assert (http.get_sampler("sampler1") or {})["status"] == {"name": "ACTIVE"}
+    client = sampling_client(loops, created)
+    assert client.sample(prompt=FakeModelInput([1])).sequences
+    http.deactivate_sampler("sampler1")
+    assert (http.get_sampler("sampler1") or {})["status"] == {"name": "INACTIVE"}
+    assert http.get_sampler("sampler9") is None
+    with pytest.raises(FakeSamplerTerminatedError, match="INACTIVE"):
+        client.sample(prompt=FakeModelInput([1]))
+
+
+def test_a_sampling_client_must_be_built_with_its_sampler_s_deployment() -> None:
+    loops = FakeLoops(serverless=True)
+    _, created = sampler(loops)
+    dedicated = FakeBasetenDeployment(SERVERLESS_URL, "model1", "dep1", "https://x")
+    with pytest.raises(ValueError, match="is not sampler sampler1's"):
+        loops.SamplingClient(deployment=dedicated, sampler_id=created.sampler_id)
 
 
 def test_a_sampler_answers_the_completion_until_a_stop_token_or_max_tokens() -> None:
@@ -330,6 +352,7 @@ def test_the_fake_types_have_the_real_fields() -> None:
     assert dataclasses.asdict(FakeAdamParams()) == defaults.model_dump()
     assert dataclasses.asdict(FakeSamplingParams()) == sdk.SamplingParams().model_dump()
     assert _fields(FakeBasetenDeployment) == _fields(sdk.sampling_client.BasetenDeployment)
+    assert _fields(FakeServerlessDeployment) == _fields(sdk.sampling_client.ServerlessDeployment)
     assert {"from_ints", "to_ints", "length"} <= set(dir(sdk.ModelInput))
 
 
@@ -349,11 +372,11 @@ def test_every_call_the_fake_takes_binds_to_the_real_sdk() -> None:
     kwargs: dict[str, Any] = {
         "api_key": "k",
         "base_model": "m",
-        "sampler_id": "s",
+        "sampler_id": created.sampler_id,
         "session_id": "x",
     }
     serving = loops.SamplingClient(
-        deployment=FakeBasetenDeployment(created["base_url"], "model1", "dep1", "https://x"),
+        deployment=loops.samplers[created.sampler_id].deployment(),
         checkpoint_path=None,
         ready_timeout=1.0,
         timeout=1.0,
