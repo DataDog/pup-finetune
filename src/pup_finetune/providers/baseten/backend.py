@@ -9,8 +9,8 @@
 - :class:`BasetenBackend` opens one :class:`BasetenSession` per ``open_session``: a Loops
   session and a LoRA trainer (a Loops run) whose context fits the session's longest
   example, rounded up to a power of two of at least :data:`MIN_SEQ_LEN` tokens. Baseten
-  places the trainer: on serverless capacity when the workspace has serverless Loops for the
-  model and a shared pool fits the LoRA rank and context, else on a dedicated deployment. A trainer
+  chooses where the trainer runs, serverless or dedicated (``BASETEN_LOOPS_SCOPE``, when set,
+  asks for one). A trainer
   Baseten has no capacity for is a :class:`ProviderCapacityError`, with nothing left running.
   Leaving the context always closes the trainer client and deactivates the run and every
   sampler the session started, however the session ended; a deactivation that fails raises
@@ -35,6 +35,7 @@ Everything that reaches Baseten goes through :mod:`.client`; tests pass the fake
 
 from __future__ import annotations
 
+import os
 import re
 import time
 import uuid
@@ -65,6 +66,7 @@ from pup_finetune.providers.baseten import PROVIDER_NAME
 from pup_finetune.providers.baseten.client import (
     API_BASE,
     MAX_CHECKPOINT_NAME_LEN,
+    SCOPE_ENV,
     SOURCE,
     BasetenHTTP,
     DeploymentRejected,
@@ -127,7 +129,7 @@ def fitted_seq_len(max_seq_len: int, limit: int) -> int:
 
 
 class BasetenBackend:
-    """Opens LoRA training sessions on Baseten Loops, each on a trainer of its own.
+    """It opens LoRA training sessions on Baseten Loops, each on a trainer of its own.
 
     ``api_key`` gives the API key when a session opens, not before. ``renderer`` gives a
     profile's renderer, which samplers render prompts and parse completions with.
@@ -188,10 +190,14 @@ class BasetenBackend:
         sdk = loops_sdk(self._loops)
         context = fitted_seq_len(max_seq_len, profile.max_seq_len)
         service = loops_service(api_key, loops=sdk)
+        # The log names the variable when it is set, because it then decides where the
+        # trainer runs.
+        scope = os.environ.get(SCOPE_ENV)
+        chosen = f"{SCOPE_ENV}={scope} chooses" if scope else "Baseten chooses"
         output.info(
             f"provisioning a Baseten Loops trainer for {profile.base_model} ({context} tokens) "
-            f"in Loops session {service.session_id}, on serverless capacity if Baseten can "
-            "place it there, else dedicated; this can take minutes"
+            f"in Loops session {service.session_id} ({chosen} where it runs); this can take "
+            "minutes"
         )
         with BasetenHTTP(api_key, transport=self._transport) as http:
             trainer = loops_trainer(
@@ -319,11 +325,11 @@ def _deactivate(
     *,
     bills_while_active: bool = True,
 ) -> None:
-    """Deactivate ``what`` (at ``url``) unless it is inactive, then wait until it is.
+    """It deactivates ``what`` (at ``url``) unless it is inactive, then waits until it is.
 
-    On failure, raises an :class:`ExternalError` with the manual step in its message, as
-    callers may show only the message; it warns of billing unless ``bills_while_active`` is
-    false (a serverless sampler bills only what it samples).
+    On failure, it raises an :class:`ExternalError` with the manual step in its message, as
+    callers may show only the message. The message warns of billing unless
+    ``bills_while_active`` is false, since a serverless sampler bills only what it samples.
     """
     try:
         current: str | None = "UNKNOWN"
@@ -469,8 +475,9 @@ class BasetenSession:
         raise UsageError("Baseten has no promotion; the sampler checkpoint is deployed")
 
     def sampler(self, ckpt: CheckpointRef | None) -> BasetenSampler:
-        """A Loops sampler for ``ckpt`` or the base model. Paid: for its GPU's time until
-        closed on a dedicated deployment, by the token on serverless capacity."""
+        """It creates a Loops sampler for ``ckpt`` or the base model. The sampler is paid: for
+        its GPU's time until it is closed on a dedicated deployment, or by the token on
+        serverless capacity."""
         self._require_open()
         if ckpt is not None:
             if ckpt.kind != "sampler":
@@ -627,7 +634,8 @@ class BasetenSession:
 
 
 def _placed(sampler: LoopsSampler) -> str:
-    """Where Baseten put ``sampler``, for the log: a run's trainer does not say, its samplers do."""
+    """It says where Baseten put ``sampler``, for the log. A run's trainer does not report
+    where it runs, but its samplers do."""
     if sampler.deployment is None:
         return f"Loops sampler {sampler.sampler_id} on serverless capacity"
     return (
@@ -642,7 +650,7 @@ def _require_ours(ckpt: CheckpointRef) -> None:
 
 
 class BasetenSampler:
-    """Greedy generation on a Loops sampler; built by :meth:`BasetenSession.sampler`.
+    """It generates greedily on a Loops sampler, and :meth:`BasetenSession.sampler` builds it.
 
     The sampler is a Baseten deployment with its own GPU, or a sampler on Baseten's serverless
     capacity (``record.deployment`` is ``None``): :meth:`close` deactivates either (closing

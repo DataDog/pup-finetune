@@ -1245,9 +1245,9 @@ class SupportsRemote(Protocol):
 
 
 Placement = Literal["serverless", "dedicated"]
-"""Where a provider runs a run's trainer and samplers: ``serverless`` on capacity it shares
-between accounts and bills by use, ``dedicated`` on capacity of the run's own, billed for the
-time it runs."""
+"""A placement says where a provider runs a run's trainer and samplers. ``serverless`` is
+capacity the provider shares between accounts and bills by use, and ``dedicated`` is capacity
+of the run's own, billed for the time it runs."""
 
 SERVERLESS: Final[Placement] = "serverless"
 DEDICATED: Final[Placement] = "dedicated"
@@ -1255,19 +1255,20 @@ DEDICATED: Final[Placement] = "dedicated"
 
 @runtime_checkable
 class SupportsPlacement(Protocol):
-    """A provider that chooses where a run's trainer and samplers run, and can say before a
-    run where it expects to put them."""
+    """A provider of this kind chooses where a run's trainer and samplers run, and it says
+    before a run where it expects to put them."""
 
     def expected_placement(self, profile: ModelProfile) -> Placement:
-        """Where the provider expects to run ``profile`` for this account. Only a forecast:
-        the provider decides when it creates the trainer and each sampler. Raises like
-        :meth:`Provider.preflight`, and reads nothing preflight has not read."""
+        """It returns where the provider expects to run ``profile`` for this account. The
+        result is a forecast, because the provider decides when it creates the trainer and
+        each sampler. It raises like :meth:`Provider.preflight`, and it reads nothing that
+        preflight has not read."""
         ...
 
 
 def expected_placement(provider: Provider, profile: ModelProfile) -> Placement | None:
-    """:meth:`SupportsPlacement.expected_placement`, or ``None`` for a provider that places
-    nothing itself."""
+    """It returns :meth:`SupportsPlacement.expected_placement`, or ``None`` for a provider
+    that places nothing itself."""
     if not isinstance(provider, SupportsPlacement):
         return None
     return provider.expected_placement(profile)

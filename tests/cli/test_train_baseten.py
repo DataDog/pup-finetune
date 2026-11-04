@@ -243,7 +243,8 @@ def test_a_workspace_without_serverless_expects_dedicated_and_says_nothing_of_it
 
 @pytest.fixture
 def serverless_workspace(routes: dict[str, Answer], loops: FakeLoops) -> None:
-    """A workspace with serverless Loops for Qwen3.5 9B, where Baseten places its samplers."""
+    """The workspace has serverless Loops for Qwen3.5 9B, and Baseten places its samplers
+    there."""
     routes["GET /v1/loops/capabilities"] = (
         200,
         capabilities(SHORT_PROFILE.base_model, serverless=True),

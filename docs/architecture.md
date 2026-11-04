@@ -270,12 +270,12 @@ Baseten Loops through `providers/baseten/client.py`, the only module that loads 
   are read once per provider; their `serverless` flag for the model is the placement the
   provider expects (`SupportsPlacement`), which the preview, `run.json`, `doctor --check` and
   `models list --check` report.
-- **Placement.** pup-finetune sends no scope, so Baseten places the trainer and each sampler:
-  on serverless (shared) capacity when the workspace has serverless Loops for the model and a
-  shared pool fits the LoRA rank and context, else on a dedicated deployment. An explicit
-  `serverless` scope would fail instead of falling back. A serverless trainer and sampler
-  bill by the token, a dedicated one for its GPUs' time. Only a sampler says where it went
-  (no model or deployment of its own when serverless), and the run logs it.
+- **Placement.** pup-finetune sends no scope, so Baseten chooses where the trainer and each
+  sampler run: serverless (shared) capacity or a dedicated deployment. `BASETEN_LOOPS_SCOPE`,
+  when set, is the SDK's own choice for the trainer, and the run says it is set. A
+  serverless trainer and sampler bill by the token, a dedicated one for its GPUs' time. Only
+  a sampler says where it went (no model or deployment of its own when serverless), and the
+  run logs it.
 - **Sessions.** `open_session` opens a Loops session and a LoRA trainer whose
   context is the next power of two over the session's longest example (at least 1024 tokens,
   at most the profile's). Leaving the context always deactivates the run and every sampler

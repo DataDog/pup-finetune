@@ -363,9 +363,10 @@ class RunDir:
         the user left at their defaults (``defaults_used``; ``max_seq_len_flag`` names the
         flag that cut the context, if one did); both follow from the rest, so
         neither is part of ``settings_hash``, and a run recorded before them has neither.
-        ``expected_placement`` is where the provider expected to run it, when it said
-        (:class:`~pup_finetune.providers.base.SupportsPlacement`): a forecast, recorded so a
-        run can be matched to how it was billed, and also outside ``settings_hash``.
+        ``expected_placement`` is where the provider expects to run it, when the provider says
+        (:class:`~pup_finetune.providers.base.SupportsPlacement`). It is a forecast, recorded so
+        that a run can be matched to how it was billed, and it is not part of
+        ``settings_hash`` either.
         """
         run_id = check_run_id(run_id if run_id is not None else new_run_id(now()))
         run_dir = cls(path)

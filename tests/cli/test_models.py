@@ -53,7 +53,7 @@ from tests.providers.baseten.test_baseten_provider import provider_on as baseten
 
 runner = CliRunner()
 DEDICATED_PREFLIGHT = {"expected_placement": DEDICATED}
-"""What a Baseten preflight adds for a model its workspace has no serverless Loops for."""
+"""A Baseten preflight adds this for a model that its workspace has no serverless Loops for."""
 
 QWEN = {
     "alias": "qwen3p8-27b",

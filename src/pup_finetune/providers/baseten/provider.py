@@ -189,7 +189,8 @@ def _is_int(value: object) -> TypeGuard[int]:
 
 
 def _model_entry(capabilities: Mapping[str, Any], base_model: str) -> Mapping[str, Any]:
-    """``base_model``'s entry in ``capabilities``; :class:`UsageError` when it has none."""
+    """It returns ``base_model``'s entry in ``capabilities``, and it raises
+    :class:`UsageError` when there is none."""
     models = capabilities.get("supported_models")
     matches = [
         entry
@@ -238,8 +239,8 @@ def training_limit(capabilities: Mapping[str, Any], base_model: str) -> int:
 
 
 def offers_serverless(capabilities: Mapping[str, Any], base_model: str) -> bool:
-    """Whether this workspace can run ``base_model`` on serverless Loops (Baseten's shared
-    capacity), from ``capabilities`` as for :func:`training_limit`.
+    """It says whether this workspace can run ``base_model`` on serverless Loops (Baseten's
+    shared capacity), from ``capabilities`` as for :func:`training_limit`.
 
     Baseten reports ``serverless`` only to workspaces in its early access and leaves it out
     for the rest, so a missing flag is ``False``. Raises :class:`UsageError` when the model
@@ -328,12 +329,13 @@ class BasetenProvider:
         return limit
 
     def expected_placement(self, profile: ModelProfile) -> Placement:
-        """``serverless`` when Loops' capabilities say this workspace can run ``profile`` on
-        serverless Loops, else ``dedicated``. From the capabilities :meth:`preflight` read.
+        """It returns ``serverless`` when Loops' capabilities say this workspace can run
+        ``profile`` on serverless Loops, and ``dedicated`` otherwise. It uses the capabilities
+        that :meth:`preflight` read.
 
-        A forecast: no scope is sent, so Baseten still runs a trainer on a dedicated
-        deployment when no shared pool fits its LoRA rank and context, and says nothing of
-        it; only a sampler reports where it went (see :mod:`.backend`).
+        The result is a forecast. No scope is sent, so Baseten chooses where each trainer and
+        sampler runs, and ``BASETEN_LOOPS_SCOPE``, when set, chooses for the trainer. A trainer
+        does not say where it went, but a sampler does (see :mod:`.backend`).
         """
         self._own(profile)
         serverless = offers_serverless(self._read_capabilities(), profile.base_model)
@@ -485,9 +487,9 @@ class BasetenProvider:
         return BasetenHTTP(self._key(), transport=self._transport)
 
     def _read_capabilities(self) -> dict[str, Any]:
-        """Loops' capabilities for this workspace, read once per provider: a ``doctor
-        --check`` preflights every model, and ``train`` asks for the limit and the
-        placement."""
+        """It returns Loops' capabilities for this workspace, read once per provider, because
+        ``doctor --check`` preflights every model and ``train`` asks for both the limit and
+        the placement."""
         if self._capabilities is None:
             with self._http() as http:
                 self._capabilities = http.capabilities()

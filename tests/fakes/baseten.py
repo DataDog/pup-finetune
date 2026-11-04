@@ -258,7 +258,7 @@ class FakeBasetenDeployment:
 
 @dataclass(frozen=True)
 class FakeServerlessDeployment:
-    """Stands in for ``baseten.loops.sampling_client.ServerlessDeployment``."""
+    """It stands in for ``baseten.loops.sampling_client.ServerlessDeployment``."""
 
     base_url: str
 
@@ -303,8 +303,8 @@ class FakeCheckpoint:
 
 @dataclass
 class FakeSampler:
-    """One Loops sampler serving a checkpoint or the base model: a Baseten deployment, or
-    serverless (``model_id`` and ``deployment_id`` are ``None``)."""
+    """It is one Loops sampler that serves a checkpoint or the base model, on a Baseten
+    deployment or serverless (then ``model_id`` and ``deployment_id`` are ``None``)."""
 
     sampler_id: str
     session_id: str
@@ -322,7 +322,8 @@ class FakeSampler:
         return f"https://model-{self.model_id}.api.baseten.co/deployment/{self.deployment_id}/sync"
 
     def deployment(self) -> FakeBasetenDeployment | FakeServerlessDeployment:
-        """What a ``SamplingClient`` of this sampler must be built with."""
+        """It returns the deployment that a ``SamplingClient`` of this sampler must be built
+        with."""
         if self.model_id is None or self.deployment_id is None:
             return FakeServerlessDeployment(base_url=self.base_url)
         return FakeBasetenDeployment(self.base_url, self.model_id, self.deployment_id, API_BASE)
@@ -1069,8 +1070,8 @@ def short_capabilities(body: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def serverless_capabilities(body: Mapping[str, Any]) -> dict[str, Any]:
-    """``body`` with serverless Loops for :data:`SHORT_PROFILE`'s model only, as Baseten reports
-    it to a workspace in its early access."""
+    """It returns ``body`` with serverless Loops for :data:`SHORT_PROFILE`'s model only, as
+    Baseten reports it to a workspace in its early access."""
     return {
         **body,
         "supported_models": [

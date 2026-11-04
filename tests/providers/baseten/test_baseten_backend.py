@@ -95,7 +95,7 @@ SAMPLER_DEACTIVATE = "POST /v1/models/model1/deployments/dep1/deactivate"
 
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    for name in (*client._REJECTED_ENV, "LOOPS_BASE_URL"):
+    for name in (*client._REJECTED_ENV, "LOOPS_BASE_URL", client.SCOPE_ENV):
         monkeypatch.delenv(name, raising=False)
     yield
     redaction.clear_secrets()
@@ -185,6 +185,28 @@ class TestBasetenBackendContract(BackendContract):
 
 
 # --- open_session --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("scope", "chosen"),
+    [(None, "Baseten chooses"), ("serverless", f"{client.SCOPE_ENV}=serverless chooses")],
+    ids=["default", "from-env"],
+)
+def test_provisioning_says_who_chooses_where_the_trainer_runs(
+    setup: Setup,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    scope: str | None,
+    chosen: str,
+) -> None:
+    if scope is not None:
+        monkeypatch.setenv(client.SCOPE_ENV, scope)
+    with setup.session():
+        pass
+    assert f"({chosen} where it runs)" in capsys.readouterr().err
+    # The SDK reads the variable itself: pup-finetune passes no scope either way.
+    (settings,) = setup.loops.kwargs("create_lora_training_client")
+    assert "scope" not in settings
 
 
 @pytest.mark.parametrize(
@@ -805,7 +827,8 @@ SERVERLESS_DEACTIVATE = "POST /v1/loops/samplers/sampler1/deactivate"
 
 @pytest.fixture
 def serverless(renderer: HFChatTemplateRenderer) -> Setup:
-    """A backend on a workspace where Baseten places every sampler on serverless capacity."""
+    """The backend runs on a workspace where Baseten places every sampler on serverless
+    capacity."""
     return Setup(FakeLoops(serverless=True, completion=fake_loops().completion), renderer)
 
 

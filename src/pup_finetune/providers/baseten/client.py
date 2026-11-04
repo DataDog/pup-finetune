@@ -24,10 +24,9 @@
   :func:`loops_service` opens a Loops session with the API key, base URL and availability
   passed explicitly, so none of them comes from the environment; :func:`loops_trainer`
   creates a LoRA trainer (a Loops run) in it and :func:`loops_sampling_client` connects to a
-  sampler created over REST (:class:`LoopsSampler`). Neither asks for a placement: Baseten
-  puts each on its serverless (shared) capacity when the workspace has serverless Loops for
-  the model and a shared pool fits, else on a dedicated deployment, and only a sampler says
-  which it got. :func:`loops_failure` maps a failed SDK call to an
+  sampler created over REST (:class:`LoopsSampler`). Neither asks for a placement: with the
+  default scope Baseten chooses where each runs, serverless (shared) capacity or a dedicated
+  deployment, and only a sampler says which it got. :func:`loops_failure` maps a failed SDK call to an
   :class:`ExternalError` (auth and capacity as above), a :class:`TransientError` only for a
   call safe to repeat.
 - :func:`to_loops_datum` converts a :class:`TokenizedExample` into the SDK's ``Datum``.
@@ -71,6 +70,7 @@ __all__ = [
     "IGNORE_INDEX",
     "INSTALL_HINT",
     "MAX_CHECKPOINT_NAME_LEN",
+    "SCOPE_ENV",
     "SERVERLESS_URL",
     "SOURCE",
     "BasetenHTTP",
@@ -102,8 +102,9 @@ IGNORE_INDEX: Final = -100
 HF_SECRET_NAME: Final = "hf_access_token"  # noqa: S105 - the name of a secret, not one
 """The workspace secret a checkpoint deployment reads ``HF_TOKEN`` from, by default."""
 SERVERLESS_URL: Final = "https://loops.baseten.co"
-"""Where a serverless Loops sampler is reached: the one host Baseten's shared samplers
-answer on, so the only ``base_url`` a sampler without a deployment may have."""
+"""A serverless Loops sampler is reached at this URL. It is the one host that Baseten's shared
+samplers answer on, so it is the only ``base_url`` that a sampler without a deployment may
+have."""
 
 _MAX_BODY: Final = 4 * 1024 * 1024
 _CREATE_TIMEOUT: Final = 300.0
@@ -113,8 +114,8 @@ _AUTH_STATUS: Final = frozenset({401, 403})
 _AUTH_HINT: Final = f"{login_hint(CREDENTIALS)} to a valid key"
 _CREATED_HINT: Final = "it may have created something that bills; check the Baseten UI"
 _TRAINERS: Final = "/trainers"
-# Not spot: the SDK's (and Baseten's former) name for standard capacity. It is how a run is
-# billed and whether it can be preempted, not where it runs.
+# Dedicated availability is capacity that is not spot: it sets how a run is billed and whether
+# it can be preempted, not where the run is placed.
 _AVAILABILITY: Final = "dedicated"
 _REJECTED_ENV: Final = (
     "LOOPS_REQUEST_LOG",
@@ -122,10 +123,11 @@ _REJECTED_ENV: Final = (
     "LOOPS_REUSE_FROM_SESSION_ID",
     "INTERNAL_LOOPS_BACKEND_VERSION",
     "LOOPS_TEAM",
-    # Pins a trainer's placement through Baseten's internal route, so a run could neither
-    # fall back from serverless nor be placed as preflight expects.
-    "BASETEN_LOOPS_SCOPE",
 )
+SCOPE_ENV: Final = "BASETEN_LOOPS_SCOPE"
+"""This is the SDK's own setting for where a trainer runs. pup-finetune passes no scope, so
+when the variable is set the SDK sends it. pup-finetune's own sampler requests do not read
+it."""
 _SDK_NAMES: Final = (
     "ServiceClient",
     "Datum",
@@ -144,8 +146,8 @@ class DeploymentRejected(ExternalError):
 
 @dataclass(frozen=True, slots=True)
 class CreatedDeployment:
-    """A Baseten model deployment: one a checkpoint deployment created, or a dedicated
-    sampler's."""
+    """It names a Baseten model deployment: one that a checkpoint deployment created, or the
+    one that serves a dedicated sampler."""
 
     model_id: str
     deployment_id: str
@@ -153,10 +155,12 @@ class CreatedDeployment:
 
 @dataclass(frozen=True, slots=True)
 class LoopsSampler:
-    """A Loops sampler as :meth:`BasetenHTTP.create_sampler` read it, its ids and URL checked.
+    """It describes a Loops sampler as :meth:`BasetenHTTP.create_sampler` read it, with its
+    ids and URL checked.
 
-    ``deployment`` is the dedicated deployment serving it, with its own GPU; ``None`` for a
-    serverless sampler, which Baseten serves from shared capacity at :data:`SERVERLESS_URL`.
+    ``deployment`` is the dedicated deployment that serves it, with its own GPU. It is
+    ``None`` for a serverless sampler, which Baseten serves from shared capacity at
+    :data:`SERVERLESS_URL`.
     """
 
     sampler_id: str
@@ -286,11 +290,11 @@ class BasetenHTTP:
         model_path: str | None = None,
         base_model: str | None = None,
     ) -> LoopsSampler:
-        """A standalone sampler serving ``model_path`` (a checkpoint) or ``base_model``.
+        """It creates a standalone sampler that serves ``model_path`` (a checkpoint) or
+        ``base_model``.
 
-        It sends no ``scope``, so Baseten places it: serverless when it can, else dedicated
-        (an explicit ``serverless`` would fail rather than fall back). An answer whose ids or
-        URL cannot be trusted is a :class:`TransientError`, as the sampler exists.
+        It sends no ``scope``, so Baseten chooses where it runs. An answer whose ids or URL
+        cannot be trusted is a :class:`TransientError`, as the sampler exists.
         """
         if (model_path is None) == (base_model is None):
             raise ValueError("pass exactly one of model_path and base_model")
@@ -310,7 +314,7 @@ class BasetenHTTP:
             return _loops_sampler(_object(_object(found, label).get("sampler"), label))
 
     def get_sampler(self, sampler_id: str) -> dict[str, Any] | None:
-        """The Loops sampler, or ``None`` when Baseten no longer has it."""
+        """It returns the Loops sampler, or ``None`` when Baseten does not have it."""
         label = "the Loops sampler lookup"
         url = f"{API_BASE}/v1/loops/samplers/{_id(sampler_id, 'sampler')}"
         found = self._request("GET", url, label, missing_ok=True)
@@ -622,8 +626,9 @@ def _job_url(project_id: str, job_id: str) -> str:
 
 
 def _loops_sampler(record: Mapping[str, Any]) -> LoopsSampler:
-    """``record`` (``LoopsSamplerV1``) checked: a sampler with neither a model nor a deployment
-    is serverless, and only then may its URL be :data:`SERVERLESS_URL`."""
+    """It checks ``record`` (a ``LoopsSamplerV1``) and returns it as a :class:`LoopsSampler`.
+    A sampler with neither a model nor a deployment is serverless, and only then may its URL
+    be :data:`SERVERLESS_URL`."""
     base_url = record.get("base_url")
     if not isinstance(base_url, str):
         raise ExternalError("Baseten described the sampler without its URL", source=SOURCE)
@@ -636,7 +641,8 @@ def _loops_sampler(record: Mapping[str, Any]) -> LoopsSampler:
 
 
 def serverless_url(url: str) -> str:
-    """:data:`SERVERLESS_URL`, when ``url`` is it (a trailing slash aside); refuses any other."""
+    """It returns :data:`SERVERLESS_URL` when ``url`` is that URL, ignoring a trailing slash,
+    and it refuses any other URL."""
     if url.rstrip("/") != SERVERLESS_URL:
         raise ExternalError("refusing to send the API key to a non-Baseten URL", source=SOURCE)
     return SERVERLESS_URL
@@ -684,7 +690,7 @@ class LoopsFuture(Protocol):
 
 
 class LoopsTrainingClient(Protocol):
-    """The parts of the SDK's ``TrainingClient`` (one Loops run) used here.
+    """It declares the parts of the SDK's ``TrainingClient`` (one Loops run) used here.
 
     Closing it releases the HTTP clients only: the run keeps its trainer (its GPUs, or its
     place on serverless capacity) until it is deactivated through
@@ -712,7 +718,7 @@ class LoopsTrainingClient(Protocol):
 
 
 class LoopsSamplingClient(Protocol):
-    """The parts of the SDK's ``SamplingClient`` used here.
+    """It declares the parts of the SDK's ``SamplingClient`` used here.
 
     Closing it releases its HTTP client only: a dedicated sampler keeps its GPU until its
     deployment is deactivated through :meth:`BasetenHTTP.deactivate_deployment`, a
@@ -820,7 +826,7 @@ def _broken_sdk(exc: ImportError) -> UsageError:
 
 
 def loops_service(api_key: SecretStr, *, loops: LoopsModule | None = None) -> LoopsService:
-    """A new Loops session for ``api_key``, on standard (not spot) capacity.
+    """It opens a new Loops session for ``api_key`` with dedicated availability.
 
     The key, the base URL and the availability are passed explicitly, so the SDK never reads
     them from the environment. Raises :class:`UsageError` when the SDK is missing, the key is
@@ -847,11 +853,12 @@ def loops_trainer(
     max_seq_len: int,
     name: str,
 ) -> LoopsTrainingClient:
-    """A LoRA trainer (a Loops run) in ``service``'s session, once it is ready. Paid: by the
-    token on serverless capacity, for its GPUs' time on a dedicated deployment.
+    """It creates a LoRA trainer (a Loops run) in ``service``'s session and returns it once it
+    is ready. The trainer is paid: by the token on serverless capacity, or for its GPUs' time
+    on a dedicated deployment.
 
-    No scope is passed, so Baseten places it and falls back to dedicated when serverless
-    cannot take it; the SDK reads ``BASETEN_LOOPS_SCOPE``, which :func:`loops_sdk` refuses.
+    No scope is passed, so Baseten chooses where it runs, unless :data:`SCOPE_ENV` is set,
+    which the SDK then sends.
 
     A failure that may leave a run behind (anything but a 4xx answer to the create itself, as
     the SDK calls the new run before it returns) says how to find it; a refusal for lack of
@@ -904,7 +911,8 @@ def loops_sampling_client(
     timeout: float,
     loops: LoopsModule | None = None,
 ) -> LoopsSamplingClient:
-    """An SDK client of ``sampler`` (as :meth:`BasetenHTTP.create_sampler` returned it).
+    """It returns an SDK client of ``sampler``, as :meth:`BasetenHTTP.create_sampler`
+    returned it.
 
     Its first sample waits up to ``ready_timeout`` seconds for the sampler to be ready (its
     deployment active, or Baseten's queue admitting a serverless one), and a sample that

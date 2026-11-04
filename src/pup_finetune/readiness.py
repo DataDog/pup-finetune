@@ -240,9 +240,9 @@ def preflight_context(
 
 @dataclass(frozen=True, slots=True)
 class ModelPreflight:
-    """What a live preflight of one model found: the context a run would train it at when it
-    is not the profile's own (:func:`preflight_context`), and where the provider expects to
-    run it (``None`` for a provider that does not say)."""
+    """It holds what a live preflight of one model found: the context a run would train it at
+    when that is not the profile's own (:func:`preflight_context`), and where the provider
+    expects to run it (``None`` for a provider that does not say)."""
 
     context: TrainingContext | None
     placement: Placement | None
@@ -251,8 +251,9 @@ class ModelPreflight:
 def preflight_model(
     provider: Provider, profile: ModelProfile, max_seq_len: int | None = None
 ) -> ModelPreflight:
-    """:func:`preflight_context` and :func:`~pup_finetune.providers.base.expected_placement`
-    of ``profile``; raises like :meth:`~Provider.preflight`."""
+    """It runs :func:`preflight_context` and
+    :func:`~pup_finetune.providers.base.expected_placement` for ``profile``, and it raises like
+    :meth:`~Provider.preflight`."""
     context = preflight_context(provider, profile, max_seq_len)
     return ModelPreflight(context=context, placement=expected_placement(provider, profile))
 
@@ -265,11 +266,11 @@ def preflight_checks(
     factory: ProviderFactory | None = None,
     max_seq_len: int | None = None,
 ) -> list[CheckResult]:
-    """``doctor --provider NAME --check``: the provider's live, read-only preflight of each
-    model profile (what ``models list --check`` runs), at the context a run would train it at
-    (:func:`preflight_model`), naming where the provider expects to run it. Skipped when one
-    of its ``offline`` checks (the key and what training needs installed) did not pass.
-    ``factory`` builds the provider (default: the registry's)."""
+    """It runs ``doctor --provider NAME --check``: the provider's live, read-only preflight of
+    each model profile (what ``models list --check`` runs), at the context a run would train
+    it at (:func:`preflight_model`), naming where the provider expects to run it. It skips the
+    preflight when one of its ``offline`` checks (the key and what training needs installed)
+    did not pass. ``factory`` builds the provider (the registry's by default)."""
     blockers = [check.name for check in offline if not check.ok]
     try:
         provider = (factory or get_provider)(info.name, runtime)
@@ -337,7 +338,7 @@ def preflight_checks(
         # is news; models list --check reports the placement either way.
         serverless = placement == SERVERLESS
         if serverless:
-            detail += ", expected on serverless capacity (else dedicated)"
+            detail += ", expected on serverless capacity"
         on = " (serverless)" if serverless else ""
         checks.append(
             CheckResult(

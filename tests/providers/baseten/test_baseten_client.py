@@ -66,7 +66,6 @@ GUARDED_ENV = (
     "LOOPS_REUSE_FROM_SESSION_ID",
     "INTERNAL_LOOPS_BACKEND_VERSION",
     "LOOPS_TEAM",
-    "BASETEN_LOOPS_SCOPE",
     "LOOPS_BASE_URL",
 )
 SAMPLER_URL = "https://model-abc123.api.baseten.co/deployment/dep456/sync"
@@ -405,7 +404,8 @@ def test_create_sampler_sends_no_scope_so_baseten_places_it() -> None:
     http, transport = make_http({"POST /v1/loops/samplers": (200, {"sampler": DEDICATED_SAMPLER})})
     path = "bt://loops:run1/sampler_weights/ckpt"
     create_sampler(http)
-    # Standard (not spot) capacity; an explicit scope would refuse to fall back.
+    # The body asks for dedicated availability and sends no scope, so Baseten chooses where
+    # the sampler runs.
     assert transport.bodies("POST /v1/loops/samplers") == [
         {
             "session_id": "s1",
@@ -449,9 +449,9 @@ def test_create_sampler_reads_where_baseten_placed_it(
         ({"id": "a/b"}, "invalid Baseten sampler id"),
         ({"model_id": None, "base_url": SERVERLESS_URL}, "invalid Baseten model id"),
         ({"deployment_id": None}, "invalid Baseten deployment id"),
-        # Only a sampler without a deployment may be reached on the serverless host...
+        # A sampler without a deployment is reached only on the serverless host, and a
+        # serverless sampler is reached only there.
         ({"base_url": SERVERLESS_URL}, "non-Baseten URL"),
-        # ...and a serverless one only there.
         ({"model_id": None, "deployment_id": None}, "non-Baseten URL"),
     ],
     ids=[
@@ -769,6 +769,11 @@ def test_the_guard_also_runs_with_an_injected_sdk(monkeypatch: pytest.MonkeyPatc
     with pytest.raises(UsageError, match="LOOPS_REQUEST_LOG"):
         loops_service(KEY, loops=loops)
     assert loops.calls == []
+
+
+def test_the_sdk_s_scope_setting_is_left_to_the_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(client.SCOPE_ENV, "serverless")
+    assert loops_service(KEY, loops=FakeLoops()).session_id == "session1"
 
 
 @pytest.mark.parametrize("value", ["https://api.baseten.co", "https://api.baseten.co/", ""])

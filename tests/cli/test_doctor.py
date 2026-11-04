@@ -596,7 +596,7 @@ def test_check_says_which_models_the_workspace_runs_serverless(
     assert result.exit_code == 0, result.stderr
     serverless = checks_of(result)["baseten:model:qwen3p5-9b"]
     assert serverless["label"] == "qwen3p5-9b can be fine-tuned on Baseten (serverless)"
-    assert serverless["detail"].endswith(", expected on serverless capacity (else dedicated)")
+    assert serverless["detail"].endswith(", expected on serverless capacity")
     dedicated = checks_of(result)["baseten:model:glm-5p3-flash"]
     assert dedicated["label"] == "glm-5p3-flash can be fine-tuned on Baseten"
     assert "serverless" not in dedicated["detail"]

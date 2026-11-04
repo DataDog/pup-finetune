@@ -1178,9 +1178,9 @@ def _training_settings(settings: Mapping[str, Any]) -> str:
     return text
 
 
-SERVERLESS_EXPECTED: Final = "serverless expected, else dedicated"
-"""The train card's capacity row: the provider still places the trainer and each sampler,
-and falls back to dedicated capacity when no shared pool fits."""
+SERVERLESS_EXPECTED: Final = "serverless expected (the provider chooses)"
+"""This is the train card's capacity row. It is a forecast, because the provider chooses where
+the trainer and each sampler run."""
 
 
 def _train_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
