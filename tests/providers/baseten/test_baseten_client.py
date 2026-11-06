@@ -42,6 +42,7 @@ from pup_finetune.providers.baseten.client import (
     loops_sdk,
     loops_service,
     loops_trainer,
+    sampler_url,
     serverless_url,
     to_loops_datum,
 )
@@ -429,10 +430,10 @@ def test_create_sampler_can_serve_the_base_model() -> None:
     [
         (DEDICATED_SAMPLER, LoopsSampler("smp1", SAMPLER_URL, CreatedDeployment("m1", "d1"))),
         (SERVERLESS_SAMPLER, SERVERLESS),
-        ({**SERVERLESS_SAMPLER, "base_url": f"{SERVERLESS_URL}/"}, SERVERLESS),
         ({"id": "smp1", "base_url": SERVERLESS_URL}, SERVERLESS),
+        ({**SERVERLESS_SAMPLER, "base_url": None}, LoopsSampler("smp1", None, None)),
     ],
-    ids=["dedicated", "serverless", "trailing-slash", "ids-left-out"],
+    ids=["dedicated", "serverless", "ids-left-out", "url-left-out"],
 )
 def test_create_sampler_reads_where_baseten_placed_it(
     record: dict[str, Any], expected: LoopsSampler
@@ -444,25 +445,11 @@ def test_create_sampler_reads_where_baseten_placed_it(
 @pytest.mark.parametrize(
     ("field", "reason"),
     [
-        ({"base_url": "https://evil.example.com/sync"}, "non-Baseten URL"),
-        ({"base_url": None}, "without its URL"),
         ({"id": "a/b"}, "invalid Baseten sampler id"),
         ({"model_id": None, "base_url": SERVERLESS_URL}, "invalid Baseten model id"),
         ({"deployment_id": None}, "invalid Baseten deployment id"),
-        # A sampler without a deployment is reached only on the serverless host, and a
-        # serverless sampler is reached only there.
-        ({"base_url": SERVERLESS_URL}, "non-Baseten URL"),
-        ({"model_id": None, "deployment_id": None}, "non-Baseten URL"),
     ],
-    ids=[
-        "elsewhere",
-        "no-url",
-        "bad-id",
-        "half-serverless",
-        "no-deployment",
-        "dedicated-on-serverless-host",
-        "serverless-on-model-host",
-    ],
+    ids=["bad-id", "half-serverless", "no-deployment"],
 )
 def test_a_sampler_it_cannot_trust_is_transient_as_it_was_created(
     field: dict[str, Any], reason: str
@@ -473,6 +460,45 @@ def test_a_sampler_it_cannot_trust_is_transient_as_it_was_created(
         create_sampler(http)
     assert reason in caught.value.message
     assert caught.value.hint == CREATED_HINT
+
+
+@pytest.mark.parametrize(
+    ("record", "url"),
+    [
+        (DEDICATED_SAMPLER, SAMPLER_URL),
+        (SERVERLESS_SAMPLER, SERVERLESS_URL),
+        ({**SERVERLESS_SAMPLER, "base_url": f"{SERVERLESS_URL}/"}, SERVERLESS_URL),
+    ],
+    ids=["dedicated", "serverless", "trailing-slash"],
+)
+def test_a_sampler_is_sampled_at_its_checked_url(record: dict[str, Any], url: str) -> None:
+    http, _ = make_http({"POST /v1/loops/samplers": (200, {"sampler": record})})
+    assert sampler_url(create_sampler(http)) == url
+
+
+@pytest.mark.parametrize(
+    ("field", "reason"),
+    [
+        ({"base_url": "https://evil.example.com/sync"}, "non-Baseten URL"),
+        ({"base_url": None}, "without its URL"),
+        # A sampler without a deployment is reached only on the serverless host, and a
+        # serverless sampler is reached only there.
+        ({"base_url": SERVERLESS_URL}, "non-Baseten URL"),
+        ({"model_id": None, "deployment_id": None}, "non-Baseten URL"),
+    ],
+    ids=["elsewhere", "no-url", "dedicated-on-serverless-host", "serverless-on-model-host"],
+)
+def test_a_sampler_url_it_cannot_trust_is_refused_after_the_sampler_is_read(
+    field: dict[str, Any], reason: str
+) -> None:
+    # The create still returns the sampler, so the caller can deactivate it.
+    http, _ = make_http(
+        {"POST /v1/loops/samplers": (200, {"sampler": {**DEDICATED_SAMPLER, **field}})}
+    )
+    sampler = create_sampler(http)
+    with pytest.raises(ExternalError, match=reason) as caught:
+        sampler_url(sampler)
+    assert not isinstance(caught.value, TransientError)
 
 
 def test_sampler_routes() -> None:

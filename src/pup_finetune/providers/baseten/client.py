@@ -88,6 +88,7 @@ __all__ = [
     "loops_sdk",
     "loops_service",
     "loops_trainer",
+    "sampler_url",
     "serverless_url",
     "to_loops_datum",
 ]
@@ -156,15 +157,18 @@ class CreatedDeployment:
 @dataclass(frozen=True, slots=True)
 class LoopsSampler:
     """It describes a Loops sampler as :meth:`BasetenHTTP.create_sampler` read it, with its
-    ids and URL checked.
+    ids checked.
 
     ``deployment`` is the dedicated deployment that serves it, with its own GPU. It is
     ``None`` for a serverless sampler, which Baseten serves from shared capacity at
-    :data:`SERVERLESS_URL`.
+    :data:`SERVERLESS_URL`. ``base_url`` is the URL as Baseten sent it, or ``None`` when it
+    sent none. :func:`sampler_url` checks it when the SDK client is built, after the caller
+    has registered the sampler for cleanup, so a sampler whose URL cannot be trusted is still
+    deactivated.
     """
 
     sampler_id: str
-    base_url: str
+    base_url: str | None
     deployment: CreatedDeployment | None
 
 
@@ -293,8 +297,9 @@ class BasetenHTTP:
         """It creates a standalone sampler that serves ``model_path`` (a checkpoint) or
         ``base_model``.
 
-        It sends no ``scope``, so Baseten chooses where it runs. An answer whose ids or URL
-        cannot be trusted is a :class:`TransientError`, as the sampler exists.
+        It sends no ``scope``, so Baseten chooses where it runs. An answer whose ids cannot be
+        trusted is a :class:`TransientError`, as the sampler exists. Its URL is checked later,
+        by :func:`sampler_url`.
         """
         if (model_path is None) == (base_model is None):
             raise ValueError("pass exactly one of model_path and base_model")
@@ -626,18 +631,28 @@ def _job_url(project_id: str, job_id: str) -> str:
 
 
 def _loops_sampler(record: Mapping[str, Any]) -> LoopsSampler:
-    """It checks ``record`` (a ``LoopsSamplerV1``) and returns it as a :class:`LoopsSampler`.
-    A sampler with neither a model nor a deployment is serverless, and only then may its URL
-    be :data:`SERVERLESS_URL`."""
+    """It checks the ids in ``record`` (a ``LoopsSamplerV1``) and returns it as a
+    :class:`LoopsSampler`. A sampler with neither a model nor a deployment is serverless."""
     base_url = record.get("base_url")
-    if not isinstance(base_url, str):
-        raise ExternalError("Baseten described the sampler without its URL", source=SOURCE)
     sampler_id = _id(record.get("id"), "sampler")
     model_id, deployment_id = record.get("model_id"), record.get("deployment_id")
-    if model_id is None and deployment_id is None:
-        return LoopsSampler(sampler_id, serverless_url(base_url), None)
-    deployment = CreatedDeployment(_id(model_id, "model"), _id(deployment_id, "deployment"))
-    return LoopsSampler(sampler_id, inference_url(base_url), deployment)
+    deployment = (
+        None
+        if model_id is None and deployment_id is None
+        else CreatedDeployment(_id(model_id, "model"), _id(deployment_id, "deployment"))
+    )
+    return LoopsSampler(sampler_id, base_url if isinstance(base_url, str) else None, deployment)
+
+
+def sampler_url(sampler: LoopsSampler) -> str:
+    """It returns the URL to sample ``sampler`` at, and it refuses one the API key must not be
+    sent to. Only a serverless sampler may name :data:`SERVERLESS_URL`, and it may name no
+    other URL."""
+    if sampler.base_url is None:
+        raise ExternalError("Baseten described the sampler without its URL", source=SOURCE)
+    if sampler.deployment is None:
+        return serverless_url(sampler.base_url)
+    return inference_url(sampler.base_url)
 
 
 def serverless_url(url: str) -> str:
@@ -920,12 +935,13 @@ def loops_sampling_client(
     every sample to that checkpoint; without it, the base model serves.
     """
     sdk = loops_sdk(loops)
+    url = sampler_url(sampler)
     found = sampler.deployment
     deployment = (
-        sdk.ServerlessDeployment(base_url=sampler.base_url)
+        sdk.ServerlessDeployment(base_url=url)
         if found is None
         else sdk.BasetenDeployment(
-            base_url=sampler.base_url,
+            base_url=url,
             model_id=found.model_id,
             deployment_id=found.deployment_id,
             api_base_url=API_BASE,

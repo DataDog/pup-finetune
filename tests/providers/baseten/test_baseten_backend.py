@@ -48,6 +48,7 @@ from tests.fakes.baseten import (
     FakeForwardBackwardOutput,
     FakeLoops,
     FakeRemoteOpError,
+    FakeSampler,
     FakeSamplingParams,
     FakeServerlessDeployment,
     FakeServerShutdownError,
@@ -976,6 +977,17 @@ def test_a_sampler_that_fails_to_load_is_deactivated(setup: Setup) -> None:
             session.sampler(ckpt)
         assert not setup.loops.samplers["sampler1"].active
         assert setup.loops.sampling_clients[0].closed
+
+
+def test_a_sampler_whose_url_is_refused_is_deactivated(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(FakeSampler, "base_url", property(lambda _: "https://evil.example.com"))
+    with setup.session() as session:
+        with pytest.raises(ExternalError, match="non-Baseten URL"):
+            session.sampler(None)
+        assert not setup.loops.samplers["sampler1"].active
+    assert setup.loops.kwargs("SamplingClient") == []
 
 
 def test_only_a_sampler_checkpoint_can_be_sampled(setup: Setup) -> None:
