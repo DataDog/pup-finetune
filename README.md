@@ -165,7 +165,7 @@ uses the Datadog login to publish its experiments.
 | --- | --- | --- |
 | Your account needs | A workspace enabled to train the model on Loops. To deploy, BDN volumes and an `hf_access_token` secret. | Access to Serverless Training, and a key with access to exactly one account |
 | API key | `BASETEN_API_KEY` | `FIREWORKS_API_KEY` |
-| Training bills | A Loops trainer and samplers: on serverless Loops, where the workspace has it for the model, for the tokens; on dedicated deployments, for the GPU time they run | A serverless training session, for the tokens it trains and samples |
+| Training bills | A Loops trainer and samplers. On serverless Loops, which the workspace may have for the model, they bill for the tokens. On dedicated deployments, they bill for the GPU time they run. | A serverless training session, for the tokens it trains and samples |
 | Best epoch kept as | `deployable_checkpoint`, a Loops checkpoint | `promoted_model`, a Fireworks model |
 | `deploy` creates | A dedicated model on exactly the GPUs of `--shape TYPE:COUNT`, by default `H100:1` | An on-demand deployment on `--shape`, by default the first shape Fireworks validates |
 | `undeploy` deletes | The model. The checkpoint stays. | The deployment. The promoted model stays. |

@@ -6,11 +6,12 @@
 # Copyright 2026-present Datadog, Inc.
 """The ``baseten`` provider: model profiles, preflight, rendering, options and training.
 
-:class:`BasetenProvider` serves :data:`PROFILES`, checks with Baseten, read only, that the
-workspace can train a model before anything is paid (:meth:`~BasetenProvider.preflight`) and
-whether it trains it on serverless Loops (:meth:`~BasetenProvider.expected_placement`), from
-one read of Loops' capabilities per provider, renders each profile with its model family's
-Hugging Face chat template, and trains through :class:`~.backend.BasetenBackend`. It deploys
+:class:`BasetenProvider` serves :data:`PROFILES`. Before anything is paid, it checks with
+Baseten, read only, that the workspace can train a model (:meth:`~BasetenProvider.preflight`)
+and whether it trains it on serverless Loops (:meth:`~BasetenProvider.expected_placement`).
+Both answers come from one read of Loops' capabilities per provider. It renders each profile
+with its model family's Hugging Face chat template and trains through
+:class:`~.backend.BasetenBackend`. It deploys
 a run's sampler checkpoint as a dedicated Baseten model, smoke-tests it and deletes it
 (:mod:`.deploy`: :meth:`~BasetenProvider.deploy`, :meth:`~BasetenProvider.smoke_test`,
 :meth:`~BasetenProvider.undeploy`), and runs a run's training loop in a Baseten training job
@@ -334,8 +335,8 @@ class BasetenProvider:
         that :meth:`preflight` read.
 
         The result is a forecast. No scope is sent, so Baseten chooses where each trainer and
-        sampler runs, and ``BASETEN_LOOPS_SCOPE``, when set, chooses for the trainer. A trainer
-        does not say where it went, but a sampler does (see :mod:`.backend`).
+        sampler runs. When ``BASETEN_LOOPS_SCOPE`` is set, it asks for the trainer's placement
+        instead. A trainer does not say where it went, but a sampler does (see :mod:`.backend`).
         """
         self._own(profile)
         serverless = offers_serverless(self._read_capabilities(), profile.base_model)

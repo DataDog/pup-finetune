@@ -1255,14 +1255,14 @@ DEDICATED: Final[Placement] = "dedicated"
 
 @runtime_checkable
 class SupportsPlacement(Protocol):
-    """A provider of this kind chooses where a run's trainer and samplers run, and it says
-    before a run where it expects to put them."""
+    """A provider of this kind chooses where a run's trainer and samplers run. Before a run,
+    it says where it expects to put them."""
 
     def expected_placement(self, profile: ModelProfile) -> Placement:
         """It returns where the provider expects to run ``profile`` for this account. The
-        result is a forecast, because the provider decides when it creates the trainer and
-        each sampler. It raises like :meth:`Provider.preflight`, and it reads nothing that
-        preflight has not read."""
+        result is a forecast, because the provider makes the decision only when it creates
+        the trainer and each sampler. It raises like :meth:`Provider.preflight`. It reads
+        nothing that preflight has not read."""
         ...
 
 

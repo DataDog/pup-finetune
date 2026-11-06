@@ -9,9 +9,9 @@
 - :class:`BasetenBackend` opens one :class:`BasetenSession` per ``open_session``: a Loops
   session and a LoRA trainer (a Loops run) whose context fits the session's longest
   example, rounded up to a power of two of at least :data:`MIN_SEQ_LEN` tokens. Baseten
-  chooses where the trainer runs, serverless or dedicated (``BASETEN_LOOPS_SCOPE``, when set,
-  asks for one). A trainer
-  Baseten has no capacity for is a :class:`ProviderCapacityError`, with nothing left running.
+  chooses where the trainer runs, serverless or dedicated, unless ``BASETEN_LOOPS_SCOPE`` asks
+  for one. A trainer Baseten has no capacity for is a :class:`ProviderCapacityError`, with
+  nothing left running.
   Leaving the context always closes the trainer client and deactivates the run and every
   sampler the session started, however the session ended; a deactivation that fails raises
   an error naming the run or deployment to deactivate by hand. Resuming loads a training
@@ -23,8 +23,8 @@
 - :class:`BasetenSampler` serves the base model or a sampler checkpoint from a standalone
   Loops sampler with the profile's context, which Baseten places like the trainer: serverless,
   or a dedicated deployment with its own GPU. It is created over REST so that it is known,
-  and can be deactivated, before it is ready. It renders the prompt with the
-  profile's renderer, samples greedily up to the renderer's stop tokens and parses the
+  and can be deactivated, before it is ready. It renders the prompt with the profile's
+  renderer, samples greedily up to the renderer's stop tokens and parses the
   completion back, given the tools; one cut off at ``max_tokens`` is never ``format_valid``.
   Only sampling is retried (a bounded number of times, with backoff), and ``generate`` may be
   called from several threads at once, as the SDK's sampling client allows.
@@ -190,8 +190,8 @@ class BasetenBackend:
         sdk = loops_sdk(self._loops)
         context = fitted_seq_len(max_seq_len, profile.max_seq_len)
         service = loops_service(api_key, loops=sdk)
-        # The log names the variable when it is set, because it then decides where the
-        # trainer runs.
+        # The log names the variable when it is set, because the variable then asks for the
+        # trainer's placement.
         scope = os.environ.get(SCOPE_ENV)
         chosen = f"{SCOPE_ENV}={scope} chooses" if scope else "Baseten chooses"
         output.info(
@@ -475,9 +475,9 @@ class BasetenSession:
         raise UsageError("Baseten has no promotion; the sampler checkpoint is deployed")
 
     def sampler(self, ckpt: CheckpointRef | None) -> BasetenSampler:
-        """It creates a Loops sampler for ``ckpt`` or the base model. The sampler is paid: for
-        its GPU's time until it is closed on a dedicated deployment, or by the token on
-        serverless capacity."""
+        """It creates a Loops sampler for ``ckpt`` or the base model. The sampler is paid: on a
+        dedicated deployment, for its GPU's time until it is closed; on serverless capacity, by
+        the token."""
         self._require_open()
         if ckpt is not None:
             if ckpt.kind != "sampler":
@@ -653,8 +653,9 @@ class BasetenSampler:
     """It generates greedily on a Loops sampler, and :meth:`BasetenSession.sampler` builds it.
 
     The sampler is a Baseten deployment with its own GPU, or a sampler on Baseten's serverless
-    capacity (``record.deployment`` is ``None``): :meth:`close` deactivates either (closing
-    again is a no-op), and its session deactivates it when it ends, if still up.
+    capacity (``record.deployment`` is ``None``). :meth:`close` deactivates either kind, and
+    closing again is a no-op. If the sampler is still up when its session ends, the session
+    deactivates it.
     :meth:`generate` is safe to call from several threads, as the SDK's sampling client is.
     """
 
@@ -737,7 +738,7 @@ class BasetenSampler:
     def _deactivate(self) -> None:
         found, http = self.record.deployment, self._http
         if found is None:
-            # A serverless sampler has no deployment: Loops deactivates the sampler itself.
+            # A serverless sampler has no deployment, so it is deactivated through its Loops route.
             sampler_id = self.record.sampler_id
             _deactivate(
                 f"the serverless Baseten sampler {sampler_id}",

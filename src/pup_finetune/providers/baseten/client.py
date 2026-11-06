@@ -24,11 +24,11 @@
   :func:`loops_service` opens a Loops session with the API key, base URL and availability
   passed explicitly, so none of them comes from the environment; :func:`loops_trainer`
   creates a LoRA trainer (a Loops run) in it and :func:`loops_sampling_client` connects to a
-  sampler created over REST (:class:`LoopsSampler`). Neither asks for a placement: with the
-  default scope Baseten chooses where each runs, serverless (shared) capacity or a dedicated
-  deployment, and only a sampler says which it got. :func:`loops_failure` maps a failed SDK call to an
-  :class:`ExternalError` (auth and capacity as above), a :class:`TransientError` only for a
-  call safe to repeat.
+  sampler created over REST (:class:`LoopsSampler`). Neither asks for a placement, so
+  Baseten's default scope chooses where each runs: serverless (shared) capacity or a dedicated
+  deployment. Only a sampler reports which it got. :func:`loops_failure` maps a failed SDK
+  call to an :class:`ExternalError` (auth and capacity as above), a :class:`TransientError`
+  only for a call safe to repeat.
 - :func:`to_loops_datum` converts a :class:`TokenizedExample` into the SDK's ``Datum``.
 
 ``tests/fakes/baseten.py`` has a fake of the SDK (``loops=``) and of the HTTP routes
@@ -721,7 +721,7 @@ class LoopsSamplingClient(Protocol):
     """It declares the parts of the SDK's ``SamplingClient`` used here.
 
     Closing it releases its HTTP client only: a dedicated sampler keeps its GPU until its
-    deployment is deactivated through :meth:`BasetenHTTP.deactivate_deployment`, a
+    deployment is deactivated through :meth:`BasetenHTTP.deactivate_deployment`, and a
     serverless one stays active until :meth:`BasetenHTTP.deactivate_sampler`.
     """
 
@@ -857,8 +857,8 @@ def loops_trainer(
     is ready. The trainer is paid: by the token on serverless capacity, or for its GPUs' time
     on a dedicated deployment.
 
-    No scope is passed, so Baseten chooses where it runs, unless :data:`SCOPE_ENV` is set,
-    which the SDK then sends.
+    No scope is passed, so Baseten chooses where it runs. When :data:`SCOPE_ENV` is set, the
+    SDK sends that scope instead.
 
     A failure that may leave a run behind (anything but a 4xx answer to the create itself, as
     the SDK calls the new run before it returns) says how to find it; a refusal for lack of
@@ -915,9 +915,9 @@ def loops_sampling_client(
     returned it.
 
     Its first sample waits up to ``ready_timeout`` seconds for the sampler to be ready (its
-    deployment active, or Baseten's queue admitting a serverless one), and a sample that
-    takes over ``timeout`` seconds fails with a :class:`TimeoutError`; ``checkpoint_path``
-    routes every sample to that checkpoint, else the base model serves.
+    deployment active, or Baseten's queue admitting a serverless one). A sample that takes
+    over ``timeout`` seconds fails with a :class:`TimeoutError`. ``checkpoint_path`` routes
+    every sample to that checkpoint; without it, the base model serves.
     """
     sdk = loops_sdk(loops)
     found = sampler.deployment
