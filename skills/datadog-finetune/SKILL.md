@@ -102,7 +102,7 @@ step (`blocked_by`); a failed check has a `fix` (a missing key: the user runs `a
 Check:
 
 - [ ] `"status": "ready"`, signed in to the right Datadog site (the `datadog_auth` check).
-- [ ] The provider's key, SDK, renderer and model checks (`<PROVIDER>:model:<MODEL>`) pass.
+- [ ] The provider's key, SDK, renderer and model checks (`<PROVIDER>:model:<MODEL>`) pass. A Baseten label ending `(serverless)` bills by the token: tell the user.
 
 ## Step 1: explore the spans and agree on the goal
 
@@ -327,8 +327,8 @@ Check:
 - **Setup.** The `baseten` and `hf` extras and a key: `pup finetune auth login baseten`, or
   read only, the default remote's key in `~/.trussrc`. A model both providers offer (all but `qwen3p5-9b`) needs `--provider`:
   `pup finetune train --provider baseten --dataset datasets/my-agent --model glm-5p3-flash --detach`. `--max-seq-len <n>` (at least 1024) caps the context; never pass `--lora-alpha`.
-- **Billing.** `train`, `resume` and `evaluate` provision a dedicated Loops trainer (and
-  samplers) that bills until the run is deactivated; every exit deactivates it. Never `kill -9` a pup-finetune process.
+- **Billing.** `train`, `resume` and `evaluate` start a Loops trainer and samplers, and Baseten picks where: serverless bills by the token, dedicated for GPU time
+  until deactivated; every exit deactivates them. Never `kill -9` a pup-finetune process. The preview's `expected_placement` is a forecast: name it in `Cost:`.
   On `could not deactivate Baseten run <id> (...); it may still bill`, tell the user at once. A standalone `evaluate` starts a new trainer; `train --evaluate` reuses one.
 - **Remote.** `--remote` (instead of `--detach`) runs the loop in a Baseten CPU job, which also bills, so training goes on while the user's machine sleeps.
   It needs the `baseten` CLI, `uv` and a team secret `pup_finetune_api_key`. `cancel` cannot stop it: the user stops the job in the Baseten UI.
@@ -337,7 +337,7 @@ Check:
 - **Deploy.** A dedicated model on exactly the GPUs of `--shape TYPE:COUNT` (default `H100:1`),
   0 to 1 replicas. The workspace needs BDN volumes and an `hf_access_token` secret. `undeploy` deletes the model and keeps the checkpoint.
 - **Environment.** pup-finetune refuses `LOOPS_REQUEST_LOG`, `LOOPS_REUSE_FROM_RUN_ID`, `LOOPS_REUSE_FROM_SESSION_ID`,
-  `INTERNAL_LOOPS_BACKEND_VERSION`, `LOOPS_TEAM`, and `LOOPS_BASE_URL` (`LOOPS_BASE_URL must be unset or https://api.baseten.co`). Ask the user to unset them.
+  `INTERNAL_LOOPS_BACKEND_VERSION`, `LOOPS_TEAM`, and `LOOPS_BASE_URL` (`LOOPS_BASE_URL must be unset or https://api.baseten.co`). Ask the user to unset them. `BASETEN_LOOPS_SCOPE` is allowed: it picks the trainer's placement; never set it yourself.
 
 ### Fireworks
 
@@ -397,4 +397,4 @@ Errors read `Error [<code>]: <message>`, then `Hint: ...`. The codes, with their
 | `train` or `benchmark` says it `reads a dataset that is in Datadog`, or an evaluation was not published (`next_command` null) | No `push.json`, kept rows not pushed yet or changed since the push, or the push missed the test split | For `train` or `benchmark`: step 4, push with a yes (the hint names the command) or fetch the dataset, then preview again. For an unpublished evaluation: follow its `next_steps` (push, then rerun it; finished results are reused; or deploy unpublished). |
 | `deploy` times out, or the smoke test fails | It did not serve in time | It may still bill: preview `undeploy` at once, tell the user, confirm on their yes. Redeploy only after a yes. |
 | `undeploy` refuses: not the requested deployment | The deployment id holds another deployment | Nothing was deleted; never delete it. With an OK, follow the error's steps. |
-| `could not deactivate Baseten run <id> (...)`, or a hint that a run or sampler `may remain` | Baseten cleanup failed or was interrupted; it may still bill | Tell the user at once: they deactivate it in the Baseten UI (or with the hinted `curl` command). |
+| `could not deactivate Baseten run <id> (...)`, or a hint that a run or sampler `may remain` | Baseten cleanup failed or was interrupted; a dedicated one may still bill (a serverless sampler bills only what it samples) | Tell the user at once: they deactivate it in the Baseten UI (or with the hinted `curl` command). |
