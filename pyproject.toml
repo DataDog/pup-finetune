@@ -58,11 +58,11 @@ hf = ["transformers>=5.10.4", "jinja2>=3.1", "huggingface-hub>=0.34", "tiktoken>
 # shared renderer.
 fireworks = [
   "fireworks-ai[training-sdk]>=1.2.19,<1.3",
-  "tinker>=0.23,<0.24",
+  "tinker>=0.23,<0.38",
   "pup-finetune[hf]",
 ]
 # Judges on Anthropic: the official SDK (anthropic_client.py is the only module that loads it).
-anthropic = ["anthropic>=1,<2"]
+anthropic = ["anthropic>=1,<3"]
 # The Baseten Loops SDK, pinned to the version the client is tested with (providers/baseten).
 baseten = ["pup-finetune[hf]", "baseten-loops==0.33.0"]
 
