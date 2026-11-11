@@ -85,6 +85,7 @@ from pup_finetune.providers.base import (
     CheckpointRef,
     ModelIdTaken,
     ModelProfile,
+    Placement,
     TrainSpec,
 )
 from pup_finetune.redaction import redact
@@ -350,6 +351,7 @@ class RunDir:
         run_id: str | None = None,
         defaults_used: Sequence[str] = (),
         max_seq_len_flag: str = MAX_SEQ_LEN_FLAG,
+        expected_placement: Placement | None = None,
         now: Clock = utcnow,
     ) -> RunDir:
         """Create a run in ``path``, which must be new or empty, and write ``run.json``.
@@ -361,6 +363,10 @@ class RunDir:
         the user left at their defaults (``defaults_used``; ``max_seq_len_flag`` names the
         flag that cut the context, if one did); both follow from the rest, so
         neither is part of ``settings_hash``, and a run recorded before them has neither.
+        ``expected_placement`` is where the provider expects to run it, when the provider says
+        (:class:`~pup_finetune.providers.base.SupportsPlacement`). It is a forecast, recorded so
+        that a run can be matched to how it was billed. It is not part of ``settings_hash``
+        either.
         """
         run_id = check_run_id(run_id if run_id is not None else new_run_id(now()))
         run_dir = cls(path)
@@ -382,6 +388,9 @@ class RunDir:
                 "settings_hash": settings_hash(settings),
                 "settings": spec.recorded_settings(profile, max_seq_len_flag=max_seq_len_flag),
                 "defaults_used": list(defaults_used),
+                **(
+                    {} if expected_placement is None else {"expected_placement": expected_placement}
+                ),
                 "created_at": _iso(now()),
             }
             atomic_write_json(run_dir.run_path, manifest)

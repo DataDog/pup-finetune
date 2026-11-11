@@ -17,7 +17,7 @@ from pup_finetune.cli._presentation import SET_UP, CommandDoc, Safety, default_n
 from pup_finetune.errors import FinetuneError, UsageError
 from pup_finetune.providers import get_provider, provider_info, provider_infos, registered_providers
 from pup_finetune.providers.base import ModelProfile, Provider
-from pup_finetune.readiness import preflight_context
+from pup_finetune.readiness import preflight_model
 from pup_finetune.redaction import redact
 
 models_app = group(
@@ -35,8 +35,10 @@ LIST_DOC = CommandDoc(
         "support, default LoRA rank, whether its tokenizer runs code from the model's "
         "repository (trust_remote_code), the provider's --provider-option keys and notes on "
         "the model; this needs no API key. With --check, also shows each profile's renderer "
-        "and pinned tokenizer, asks the provider whether each model can be fine-tuned now, "
-        "and exits 1 when any cannot."
+        "and pinned tokenizer, asks the provider whether each model can be fine-tuned now "
+        "and, for a provider that places runs itself (Baseten), where it expects to run it "
+        "(preflight.expected_placement: serverless or dedicated), and exits 1 when any "
+        "cannot."
     ),
     examples=(
         "pup finetune models list",
@@ -80,15 +82,19 @@ def _preflight(
     provider: Provider, profile: ModelProfile, max_seq_len: int | None
 ) -> dict[str, Any]:
     try:
-        context = preflight_context(provider, profile, max_seq_len)
+        found = preflight_model(provider, profile, max_seq_len)
     except FinetuneError as exc:
         result: dict[str, Any] = {"ok": False, "error": redact(str(exc))}
         if exc.hint:
             result["hint"] = redact(exc.hint)
         return result
-    if context is None:
-        return {"ok": True}
-    return {"ok": True, "max_seq_len": context.max_seq_len, "max_seq_len_source": context.source}
+    result = {"ok": True}
+    if found.context is not None:
+        context = found.context
+        result |= {"max_seq_len": context.max_seq_len, "max_seq_len_source": context.source}
+    if found.placement is not None:
+        result["expected_placement"] = found.placement
+    return result
 
 
 @models_app.command(**LIST_DOC.typer())

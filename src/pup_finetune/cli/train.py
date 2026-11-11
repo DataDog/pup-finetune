@@ -110,10 +110,12 @@ from pup_finetune.providers.base import (
     OFFLINE_BILLING,
     PROVIDER_LIMIT,
     ModelProfile,
+    Placement,
     Provider,
     RemotePlan,
     TrainingUsage,
     TrainSpec,
+    expected_placement,
     fitted_context_note,
 )
 from pup_finetune.rendering.base import Renderer
@@ -451,6 +453,7 @@ def _preview(
     defaults_used: Sequence[str],
     max_seq_len_flag: str,
     runtime: Runtime,
+    placement: Placement | None,
 ) -> dict[str, Any]:
     warnings = []
     if not inputs.validation_rows:
@@ -472,6 +475,7 @@ def _preview(
         "provider_source": provider_source,
         "model": profile.alias,
         "profile": _profile_brief(profile),
+        **({} if placement is None else {"expected_placement": placement}),
         "run_id": run_id,
         "run_dir": display_path(run_dir),
         "rows": rows,
@@ -1027,6 +1031,7 @@ def train(
         options = provider.validate_options(raw_options)
         seq_flag = PROVIDER_LIMIT
         note(fitted_context_note(provider, profile, limit))
+    placement = expected_placement(provider, profile)
     # What the run trains with: an option may narrow the profile (e.g. cap its context),
     # so rows are rendered, previewed and recorded against the narrowed one.
     profile = provider.training_profile(profile)
@@ -1045,6 +1050,7 @@ def train(
         defaults_used=defaults_used,
         max_seq_len_flag=seq_flag,
         runtime=runtime,
+        placement=placement,
     )
     rplan: RemotePlan | None = None
     if remote:
@@ -1133,6 +1139,7 @@ def train(
             renderer,
             defaults_used,
             max_seq_len_flag=seq_flag,
+            placement=placement,
         )
         record, upload = submit_remote(
             run, jobs, rplan, source, mode="train", created_dir=created_dir
@@ -1171,6 +1178,7 @@ def train(
                 renderer,
                 defaults_used,
                 max_seq_len_flag=seq_flag,
+                placement=placement,
             )
             info(f"training run {run_id} in {run_dir} on {provider.name}, then evaluating it")
             result = _in_foreground(provider, run, "train", inputs, after_finalize=hook)
@@ -1189,6 +1197,7 @@ def train(
         renderer,
         defaults_used,
         max_seq_len_flag=seq_flag,
+        placement=placement,
     )
     if detach:
         return _detached(run, run_id, spawn_worker(run, "train"), notes)
@@ -1208,6 +1217,7 @@ def _create_run(
     defaults_used: Sequence[str],
     *,
     max_seq_len_flag: str,
+    placement: Placement | None,
 ) -> RunDir:
     return RunDir.create(
         run_dir,
@@ -1220,6 +1230,7 @@ def _create_run(
         run_id=run_id,
         defaults_used=defaults_used,
         max_seq_len_flag=max_seq_len_flag,
+        expected_placement=placement,
     )
 
 

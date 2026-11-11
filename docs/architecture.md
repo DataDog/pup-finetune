@@ -266,8 +266,17 @@ Baseten Loops through `providers/baseten/client.py`, the only module that loads 
 - **Preflight.** Read only: the SDK loads, and Loops' capabilities must offer and enable the
   model to the workspace with a limit of at least the `max_seq_len` option. It returns the
   limit, so a workspace whose default capacity is under the profile's context trains at the
-  limit when no `max_seq_len` is set. Nothing is paid before `--confirm`.
-- **Sessions.** `open_session` opens a Loops session and a dedicated LoRA trainer whose
+  limit when no `max_seq_len` is set. Nothing is paid before `--confirm`. The provider reads
+  the capabilities once. Their `serverless` flag for the model is where the provider expects
+  to run it (`SupportsPlacement`), which the preview, `run.json`, `doctor --check` and
+  `models list --check` report.
+- **Placement.** pup-finetune sends no scope, so Baseten chooses where the trainer and each
+  sampler run: serverless (shared) capacity or a dedicated deployment. When
+  `BASETEN_LOOPS_SCOPE` is set, the SDK sends it as the trainer's scope, and the run logs
+  that the variable is set. A serverless trainer or sampler bills by the token, a dedicated
+  one for its GPUs' time. The trainer does not report where it went. A sampler does (it has
+  no model or deployment of its own when serverless), and the run logs it.
+- **Sessions.** `open_session` opens a Loops session and a LoRA trainer whose
   context is the next power of two over the session's longest example (at least 1024 tokens,
   at most the profile's). Leaving the context always deactivates the run and every sampler
   the session started; a deactivation that fails names what to deactivate by hand, and what
@@ -276,8 +285,11 @@ Baseten Loops through `providers/baseten/client.py`, the only module that loads 
 - **Checkpoints.** `bt://loops:` paths that outlive the run; a resume loads a training
   checkpoint with its optimizer state into a new run. There is no promotion: the best sampler
   checkpoint is the run's deployable checkpoint, which `deploy` serves (see Deploying).
-- **Sampling.** Each sampler runs on its own dedicated deployment, sized to the profile's
-  context. It renders the prompt with the profile's renderer, samples greedily and parses the
+- **Sampling.** Each sampler is a standalone Loops sampler asked for the profile's context.
+  Baseten serves it from a dedicated deployment, which is deactivated through that
+  deployment, or from its shared serverless host (`loops.baseten.co`, the only URL a
+  serverless sampler may name), where it is deactivated through the Loops sampler route.
+  It renders the prompt with the profile's renderer, samples greedily and parses the
   completion into an OpenAI message. The `max_seq_len` provider option cuts the training
   profile, so it also sizes the samplers and the trainer a standalone evaluation opens.
 

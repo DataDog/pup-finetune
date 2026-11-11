@@ -31,22 +31,28 @@ from pup_finetune.providers.baseten.client import (
     API_BASE,
     IGNORE_INDEX,
     INSTALL_HINT,
+    SERVERLESS_URL,
     BasetenHTTP,
     CreatedDeployment,
     DeploymentRejected,
+    LoopsSampler,
     inference_url,
     loops_failure,
     loops_sampling_client,
     loops_sdk,
     loops_service,
     loops_trainer,
+    sampler_url,
+    serverless_url,
     to_loops_datum,
 )
 from pup_finetune.rendering.tokens import TokenizedExample
 from tests.fakes.baseten import (
     BasetenTransport,
+    FakeBasetenDeployment,
     FakeLoops,
     FakeModelInput,
+    FakeServerlessDeployment,
     FakeServerShutdownError,
     FakeTensorData,
     baseten_transport,
@@ -374,11 +380,33 @@ def test_an_accepted_sampler_create_without_a_sampler_is_transient() -> None:
         )
 
 
-def test_create_sampler_asks_for_dedicated_capacity() -> None:
-    sampler = {"id": "smp1", "model_id": "m1", "deployment_id": "d1", "base_url": SAMPLER_URL}
-    http, transport = make_http({"POST /v1/loops/samplers": (200, {"sampler": sampler})})
+DEDICATED_SAMPLER = {
+    "id": "smp1",
+    "model_id": "m1",
+    "deployment_id": "d1",
+    "base_url": SAMPLER_URL,
+}
+SERVERLESS_SAMPLER = {
+    "id": "smp1",
+    "model_id": None,
+    "deployment_id": None,
+    "base_url": SERVERLESS_URL,
+}
+
+SERVERLESS = LoopsSampler("smp1", SERVERLESS_URL, None)
+
+
+def create_sampler(http: BasetenHTTP) -> LoopsSampler:
     path = "bt://loops:run1/sampler_weights/ckpt"
-    assert http.create_sampler(session_id="s1", model_path=path, max_seq_len=4096) == sampler
+    return http.create_sampler(session_id="s1", model_path=path, max_seq_len=4096)
+
+
+def test_create_sampler_sends_no_scope_so_baseten_places_it() -> None:
+    http, transport = make_http({"POST /v1/loops/samplers": (200, {"sampler": DEDICATED_SAMPLER})})
+    path = "bt://loops:run1/sampler_weights/ckpt"
+    create_sampler(http)
+    # The body asks for dedicated availability and sends no scope, so Baseten chooses where
+    # the sampler runs.
     assert transport.bodies("POST /v1/loops/samplers") == [
         {
             "session_id": "s1",
@@ -395,6 +423,99 @@ def test_create_sampler_can_serve_the_base_model() -> None:
     http.create_sampler(session_id="s1", base_model="Qwen/Qwen3.5-9B", max_seq_len=1024)
     (body,) = transport.bodies("POST /v1/loops/samplers")
     assert (body["base_model"], "model_path" in body) == ("Qwen/Qwen3.5-9B", False)
+
+
+@pytest.mark.parametrize(
+    ("record", "expected"),
+    [
+        (DEDICATED_SAMPLER, LoopsSampler("smp1", SAMPLER_URL, CreatedDeployment("m1", "d1"))),
+        (SERVERLESS_SAMPLER, SERVERLESS),
+        ({"id": "smp1", "base_url": SERVERLESS_URL}, SERVERLESS),
+        ({**SERVERLESS_SAMPLER, "base_url": None}, LoopsSampler("smp1", None, None)),
+    ],
+    ids=["dedicated", "serverless", "ids-left-out", "url-left-out"],
+)
+def test_create_sampler_reads_where_baseten_placed_it(
+    record: dict[str, Any], expected: LoopsSampler
+) -> None:
+    http, _ = make_http({"POST /v1/loops/samplers": (200, {"sampler": record})})
+    assert create_sampler(http) == expected
+
+
+@pytest.mark.parametrize(
+    ("field", "reason"),
+    [
+        ({"id": "a/b"}, "invalid Baseten sampler id"),
+        ({"model_id": None, "base_url": SERVERLESS_URL}, "invalid Baseten model id"),
+        ({"deployment_id": None}, "invalid Baseten deployment id"),
+    ],
+    ids=["bad-id", "half-serverless", "no-deployment"],
+)
+def test_a_sampler_it_cannot_trust_is_transient_as_it_was_created(
+    field: dict[str, Any], reason: str
+) -> None:
+    record = {**DEDICATED_SAMPLER, **field}
+    http, _ = make_http({"POST /v1/loops/samplers": (200, {"sampler": record})})
+    with pytest.raises(TransientError, match=UNREADABLE) as caught:
+        create_sampler(http)
+    assert reason in caught.value.message
+    assert caught.value.hint == CREATED_HINT
+
+
+@pytest.mark.parametrize(
+    ("record", "url"),
+    [
+        (DEDICATED_SAMPLER, SAMPLER_URL),
+        (SERVERLESS_SAMPLER, SERVERLESS_URL),
+        ({**SERVERLESS_SAMPLER, "base_url": f"{SERVERLESS_URL}/"}, SERVERLESS_URL),
+    ],
+    ids=["dedicated", "serverless", "trailing-slash"],
+)
+def test_a_sampler_is_sampled_at_its_checked_url(record: dict[str, Any], url: str) -> None:
+    http, _ = make_http({"POST /v1/loops/samplers": (200, {"sampler": record})})
+    assert sampler_url(create_sampler(http)) == url
+
+
+@pytest.mark.parametrize(
+    ("field", "reason"),
+    [
+        ({"base_url": "https://evil.example.com/sync"}, "non-Baseten URL"),
+        ({"base_url": None}, "without its URL"),
+        # A sampler without a deployment is reached only on the serverless host, and a
+        # serverless sampler is reached only there.
+        ({"base_url": SERVERLESS_URL}, "non-Baseten URL"),
+        ({"model_id": None, "deployment_id": None}, "non-Baseten URL"),
+    ],
+    ids=["elsewhere", "no-url", "dedicated-on-serverless-host", "serverless-on-model-host"],
+)
+def test_a_sampler_url_it_cannot_trust_is_refused_after_the_sampler_is_read(
+    field: dict[str, Any], reason: str
+) -> None:
+    # The create still returns the sampler, so the caller can deactivate it.
+    http, _ = make_http(
+        {"POST /v1/loops/samplers": (200, {"sampler": {**DEDICATED_SAMPLER, **field}})}
+    )
+    sampler = create_sampler(http)
+    with pytest.raises(ExternalError, match=reason) as caught:
+        sampler_url(sampler)
+    assert not isinstance(caught.value, TransientError)
+
+
+def test_sampler_routes() -> None:
+    base = "/v1/loops/samplers/smp1"
+    active = {**SERVERLESS_SAMPLER, "status": {"name": "ACTIVE"}}
+    http, transport = make_http(
+        {
+            f"GET {base}": (200, {"sampler": active}),
+            f"POST {base}/deactivate": (200, {"id": "smp1"}),
+            "GET /v1/loops/samplers/gone": (404, {}),
+        }
+    )
+    assert http.get_sampler("smp1") == active
+    assert http.get_sampler("gone") is None
+    http.deactivate_sampler("smp1")
+    assert transport.calls[2:] == [f"POST {base}/deactivate"]
+    assert transport.bodies(f"POST {base}/deactivate") == [{}]
 
 
 @pytest.mark.parametrize("target", [{}, {"model_path": "bt://x", "base_model": "m"}])
@@ -614,6 +735,23 @@ def test_an_inference_url_loses_its_trailing_slash() -> None:
 @pytest.mark.parametrize(
     "url",
     [
+        "http://loops.baseten.co",
+        "https://loops.baseten.co.elsewhere.example",
+        "https://loops.baseten.co/v1",
+        "https://user@loops.baseten.co",
+        "https://loops.baseten.co:8443",
+        SAMPLER_URL,
+    ],
+)
+def test_the_key_is_only_sent_to_the_serverless_host_as_it_is(url: str) -> None:
+    assert serverless_url(f"{SERVERLESS_URL}/") == SERVERLESS_URL
+    with pytest.raises(ExternalError, match="non-Baseten URL"):
+        serverless_url(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
         "http://model-abc.api.baseten.co/deployment/d/sync/v1",
         "https://model-abc.api.baseten.co.elsewhere.example/v1",
         "https://elsewhere.example/v1",
@@ -659,6 +797,11 @@ def test_the_guard_also_runs_with_an_injected_sdk(monkeypatch: pytest.MonkeyPatc
     assert loops.calls == []
 
 
+def test_the_sdk_s_scope_setting_is_left_to_the_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(client.SCOPE_ENV, "serverless")
+    assert loops_service(KEY, loops=FakeLoops()).session_id == "session1"
+
+
 @pytest.mark.parametrize("value", ["https://api.baseten.co", "https://api.baseten.co/", ""])
 def test_the_default_loops_base_url_is_allowed(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv("LOOPS_BASE_URL", value)
@@ -695,6 +838,7 @@ def test_the_real_sdk_provides_every_name_the_client_uses() -> None:
     for name in client._SDK_NAMES:
         assert getattr(loaded, name) is getattr(sdk, name)
     assert loaded.BasetenDeployment is sdk.sampling_client.BasetenDeployment
+    assert loaded.ServerlessDeployment is sdk.sampling_client.ServerlessDeployment
 
 
 # --- loops_service -------------------------------------------------------------------
@@ -797,7 +941,7 @@ TRAINER = {
 }
 
 
-def test_loops_trainer_creates_one_dedicated_run_without_a_sampler() -> None:
+def test_loops_trainer_creates_one_run_without_a_sampler_or_a_scope() -> None:
     loops = FakeLoops()
     trainer = loops_trainer(loops_service(KEY, loops=loops), **TRAINER)
     assert trainer.run_id == "run1"
@@ -929,11 +1073,26 @@ def _with_run_id(trainer: Any) -> Any:
     return trainer
 
 
-SAMPLER = {"id": "smp1", "model_id": "abc123", "deployment_id": "dep456", "base_url": SAMPLER_URL}
-
-
-def test_loops_sampling_client_attaches_to_the_sampler_with_the_key() -> None:
-    loops = FakeLoops()
+@pytest.mark.parametrize(
+    ("serverless", "deployment"),
+    [
+        (
+            False,
+            FakeBasetenDeployment(
+                "https://model-model1.api.baseten.co/deployment/dep1/sync",
+                "model1",
+                "dep1",
+                API_BASE,
+            ),
+        ),
+        (True, FakeServerlessDeployment(SERVERLESS_URL)),
+    ],
+    ids=["dedicated", "serverless"],
+)
+def test_loops_sampling_client_attaches_to_the_sampler_with_the_key(
+    serverless: bool, deployment: Any
+) -> None:
+    loops = FakeLoops(serverless=serverless)
     service = loops_service(KEY, loops=loops)
     created = BasetenHTTP(KEY, transport=loops.transport()).create_sampler(
         session_id=service.session_id, base_model="Qwen/Qwen3.5-9B", max_seq_len=1024
@@ -949,47 +1108,16 @@ def test_loops_sampling_client_attaches_to_the_sampler_with_the_key() -> None:
         loops=loops,
     )
     (kwargs,) = loops.kwargs("SamplingClient")
-    assert kwargs.pop("deployment") == loops.BasetenDeployment(
-        base_url=created["base_url"],
-        model_id="model1",
-        deployment_id="dep1",
-        api_base_url=API_BASE,
-    )
     assert kwargs == {
         "api_key": SECRET,
         "base_model": "Qwen/Qwen3.5-9B",
+        "deployment": deployment,
         "sampler_id": "sampler1",
         "session_id": "session1",
         "checkpoint_path": None,
         "ready_timeout": 60.0,
         "timeout": 30.0,
     }
-
-
-@pytest.mark.parametrize(
-    ("field", "message"),
-    [
-        ({"base_url": "https://evil.example.com/sync"}, "non-Baseten URL"),
-        ({"base_url": None}, "without its URL"),
-        ({"id": "a/b"}, "invalid Baseten sampler id"),
-    ],
-)
-def test_loops_sampling_client_refuses_a_sampler_it_cannot_trust(
-    field: dict[str, Any], message: str
-) -> None:
-    loops = FakeLoops()
-    with pytest.raises(ExternalError, match=message):
-        loops_sampling_client(
-            KEY,
-            {**SAMPLER, **field},
-            base_model="Qwen/Qwen3.5-9B",
-            session_id="session1",
-            checkpoint_path=None,
-            ready_timeout=60.0,
-            timeout=30.0,
-            loops=loops,
-        )
-    assert loops.calls == []
 
 
 # --- loops_failure -------------------------------------------------------------------

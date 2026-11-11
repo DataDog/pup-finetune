@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from pup_finetune.display import joined, loss_text
-from pup_finetune.providers.base import MAX_SEQ_LEN_OPTION
+from pup_finetune.providers.base import MAX_SEQ_LEN_OPTION, SERVERLESS
 from pup_finetune.redaction import redact
 from pup_finetune.runtime import Runtime
 
@@ -1178,12 +1178,20 @@ def _training_settings(settings: Mapping[str, Any]) -> str:
     return text
 
 
+SERVERLESS_EXPECTED: Final = "serverless expected (the provider chooses)"
+"""This is the train card's capacity row. It is a forecast, because the provider chooses where
+the trainer and each sampler run."""
+
+
 def _train_card(preview: Mapping[str, Any]) -> tuple[str, list[Row | None]]:
     settings = preview.get("settings") or {}
     rows = [
         _row("data", _token_data(preview)),
         _row("settings", _training_settings(settings)),
     ]
+    # Dedicated is what a provider without serverless always does, so only serverless is news.
+    if preview.get("expected_placement") == SERVERLESS:
+        rows.append(_row("capacity", SERVERLESS_EXPECTED))
     remote = preview.get("remote")
     if isinstance(remote, Mapping):
         rows.append(_row("runs", f"a Baseten CPU job in team {remote.get('team')}"))

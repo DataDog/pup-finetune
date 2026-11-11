@@ -37,7 +37,7 @@ from pup_finetune.providers.baseten.backend import (
     BasetenBackend,
     fitted_seq_len,
 )
-from pup_finetune.providers.baseten.client import DeploymentRejected, to_loops_datum
+from pup_finetune.providers.baseten.client import SERVERLESS_URL, DeploymentRejected, to_loops_datum
 from pup_finetune.rendering.families import QWEN3_5
 from pup_finetune.rendering.hf import HFChatTemplateRenderer
 from pup_finetune.rendering.tokens import TokenizedExample
@@ -48,14 +48,16 @@ from tests.fakes.baseten import (
     FakeForwardBackwardOutput,
     FakeLoops,
     FakeRemoteOpError,
+    FakeSampler,
     FakeSamplingParams,
+    FakeServerlessDeployment,
     FakeServerShutdownError,
     FakeTensorData,
     http_status_error,
     loss_at,
 )
 from tests.fakes.tokenizer import FakeChatTokenizer
-from tests.providers.baseten.test_baseten_client import AUTH_HINT
+from tests.providers.baseten.test_baseten_client import AUTH_HINT, CREATED_HINT
 from tests.providers.contract import BackendContract
 
 KEY = SecretStr("synthetic-baseten-key")
@@ -94,7 +96,7 @@ SAMPLER_DEACTIVATE = "POST /v1/models/model1/deployments/dep1/deactivate"
 
 @pytest.fixture(autouse=True)
 def _isolated(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    for name in (*client._REJECTED_ENV, "LOOPS_BASE_URL"):
+    for name in (*client._REJECTED_ENV, "LOOPS_BASE_URL", client.SCOPE_ENV):
         monkeypatch.delenv(name, raising=False)
     yield
     redaction.clear_secrets()
@@ -184,6 +186,28 @@ class TestBasetenBackendContract(BackendContract):
 
 
 # --- open_session --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("scope", "chosen"),
+    [(None, "Baseten chooses"), ("serverless", f"{client.SCOPE_ENV}=serverless chooses")],
+    ids=["default", "from-env"],
+)
+def test_provisioning_says_who_chooses_where_the_trainer_runs(
+    setup: Setup,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    scope: str | None,
+    chosen: str,
+) -> None:
+    if scope is not None:
+        monkeypatch.setenv(client.SCOPE_ENV, scope)
+    with setup.session():
+        pass
+    assert f"({chosen} where it runs)" in capsys.readouterr().err
+    # The SDK reads the variable itself: pup-finetune passes no scope either way.
+    (settings,) = setup.loops.kwargs("create_lora_training_client")
+    assert "scope" not in settings
 
 
 @pytest.mark.parametrize(
@@ -786,15 +810,71 @@ def test_a_sampling_failure_not_worth_retrying_is_raised_at_once(
     assert caught.value.__cause__ is error
 
 
-def test_a_sampler_described_without_its_deployment_is_not_a_refusal(
+def test_a_sampler_described_with_half_a_deployment_is_not_a_refusal(
     loops: FakeLoops, renderer: HFChatTemplateRenderer
 ) -> None:
-    sampler = {"id": "sampler1", "base_url": "https://model-x.api.baseten.co/sync"}
+    sampler = {"id": "sampler1", "model_id": "x", "base_url": "https://model-x.api.baseten.co/sync"}
     setup = Setup(loops, renderer, {"POST /v1/loops/samplers": (200, {"sampler": sampler})})
     with setup.session() as session, pytest.raises(TransientError) as caught:
         session.sampler(None)
-    assert caught.value.hint == "deactivate the sampler of Loops session session1 in the Baseten UI"
+    assert caught.value.hint == f"{SAMPLER_LEFT}; {CREATED_HINT}"
     assert setup.loops.kwargs("SamplingClient") == []
+
+
+# --- serverless samplers -------------------------------------------------------------
+
+SERVERLESS_DEACTIVATE = "POST /v1/loops/samplers/sampler1/deactivate"
+
+
+@pytest.fixture
+def serverless(renderer: HFChatTemplateRenderer) -> Setup:
+    """The backend runs on a workspace where Baseten places every sampler on serverless
+    capacity."""
+    return Setup(FakeLoops(serverless=True, completion=fake_loops().completion), renderer)
+
+
+def test_a_serverless_sampler_samples_without_a_deployment_and_logs_its_placement(
+    serverless: Setup, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with serverless.session() as session:
+        generation = session.sampler(None).generate(HI, [], max_tokens=64)
+    assert generation.message == {"role": "assistant", "content": "Hello there!"}
+    (connect,) = serverless.loops.kwargs("SamplingClient")
+    assert connect["deployment"] == FakeServerlessDeployment(SERVERLESS_URL)
+    assert "Baseten placed Loops sampler sampler1 on serverless capacity" in capsys.readouterr().err
+
+
+def test_a_serverless_sampler_is_deactivated_as_a_sampler_once(serverless: Setup) -> None:
+    with serverless.session() as session:
+        sampler = session.sampler(None)
+        sampler.close()
+        sampler.close()
+        assert not serverless.loops.samplers["sampler1"].active
+    calls = serverless.transport.calls
+    assert calls.count(SERVERLESS_DEACTIVATE) == 1
+    assert not any("/v1/models/" in call for call in calls)
+
+
+def test_a_dedicated_sampler_logs_its_deployment(
+    setup: Setup, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with setup.session() as session:
+        session.sampler(None)
+    placed = "Baseten placed Loops sampler sampler1 on dedicated deployment model1/dep1"
+    assert placed in capsys.readouterr().err
+
+
+def test_a_failed_serverless_deactivation_names_the_manual_step_without_billing(
+    renderer: HFChatTemplateRenderer,
+) -> None:
+    setup = Setup(FakeLoops(serverless=True), renderer, {SERVERLESS_DEACTIVATE: (500, {})})
+    with pytest.raises(ExternalError) as caught, setup.session() as session:
+        session.sampler(None)
+    url = "https://api.baseten.co/v1/loops/samplers/sampler1/deactivate"
+    message = caught.value.message
+    assert message.startswith("could not deactivate the serverless Baseten sampler sampler1")
+    assert f"POST {url}" in message
+    assert "bill" not in message
 
 
 @pytest.mark.parametrize("checkpoint", [False, True], ids=["base", "checkpoint"])
@@ -897,6 +977,17 @@ def test_a_sampler_that_fails_to_load_is_deactivated(setup: Setup) -> None:
             session.sampler(ckpt)
         assert not setup.loops.samplers["sampler1"].active
         assert setup.loops.sampling_clients[0].closed
+
+
+def test_a_sampler_whose_url_is_refused_is_deactivated(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(FakeSampler, "base_url", property(lambda _: "https://evil.example.com"))
+    with setup.session() as session:
+        with pytest.raises(ExternalError, match="non-Baseten URL"):
+            session.sampler(None)
+        assert not setup.loops.samplers["sampler1"].active
+    assert setup.loops.kwargs("SamplingClient") == []
 
 
 def test_only_a_sampler_checkpoint_can_be_sampled(setup: Setup) -> None:

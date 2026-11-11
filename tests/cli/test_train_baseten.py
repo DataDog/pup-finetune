@@ -32,6 +32,7 @@ from pup_finetune import providers, redaction
 from pup_finetune.cli import app
 from pup_finetune.cli import deploy as deploy_module
 from pup_finetune.cli import train as train_module
+from pup_finetune.cli._summary import SERVERLESS_EXPECTED
 from pup_finetune.evaluation import benchmark as benchmark_module
 from pup_finetune.evaluation import runner as eval_module
 from pup_finetune.providers.base import (
@@ -229,6 +230,53 @@ def test_a_context_flag_over_the_workspace_limit_is_refused(
     assert f"pass --max-seq-len N with N at most {WORKSPACE_LIMIT}" in result.stderr
     assert not run_dir.exists()
     assert loops.calls == []
+
+
+def test_a_workspace_without_serverless_expects_dedicated_and_says_nothing_of_it(
+    dataset: Path, tmp_path: Path
+) -> None:
+    result = train(dataset, tmp_path / "run")
+    assert result.exit_code == 2, result.stderr
+    assert output(result)["preview"]["expected_placement"] == "dedicated"
+    assert "capacity" not in result.stderr
+
+
+@pytest.fixture
+def serverless_workspace(routes: dict[str, Answer], loops: FakeLoops) -> None:
+    """The workspace has serverless Loops for Qwen3.5 9B, and Baseten places its samplers
+    there."""
+    routes["GET /v1/loops/capabilities"] = (
+        200,
+        capabilities(SHORT_PROFILE.base_model, serverless=True),
+    )
+    loops.serverless = True
+
+
+@pytest.mark.usefixtures("serverless_workspace")
+def test_a_serverless_workspace_trains_evaluates_and_records_where_it_expected_to_run(
+    dataset: Path, tmp_path: Path, loops: FakeLoops, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    preview = train(dataset, run_dir)
+    assert preview.exit_code == 2, preview.stderr
+    assert output(preview)["preview"]["expected_placement"] == "serverless"
+    assert any(
+        line.split() == ["capacity", *SERVERLESS_EXPECTED.split()]
+        for line in preview.stderr.splitlines()
+    )
+
+    monkeypatch.setenv("PUP_FINETUNE_DEV", "1")
+    flags = ("--evaluate", "--eval-judge-model", "fake-judge", "--eval-skip-calibration")
+    flags += ("--eval-no-publish",)
+    result = train(dataset, run_dir, *flags, "--confirm")
+    assert result.exit_code == 0, result.stderr
+    manifest = json.loads(RunDir(run_dir).run_path.read_text(encoding="utf-8"))
+    assert manifest["expected_placement"] == "serverless"
+    # Every sampler went serverless, and none is left active.
+    assert loops.samplers
+    assert all(sampler.deployment_id is None for sampler in loops.samplers.values())
+    assert not any(sampler.active for sampler in loops.samplers.values())
+    assert "on serverless capacity" in result.stderr
 
 
 def test_a_confirmed_run_trains_leaves_nothing_running_and_deploys_its_checkpoint(

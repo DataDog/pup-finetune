@@ -7,9 +7,11 @@
 """The Baseten training backend: LoRA fine-tuning sessions on Baseten Loops.
 
 - :class:`BasetenBackend` opens one :class:`BasetenSession` per ``open_session``: a Loops
-  session and a dedicated LoRA trainer (a Loops run) whose context fits the session's longest
-  example, rounded up to a power of two of at least :data:`MIN_SEQ_LEN` tokens. A trainer
-  Baseten has no capacity for is a :class:`ProviderCapacityError`, with nothing left running.
+  session and a LoRA trainer (a Loops run) whose context fits the session's longest
+  example, rounded up to a power of two of at least :data:`MIN_SEQ_LEN` tokens. Baseten
+  chooses where the trainer runs, serverless or dedicated, unless ``BASETEN_LOOPS_SCOPE`` asks
+  for one. A trainer Baseten has no capacity for is a :class:`ProviderCapacityError`, with
+  nothing left running.
   Leaving the context always closes the trainer client and deactivates the run and every
   sampler the session started, however the session ended; a deactivation that fails raises
   an error naming the run or deployment to deactivate by hand. Resuming loads a training
@@ -18,10 +20,11 @@
   SDK futures, so steps pipeline. Only ``forward`` and sampling, which change nothing when
   repeated, fail as :class:`TransientError`. Checkpoints are ``bt://loops:`` paths that
   outlive the run. There is no promotion: the best sampler checkpoint is what gets deployed.
-- :class:`BasetenSampler` serves the base model or a sampler checkpoint from a dedicated Loops
-  sampler (its own GPU) with the profile's context, created over REST so that its deployment
-  is known, and can be deactivated, before it is ready. It renders the prompt with the
-  profile's renderer, samples greedily up to the renderer's stop tokens and parses the
+- :class:`BasetenSampler` serves the base model or a sampler checkpoint from a standalone
+  Loops sampler with the profile's context, which Baseten places like the trainer: serverless,
+  or a dedicated deployment with its own GPU. It is created over REST so that it is known,
+  and can be deactivated, before it is ready. It renders the prompt with the profile's
+  renderer, samples greedily up to the renderer's stop tokens and parses the
   completion back, given the tools; one cut off at ``max_tokens`` is never ``format_valid``.
   Only sampling is retried (a bounded number of times, with backoff), and ``generate`` may be
   called from several threads at once, as the SDK's sampling client allows.
@@ -32,6 +35,7 @@ Everything that reaches Baseten goes through :mod:`.client`; tests pass the fake
 
 from __future__ import annotations
 
+import os
 import re
 import time
 import uuid
@@ -55,7 +59,6 @@ from pup_finetune.providers.base import (
     ProviderAuthError,
     ProviderCapacityError,
     StepMetrics,
-    TransientError,
     is_transient,
     raise_session_failure,
 )
@@ -63,11 +66,13 @@ from pup_finetune.providers.baseten import PROVIDER_NAME
 from pup_finetune.providers.baseten.client import (
     API_BASE,
     MAX_CHECKPOINT_NAME_LEN,
+    SCOPE_ENV,
     SOURCE,
     BasetenHTTP,
     DeploymentRejected,
     LoopsFuture,
     LoopsModule,
+    LoopsSampler,
     LoopsSamplingClient,
     LoopsTrainingClient,
     loops_failure,
@@ -124,7 +129,7 @@ def fitted_seq_len(max_seq_len: int, limit: int) -> int:
 
 
 class BasetenBackend:
-    """Opens LoRA training sessions on Baseten Loops, each on its own dedicated trainer.
+    """It opens LoRA training sessions on Baseten Loops, each on a trainer of its own.
 
     ``api_key`` gives the API key when a session opens, not before. ``renderer`` gives a
     profile's renderer, which samplers render prompts and parse completions with.
@@ -185,9 +190,14 @@ class BasetenBackend:
         sdk = loops_sdk(self._loops)
         context = fitted_seq_len(max_seq_len, profile.max_seq_len)
         service = loops_service(api_key, loops=sdk)
+        # The log names the variable when it is set, because the variable then asks for the
+        # trainer's placement.
+        scope = os.environ.get(SCOPE_ENV)
+        chosen = f"{SCOPE_ENV}={scope} chooses" if scope else "Baseten chooses"
         output.info(
-            f"provisioning a dedicated Baseten Loops trainer for {profile.base_model} "
-            f"({context} tokens) in Loops session {service.session_id}; this can take minutes"
+            f"provisioning a Baseten Loops trainer for {profile.base_model} ({context} tokens) "
+            f"in Loops session {service.session_id} ({chosen} where it runs); this can take "
+            "minutes"
         )
         with BasetenHTTP(api_key, transport=self._transport) as http:
             trainer = loops_trainer(
@@ -312,11 +322,14 @@ def _deactivate(
     status: Callable[[], str | None],
     deactivate: Callable[[], None],
     sleep: Sleep,
+    *,
+    bills_while_active: bool = True,
 ) -> None:
-    """Deactivate ``what`` (at ``url``) unless it is inactive, then wait until it is.
+    """It deactivates ``what`` (at ``url``) unless it is inactive, then waits until it is.
 
-    On failure, raises an :class:`ExternalError` with the manual step in its message, as
-    callers may show only the message.
+    On failure, it raises an :class:`ExternalError` with the manual step in its message, as
+    callers may show only the message. The message warns of billing unless
+    ``bills_while_active`` is false, since a serverless sampler bills only what it samples.
     """
     try:
         current: str | None = "UNKNOWN"
@@ -344,8 +357,9 @@ def _deactivate(
         raise last_error or ExternalError(f"{what} is still active", source=SOURCE)
     except Exception as exc:
         reason = exc.message if isinstance(exc, FinetuneError) else type(exc).__name__
+        bills = "; it may still bill" if bills_while_active else ""
         raise ExternalError(
-            f"could not deactivate {what} ({reason}); it may still bill: deactivate it in the "
+            f"could not deactivate {what} ({reason}){bills}: deactivate it in the "
             f"Baseten UI or POST {url}",
             source=SOURCE,
             hint=f'curl -X POST {url} -H "Authorization: Bearer $BASETEN_API_KEY"',
@@ -461,7 +475,9 @@ class BasetenSession:
         raise UsageError("Baseten has no promotion; the sampler checkpoint is deployed")
 
     def sampler(self, ckpt: CheckpointRef | None) -> BasetenSampler:
-        """A dedicated Loops sampler for ``ckpt`` or the base model. Paid until closed."""
+        """It creates a Loops sampler for ``ckpt`` or the base model. The sampler is paid: on a
+        dedicated deployment, for its GPU's time until it is closed; on serverless capacity, by
+        the token."""
         self._require_open()
         if ckpt is not None:
             if ckpt.kind != "sampler":
@@ -535,6 +551,7 @@ class BasetenSession:
         except BaseException as exc:  # e.g. Ctrl-C while the sampler is created
             exc.add_note(left)
             raise
+        output.info(f"Baseten placed {_placed(record)}")
         sampler = BasetenSampler(
             record,
             loops_session_id=self.loops_session_id,
@@ -616,22 +633,35 @@ class BasetenSession:
             raise StateError(f"the Baseten training session {self._run_id} has ended")
 
 
+def _placed(sampler: LoopsSampler) -> str:
+    """It says where Baseten put ``sampler``, for the log. A run's trainer does not report
+    where it runs, but its samplers do."""
+    if sampler.deployment is None:
+        return f"Loops sampler {sampler.sampler_id} on serverless capacity"
+    return (
+        f"Loops sampler {sampler.sampler_id} on dedicated deployment "
+        f"{sampler.deployment.model_id}/{sampler.deployment.deployment_id}"
+    )
+
+
 def _require_ours(ckpt: CheckpointRef) -> None:
     if not ckpt.uri.startswith("bt://loops:"):
         raise UsageError(f"{ckpt.uri!r} is not a Baseten Loops checkpoint")
 
 
 class BasetenSampler:
-    """Greedy generation on a dedicated Loops sampler; built by :meth:`BasetenSession.sampler`.
+    """It generates greedily on a Loops sampler, and :meth:`BasetenSession.sampler` builds it.
 
-    The sampler is a Baseten deployment with its own GPU: :meth:`close` deactivates it
-    (closing again is a no-op), and its session deactivates it when it ends, if still up.
+    The sampler is a Baseten deployment with its own GPU, or a sampler on Baseten's serverless
+    capacity (``record.deployment`` is ``None``). :meth:`close` deactivates either kind, and
+    closing again is a no-op. If the sampler is still up when its session ends, the session
+    deactivates it.
     :meth:`generate` is safe to call from several threads, as the SDK's sampling client is.
     """
 
     def __init__(
         self,
-        record: Mapping[str, Any],
+        record: LoopsSampler,
         *,
         loops_session_id: str,
         sdk: LoopsModule,
@@ -640,17 +670,7 @@ class BasetenSampler:
         max_seq_len: int,
         sleep: Sleep,
     ) -> None:
-        model_id, deployment_id = record.get("model_id"), record.get("deployment_id")
-        if not (isinstance(model_id, str) and isinstance(deployment_id, str)):
-            raise TransientError(
-                "Baseten described the new sampler without its deployment",
-                source=SOURCE,
-                hint=f"deactivate the sampler of Loops session {loops_session_id} in the "
-                "Baseten UI",
-            )
-        self.model_id = model_id
-        self.deployment_id = deployment_id
-        self._record = dict(record)
+        self.record = record
         self._loops_session_id = loops_session_id
         self._sdk = sdk
         self._http = http
@@ -664,7 +684,7 @@ class BasetenSampler:
         """Attach the SDK client; for a checkpoint, load it with one sample (which waits)."""
         self._client = loops_sampling_client(
             api_key,
-            self._record,
+            self.record,
             base_model=base_model,
             session_id=self._loops_session_id,
             checkpoint_path=checkpoint_path,
@@ -712,15 +732,31 @@ class BasetenSampler:
         except Exception as exc:
             output.warn(f"could not close the Loops sampling client ({type(exc).__name__})")
         finally:  # also when Ctrl-C cut the close
-            model_id, deployment_id = self.model_id, self.deployment_id
-            _deactivate(
-                f"the Baseten sampler deployment {model_id}/{deployment_id}",
-                f"{API_BASE}/v1/models/{model_id}/deployments/{deployment_id}/deactivate",
-                lambda: _status_name(self._http.get_deployment(model_id, deployment_id)),
-                lambda: self._http.deactivate_deployment(model_id, deployment_id),
-                self._sleep,
-            )
+            self._deactivate()
         self._closed = True
+
+    def _deactivate(self) -> None:
+        found, http = self.record.deployment, self._http
+        if found is None:
+            # A serverless sampler has no deployment, so it is deactivated through its Loops route.
+            sampler_id = self.record.sampler_id
+            _deactivate(
+                f"the serverless Baseten sampler {sampler_id}",
+                f"{API_BASE}/v1/loops/samplers/{sampler_id}/deactivate",
+                lambda: _status_name(http.get_sampler(sampler_id)),
+                lambda: http.deactivate_sampler(sampler_id),
+                self._sleep,
+                bills_while_active=False,
+            )
+            return
+        model_id, deployment_id = found.model_id, found.deployment_id
+        _deactivate(
+            f"the Baseten sampler deployment {model_id}/{deployment_id}",
+            f"{API_BASE}/v1/models/{model_id}/deployments/{deployment_id}/deactivate",
+            lambda: _status_name(http.get_deployment(model_id, deployment_id)),
+            lambda: http.deactivate_deployment(model_id, deployment_id),
+            self._sleep,
+        )
 
     def _sample(self, prompt: list[int], max_tokens: int, label: str) -> tuple[Any, float]:
         """The one sequence sampled greedily after ``prompt``, and the seconds it took.

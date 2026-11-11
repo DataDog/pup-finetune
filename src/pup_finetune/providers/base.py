@@ -1242,3 +1242,33 @@ class SupportsRemote(Protocol):
     def remote_jobs(self) -> RemoteJobs:
         """The remote jobs; builds nothing remote."""
         ...
+
+
+Placement = Literal["serverless", "dedicated"]
+"""A placement says where a provider runs a run's trainer and samplers. ``serverless`` is
+capacity the provider shares between accounts and bills by use, and ``dedicated`` is capacity
+of the run's own, billed for the time it runs."""
+
+SERVERLESS: Final[Placement] = "serverless"
+DEDICATED: Final[Placement] = "dedicated"
+
+
+@runtime_checkable
+class SupportsPlacement(Protocol):
+    """A provider of this kind chooses where a run's trainer and samplers run. Before a run,
+    it says where it expects to put them."""
+
+    def expected_placement(self, profile: ModelProfile) -> Placement:
+        """It returns where the provider expects to run ``profile`` for this account. The
+        result is a forecast, because the provider makes the decision only when it creates
+        the trainer and each sampler. It raises like :meth:`Provider.preflight`. It reads
+        nothing that preflight has not read."""
+        ...
+
+
+def expected_placement(provider: Provider, profile: ModelProfile) -> Placement | None:
+    """It returns :meth:`SupportsPlacement.expected_placement`, or ``None`` for a provider
+    that places nothing itself."""
+    if not isinstance(provider, SupportsPlacement):
+        return None
+    return provider.expected_placement(profile)

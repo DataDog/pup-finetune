@@ -38,10 +38,15 @@ What it mimics:
 - ``POST /v1/loops/samplers`` creates a sampler (``sampler1``...) on its own deployment
   (``model1``/``dep1``...) serving a saved sampler checkpoint (an unknown or expired one is
   refused with HTTP 404) or the base model; the deployment reads ``ACTIVE`` until it is
-  deactivated (``POST /v1/models/<m>/deployments/<d>/deactivate``). A ``SamplingClient`` of
-  it answers ``completion`` (token ids; by default the code points of ``Hello.``), cut after
-  the first stop token id of ``SamplingParams.stop`` or at ``max_tokens``, and refuses to
-  sample once closed, once its deployment is inactive or when its checkpoint expired.
+  deactivated (``POST /v1/models/<m>/deployments/<d>/deactivate``). With
+  ``FakeLoops(serverless=True)`` Baseten places it on serverless capacity instead: no model
+  or deployment, and :data:`SERVERLESS_URL` as its URL. Either reads ``ACTIVE`` at ``GET
+  /v1/loops/samplers/<id>`` until ``POST /v1/loops/samplers/<id>/deactivate``. A
+  ``SamplingClient`` must be built with the sampler's own deployment (``BasetenDeployment``
+  or ``ServerlessDeployment``); it answers ``completion`` (token ids; by default the code
+  points of ``Hello.``), cut after the first stop token id of ``SamplingParams.stop`` or at
+  ``max_tokens``, and refuses to sample once closed, once its sampler is inactive or when its
+  checkpoint expired.
 - Serving: ``GET /v1/loops/checkpoints`` describes a saved checkpoint (``ckpt1``...; none for
   an unknown or expired one), and :meth:`FakeLoops.sampler_checkpoint` leaves one as a
   finished run does. ``GET /v1/instance_types`` lists :attr:`FakeLoops.instance_types`.
@@ -102,7 +107,7 @@ from typing import Any, Literal
 import httpx
 
 from pup_finetune.providers.base import ModelProfile
-from pup_finetune.providers.baseten.client import MAX_CHECKPOINT_NAME_LEN
+from pup_finetune.providers.baseten.client import API_BASE, MAX_CHECKPOINT_NAME_LEN, SERVERLESS_URL
 from pup_finetune.providers.baseten.provider import PROFILES
 from tests.fakes.chat_api import completion
 
@@ -110,6 +115,7 @@ Answer = tuple[int, Any] | httpx.Response | Callable[[httpx.Request], httpx.Resp
 
 _CLOSED = "Cannot send a request, as the client has been closed."
 _RUN_ROUTE = re.compile(r"/v1/loops/runs/([A-Za-z0-9_-]+)(/deactivate)?")
+_SAMPLER_ROUTE = re.compile(r"/v1/loops/samplers/([A-Za-z0-9_-]+)(/deactivate)?")
 _DEPLOYMENT_ROUTE = re.compile(
     r"/v1/models/([A-Za-z0-9_-]+)/deployments/([A-Za-z0-9_-]+)(/deactivate)?"
 )
@@ -250,6 +256,13 @@ class FakeBasetenDeployment:
     api_base_url: str
 
 
+@dataclass(frozen=True)
+class FakeServerlessDeployment:
+    """It stands in for ``baseten.loops.sampling_client.ServerlessDeployment``."""
+
+    base_url: str
+
+
 class FakeSamplerTerminatedError(RuntimeError):
     """Stands in for ``baseten.loops.SamplerTerminatedError``: the sampler stopped."""
 
@@ -290,12 +303,13 @@ class FakeCheckpoint:
 
 @dataclass
 class FakeSampler:
-    """One Loops sampler: a Baseten deployment serving a checkpoint or the base model."""
+    """It is one Loops sampler that serves a checkpoint or the base model, on a Baseten
+    deployment or serverless (then ``model_id`` and ``deployment_id`` are ``None``)."""
 
     sampler_id: str
     session_id: str
-    model_id: str
-    deployment_id: str
+    model_id: str | None
+    deployment_id: str | None
     model_path: str | None
     base_model: str | None
     max_seq_len: int
@@ -303,15 +317,26 @@ class FakeSampler:
 
     @property
     def base_url(self) -> str:
+        if self.deployment_id is None:
+            return SERVERLESS_URL
         return f"https://model-{self.model_id}.api.baseten.co/deployment/{self.deployment_id}/sync"
+
+    def deployment(self) -> FakeBasetenDeployment | FakeServerlessDeployment:
+        """It returns the deployment that a ``SamplingClient`` of this sampler must be built
+        with."""
+        if self.model_id is None or self.deployment_id is None:
+            return FakeServerlessDeployment(base_url=self.base_url)
+        return FakeBasetenDeployment(self.base_url, self.model_id, self.deployment_id, API_BASE)
 
     def record(self) -> dict[str, Any]:
         """The sampler as ``POST /v1/loops/samplers`` describes it."""
+        status = "ACTIVE" if self.active else "INACTIVE"
         return {
             "id": self.sampler_id,
             "model_id": self.model_id,
             "deployment_id": self.deployment_id,
             "base_url": self.base_url,
+            "status": {"name": status},
         }
 
 
@@ -518,7 +543,7 @@ class FakeSamplingClient:
         if self.closed:
             raise RuntimeError(_CLOSED)
         if not self.sampler.active:
-            raise FakeSamplerTerminatedError(f"sampler {self.sampler.deployment_id} is INACTIVE")
+            raise FakeSamplerTerminatedError(f"sampler {self.sampler.sampler_id} is INACTIVE")
         if self.checkpoint_path is not None and not loops._serves(self.checkpoint_path):
             raise http_status_error(404, json={"detail": "checkpoint not found"})
         params = sampling_params or FakeSamplingParams()
@@ -561,7 +586,9 @@ class FakeLoops:
     """A fake ``baseten.loops`` module; see the module docstring.
 
     ``logprobs=False`` leaves ``loss_fn_outputs`` empty, so only the loss is reported;
-    ``bdn=False`` refuses every checkpoint deployment, as a workspace without BDN volumes.
+    ``bdn=False`` refuses every checkpoint deployment, as a workspace without BDN volumes;
+    ``serverless=True`` places every sampler on serverless capacity, as Baseten does for a
+    workspace with serverless Loops for the model.
     """
 
     Datum = FakeDatum
@@ -570,15 +597,22 @@ class FakeLoops:
     AdamParams = FakeAdamParams
     SamplingParams = FakeSamplingParams
     BasetenDeployment = FakeBasetenDeployment
+    ServerlessDeployment = FakeServerlessDeployment
     ServerShutdownError = FakeServerShutdownError
     RemoteOpError = FakeRemoteOpError
     SamplerTerminatedError = FakeSamplerTerminatedError
 
     def __init__(
-        self, *, logprobs: bool = True, completion: Sequence[int] = COMPLETION, bdn: bool = True
+        self,
+        *,
+        logprobs: bool = True,
+        completion: Sequence[int] = COMPLETION,
+        bdn: bool = True,
+        serverless: bool = False,
     ) -> None:
         self.logprobs = logprobs
         self.bdn = bdn
+        self.serverless = serverless
         self.completion = list(completion)
         self.calls: list[LoopsCall] = []
         self.sessions: list[str] = []
@@ -619,13 +653,9 @@ class FakeLoops:
 
     def SamplingClient(self, **kwargs: Any) -> FakeSamplingClient:
         self._raise_on_failure("SamplingClient", kwargs)
-        deployment = kwargs["deployment"]
-        sampler = next(
-            sampler
-            for sampler in self.samplers.values()
-            if (sampler.model_id, sampler.deployment_id, sampler.base_url)
-            == (deployment.model_id, deployment.deployment_id, deployment.base_url)
-        )
+        sampler = self.samplers[kwargs["sampler_id"]]
+        if kwargs["deployment"] != sampler.deployment():
+            raise ValueError(f"{kwargs['deployment']!r} is not sampler {sampler.sampler_id}'s")
         client = FakeSamplingClient(self, sampler, kwargs.get("checkpoint_path"))
         self.sampling_clients.append(client)
         return client
@@ -725,8 +755,8 @@ class FakeLoops:
         sampler = FakeSampler(
             sampler_id=f"sampler{number}",
             session_id=body["session_id"],
-            model_id=f"model{number}",
-            deployment_id=f"dep{number}",
+            model_id=None if self.serverless else f"model{number}",
+            deployment_id=None if self.serverless else f"dep{number}",
             model_path=path,
             base_model=body.get("base_model"),
             max_seq_len=body["max_seq_length"],
@@ -735,6 +765,18 @@ class FakeLoops:
         return self._injected("sampler", self.lost) or httpx.Response(
             200, json={"sampler": sampler.record()}
         )
+
+    def _handle_sampler(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
+        sampler_id, deactivate = match.groups()
+        sampler = self.samplers.get(sampler_id)
+        if sampler is None:
+            return httpx.Response(404, json={"detail": "not found"})
+        if request.method == "POST" and deactivate:
+            sampler.active = False
+            return httpx.Response(200, json={"id": sampler_id})
+        if request.method == "GET" and not deactivate:
+            return httpx.Response(200, json={"sampler": sampler.record()})
+        raise AssertionError(f"no fake Baseten route for {request.method} {request.url.path}")
 
     def _handle_deployment(self, request: httpx.Request, match: re.Match[str]) -> httpx.Response:
         model_id, deployment_id, deactivate = match.groups()
@@ -906,6 +948,9 @@ class FakeLoops:
             name = request.url.params.get("name")
             models = [m.record() for m in self.models.values() if name in (None, m.name)]
             return httpx.Response(200, json={"models": models})
+        sampler = _SAMPLER_ROUTE.fullmatch(request.url.path)
+        if sampler is not None:
+            return self._handle_sampler(request, sampler)
         chat = _CHAT_ROUTE.fullmatch(request.url.path)
         if chat is not None and request.method == "POST":
             return self._chat(request, chat)
@@ -1019,6 +1064,18 @@ def short_capabilities(body: Mapping[str, Any]) -> dict[str, Any]:
             {**entry, "max_enabled_seq_len": WORKSPACE_LIMIT}
             if entry["model_name"] == SHORT_PROFILE.base_model
             else entry
+            for entry in body["supported_models"]
+        ],
+    }
+
+
+def serverless_capabilities(body: Mapping[str, Any]) -> dict[str, Any]:
+    """It returns ``body`` with serverless Loops for :data:`SHORT_PROFILE`'s model only, as
+    Baseten reports it to a workspace in its early access."""
+    return {
+        **body,
+        "supported_models": [
+            {**entry, "serverless": entry["model_name"] == SHORT_PROFILE.base_model}
             for entry in body["supported_models"]
         ],
     }
