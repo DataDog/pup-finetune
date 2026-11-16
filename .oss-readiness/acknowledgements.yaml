@@ -1,0 +1,165 @@
+version: 1
+acknowledgements:
+- id: ba25bd9195c326a3c8bc5508f0d41131a0146a8b6765a5165307c2e70ec44668
+  check_id: no_secrets_patterns
+  title: 'Potential secret: Generic API key'
+  evidence_pattern: tests/test_inference.py — matched pattern 'Generic API key'
+  reason: 'Synthetic test credential: a fake key or token, marked synthetic in the
+    value itself, used only by tests and test fakes.'
+  acknowledged_at: '2026-11-16T21:20:05.114743+00:00'
+  acknowledged_by: Alex Barksdale
+- id: 85df34f9925a7f051d20485fb3bf434a83b15b88b2a6ca56e8a50f91bb6c3b92
+  check_id: no_secrets_patterns
+  title: 'Potential secret: Generic API key'
+  evidence_pattern: tests/test_anthropic_client.py — matched pattern 'Generic API
+    key'
+  reason: 'Synthetic test credential: a fake key or token, marked synthetic in the
+    value itself, used only by tests and test fakes.'
+  acknowledged_at: '2026-11-16T21:20:05.930043+00:00'
+  acknowledged_by: Alex Barksdale
+- id: 70b90e43c5238638062416d3b009c96dc9e2ebeffa65ddc6ec64d4ef9b5d60f9
+  check_id: no_secrets_patterns
+  title: 'Potential secret: Generic token'
+  evidence_pattern: tests/test_anthropic_client.py — matched pattern 'Generic token'
+  reason: 'Synthetic test credential: a fake key or token, marked synthetic in the
+    value itself, used only by tests and test fakes.'
+  acknowledged_at: '2026-11-16T21:20:06.778052+00:00'
+  acknowledged_by: Alex Barksdale
+- id: ccbb0ef9f1906a28256f664f771e81609ffe2aa69b881857ef81f70cc0795999
+  check_id: no_secrets_patterns
+  title: 'Potential secret: Generic token'
+  evidence_pattern: tests/test_runtime.py — matched pattern 'Generic token'
+  reason: 'Synthetic test credential: a fake key or token, marked synthetic in the
+    value itself, used only by tests and test fakes.'
+  acknowledged_at: '2026-11-16T21:20:07.614983+00:00'
+  acknowledged_by: Alex Barksdale
+- id: cd989a9f84ad0fa4bf7066d16c1efc526acbe33db79a0163d1464f73138de117
+  check_id: no_secrets_patterns
+  title: 'Potential secret: Generic token'
+  evidence_pattern: tests/test_output.py — matched pattern 'Generic token'
+  reason: 'Synthetic test credential: a fake key or token, marked synthetic in the
+    value itself, used only by tests and test fakes.'
+  acknowledged_at: '2026-11-16T21:20:08.498920+00:00'
+  acknowledged_by: Alex Barksdale
+- id: 2e2e8b18886e3665e6a0a23c03048d8c834691cee15ba2f66942b66f4bb1d5d5
+  check_id: no_secrets_patterns
+  title: 'Potential secret: Generic token'
+  evidence_pattern: tests/test_credentials.py — matched pattern 'Generic token'
+  reason: 'Synthetic test credential: a fake key or token, marked synthetic in the
+    value itself, used only by tests and test fakes.'
+  acknowledged_at: '2026-11-16T21:20:09.383397+00:00'
+  acknowledged_by: Alex Barksdale
+- id: 8d1c50c7a0aa1a555156a325cf5749be772dbf7ef862c3a9856f1508787596c1
+  check_id: no_secrets_patterns
+  title: 'Potential secret: Generic token'
+  evidence_pattern: tests/training/test_remote.py — matched pattern 'Generic token'
+  reason: 'Not a secret: the value is the name of a Baseten team secret (pup_finetune_api_key)
+    that a test passes.'
+  acknowledged_at: '2026-11-16T21:20:10.239063+00:00'
+  acknowledged_by: Alex Barksdale
+- id: a9a3eb945350a6b2f8ea408bf3fdf051d7943a1068e380aedef954d23250af89
+  check_id: no_secrets_patterns
+  title: 'Potential secret: Generic token'
+  evidence_pattern: tests/cli/test_auth.py — matched pattern 'Generic token'
+  reason: 'Synthetic test credential: a fake key or token, marked synthetic in the
+    value itself, used only by tests and test fakes.'
+  acknowledged_at: '2026-11-16T21:20:11.070854+00:00'
+  acknowledged_by: Alex Barksdale
+- id: f1dbae0e5a7950df662fe881ba5fdaa1212e0f5c134f2f972647013507c71e22
+  check_id: no_secrets_patterns
+  title: 'Potential secret: Generic token'
+  evidence_pattern: tests/cli/test_doctor.py — matched pattern 'Generic token'
+  reason: 'Synthetic test credential: a fake key or token, marked synthetic in the
+    value itself, used only by tests and test fakes.'
+  acknowledged_at: '2026-11-16T21:20:11.870339+00:00'
+  acknowledged_by: Alex Barksdale
+- id: 63d53bebd14a6fdfe5f908020ba540070fb9428827822799a88ed7154b700fb1
+  check_id: no_secrets_patterns
+  title: 'Potential secret: Generic API key'
+  evidence_pattern: tests/cli/test_deploy.py — matched pattern 'Generic API key'
+  reason: 'Synthetic test credential: a fake key or token, marked synthetic in the
+    value itself, used only by tests and test fakes.'
+  acknowledged_at: '2026-11-16T21:20:12.701831+00:00'
+  acknowledged_by: Alex Barksdale
+- id: 7489eb8d709f1ef53a20f531c8915b5fe5273b5339aba0343b1ab3c7cc9bbcb1
+  check_id: no_secrets_patterns
+  title: 'Potential secret: Generic API key'
+  evidence_pattern: tests/cli/test_models.py — matched pattern 'Generic API key'
+  reason: 'Synthetic test credential: a fake key or token, marked synthetic in the
+    value itself, used only by tests and test fakes.'
+  acknowledged_at: '2026-11-16T21:20:13.546388+00:00'
+  acknowledged_by: Alex Barksdale
+- id: 15f0f0b285ab9fd6c3c57ce8db937bf1b4cc54b3e60f9670a0d05e7e5633ab86
+  check_id: no_secrets_patterns
+  title: 'Potential secret: Generic token'
+  evidence_pattern: tests/cli/test_main.py — matched pattern 'Generic token'
+  reason: 'Synthetic test credential: a fake key or token, marked synthetic in the
+    value itself, used only by tests and test fakes.'
+  acknowledged_at: '2026-11-16T21:20:14.421046+00:00'
+  acknowledged_by: Alex Barksdale
+- id: f9bf6a1d263a62db18e7e6b372b26a80df2d1ea12a15921932eaa6210cf1d7f9
+  check_id: no_secrets_patterns
+  title: 'Potential secret: Generic token'
+  evidence_pattern: tests/cli/test_train_detach.py — matched pattern 'Generic token'
+  reason: 'Synthetic test credential: a fake key or token, marked synthetic in the
+    value itself, used only by tests and test fakes.'
+  acknowledged_at: '2026-11-16T21:20:15.269927+00:00'
+  acknowledged_by: Alex Barksdale
+- id: 52de1b3edb7621f43c95c05e4c02bb66920893a80ea62f2ff41a4fe558f55da5
+  check_id: no_secrets_patterns
+  title: 'Potential secret: Generic API key'
+  evidence_pattern: tests/fakes/fireworks_api.py — matched pattern 'Generic API key'
+  reason: 'Synthetic test credential: a fake key or token, marked synthetic in the
+    value itself, used only by tests and test fakes.'
+  acknowledged_at: '2026-11-16T21:20:16.140095+00:00'
+  acknowledged_by: Alex Barksdale
+- id: e2b4b3e233f048407ce63d7911e3786ffe73551159758e7507ddd653445923da
+  check_id: no_secrets_patterns
+  title: 'Potential secret: Generic API key'
+  evidence_pattern: tests/fakes/chat_api.py — matched pattern 'Generic API key'
+  reason: 'Synthetic test credential: a fake key or token, marked synthetic in the
+    value itself, used only by tests and test fakes.'
+  acknowledged_at: '2026-11-16T21:20:16.976159+00:00'
+  acknowledged_by: Alex Barksdale
+- id: 92a8770178be8cd58eeb920f7ed04251bc8a0818ebb6501211641578a92863a5
+  check_id: no_secrets_patterns
+  title: 'Potential secret: Generic token'
+  evidence_pattern: tests/datadog/test_pup.py — matched pattern 'Generic token'
+  reason: 'Synthetic test credential: a fake key or token, marked synthetic in the
+    value itself, used only by tests and test fakes.'
+  acknowledged_at: '2026-11-16T21:20:17.871807+00:00'
+  acknowledged_by: Alex Barksdale
+- id: edf5f4137e7616f5b19cc9de943dec5368739bac17194958710b98975976623a
+  check_id: no_secrets_patterns
+  title: 'Potential secret: Generic token'
+  evidence_pattern: tests/evaluation/test_replay.py — matched pattern 'Generic token'
+  reason: 'Synthetic test value: a made-up token string in a test, not a real credential.'
+  acknowledged_at: '2026-11-16T21:20:18.782566+00:00'
+  acknowledged_by: Alex Barksdale
+- id: 5a778b703c2c115a427b1dc9e0d1d6d3a91fa2d30bbb62fbc1b1ad4b65557b86
+  check_id: no_secrets_patterns
+  title: 'Potential secret: Generic token'
+  evidence_pattern: tests/providers/baseten/test_baseten_client.py — matched pattern
+    'Generic token'
+  reason: 'Synthetic test credential: a fake key or token, marked synthetic in the
+    value itself, used only by tests and test fakes.'
+  acknowledged_at: '2026-11-16T21:20:19.657993+00:00'
+  acknowledged_by: Alex Barksdale
+- id: 1fa215a220ec75476436bcbf4cc00001625f9f3cdd6b3fdc5d51f3b5b3af1596
+  check_id: no_secrets_patterns
+  title: 'Potential secret: Generic API key'
+  evidence_pattern: tests/providers/fireworks/test_fireworks_client.py — matched pattern
+    'Generic API key'
+  reason: 'Synthetic test credential: a fake key or token, marked synthetic in the
+    value itself, used only by tests and test fakes.'
+  acknowledged_at: '2026-11-16T21:20:20.557833+00:00'
+  acknowledged_by: Alex Barksdale
+- id: 712d31833471f4c2248fa7c3884eaf12ad7ad4dce047c804ffa3d18eccb9eb6c
+  check_id: no_secrets_patterns
+  title: 'Potential secret: Generic API key'
+  evidence_pattern: tests/providers/fireworks/test_fireworks_deploy.py — matched pattern
+    'Generic API key'
+  reason: 'Synthetic test credential: a fake key or token, marked synthetic in the
+    value itself, used only by tests and test fakes.'
+  acknowledged_at: '2026-11-16T21:20:21.426685+00:00'
+  acknowledged_by: Alex Barksdale

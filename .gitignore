@@ -30,6 +30,9 @@ src/pup_finetune/_version.py
 # Local research notes
 /.notes/
 
+# oss-readiness run logs; its acknowledgements.yaml stays tracked
+/.oss-readiness/logs/
+
 # OS / editor / local env
 .DS_Store
 .env*

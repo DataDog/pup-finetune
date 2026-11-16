@@ -4,11 +4,17 @@
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
+## About
+
 pup-finetune fine-tunes an open-weight model on your agent's trajectories, the messages, tool
 calls and tool results of its recorded runs. It reads the LLM spans your application sends to
 Datadog Agent Observability and turns them into a training dataset you review. It then trains
 a LoRA adapter on Baseten or Fireworks, compares the tuned model with the base model, and
 deploys it.
+
+A model tuned on your agent's own runs learns that agent's task, tools and output format. A
+smaller open model tuned this way can do one job as well as a larger general model, at lower
+cost and latency, and pup-finetune measures whether it does before you deploy it.
 
 pup-finetune is a Pup extension, so you run it as `pup finetune <COMMAND>`. Every Datadog read
 and write goes through Pup's login.
