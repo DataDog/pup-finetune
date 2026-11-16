@@ -1243,6 +1243,13 @@ Synthetic fixtures live in `tests/fixtures/` (see its README); `rows/` holds can
 - Fixtures are synthetic only: never commit real trace content or customer data.
 - No internal links or internal-only references; this repository will be public.
 
+## Git conventions
+
+- **Commit messages.** Don't add co-author lines for coding agents, such as
+  `Co-Authored-By: Claude`.
+- **Pull requests.** Don't add "Generated with Claude Code" or similar footers. Keep the
+  description about the change.
+
 ## Adding a provider
 
 See "How a new provider plugs in" in `docs/architecture.md`.
