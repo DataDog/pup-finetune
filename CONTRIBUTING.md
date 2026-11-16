@@ -28,9 +28,16 @@ uv run python scripts/check_3rdparty.py # LICENSE-3rdparty.csv covers every depe
 After you change a command's help or flags, regenerate the command reference with
 `uv run python scripts/gen_command_docs.py`; a test fails when `docs/commands.md` is stale.
 
+## Sign your commits
+
+The `main` branch accepts only signed commits, so sign every commit in your pull request. If you
+don't sign commits yet, follow GitHub's guide to
+[signing commits](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits).
+
 ## Pull requests
 
-- Keep pull requests small and focused on one change. Open an issue first for larger changes.
+- Keep pull requests small and focused on one change. For a new feature or a larger change,
+  start with an RFC (see the next section).
 - Add or update tests for every behavior change. Tests mirror the `src/` layout: tests for
   `src/pup_finetune/cli/` live under `tests/cli/`. Use fakes rather than mocks, and
   make no network or paid calls in the default suite.
@@ -40,6 +47,33 @@ After you change a command's help or flags, regenerate the command reference wit
 - Use synthetic data only in tests, fixtures and examples. Never commit real traces, credentials
   or customer data.
 - Update the documentation when you change user-facing behavior.
+
+## New features and larger changes
+
+Get a new feature or a larger change accepted before you write the code. This saves you from
+building something that is already in progress another way, or that is out of scope.
+
+1. Open an issue with the RFC template, titled `[RFC] <your proposal>`. Explain the problem,
+   who it affects, and how you plan to solve it.
+2. A maintainer labels the issue `rfc/discussion` and discusses the proposal with you.
+3. If the proposal is accepted, the issue is labeled `rfc/approved`. Open your pull request and
+   link it to the issue.
+4. If the proposal is declined, a maintainer explains why, labels the issue `rfc/rejected` and
+   closes it.
+
+A bug fix needs an RFC only when the fix is large or changes behavior that others rely on.
+Maintainers may close a feature pull request that has no approved RFC.
+
+## AI code assistants
+
+You can use AI code assistants to contribute. The rest of this guide still applies, including
+the RFC process for new features. The change is yours: understand the code you submit, review
+it, and test it. Maintainers may close a pull request that looks generated without review or
+tests.
+
+Point your assistant at [AGENTS.md](AGENTS.md). It describes the project's layout, conventions
+and checks. If an assistant helped with a pull request, name it in the pull request
+description.
 
 ## Adding a provider
 
