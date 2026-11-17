@@ -42,6 +42,15 @@ provider SDK has its own extra (`baseten`, `fireworks`); CI installs every extra
 checks on Ubuntu and macOS with Python 3.12 and 3.13, and smoke-tests the built wheel. When you
 add a dependency, add its row to `LICENSE-3rdparty.csv`.
 
+Releases are GitHub Releases. When a maintainer pushes a `vX.Y.Z` tag on `main`,
+`.github/workflows/release.yml` builds the wheel, and `scripts/release_launcher.py` writes one
+launcher per platform from `scripts/release_launcher.sh.in`. The workflow attests every asset and
+publishes the release. Users then run `pup extension install DataDog/pup-finetune`, which installs
+the launcher for their platform. The launcher downloads the release's wheel, checks its SHA-256
+and runs it with `uv tool run`, pinned to the versions `uv.lock` resolved.
+`docs/releasing.md` is the maintainer's how-to. `tests/scripts/test_release_launcher.py` runs the
+launcher against stand-ins for `curl` and `uv`.
+
 To develop against pup, install the checkout as a pup extension. `bin/pup-finetune` is a small
 POSIX sh launcher that runs `uv run --project <checkout> pup-finetune` from any directory, and
 pup names the extension `finetune` after the file:
