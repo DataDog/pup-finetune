@@ -38,6 +38,7 @@ def _load_script() -> ModuleType:
 release_launcher = _load_script()
 
 _SH = shutil.which("sh") or "/bin/sh"
+_PYTHON = (_REPO_ROOT / ".python-version").read_text(encoding="utf-8").strip()
 _TAG = "v0.1.0"
 _WHEEL = "pup_finetune-0.1.0-py3-none-any.whl"
 _URL = f"https://github.com/DataDog/pup-finetune/releases/download/{_TAG}/{_WHEEL}"
@@ -86,6 +87,14 @@ def test_constraint_lines_keep_only_requirements() -> None:
 def test_constraint_lines_refuse_what_cannot_constrain(text: str, match: str) -> None:
     with pytest.raises(release_launcher.ReleaseError, match=match):
         release_launcher.constraint_lines(text)
+
+
+@pytest.mark.parametrize("text", ["", "3", "3.12'; rm -rf ~", "python3.12"])
+def test_python_version_refuses_what_uv_cannot_pin(tmp_path: Path, text: str) -> None:
+    path = tmp_path / ".python-version"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(release_launcher.ReleaseError, match=r"is not X\.Y"):
+        release_launcher.python_version(path)
 
 
 def _inputs(tmp_path: Path, wheel_bytes: bytes = b"wheel bytes") -> tuple[Path, Path]:
@@ -258,6 +267,8 @@ def test_the_launcher_downloads_the_wheel_once_and_runs_it_pinned(tmp_path: Path
         "tool",
         "run",
         "--quiet",
+        "--python",
+        _PYTHON,
         "--constraints",
         str(constraints),
         "--from",
