@@ -168,8 +168,9 @@ to both providers. [Choose the judge](docs/evaluate.md#choose-the-judge) names t
 
 ### What each step needs
 
-`doctor` checks each of these, and `uv sync --all-extras` installs every extra. `evaluate` also
-uses the Datadog login to publish its experiments.
+`doctor` checks each of these. A release install includes every extra, and in a checkout
+`uv sync --all-extras` installs them. `evaluate` also uses the Datadog login to publish its
+experiments.
 
 <!-- BEGIN GENERATED: what each step needs (scripts/gen_command_docs.py) -->
 | Step | Datadog login | API key | Extra |
@@ -342,7 +343,9 @@ your `--hourly-rate-usd`. `resume <RUN_ID>` continues an interrupted run, and
 [training guide](docs/train.md) covers caps, the learning-rate schedule, stopping and resuming.
 
 On Baseten only, `--remote` trains in a Baseten CPU job that also bills, and `cancel` cannot stop
-it. [Train in a Baseten job](docs/train.md#train-in-a-baseten-job) says what it needs and how to
+it. It uploads pup-finetune's source, so it needs an
+[install from a checkout](#install-from-a-checkout).
+[Train in a Baseten job](docs/train.md#train-in-a-baseten-job) says what else it needs and how to
 stop it.
 
 ### Start with a cheap run
