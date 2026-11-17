@@ -47,7 +47,8 @@ Releases are GitHub Releases. When a maintainer pushes a `vX.Y.Z` tag on `main`,
 launcher per platform from `scripts/release_launcher.sh.in`. The workflow attests every asset and
 publishes the release. Users then run `pup extension install DataDog/pup-finetune`, which installs
 the launcher for their platform. The launcher downloads the release's wheel, checks its SHA-256
-and runs it with `uv tool run`, pinned to the versions `uv.lock` resolved.
+and runs it with `uv tool run` on the Python in `.python-version`, pinned to the versions
+`uv.lock` resolved.
 `docs/releasing.md` is the maintainer's how-to. `tests/scripts/test_release_launcher.py` runs the
 launcher against stand-ins for `curl` and `uv`.
 

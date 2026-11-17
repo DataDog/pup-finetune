@@ -12,10 +12,10 @@ Usage: python scripts/release_launcher.py --tag v0.1.0 --wheel dist/pup_finetune
 `pup extension install DataDog/pup-finetune` downloads the launcher named for the user's
 platform (Pup's `pup-<name>-<os>-<arch>` convention) and installs it as the `finetune`
 extension. Every launcher is the same POSIX shell script, rendered from
-`release_launcher.sh.in`: it pins the release's wheel by SHA-256 and the dependency versions
-`uv.lock` resolved (`--constraints`, from `uv export`). `checksums.txt` lists the SHA-256 of
-every asset. The release's version, normalized as in the wheel's name, is the only line printed
-on stdout. Stdlib only.
+`release_launcher.sh.in`: it pins the release's wheel by SHA-256, the Python version in
+`.python-version` and the dependency versions `uv.lock` resolved (`--constraints`, from
+`uv export`). `checksums.txt` lists the SHA-256 of every asset. The release's version,
+normalized as in the wheel's name, is the only line printed on stdout. Stdlib only.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ import sys
 from pathlib import Path
 
 TEMPLATE = Path(__file__).resolve().parent / "release_launcher.sh.in"
+PYTHON_VERSION_FILE = Path(__file__).resolve().parent.parent / ".python-version"
 
 PLATFORMS: tuple[str, ...] = (
     "darwin-aarch64",
@@ -37,6 +38,7 @@ PLATFORMS: tuple[str, ...] = (
 )
 
 _TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)(?:-(a|b|rc)\.?(\d+))?")
+_PYTHON = re.compile(r"\d+\.\d+(?:\.\d+)?")
 
 
 class ReleaseError(Exception):
@@ -51,6 +53,14 @@ def version_of(tag: str) -> str:
         raise ReleaseError(f"tag {tag!r} is not vX.Y.Z or vX.Y.Z-rc.N (also a.N, b.N)")
     major, minor, patch, pre, number = match.groups()
     return f"{major}.{minor}.{patch}{pre or ''}{number or ''}"
+
+
+def python_version(path: Path = PYTHON_VERSION_FILE) -> str:
+    """The Python version the launcher asks uv for, the one development and CI use."""
+    version = path.read_text(encoding="utf-8").strip()
+    if _PYTHON.fullmatch(version) is None:
+        raise ReleaseError(f"{path.name} holds {version!r}, which is not X.Y or X.Y.Z")
+    return version
 
 
 def constraint_lines(text: str) -> list[str]:
@@ -73,6 +83,7 @@ def render(*, tag: str, wheel: str, wheel_sha256: str, constraints: list[str]) -
     values = {
         "@TAG@": tag,
         "@VERSION@": version_of(tag),
+        "@PYTHON@": python_version(),
         "@WHEEL@": wheel,
         "@WHEEL_SHA256@": wheel_sha256,
         "@CONSTRAINTS@": "\n".join(constraints),
