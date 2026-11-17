@@ -1,0 +1,82 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Unless explicitly stated otherwise all files in this repository are licensed under the Apache License Version 2.0.
+#
+# This product includes software developed at Datadog (https://www.datadoghq.com/).
+# Copyright 2026-present Datadog, Inc.
+
+# Publish a GitHub Release when a maintainer pushes a version tag (see docs/releasing.md).
+# The org-wide tag ruleset lets only maintainers and admins push tags, so this job never
+# creates one: it builds, checks and attests the assets, then releases the tag it was given.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub Release
+      id-token: write # sign the build provenance with Sigstore, keyless
+      attestations: write # store the build provenance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # hatch-vcs derives the version from the tag
+      - name: Check that the tag is on main
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+            echo "::error::the tag ${GITHUB_REF_NAME} is not on main"
+            exit 1
+          fi
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: false # nothing cached by other workflows reaches a release
+      - name: Build the wheel
+        run: uv build --wheel --out-dir dist
+      - name: Export the locked dependency versions
+        run: >-
+          uv export --frozen --no-dev --all-extras --no-emit-project --no-hashes
+          --format requirements.txt --output-file dist/constraints.txt
+      - name: Write the release assets
+        id: assets
+        run: |
+          version=$(uv run --no-project python scripts/release_launcher.py \
+            --tag "$GITHUB_REF_NAME" --wheel "dist/pup_finetune-"*.whl \
+            --constraints dist/constraints.txt --out-dir dist/release)
+          echo "version=${version}" >>"$GITHUB_OUTPUT"
+      - name: Run a launcher against the built wheel
+        env:
+          VERSION: ${{ steps.assets.outputs.version }}
+        run: |
+          # Seed the launcher's cache with the wheel it would download from this release.
+          cache="${RUNNER_TEMP}/cache"
+          mkdir -p "${cache}/pup-finetune/${VERSION}"
+          cp "dist/release/pup_finetune-${VERSION}-py3-none-any.whl" "${cache}/pup-finetune/${VERSION}/"
+          printed=$(XDG_CACHE_HOME="$cache" dist/release/pup-finetune-linux-x86_64 --version)
+          if [ "$printed" != "$VERSION" ]; then
+            echo "::error::the launcher printed ${printed}, not ${VERSION}"
+            exit 1
+          fi
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/release/*
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -- dist/release/*
+          case "$GITHUB_REF_NAME" in *-*) set -- --prerelease "$@" ;; esac
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" \
+            --generate-notes "$@"

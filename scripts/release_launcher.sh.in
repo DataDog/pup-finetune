@@ -1,0 +1,67 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# Unless explicitly stated otherwise all files in this repository are licensed under the Apache License Version 2.0.
+#
+# This product includes software developed at Datadog (https://www.datadoghq.com/).
+# Copyright 2026-present Datadog, Inc.
+
+# pup-finetune @VERSION@. `pup extension install DataDog/pup-finetune` installs this launcher as
+# the `finetune` extension. It downloads the wheel of release @TAG@ once, checks it against the
+# SHA-256 below on every run, and runs it with uv, pinned to the dependency versions the release
+# was built with. scripts/release_launcher.py generates it; edit the template, not a release.
+set -eu
+
+tag='@TAG@'
+version='@VERSION@'
+wheel='@WHEEL@'
+wheel_sha256='@WHEEL_SHA256@'
+url="https://github.com/DataDog/pup-finetune/releases/download/$tag/$wheel"
+
+fail() {
+    echo "pup-finetune: $*" >&2
+    exit 1
+}
+
+sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d ' ' -f 1
+    else
+        shasum -a 256 "$1" | cut -d ' ' -f 1
+    fi
+}
+
+if ! command -v uv >/dev/null 2>&1; then
+    echo "pup-finetune: uv not found on PATH; install it from https://docs.astral.sh/uv/" >&2
+    exit 127
+fi
+
+cache="${XDG_CACHE_HOME:-$HOME/.cache}/pup-finetune/$version"
+if [ ! -f "$cache/$wheel" ]; then
+    command -v curl >/dev/null 2>&1 || fail "curl not found on PATH; it downloads $url"
+    mkdir -p "$cache"
+    partial=$(mktemp "$cache/.$wheel.XXXXXX")
+    if ! curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+        --output "$partial" "$url"; then
+        rm -f "$partial"
+        fail "could not download $url"
+    fi
+    mv "$partial" "$cache/$wheel"
+fi
+if [ "$(sha256 "$cache/$wheel")" != "$wheel_sha256" ]; then
+    rm -f "$cache/$wheel"
+    fail "$wheel does not match this launcher's SHA-256, so it was deleted; the next run downloads it again"
+fi
+
+constraints="$cache/constraints.txt"
+if [ ! -f "$constraints" ]; then
+    partial=$(mktemp "$cache/.constraints.XXXXXX")
+    cat >"$partial" <<'CONSTRAINTS'
+@CONSTRAINTS@
+CONSTRAINTS
+    mv "$partial" "$constraints"
+fi
+
+exec uv tool run --quiet --constraints "$constraints" \
+    --from "pup-finetune[anthropic,baseten,fireworks] @ file://$cache/$wheel" \
+    pup-finetune "$@"
