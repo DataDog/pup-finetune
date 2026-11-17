@@ -50,8 +50,10 @@ launcher is a POSIX shell script rendered from `scripts/release_launcher.sh.in`.
 run, it downloads the release's wheel into `~/.cache/pup-finetune/<version>/` (or
 `$XDG_CACHE_HOME/pup-finetune/<version>/`). On every run, it checks the wheel against the SHA-256
 it carries, and it deletes a wheel that does not match. It then runs the wheel with `uv tool run`,
-with the Anthropic, Baseten and Fireworks extras, and with the dependency versions the release was
-built with as constraints.
+with the Anthropic, Baseten and Fireworks extras, on the Python version in `.python-version`, and
+with the dependency versions the release was built with as constraints. uv downloads that Python
+when the machine does not have it. Without the pin, uv would pick the newest Python on the
+machine, for which a pinned dependency may have no wheel.
 
 The launcher needs `uv` and `curl`, and runs on macOS and Linux. `train --remote` stages
 pup-finetune's source and `uv.lock`, so it needs a checkout install, as `CONTRIBUTING.md`
