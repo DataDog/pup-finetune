@@ -47,11 +47,8 @@ than `datadoghq.com`, read [Installation](#installation) first.
 brew install datadog-labs/pack/pup
 pup auth login
 
-# Install pup-finetune as the `finetune` extension
-git clone https://github.com/DataDog/pup-finetune.git && cd pup-finetune
-uv sync --all-extras
-pup extension install --local bin/pup-finetune --link \
-  --description "Fine-tune a model on your Agent Observability traces"
+# Install the latest release of pup-finetune as the `finetune` extension
+pup extension install DataDog/pup-finetune
 
 # Store your training provider's key, with <PROVIDER> as baseten or fireworks
 pup finetune auth login <PROVIDER>
@@ -109,13 +106,34 @@ covers [installing Pup](https://github.com/DataDog/pup#installation) without Hom
 [Authentication](https://github.com/DataDog/pup#authentication) lists the sites and other ways
 to sign in.
 
+`pup extension install DataDog/pup-finetune` installs the latest release's launcher for your
+platform, macOS or Linux. Add `--tag <TAG>`, such as `--tag v0.1.0`, to install another release.
+On its first run, the launcher downloads the release's wheel. On every run, it checks the wheel's
+SHA-256 and runs it with uv, pinned to the dependency versions the release was built with. uv
+installs Python 3.12 if you don't have it.
+
+### Install from a checkout
+
+To contribute, or to use `train --remote`, which stages pup-finetune's source for the remote job,
+install a checkout instead. `--force` replaces a release install:
+
+```bash
+git clone https://github.com/DataDog/pup-finetune.git && cd pup-finetune
+uv sync --all-extras
+pup extension install --local bin/pup-finetune --link --force \
+  --description "Fine-tune a model on your Agent Observability traces"
+```
+
 With `--link`, the extension is a link to `bin/pup-finetune`, which runs your checkout through
-`uv run`. uv installs Python 3.12 if you don't have it.
+`uv run`.
 
 ### Update and remove
 
 ```bash
-# Update from your checkout, with no reinstall since the extension is a link
+# Update a release install to the latest release
+pup extension upgrade finetune
+
+# Update a checkout install, with no reinstall since the extension is a link
 git pull
 uv sync --all-extras
 
@@ -127,8 +145,9 @@ pup finetune auth logout openai
 pup extension remove finetune
 ```
 
-[`pup extension upgrade`](https://github.com/DataDog/pup/blob/main/docs/EXTENSIONS.md) updates
-only extensions installed from GitHub releases, so it does not update this one.
+A release install keeps its wheel in `~/.cache/pup-finetune/`, which you can delete after you
+remove the extension. [docs/releasing.md](docs/releasing.md) explains how releases are built and
+how to verify one.
 
 ## Credentials
 
@@ -149,8 +168,9 @@ to both providers. [Choose the judge](docs/evaluate.md#choose-the-judge) names t
 
 ### What each step needs
 
-`doctor` checks each of these, and `uv sync --all-extras` installs every extra. `evaluate` also
-uses the Datadog login to publish its experiments.
+`doctor` checks each of these. A release install includes every extra, and in a checkout
+`uv sync --all-extras` installs them. `evaluate` also uses the Datadog login to publish its
+experiments.
 
 <!-- BEGIN GENERATED: what each step needs (scripts/gen_command_docs.py) -->
 | Step | Datadog login | API key | Extra |
@@ -323,7 +343,9 @@ your `--hourly-rate-usd`. `resume <RUN_ID>` continues an interrupted run, and
 [training guide](docs/train.md) covers caps, the learning-rate schedule, stopping and resuming.
 
 On Baseten only, `--remote` trains in a Baseten CPU job that also bills, and `cancel` cannot stop
-it. [Train in a Baseten job](docs/train.md#train-in-a-baseten-job) says what it needs and how to
+it. It uploads pup-finetune's source, so it needs an
+[install from a checkout](#install-from-a-checkout).
+[Train in a Baseten job](docs/train.md#train-in-a-baseten-job) says what else it needs and how to
 stop it.
 
 ### Start with a cheap run
