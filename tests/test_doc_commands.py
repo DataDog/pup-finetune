@@ -60,6 +60,7 @@ OTHER_TOOL_FLAGS = {
     "--field",
     "--local",
     "--link",
+    "--force",
     "--description",
     "--jq",
     "--output",
